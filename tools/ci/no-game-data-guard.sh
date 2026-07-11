@@ -16,7 +16,7 @@ patterns=(
     '\.dax$'
     '\.tlb$'
     '\.geo$'
-    '^ecl.*'
+    '^ecl[0-9]'
     '\.ecl$'
     '^savgam.*'
     '\.sav$'

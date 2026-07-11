@@ -24,9 +24,11 @@ Cargo.lock.bak
 *.GEO
 *.geo
 
-# ECL scripts (compiled bytecode)
-ECL*
-ecl*
+# ECL scripts (compiled bytecode) — bare ECL1/ecl2-style container names.
+# Deliberately ECL[0-9]*, not ECL*: engine source files named ecl.rs,
+# ecl_disasm.rs, etc. must not be swallowed by the game-data patterns.
+ECL[0-9]*
+ecl[0-9]*
 *.ECL
 *.ecl
 
