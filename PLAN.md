@@ -377,8 +377,12 @@ else — most of the project by volume — runs on Sonnet with the harness as th
 - [x] CI skeleton: build + clippy + fmt + wasm32 check + no-game-data guard
 - [ ] Buy/locate GOG FR Archives Collection Two; extract CotAB → `~/goldbox-data/cotab` (outside repo); record file hashes
 - [ ] Locate Buck Rogers CTD + MC originals → `~/goldbox-data/{ctd,mc}`
-- [ ] Clone refs to `~/src/goldbox-refs/`: coab, goldboxexplorer, ssi-engine, Jzatopa workspace; fetch daxdump.zip
+- [x] Clone refs to `~/src/goldbox-refs/`: coab, goldboxexplorer, ssi-engine, Jzatopa workspace; fetch daxdump.zip
+  *(2026-07-11; also vafada/daxviewer, plus formats/hackdocs/GBC 2.01/tlbutil2/goldboxfont archives
+  from gbc.zorbus.net — daxdump.zip includes EclDump.exe, so both reference dumpers are on hand)*
 - [ ] `brew install temurin@21 innoextract`; build & run ssi-engine against the CotAB dir (day-0 sanity)
-- [ ] DOSBox Staging installed; CotAB boots in it
+  *(tooling done 2026-07-11: innoextract, maven, OpenJDK 21 via `openjdk@21` formula — the temurin
+  cask needs an interactive sudo; ssi-engine `mvn package` builds clean. The run awaits game data.)*
+- [ ] DOSBox Staging installed; CotAB boots in it *(0.82.2 installed 2026-07-11; boot test awaits game data)*
 - [ ] Decide oracle rig: UTM Windows VM (GBC + DOSBox + coab) vs CrossOver experiment; timebox the coab-core-on-.NET-8 spike to one evening
 - [x] `GBX_DATA_DIR` convention wired into a hello-world `restrike detect` that fingerprints a game dir
