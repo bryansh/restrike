@@ -1,0 +1,59 @@
+# Rust build artifacts
+/target/
+**/target/
+Cargo.lock.bak
+*.pdb
+
+# Editor/OS cruft
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# --- Game data guard -------------------------------------------------------
+# This repo ships engine code only (PLAN.md D10). Users supply their own
+# legally-obtained Gold Box data files; none of it may ever be committed.
+# These patterns cover known SSI Gold Box file formats/names so a stray copy
+# can't be accidentally added. The CI no-game-data guard enforces this too.
+
+# DAX/TLB archive containers and their typical companions
+*.DAX
+*.dax
+*.TLB
+*.tlb
+*.GEO
+*.geo
+
+# ECL scripts (compiled bytecode)
+ECL*
+ecl*
+*.ECL
+*.ecl
+
+# Save games
+SAVGAM*
+savgam*
+*.SAV
+*.sav
+
+# Executables / overlays shipped with the original games
+START.EXE
+start.exe
+GAME.OVR
+game.ovr
+*.OVR
+*.ovr
+
+# Other common Gold Box / DOS-era data extensions
+*.PIC
+*.pic
+*.CBM
+*.cbm
+*.FNT
+*.fnt
+*.PAL
+*.pal
+
+# Anywhere a real data dir gets pointed at or extracted to locally
+/goldbox-data/
+/game-data/

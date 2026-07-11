@@ -1,0 +1,14 @@
+[package]
+name = "gbx-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Game state, world simulation, combat, magic, UI shell, framebuffer, tick API, and save/load."
+
+[dependencies]
+gbx-formats = { path = "../gbx-formats" }
+gbx-vm = { path = "../gbx-vm" }
+gbx-rules = { path = "../gbx-rules" }
+
+[dev-dependencies]

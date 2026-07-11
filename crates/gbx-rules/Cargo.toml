@@ -1,0 +1,11 @@
+[package]
+name = "gbx-rules"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Rules packs (data) and per-flavor traits (adnd1, xxvc) with verify-on-load against user data."
+
+[dependencies]
+
+[dev-dependencies]

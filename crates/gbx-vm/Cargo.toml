@@ -1,0 +1,12 @@
+[package]
+name = "gbx-vm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ECL bytecode decoder, disassembler, interpreter, and ScriptMemory facade."
+
+[dependencies]
+gbx-formats = { path = "../gbx-formats" }
+
+[dev-dependencies]

@@ -1,0 +1,13 @@
+[package]
+name = "gbx-formats"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Gold Box data format parsers: DAX containers, ECL blocks, GEO maps, images, saves, and game-detection fingerprints."
+
+[dependencies]
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"

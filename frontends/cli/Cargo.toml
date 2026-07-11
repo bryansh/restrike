@@ -1,0 +1,20 @@
+[package]
+name = "restrike-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Headless CLI frontend for Restrike: dump | disasm | census | map | detect | run-script | replay | verify."
+
+[[bin]]
+name = "restrike"
+path = "src/main.rs"
+
+[dependencies]
+gbx-formats = { path = "../../crates/gbx-formats" }
+gbx-vm = { path = "../../crates/gbx-vm" }
+gbx-rules = { path = "../../crates/gbx-rules" }
+gbx-engine = { path = "../../crates/gbx-engine" }
+gbx-oracle = { path = "../../crates/gbx-oracle" }
+
+[dev-dependencies]
