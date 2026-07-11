@@ -16,7 +16,8 @@ file/section/thread/post, not just a project name.
 
 | Subsystem | Source | Type | License / terms | Notes |
 |---|---|---|---|---|
-| _(none yet — M0 scaffold only)_ | | | | |
+| `gbx-vm` ECL execution model: fetch/dispatch loop, five-vector block header, operand modes, string registers, compare/IF semantics, CotAB opcode table (`0x00`–`0x40`) | coab `engine/ovr003.cs` (`RunEclVm`/`sub_29607`, `SetupCommandTable`, `CMD_*` handlers), `engine/ovr008.cs` (`vm_LoadCmdSets`, `vm_init_ecl`), `Classes/Opperation.cs`, `Classes/EclBlock.cs` | reference | unclear (transliterated from the disassembled binary) | Read for behavior, no code copied (D11). Findings recorded in [docs/design/vm-scriptmemory.md](docs/design/vm-scriptmemory.md). |
+| ScriptMemory address windows (`0x4B00`/`0x7A00`/`0x7C00`/`0x8000` ranges), write-side-effect cells, named globals | coab `engine/ovr008.cs` (`vm_GetMemoryValueType`/`sub_30723`, `vm_GetMemoryValue`/`sub_30F16`, `vm_SetMemoryValue`, `alter_character`), `Classes/Gbl.cs` field naming | reference | unclear (as above) | Seed for the per-game address map; unknown cells discovered via access log at runtime. |
 
 ### Column guide
 
