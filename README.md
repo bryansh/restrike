@@ -3,21 +3,21 @@
 The SSI Gold Box RPGs, struck again from the original data.
 
 Restrike is a native, cross-platform reimplementation of SSI's "Gold Box"
-engine — the shared engine behind *Pool of Radiance*, *Curse of the Azure
+engine, the shared engine behind *Pool of Radiance*, *Curse of the Azure
 Bonds*, the *Buck Rogers* games, and the rest of the family. It follows the
 same model as ScummVM and OpenMW: instead of emulating the original 1990 DOS
-machine, it re-implements the engine itself and loads the original game's
-data files directly, so the games run natively on modern hardware — desktop
-today, WebAssembly in the browser down the line.
+machine, we re-implement the engine itself and load the original game's data
+files directly. That means the games run natively on modern hardware, on
+desktop today and in the browser via WebAssembly down the line.
 
 **This repository is engine only.** It contains no game data, art, text, or
-scripts from any SSI title — you supply your own legally-obtained copy of a
+scripts from any SSI title. You supply your own legally-obtained copy of a
 Gold Box game and point the engine at it.
 
 ## Build & run
 
-Requires a stable Rust toolchain (see `rust-toolchain.toml`; `rustup` will
-pick it up automatically).
+You'll need a stable Rust toolchain (see `rust-toolchain.toml`; `rustup`
+picks it up automatically).
 
 ```sh
 cargo build --workspace
