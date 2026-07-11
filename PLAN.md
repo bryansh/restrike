@@ -372,13 +372,13 @@ else — most of the project by volume — runs on Sonnet with the harness as th
 
 ## 10. First session checklist (M0 kickoff)
 
-- [ ] `git init`; commit BRIEF.md + PLAN.md
-- [ ] Cargo workspace scaffold (crates + frontends/cli), LICENSE, SOURCES.md, .gitignore (game-data patterns), rust-toolchain.toml
-- [ ] CI skeleton: build + clippy + fmt + wasm32 check + no-game-data guard
+- [x] `git init`; commit BRIEF.md + PLAN.md
+- [x] Cargo workspace scaffold (crates + frontends/cli), LICENSE, SOURCES.md, .gitignore (game-data patterns), rust-toolchain.toml
+- [x] CI skeleton: build + clippy + fmt + wasm32 check + no-game-data guard
 - [ ] Buy/locate GOG FR Archives Collection Two; extract CotAB → `~/goldbox-data/cotab` (outside repo); record file hashes
 - [ ] Locate Buck Rogers CTD + MC originals → `~/goldbox-data/{ctd,mc}`
 - [ ] Clone refs to `~/src/goldbox-refs/`: coab, goldboxexplorer, ssi-engine, Jzatopa workspace; fetch daxdump.zip
 - [ ] `brew install temurin@21 innoextract`; build & run ssi-engine against the CotAB dir (day-0 sanity)
 - [ ] DOSBox Staging installed; CotAB boots in it
 - [ ] Decide oracle rig: UTM Windows VM (GBC + DOSBox + coab) vs CrossOver experiment; timebox the coab-core-on-.NET-8 spike to one evening
-- [ ] `GBX_DATA_DIR` convention wired into a hello-world `restrike detect` that fingerprints a game dir
+- [x] `GBX_DATA_DIR` convention wired into a hello-world `restrike detect` that fingerprints a game dir
