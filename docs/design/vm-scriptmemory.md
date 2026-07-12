@@ -269,8 +269,9 @@ deterministic, mockable in conformance tests. The **seam is fixed now**: placeme
 rule — returns a value or mutates game entities synchronously → service; paced or
 user-facing → Effect/Request. **M1 step 0 produces the 65-opcode channel
 classification table** (checked against each coab handler) before `step()` is
-written; the classification lands as an appendix to this doc, and the **full
-`EngineServices` trait is declared in one shot from it** — no
+written; the classification lands in
+[docs/design/opcode-classification.md](opcode-classification.md), and the
+**full `EngineServices` trait is declared in one shot from it** — no
 grow-a-method-per-opcode treadmill breaking every mock. Call recording for oracle
 traces (H4) comes from a wrapper impl around the trait, not from the trait's shape.
 
@@ -473,7 +474,9 @@ Effects + input-trace keypresses — §1, D-VM3).
 ## 6. What this unblocks (M1 build order)
 
 0. **The 65-opcode channel classification** (Effect / Request / services / machine-
-   internal, from each coab handler) — appendix to this doc, before `step()` exists;
+   internal, from each coab handler) — see
+   [docs/design/opcode-classification.md](opcode-classification.md), before
+   `step()` exists;
 1. `decode()` + dialect table (names from coab, skip sizes from the original size
    column) → **disassembler** (flow-following, D-VM8) → validated against EclDump.exe
    on real data when it lands (H1);
