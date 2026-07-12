@@ -320,6 +320,37 @@ source document (§5 "New docket candidates").
   side by side — automap and event work (M2/M8) must not assume
   block == single map.
 
+### FD-17: Keyboard type-ahead — does the original drain the buffer to the newest key?
+
+- **Status:** open
+- **Question:** coab's `GetInputKey` discards the entire keyboard buffer
+  after reading any nonzero key, keeping only the newest
+  (`~/src/goldbox-refs/coab/engine/seg043.cs:55-62`) — so mashing forward
+  five times during a slow redraw commits **one** step, and type-ahead is
+  largely lost. Is this the original binary's behavior, or a coab
+  transliteration/anti-key-repeat artifact?
+- **Evidence so far:** coab source only (found during the 2026-07-12 M2
+  renderer/UI-shell adversarial review round —
+  `docs/design/renderer-ui-shell.md` §1.5, §1.11 item 9). Player-visible:
+  it determines whether queued movement keys walk multiple squares.
+- **Settled by:** DOSBox test (no harness rung needed): mash forward during
+  a slow redraw / event text, count committed steps. The engine's
+  input-queue read is a single function to swap if this falsifies
+  drain-to-last (design doc D-UI1 ships coab's semantics meanwhile).
+
+### FD-18: Do Up/Down arrows move list-menu highlights?
+
+- **Status:** open
+- **Question:** coab's `sl_select_item` special-key switch handles only the
+  Home/End/PgUp/PgDn ctrl-codes (`'G'/'O'/'I'/'Q'`) and ignores Up/Down
+  arrows entirely (`~/src/goldbox-refs/coab/engine/ovr027.cs:617-640`),
+  which contradicts common memory of navigating Gold Box menus with the
+  arrow keys. Which is right?
+- **Evidence so far:** coab source only (same review round;
+  `docs/design/renderer-ui-shell.md` §1.5, §1.11 item 10).
+- **Settled by:** DOSBox check on any vertical menu (shop/training lists in
+  the M2 capture sessions) before the design doc's D-UI6 key map is pinned.
+
 ## 4. How new entries get added
 
 Any session that surfaces a behavioral hypothesis not derivable purely from

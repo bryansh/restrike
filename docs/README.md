@@ -4,7 +4,11 @@ Format notes, the fidelity docket, and other working documentation for
 Restrike.
 
 - `design/` — architecture design docs for one-way-door decisions (PLAN.md §9
-  rule 3), starting with [`design/vm-scriptmemory.md`](design/vm-scriptmemory.md).
+  rule 3): [`design/vm-scriptmemory.md`](design/vm-scriptmemory.md) (M1, ECL
+  VM & ScriptMemory), [`design/opcode-classification.md`](design/opcode-classification.md)
+  (M1 step 0, the 65-opcode channel table), and
+  [`design/renderer-ui-shell.md`](design/renderer-ui-shell.md) (M2, renderer +
+  UI shell + tick core).
 - `fidelity-docket.md` — running list of behavioral hypotheses to settle
   against the oracle (created in M1; see PLAN.md section 1).
 - Format notes for DAX/ECL/GEO and other data formats land here as they're
