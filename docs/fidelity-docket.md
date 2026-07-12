@@ -282,7 +282,7 @@ source document (§5 "New docket candidates").
 
 ### FD-16: GEO2.DAX block 1's columns 8-15 don't match any printed map
 
-- **Status:** narrowed
+- **Status:** resolved (2026-07-12 audit)
 - **Question:** Block 1 of `GEO2.DAX` (Tilverton City, per Gold Box
   Explorer's per-game GEO-id table — confirmed to be the correct block by
   a real wall-topology match, see evidence) decodes to a 16x16 square grid,
@@ -305,12 +305,20 @@ source document (§5 "New docket candidates").
   Thieves' Guild map is far denser (many small rooms/doors) than what
   `restrike map`'s columns 8-15 show. Not disproven, just not confirmed —
   a hasty visual density comparison, not a cell-by-cell check.
-- **Settled by:** H1 (a byte-exact comparison against a reference tool once
-  the oracle rig lands) or a careful hand-transcription of the printed
-  Thieves' Guild map into the same coordinate convention this docket's
-  evidence used, cell-by-cell, for a real yes/no answer. Until then: do not
-  assume columns 8-15 are unused when building anything that depends on
-  GEO block 1's full extent (e.g. a future automap overlay, M8).
+- **Resolution:** columns 8-15 **are the Thieves' Guild**, confirmed by a
+  discriminating topology landmark rather than density: the printed Guild
+  map (*Cluebook.pdf* p.8, 8x16) has exactly two exits — "Exits to
+  Tilverton Sewers" — on its bottom edge at its columns ~2 and ~6. Our
+  rendering of GEO block 1 has exactly two openings in the entire bottom
+  border, at absolute columns **10 and 14** = 2+8 and 6+8. Together with
+  both printed maps being 8x16 and Gold Box Explorer naming block 1
+  "Tilverton City, Thieves' Guild" as one entry, the side-by-side packing
+  is confirmed. (The earlier density mismatch was a red herring: printed-map
+  visual density includes location labels and annotations; unique boundary
+  topology is the right fingerprint for map identification.) Consequence
+  worth keeping: one GEO block can hold multiple logical locations packed
+  side by side — automap and event work (M2/M8) must not assume
+  block == single map.
 
 ## 4. How new entries get added
 
