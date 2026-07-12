@@ -184,6 +184,53 @@ pub(crate) fn skip_batches(bytes: &BlockBytes, start: u16, count: u8) -> u16 {
     cursor
 }
 
+/// Decodes a block's header vector table: `count` **separately-anchored**
+/// operand batches starting at [`ECL_BLOCK_BASE`], returning each one's raw
+/// word (`Arg::raw_word`, `None` if the operand's mode never carries one —
+/// an unresolved vector) plus the address one past the last batch's anchor
+/// byte.
+///
+/// Mirrors coab's `vm_init_ecl` (`ovr008.cs:115-124`): each of the five
+/// CotAB vectors is read via its **own** `vm_LoadCmdSets(1)` call (five
+/// separate calls, not one call with `numberOfSets=5`) and only `.Word` is
+/// ever consulted. This distinction matters for byte accounting: within a
+/// single `vm_LoadCmdSets(n)` call, `n>1` operand batches chain back-to-back
+/// with no gap (`decode`'s ordinary `Fixed(n)` loop, and the normal
+/// instruction-decode path this crate already used, is exactly this case).
+/// But `vm_LoadCmdSets` reads its first (and, here, only) batch's mode byte
+/// at `ecl_offset+1` — one byte *past* whatever `ecl_offset` was on entry —
+/// and unconditionally increments `ecl_offset` once more *after* its loop
+/// (`ovr008.cs:79`, outside the `for`). For a normal instruction that single
+/// call is the *only* call, and the pre-call `ecl_offset` is the opcode
+/// byte's own address, so that trailing `+1` does nothing but land on the
+/// next opcode (already what `decode()`'s `next` computes). But
+/// `vm_init_ecl` calls `vm_LoadCmdSets(1)` five times in a row, each with no
+/// intervening opcode byte — so each call's entry `ecl_offset` (left there
+/// by the *previous* call's trailing `+1`) is itself an unread "anchor"
+/// byte, and the real vector sits one byte further in. Net effect: **each
+/// vector after the first is preceded by one wasted/unread byte** that a
+/// contiguous `Fixed(5)`-style decode (this function's first, buggy
+/// implementation) would misinterpret as still belonging to the previous
+/// vector's operand stream — corrupting every vector after the first and,
+/// via `code_start`, misaligning everything decoded from it. Traced and
+/// confirmed byte-for-byte against `ovr008.cs:9-80` before this fix; see
+/// `docs/census/cotab-v1.3.md` §4 for the real-data symptom this produced.
+///
+/// `count` is dialect data (`docs/design/vm-scriptmemory.md` D-VM7:
+/// "vector-table length... [is a] per-generation parameter"); CotAB's is
+/// [`crate::dialect::COTAB_VECTOR_COUNT`].
+pub fn read_header_vectors(bytes: &BlockBytes, count: usize) -> (Vec<Option<u16>>, u16) {
+    let mut anchor = ECL_BLOCK_BASE;
+    let mut vectors = Vec::with_capacity(count);
+    for _ in 0..count {
+        let mode_addr = anchor.wrapping_add(1);
+        let (arg, next) = decode_operand(bytes, mode_addr);
+        vectors.push(arg.raw_word());
+        anchor = next;
+    }
+    (vectors, anchor)
+}
+
 /// Decodes one operand batch starting at `addr` (the mode byte's position),
 /// returning the operand and the address of the next unread byte.
 fn decode_operand(bytes: &BlockBytes, addr: u16) -> (Arg, u16) {
@@ -471,6 +518,38 @@ mod tests {
         let block = block_at(0x8000, &[0x36, 0x00, 0x03, 0x00, 0x07]);
         let instr = decode(&block, 0x8000, &COTAB).unwrap();
         assert_eq!(instr.args.len(), 2);
+    }
+
+    #[test]
+    fn read_header_vectors_decodes_five_separately_anchored_batches() {
+        // Mirrors vm_init_ecl's 5 *separate* vm_LoadCmdSets(1) calls: each
+        // vector is preceded by one wasted "anchor" byte (0xCC, never
+        // read/asserted-on) that a naive contiguous Fixed(5) decode would
+        // misinterpret as still belonging to the previous vector — this is
+        // exactly the bug the function's doc comment traces and fixes.
+        // Mixed modes prove the batch decoder (not a fixed stride) drives
+        // each vector's own length.
+        let block = block_at(
+            0x8000,
+            &[
+                0xCC, // 0x8000: anchor for vector 1 (wasted)
+                0x02, 0x00, 0x81, // 0x8001-3: vector 1: ImmWord 0x8100
+                0xCC, // 0x8004: anchor for vector 2 (wasted)
+                0x00, 0x05, // 0x8005-6: vector 2: ImmByte 5 -> no raw_word
+                0xCC, // 0x8007: anchor for vector 3 (wasted)
+                0x01, 0x00, 0x4B, // 0x8008-A: vector 3: Mem 0x4B00
+                0xCC, // 0x800B: anchor for vector 4 (wasted)
+                0x02, 0x00, 0x82, // 0x800C-E: vector 4: ImmWord 0x8200
+                0xCC, // 0x800F: anchor for vector 5 (wasted)
+                0x02, 0x00, 0x83, // 0x8010-2: vector 5: ImmWord 0x8300
+            ],
+        );
+        let (vectors, next_anchor) = read_header_vectors(&block, 5);
+        assert_eq!(
+            vectors,
+            vec![Some(0x8100), None, Some(0x4B00), Some(0x8200), Some(0x8300),]
+        );
+        assert_eq!(next_anchor, 0x8013);
     }
 
     #[test]

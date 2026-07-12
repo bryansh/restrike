@@ -1,5 +1,7 @@
 //! `restrike` — headless CLI frontend for the Restrike engine.
 
+mod census;
+
 use gbx_formats::detect::{self, Detection};
 use gbx_vm::dialect::COTAB;
 use gbx_vm::{decode, disassemble};
@@ -12,6 +14,7 @@ fn main() -> ExitCode {
     match args.next().as_deref() {
         Some("detect") => cmd_detect(args.next()),
         Some("disasm") => cmd_disasm(args.collect()),
+        Some("census") => census::cmd_census(args.collect()),
         Some(other) => {
             eprintln!("restrike: unknown command '{other}'");
             print_usage();
@@ -27,14 +30,22 @@ fn main() -> ExitCode {
 fn print_usage() {
     eprintln!("usage: restrike detect [DIR]");
     eprintln!("       restrike disasm --raw-block <PATH> [--entry 0xNNNN[,0xNNNN...]]");
+    eprintln!("       restrike census [DIR] [--out <PATH>]");
     eprintln!();
     eprintln!("If DIR is omitted, falls back to the GBX_DATA_DIR environment variable.");
     eprintln!();
     eprintln!(
+        "census scans DIR for ECL*.DAX, extracts every block, and disassembles from each \
+         block's header vectors, aggregating opcode/hazard statistics. CSV goes to --out (or \
+         stdout by default); the human-readable report always goes to stderr."
+    );
+    eprintln!();
+    eprintln!(
         "disasm reads a raw ECL block file (runtime input only — no sample blocks ship in \
          this repo) and runs the flow-following disassembler (D-VM8) over it. --entry defaults \
-         to the block's base address (0x8000); this session doesn't yet parse the block's real \
-         header vector table, so pass the true entry points with --entry when you know them."
+         to the block's base address (0x8000), not the block's real header vectors — unlike \
+         census, disasm doesn't decode the header for you, so pass the true entry points with \
+         --entry when you know them."
     );
 }
 

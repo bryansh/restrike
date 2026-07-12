@@ -3,9 +3,9 @@
 //!
 //! This crate is platform-pure: no windowing, audio, or async runtime dependencies.
 //!
-//! This session ships the dialect table and the bytecode decoder only
-//! (`docs/design/vm-scriptmemory.md` §6 build-order items 0-1, decoder half).
-//! No interpreter, no flow-following disassembler, no census tool yet.
+//! `docs/design/vm-scriptmemory.md` §6 build-order items 0-2 (channel
+//! classification, decoder + disassembler, census) are shipped. No
+//! interpreter yet.
 
 pub mod decode;
 pub mod dialect;
@@ -14,6 +14,11 @@ pub mod disasm;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
-pub use decode::{decode, Arg, BlockBytes, DecodeError, Instr, Op};
-pub use dialect::{Channel, Dialect, OpcodeInfo, OperandShape, SuccessorKind, COTAB};
-pub use disasm::disassemble;
+pub use decode::{
+    decode, read_header_vectors, Arg, BlockBytes, DecodeError, Instr, Op, ECL_BLOCK_BASE,
+    ECL_BLOCK_SIZE,
+};
+pub use dialect::{
+    Channel, Dialect, OpcodeInfo, OperandShape, SuccessorKind, COTAB, COTAB_VECTOR_COUNT,
+};
+pub use disasm::{disassemble, DataRegion, Hazard, Listing, Summary};

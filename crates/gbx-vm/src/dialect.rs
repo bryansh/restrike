@@ -140,6 +140,12 @@ use SuccessorKind::{
     Branch, Call, ComputedTable, ConservativeFallthrough, Jump, Sequential, Terminal,
 };
 
+/// The number of block-header vectors CotAB decodes at block load
+/// (`docs/design/vm-scriptmemory.md` §1's five-row vector table; coab
+/// `vm_init_ecl`, `ovr008.cs:115-124`). Dialect data per D-VM7 — a future
+/// Buck Rogers dialect may declare a different count.
+pub const COTAB_VECTOR_COUNT: usize = 5;
+
 /// The CotAB (Curse of the Azure Bonds) opcode table, `0x00`-`0x40`.
 ///
 /// `0x1F` ("notsure 0x1f") has no handler in coab — a null delegate in its
