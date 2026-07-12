@@ -586,6 +586,53 @@ mod opcodes {
         assert!(h.calls.contains(&RecordedCall::LoadBigpic { id: 0x79 }));
     }
 
+    /// LOAD PIECES (0x37), `CMD_LoadFiles` ovr003.cs:501-604 (shared with
+    /// 0x21; the `0x37` branch): `var_3 == 0x7F` is the fixed-walldef
+    /// shortcut, `LoadWalldef(1, 0)`.
+    #[test]
+    fn load_pieces_var_3_0x7f_loads_a_fixed_walldef() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x37).imm_byte(0x7F).imm_byte(0xFF).imm_byte(0xFF);
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+
+        assert_eq!(run_until_done(&mut m, &mut h), Exit::Ended);
+        assert!(h
+            .calls
+            .contains(&RecordedCall::LoadWalldef { set: 1, id: 0 }));
+    }
+
+    /// LOAD PIECES (0x37), the general branch: each of the 3 operands
+    /// either loads a walldef (`!= 0xFF`) or resets that wall-set slot
+    /// (`== 0xFF`) — the `area_ptr.field_1CE`/`field_1D0` gate has no
+    /// `ScriptMemory` address (documented simplification, `machine.rs`'s
+    /// doc comment), so this is the only path this session's interpreter
+    /// takes when `var_3 != 0x7F`.
+    #[test]
+    fn load_pieces_general_branch_loads_or_resets_each_slot() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x37).imm_byte(5).imm_byte(0xFF).imm_byte(9); // var_3=5, var_2=0xFF, var_1=9
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+
+        assert_eq!(run_until_done(&mut m, &mut h), Exit::Ended);
+        assert!(h
+            .calls
+            .contains(&RecordedCall::LoadWalldef { set: 1, id: 5 }));
+        assert!(h.calls.contains(&RecordedCall::ResetWallSet { index: 1 }));
+        assert!(h
+            .calls
+            .contains(&RecordedCall::LoadWalldef { set: 3, id: 9 }));
+    }
+
     /// COMBAT (0x24), `CMD_Combat` ovr003.cs:971-1029: the design doc's
     /// coarse request — no operands, suspends, then completes on reply.
     #[test]
@@ -1422,12 +1469,11 @@ mod vm_error_legality {
         );
     }
 
-    /// Executing a truly unknown opcode halts the machine loudly (D-VM6):
-    /// `0x1F` is unimplemented by design (never observed in shipped CotAB
-    /// data, census §1), and a completely out-of-table byte behaves the
-    /// same way.
+    /// `0x1F` is dialect-known (coab's own null-handler entry) but has no
+    /// Restrike handler — `VmError::Unimplemented`, distinct from a byte
+    /// with no dialect entry at all (D-VM6 audit note, M1 run-script task).
     #[test]
-    fn executing_an_unknown_opcode_halts_the_machine() {
+    fn executing_a_dialect_known_but_unimplemented_opcode_halts_as_unimplemented() {
         let mut b = EclBuilder::new();
         b.label("entry");
         b.raw(&[0x1F, 0x00, 0x00]); // 0x1F: known to the dialect table, not to this interpreter
@@ -1438,7 +1484,7 @@ mod vm_error_legality {
         let err = m.step(&mut h).unwrap_err();
         assert_eq!(
             err,
-            VmError::UnknownOpcode {
+            VmError::Unimplemented {
                 pc: entry,
                 opcode: 0x1F
             }

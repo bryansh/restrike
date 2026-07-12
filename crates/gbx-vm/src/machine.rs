@@ -7,12 +7,17 @@
 //!
 //! Implements the census's (`docs/census/cotab-v1.3.md` §8) top-25 opcodes
 //! plus the ride-alongs the task's docket calls out explicitly (PRINT
-//! RETURN, COMPARE AND, LOAD FILES, NEWECL). Every other known opcode —
-//! including `0x1F`, which even coab leaves unimplemented — is a loud,
-//! poisoning halt (D-VM6): `VmError::UnknownOpcode` covers both "no dialect
-//! entry" and "the dialect knows it, but this interpreter doesn't implement
-//! it yet," since from `step()`'s perspective both mean the same thing: no
-//! handler exists.
+//! RETURN, COMPARE AND, LOAD FILES, NEWECL). Every other opcode is a loud,
+//! poisoning halt (D-VM6), but the *reason* is now distinguished
+//! (M1 run-script audit note): `VmError::UnknownOpcode` is the original's
+//! own "no dialect entry" wedge (e.g. `0x41`, or any byte the CotAB
+//! `CommandTable` never populated), while `VmError::Unimplemented` is a
+//! Restrike-side gap — the dialect table knows the opcode (including
+//! `0x1F`, which even coab leaves as a null handler) but this interpreter
+//! hasn't grown a handler for it yet. Both halt identically from `step()`'s
+//! perspective; the split exists so `restrike run-script`'s diagnostic can
+//! tell "the original game would have wedged here too" apart from "our
+//! interpreter's opcode coverage stops here."
 
 use std::collections::VecDeque;
 
@@ -51,7 +56,16 @@ pub enum RestoreError {
 /// does not move, so a repeated `step()` call reproduces the same error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VmError {
+    /// No dialect entry for this opcode byte at all — the original's own
+    /// wedge (D-VM6). `dialect.lookup(opcode)` returned `None`.
     UnknownOpcode {
+        pc: u16,
+        opcode: u8,
+    },
+    /// The dialect table has an entry for this opcode (including `0x1F`,
+    /// coab's own null-handler case), but this interpreter has no handler
+    /// for it yet — a Restrike coverage gap, not an original-engine wedge.
+    Unimplemented {
         pc: u16,
         opcode: u8,
     },
@@ -521,6 +535,14 @@ impl EclMachine {
     /// `strIndex` resets to 0 for each call, exactly like the original's
     /// local variable — callers doing a fixed-prefix-then-tail decode
     /// (variable-tail opcodes) call this twice, each with its own reset.
+    ///
+    /// `0x80` inline strings are decompressed here (task 1, ECL
+    /// inline-string decompression — coab `LoadCompressedEclString` runs
+    /// this at the exact same decode-time point, `ovr008.cs:39-56`) via
+    /// `gbx_formats::ecl_text::decompress`. `0x81` memory strings are
+    /// *never* decompressed — they're already plain ASCII on the wire
+    /// (`gbx-formats/src/ecl_text.rs`'s module doc); `host.read_string`
+    /// returns them as-is.
     fn load_cmd_sets(
         &mut self,
         mut cursor: u16,
@@ -536,7 +558,8 @@ impl EclMachine {
             match &arg {
                 Arg::InlineStr(raw) => {
                     str_index += 1;
-                    self.strings.set(str_index, VmString(raw.clone()));
+                    self.strings
+                        .set(str_index, VmString(gbx_formats::ecl_text::decompress(raw)));
                 }
                 Arg::MemStr(addr) => {
                     str_index += 1;
@@ -650,7 +673,7 @@ impl EclMachine {
             0x16..=0x1B => self.op_if(activation, host, pc, opcode),
             0x1C => self.op_clearmonsters(activation, host),
             0x20 => self.op_newecl(activation, host, pc, opcode),
-            0x21 => self.op_load_files(activation, host, pc, opcode),
+            0x21 => self.op_load_files(activation, host, pc, opcode, false),
             0x24 => self.op_combat(activation),
             0x25 => self.op_on_goto(activation, host, pc, opcode),
             0x2A => self.op_gettable(activation, host, pc, opcode),
@@ -658,7 +681,11 @@ impl EclMachine {
             0x2D => self.op_call(activation, host, pc, opcode),
             0x2F => self.op_and(activation, host, pc, opcode),
             0x33 => self.op_print_return(activation),
+            0x37 => self.op_load_files(activation, host, pc, opcode, true),
             0x3A => self.op_delay(activation),
+            _ if self.dialect.lookup(opcode).is_some() => {
+                Err(VmError::Unimplemented { pc, opcode })
+            }
             _ => Err(VmError::UnknownOpcode { pc, opcode }),
         }
     }
@@ -1000,30 +1027,70 @@ impl EclMachine {
         Ok(VmStep::Done(Exit::ChainTo(BlockId(block_id))))
     }
 
-    /// LOAD FILES (0x21) `gbl.command == 0x21` branch only, `CMD_LoadFiles`
-    /// ovr003.cs:501-604 (LOAD PIECES/0x37's branch isn't implemented this
-    /// session). Drops the `lastDaxBlockId != 0x50` gate on the big-picture
-    /// load — an engine-internal field with no documented `ScriptMemory`
-    /// address — as a documented simplification.
+    /// LOAD FILES (0x21) / LOAD PIECES (0x37), `CMD_LoadFiles`
+    /// ovr003.cs:501-604 — one shared handler, keyed on `gbl.command`
+    /// (`load_pieces` here). Operand decode/order is identical for both
+    /// (`var_3, var_2, var_1` from operands 1-3, matching the original's own
+    /// quirky reversed naming).
+    ///
+    /// 0x21 (`load_pieces == false`): drops the `lastDaxBlockId != 0x50`
+    /// gate on the big-picture load — an engine-internal field with no
+    /// documented `ScriptMemory` address — as a documented simplification
+    /// (unconditionally allowed rather than silently suppressed).
+    ///
+    /// 0x37 (`load_pieces == true`, added for `restrike run-script`'s M1
+    /// task 3 real-block demo — under-traced by the original M1 step-0
+    /// classification pass, which stopped at `Load3DMap`/`LoadWalldef`/
+    /// `load_bigpic` without reading this branch's body): `var_3 == 0x7F`
+    /// loads a fixed walldef; otherwise a gate on `area_ptr.field_1CE`/
+    /// `field_1D0` (both engine-internal, no `ScriptMemory` address) picks
+    /// between a 2-call and a 3-call `LoadWalldef` sequence — modeled here
+    /// as always false (documented simplification, same spirit as 0x21's:
+    /// prefer the branch that exercises the full mapped service surface —
+    /// the 3-way load-or-`reset_wall_set` sequence — over guessing at
+    /// unmodeled state). None of these calls feed a value back into the VM,
+    /// so the simplification cannot affect control flow, only which
+    /// `EngineServices` calls are observed.
     fn op_load_files(
         &mut self,
         activation: &mut Activation,
         host: &mut dyn VmHost,
         pc: u16,
         opcode: u8,
+        load_pieces: bool,
     ) -> Result<VmStep, VmError> {
         const IN_DUNGEON_ADDR: u16 = 0x4BE6;
         let (args, next) = self.load_cmd_sets(pc.wrapping_add(1), 3, host, pc);
         let var_3 = self.resolve_numeric(&args[0], pc, opcode, host)? as u8;
-        let _var_2 = self.resolve_numeric(&args[1], pc, opcode, host)? as u8;
+        let var_2 = self.resolve_numeric(&args[1], pc, opcode, host)? as u8;
         let var_1 = self.resolve_numeric(&args[2], pc, opcode, host)? as u8;
-        let in_dungeon = self.mem_read(IN_DUNGEON_ADDR, host, Origin { pc });
 
-        if var_3 != 0xFF && var_3 != 0x7F && in_dungeon != 0 {
-            host.load_3d_map(var_3);
-        }
-        if var_1 != 0xFF && in_dungeon == 0 {
-            host.load_bigpic(0x79);
+        if !load_pieces {
+            let in_dungeon = self.mem_read(IN_DUNGEON_ADDR, host, Origin { pc });
+            if var_3 != 0xFF && var_3 != 0x7F && in_dungeon != 0 {
+                host.load_3d_map(var_3);
+            }
+            if var_1 != 0xFF && in_dungeon == 0 {
+                host.load_bigpic(0x79);
+            }
+        } else if var_3 == 0x7F {
+            host.load_walldef(1, 0);
+        } else {
+            if var_3 != 0xFF {
+                host.load_walldef(1, var_3);
+            } else {
+                host.reset_wall_set(0);
+            }
+            if var_2 != 0xFF {
+                host.load_walldef(2, var_2);
+            } else {
+                host.reset_wall_set(1);
+            }
+            if var_1 != 0xFF {
+                host.load_walldef(3, var_1);
+            } else {
+                host.reset_wall_set(2);
+            }
         }
         activation.pc = next;
         Ok(VmStep::Continue)
