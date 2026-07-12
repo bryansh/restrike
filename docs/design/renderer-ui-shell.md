@@ -1044,7 +1044,15 @@ commitments.
     reads differently.
 11. **Walldef block 0 pairing** (§1.11 item 8): GBE's base-100 special case
     vs coab's unconditional `×10` — check whether WALLDEF block 0 is ever
-    multi-wallset in real CotAB data.
+    multi-wallset in real CotAB data. **Answered (M2 step 1):** across all
+    six `WALLDEF{2..6}.DAX` files in the real CotAB data set, block id `0`
+    never appears at all (observed ids: 1-4, 8-14, 16-17). The GBE/coab
+    contradiction is moot for this data set — LOAD FILES' `0x7F` ->
+    `LoadWalldef(1, 0)` is a live code path but no shipped CotAB block
+    exercises it. Multi-wallset blocks do exist among the non-zero ids
+    (block 14 in `WALLDEF5.DAX` and block 17 in `WALLDEF6.DAX`, both 2
+    wallsets/1560 bytes) — the general multi-wallset path is real and
+    covered, just not at id 0.
 
 ## 5. What this unblocks (M2 build order)
 

@@ -173,6 +173,7 @@ dependencies = [
  "gbx-oracle",
  "gbx-rules",
  "gbx-vm",
+ "tempfile",
 ]
 
 [[package]]

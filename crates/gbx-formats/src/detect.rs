@@ -50,6 +50,16 @@ pub fn hash_file(path: &Path) -> io::Result<String> {
     Ok(hex_encode(&hasher.finalize()))
 }
 
+/// SHA-256 digest of an in-memory buffer, as a lowercase hex string. The
+/// pure counterpart to [`hash_file`] — no filesystem access, so it stays
+/// usable from `GameData` (`gbx-formats/src/game_data.rs`, D-UI1's "the core
+/// does zero I/O") and from `wasm32`.
+pub fn hash_bytes(data: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hex_encode(&hasher.finalize())
+}
+
 fn hex_encode(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -103,6 +113,35 @@ pub fn detect_dir(dir: &Path) -> io::Result<Detection> {
     }
 
     Ok(Detection::Unknown { files })
+}
+
+/// Fingerprints an in-memory file set against [`DETECTION_TABLE`] — the
+/// pure counterpart to [`detect_dir`], used by `GameData::detect`
+/// (`gbx-formats/src/game_data.rs`) so detection never touches the
+/// filesystem once the frontend has already handed bytes over.
+pub fn detect_bytes<'a>(files: impl IntoIterator<Item = (&'a str, &'a [u8])>) -> Detection {
+    let mut reports: Vec<FileReport> = files
+        .into_iter()
+        .map(|(name, bytes)| FileReport {
+            path: PathBuf::from(name),
+            sha256: hash_bytes(bytes),
+        })
+        .collect();
+    reports.sort_by(|a, b| a.path.cmp(&b.path));
+
+    for report in &reports {
+        if let Some(sig) = DETECTION_TABLE
+            .iter()
+            .find(|sig| sig.sha256 == report.sha256)
+        {
+            return Detection::Known {
+                game: sig.game,
+                files: reports,
+            };
+        }
+    }
+
+    Detection::Unknown { files: reports }
 }
 
 fn walk(dir: &Path, out: &mut Vec<FileReport>) -> io::Result<()> {
@@ -178,6 +217,23 @@ mod tests {
             Detection::Known { files, .. } => files,
         };
         assert_eq!(files.len(), 2);
+    }
+
+    #[test]
+    fn hash_bytes_matches_hash_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("hello.txt");
+        File::create(&path).unwrap().write_all(b"hello").unwrap();
+        assert_eq!(hash_file(&path).unwrap(), hash_bytes(b"hello"));
+    }
+
+    #[test]
+    fn detect_bytes_yields_unknown_for_synthetic_data() {
+        let result = detect_bytes([("SOMEFILE.DAT", b"not a real game file".as_slice())]);
+        match result {
+            Detection::Unknown { files } => assert_eq!(files.len(), 1),
+            Detection::Known { .. } => panic!("synthetic data must never match a real fingerprint"),
+        }
     }
 
     #[test]

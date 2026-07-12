@@ -1,6 +1,7 @@
 //! `restrike` — headless CLI frontend for the Restrike engine.
 
 mod census;
+mod dump_image;
 mod map;
 mod run_script;
 
@@ -19,6 +20,7 @@ fn main() -> ExitCode {
         Some("census") => census::cmd_census(args.collect()),
         Some("map") => map::cmd_map(args.collect()),
         Some("run-script") => run_script::cmd_run_script(args.collect()),
+        Some("dump-image") => dump_image::cmd_dump_image(args.collect()),
         Some(other) => {
             eprintln!("restrike: unknown command '{other}'");
             print_usage();
@@ -39,6 +41,10 @@ fn print_usage() {
     eprintln!(
         "       restrike run-script [DIR] --dax <FILE> --block <ID> [--vector N] [--trace] \
          [--reply k=v ...]"
+    );
+    eprintln!(
+        "       restrike dump-image [DIR] --dax <FILE> --block <ID> [--frame N] [--mask N] \
+         --out <path.ppm>"
     );
     eprintln!();
     eprintln!("If DIR is omitted, falls back to the GBX_DATA_DIR environment variable.");
