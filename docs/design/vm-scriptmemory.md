@@ -58,7 +58,9 @@ globals shared (and clobberable) across nested runs.
 VM address `0x8000` (`Classes/EclBlock.cs`; code addresses stored in scripts are
 `0x8000`-based 16-bit VM addresses; coab reaches block bytes via a 16-bit wrap). There
 is **one resident block at a time**, shared by all nested runs. The block header is
-five decoded operands read at load (`ovr008.cs vm_init_ecl`), an event-vector table:
+five decoded operands read at load (`ovr008.cs vm_init_ecl`) — five *separate*
+one-operand batches, each preceded by an unread anchor byte, so the vectors sit at
+block bytes 1–3, 5–7, 9–11, 13–15, 17–19 (see docket item 6) — an event-vector table:
 
 | # | Vector | Fired |
 |---|--------|-------|
@@ -454,13 +456,19 @@ match machine.step(&mut host)? {
 
 ## 5. Open questions → fidelity docket seeds
 
-1. `0x1F` opcode semantics (unknown to coab). Census first; if unused in shipped
-   CotAB scripts, no-op with rationale.
-2. Do shipped scripts ever place IF before an opcode whose skip size ≠ run
-   consumption (the variable-tail opcodes, plus fixed-arity `0x34` ECL CLOCK and
-   `0x36` ADD NPC), or use memory-mode menu counts? Census reports all of it (D-VM8).
-3. Operand mode `0x01` vs `0x03` — identical on read *and* write paths in coab;
-   presumed cosmetic. Confirm against ECLDump's rendering; low priority.
+1. ~~`0x1F` opcode semantics~~ **Resolved by census
+   ([cotab-v1.3](../census/cotab-v1.3.md) §1): `0x1F` never appears anywhere in
+   shipped CotAB scripts** — reachable or skipped-over. It therefore stays in the
+   D-VM6 unknown-opcode class (loud halt): if it ever fires, that signals a
+   corrupted pc or bad extraction, and a no-op would mask it.
+2. ~~IF before skip-divergent opcodes / memory-mode menu counts~~ **Resolved for
+   CotAB by census (§2, §3): zero occurrences of either.** The skip-divergence
+   hazard is theoretical in this title and static disassembly is fully sound;
+   the quarantine machinery stays for other dialects (re-run per title).
+3. ~~Operand mode `0x01` vs `0x03`~~ **Resolved for CotAB by census (§6): mode
+   `0x03` appears zero times in 2,787 shipped memory-mode operands.** The
+   distinction is moot on real data; both stay decoded (`Arg::MemAlt` may matter
+   in other titles — recheck in the M7/M9 census delta).
 4. Nested `ChainTo` mechanism is now recorded from coab (§1: block swaps mid-flow,
    the interrupted engine flow completes against the new block, chaining happens at
    walk-loop unwind). Data-gated remainder: does shipped content actually exercise a
@@ -468,7 +476,12 @@ match machine.step(&mut host)? {
 5. Exact inline-string compression (bit-packing) — `gbx-formats` work, verified
    against ECLDump text output.
 6. Byte-exact operand/offset accounting in `vm_LoadCmdSets` (the +1/+2/wrap dance) —
-   pinned by implementing against ECLDump goldens rather than derived from coab prose.
+   **substantially validated on real data: zero decode desyncs across all 824 blocks
+   of CotAB v1.3 (census §7).** Implementation also pinned the header subtlety: the
+   five header vectors are five *separate* one-operand batches, each preceded by an
+   unread anchor byte (`vm_LoadCmdSets` always behaves as if positioned on an opcode
+   byte), so vectors live at block bytes 1–3, 5–7, 9–11, 13–15, 17–19 — not
+   contiguously. EclDump golden cross-check remains open until the oracle rig lands.
 7. Version skew: coab transliterates a specific CotAB build (its demo string says
    v1.3); our canonical target is the GOG build (PLAN §2.3). On data arrival, confirm
    the GOG binary's version and treat any behavioral delta as a detection-table +
