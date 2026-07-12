@@ -1,13 +1,19 @@
 # Design: ECL VM & ScriptMemory
 
 > M1 architecture pass per PLAN.md §9 operating rule 3 (one design review before each
-> one-way door). Status: **v2, draft for review**. v1 was written 2026-07-11 from a
+> one-way door). Status: **v3, draft for review**. v1 was written 2026-07-11 from a
 > read of coab's VM internals (read-for-behavior per D11 — no code copied; see
 > SOURCES.md), then subjected to two independent adversarial reviews the same day;
-> v2 folds in the verified findings (nested script runs, block ownership, resume
+> v2 folded in the verified findings (nested script runs, block ownership, resume
 > semantics, the engine-services channel, skip fidelity, string-register persistence,
-> PRINT pagination). Citation spot-checks for the load-bearing findings were re-run
-> against coab directly.
+> PRINT pagination). A second, bounded review round scoped to v2's new surface
+> produced v3: no architectural changes, but two §1 machine-behavior corrections
+> (PROGRAM-9 terminates rather than resumes; skip/run mismatches exist on fixed-arity
+> opcodes too), a single-borrow host fix in the ctx API, and tightened
+> suspension/serialization/census contracts. All load-bearing citations were
+> re-verified against coab directly. Review stops here: remaining risk is carried by
+> M1's scheduled falsifiers (step-0 opcode classification, §4 conformance tests,
+> census hazard reports).
 >
 > Scope: the `gbx-vm` crate — bytecode decoding, the interpreter's execution and
 > suspension model, and the ScriptMemory facade through which scripts touch engine
@@ -27,16 +33,22 @@ in a `CommandTable`, run the handler. Handlers decode their own operands (advanc
 ends in a modal `VertMenuSelect(...)` call. The loop exits when a handler sets
 `stopVM` (EXIT, NEWECL) or externally when `party_killed`.
 
-**Nested runs are real.** `RunEclVm` is re-entrant in the original: PROGRAM case 9
-saves `ecl_offset`, calls `TryEncamp()` — which itself runs
-`RunEclVm(PreCampCheckAddr)` and possibly `RunEclVm(CampInterruptedAddr)`
-(`ovr003.cs:1913–1926`) — then restores the offset and continues. A script can be
-parked mid-instruction while other scripts (in the same block) run to completion, and
-the camp menu reachable inside includes **game save/load**. Critically, the original
-saves and restores *only the instruction pointer*: `compare_flags`, `vmCallStack`,
-and the string registers are process globals shared (and clobberable) across nested
-runs. Nesting depth in practice is small (camp-within-step), but the model must
-represent it.
+**Nested runs are real — and the parked script is terminated, not resumed.**
+`RunEclVm` is re-entrant in the original at exactly one site: PROGRAM case 9 saves
+`ecl_offset`, calls `TryEncamp()` — which itself runs `RunEclVm(PreCampCheckAddr)`
+and possibly `RunEclVm(CampInterruptedAddr)` (`ovr003.cs:1913–1926`) — restores the
+offset, then immediately performs **`CMD_Exit()`** (`ovr003.cs:1975–1981`): the outer
+script never executes another instruction (the offset restore is dead code — every
+`RunEclVm` entry reassigns it), and EXIT's side effects apply (set `stopVM`, clear
+`vmCallStack`, clear encounter flags, restore `SelectedPlayer`). No other nested
+call sites exist (combat/rest/training never re-enter the VM). So the original
+parks a frame mid-instruction — it is genuinely live state, and a save taken inside
+the camp menu happens above it — but never resumes one. Our activation stack must
+represent the parked frame (for the save case and for PROGRAM-9's post-camp EXIT
+semantics); *resumability* of outer frames beyond that is generality insurance, not
+observed original behavior. The original saves and restores *only the instruction
+pointer*: `compare_flags`, `vmCallStack`, and the string registers are process
+globals shared (and clobberable) across nested runs.
 
 **Program structure.** A script block is a `0x1E00`-byte buffer conceptually mapped at
 VM address `0x8000` (`Classes/EclBlock.cs`; code addresses stored in scripts are
@@ -47,7 +59,7 @@ five decoded operands read at load (`ovr008.cs vm_init_ecl`), an event-vector ta
 | # | Vector | Fired |
 |---|--------|-------|
 | 1 | `vm_run_addr_1` | after every world-menu command (per-step handler) |
-| 2 | `SearchLocationAddr` | after **every move** (search mode distinguished via `search_flags`) |
+| 2 | `SearchLocationAddr` | after **every world-menu command** (search mode distinguished via `search_flags`, forced to 1 per firing) |
 | 3 | `PreCampCheckAddr` | before camping |
 | 4 | `CampInterruptedAddr` | camp interrupted |
 | 5 | `ecl_initial_entryPoint` | block entry (move/load) |
@@ -58,16 +70,27 @@ with a `vmFlag01` short-circuit after every run — that orchestration belongs t
 `gbx-engine`, not the VM, but the VM contract must expose what it needs (see D-VM3).
 
 **Block switching (NEWECL 0x20 / PROGRAM 0x38).** NEWECL loads the new block
-*immediately*, re-parses vectors, **clears the call stack and flags**
+*immediately, mid-flow*, re-parses vectors, **clears the call stack and flags**
 (`ovr008.cs vm_init_ecl:102–107` — which also resets engine state: `inDungeon=1`,
 encounter flags, rest-encounter params, `HeadBlockId`), sets `stopVM` + `vmFlag01`,
-and the old script **never resumes** (`ovr003.cs:480–498`). Block bytes are reloaded
-fresh from disk on every switch (`ovr008.cs load_ecl_dax`), while the walk loop
-deliberately skips reload when re-entering the resident block — so self-modifications
-persist across vector runs but never across block switches. PROGRAM is a grab-bag:
-case 0 = the full game menu (save/load/training/party changes, then the script
-*continues*), case 3 = party-kill, case 8 = endgame (prints, saves, exits), case 9 =
-run the camp flow (the nested-run case above).
+and the old script **never resumes** (`ovr003.cs:480–498`). When a *nested* run
+triggers NEWECL, the interrupted engine flow **completes against the new block**:
+`TryEncamp` has no `vmFlag01` check, so after a NEWECL in the pre-camp script the
+camp UI still runs and `CampInterruptedAddr` — now the *new* block's vector — can
+still fire; the chain runner only takes over when control unwinds to the walk loop
+(`ovr003.cs:2342, 2363, 2386`). The M2 engine contract inherits this: a request in
+progress finishes (with the new block resident) before the engine chains. Block bytes
+are reloaded fresh from disk on every switch (`ovr008.cs load_ecl_dax`), while the
+walk loop skips reload when re-entering the resident block — but **`vm_init_ecl`
+runs on every walk-loop entry regardless** (`ovr003.cs:2268–2278`): call stack and
+flags are cleared and the five vectors re-parsed from the (possibly self-modified)
+resident bytes, plus conditional area-field resets (`RestField200Values`/
+`RestField6F2Values` when `reload_ecl_and_pictures == false`). So self-modified
+*data* persists across vector runs, self-modified *vectors* take effect on re-entry,
+and nothing survives a block switch. PROGRAM is a grab-bag: case 0 = the full game
+menu (save/load/training/party changes, then the script *continues*), case 3 =
+party-kill (then EXIT), case 8 = endgame (prints, saves, exits), case 9 = run the
+camp flow, then EXIT (the nested-run case above).
 
 **Instruction encoding.** Opcode byte, then per-opcode operands. Each operand is a
 mode byte + payload (`ovr008.cs vm_LoadCmdSets`, `Classes/Opperation.cs`):
@@ -111,8 +134,14 @@ tests one flag and, when false, skips the next instruction via `SkipNextCommand`
 and performs `0x81` memory reads as side effects — and for size-**0** opcodes
 (EXIT, RETURN, APPROACH, the IFs, both MENUs, ON GOTO/GOSUB, COMBAT, …) it advances
 **one byte only**. An IF-false over a variable-tail opcode (VERTICAL MENU…) therefore
-lands the pc *inside operand bytes*. Whether shipped scripts ever do that is a census
-question; our skip must reproduce the original's table-driven behavior either way.
+lands the pc *inside operand bytes*. And the divergence is **not limited to
+variable-tail opcodes**: a full sweep of the 65-entry table against every handler's
+operand consumption found two fixed-arity mismatches — ECL CLOCK (`0x34`) and ADD NPC
+(`0x36`) declare size 1 but their handlers consume **2** operand batches
+(`ovr003.cs:2115/2117` vs `CMD_EclClock`/`CMD_AddNPC`) — so skip sizes must be
+*transcribed from the original's size column, never derived from operand counts*.
+Whether shipped scripts ever skip across a divergent opcode is a census question; our
+skip must reproduce the original's table-driven behavior either way.
 GOSUB/RETURN use an unbounded `Stack<ushort>`; ON GOTO / ON GOSUB are computed jumps.
 
 **Text output blocks on pagination.** PRINT/PRINTCLEAR route through
@@ -172,19 +201,20 @@ holds globally:
   activation to fire a vector (`enter(addr)`) — including *while an outer activation
   sits suspended mid-instruction* (the PROGRAM-9 camp case). `Done` pops it.
 
-The machine never waits. `step(ctx)` executes (or continues) one instruction of the
+The machine never waits. `step(host)` executes (or continues) one instruction of the
 top activation and returns:
 
 - `Continue` — call again;
 - `Effect(e)` — presentation output (text, picture, clear-box, sprite…). Effects are
-  **engine-buffered**: ordering is part of the trace surface, and the engine is
-  licensed to stop stepping until presentation drains (that's where PRINT pagination
-  and its "press any key" inputs live — engine-side, in the input trace, without a
-  VM suspension);
+  **engine-buffered** with one normative rule: effects yielded before a Request
+  **must** be presented (or enqueued to presentation) in yield order, none dropped,
+  before that Request's interaction is shown. The engine may stop stepping until
+  presentation drains (that's where PRINT pagination and its "press any key" inputs
+  live — engine-side, in the input trace, without a VM suspension);
 - `Request(r)` — the activation is **suspended** awaiting a reply (menu selection,
   number/string input, combat outcome, camp flow, delay…). The engine services it
   over as many ticks as needed — possibly running *other activations* meanwhile —
-  then calls `resume(reply, ctx)`, which completes the instruction (post-input
+  then calls `resume(reply, host)`, which completes the instruction (post-input
   memory write-backs happen here, inside the VM, with correct Origin) and returns
   the next `VmStep`. Instructions may legitimately yield **several**
   Effects/Requests before completing (ENCOUNTER MENU is an interactive loop;
@@ -193,35 +223,56 @@ top activation and returns:
   kind. Coarse requests are preferred where the original's loop state is all engine
   state anyway (ENCOUNTER MENU's approach-distance dance lives in `area2_ptr` —
   the engine owns the loop, one memory write exits it);
-- `Done(exit)` — `Exit::Ended` (EXIT/vector completion, pops the activation) or
-  `Exit::ChainTo(block_id)` (NEWECL/PROGRAM-8): **the old context never resumes** —
-  the engine abandons the entire activation stack, loads the new block (applying the
-  documented `vm_init_ecl` engine-state resets), and enters via the chain-runner
-  protocol (`vmFlag01` semantics, owned by the M2 engine loop).
+- `Done(exit)` — `Exit::Ended` (EXIT/vector completion, pops the activation; if the
+  activation below is suspended, the engine consults `pending()` — it does not blindly
+  run the next vector) or `Exit::ChainTo(block_id)` (NEWECL/PROGRAM-8): **no VM
+  context ever resumes across a chain** — the engine swaps the block immediately
+  (applying the documented `vm_init_ecl` resets), *completes any engine flow already
+  in progress against the new block* (the TryEncamp behavior in §1), then abandons
+  the activation stack and enters via the chain-runner protocol (`vmFlag01`
+  semantics, owned by the M2 engine loop).
 
 Suspending is just returning; the whole `EclMachine` — block, shared state,
-activation stack with pendings — is the save-anywhere unit (M3). A pending request
-is re-presentable after load (`pending()` accessor). Each `step()` batch runs under a
-**fuel bound** (per-tick step budget with a loud diagnostic) so a `GOTO`-self loop
-can't hang a frontend — a headless-tick necessity the original never had.
+activation stack with pendings — is the save-anywhere unit (M3). Three snapshot
+commitments now, because deep pendings (camp save above a parked PROGRAM-9 frame)
+*will* land in user saves: snapshots carry a **version tag** and unknown versions are
+**rejected, not migrated** (revisit at M3 if saves need more longevity); a restored
+machine re-presents its **stored Request verbatim** via `pending()` — never
+re-derived from memory or string registers; and restore is its own entry point
+(`EclMachine::restore(snapshot, &Dialect)`) — the dialect is re-bound at restore,
+never embedded in the snapshot. Fuel is **engine policy, not VM API**: `step()`
+executes one instruction per call and cannot hang; the engine counts steps per tick
+and raises the loud diagnostic itself (same for a GOSUB-depth watchdog — the
+`call_stack` is faithfully unbounded, so a GOSUB-self loop grows it forever while
+staying responsive; the engine flags depth past a threshold).
 
-**D-VM4 — Four channels, chosen per opcode by a stated rule.** Synchronous,
-value-returning services are context arguments; presentation is Effects;
+**D-VM4 — Four channels, chosen per opcode by a stated rule; one host borrow.**
+Synchronous, value-returning services are context arguments; presentation is Effects;
 user/time-scale interaction is Requests; everything the VM keeps is machine state.
-`ScriptCtx` is `{ mem: &mut dyn ScriptMemory, rng: &mut dyn VmRng, services:
-&mut dyn EngineServices }`. The third member is the load-bearing addition: a large
+The context is a **single borrow** — `step(&mut self, host: &mut dyn VmHost)` with
+`trait VmHost: ScriptMemory + EngineServices { fn rng(&mut self) -> &mut dyn VmRng; }`
+— because in `gbx-engine` the memory facade and the services are views over the
+*same* state (the Party window reads the selected character that LOAD CHARACTER
+retargets; services roll the engine's one PRNG per D9): three simultaneous `&mut`
+borrows into one engine would be unconstructible in safe Rust. ScriptMemory and
+EngineServices stay separate *traits* for classification and testing; `gbx-vm` ships
+one composable `TestHost` (mock memory + scripted services + fixed rng) so
+conformance tests aren't repriced every time the surface grows. The services are the
+load-bearing addition: a large
 fraction of the opcode set synchronously touches engine entities that are *not*
 16-bit memory cells — LOAD CHARACTER retargets the selected player (redirecting
 subsequent Party-window reads), LOAD/SETUP/CLEAR MONSTER, CHECKPARTY, PARTYSTRENGTH,
 FIND ITEM/SPECIAL, DESTROY ITEMS, ADD NPC, WHO, ECL CLOCK (game time), SPELL
 (memorized-spell queries), TREASURE's item instantiation, DAMAGE's saving throws.
 These are `EngineServices` calls: defined in `gbx-vm`, implemented in `gbx-engine`,
-deterministic, mockable in conformance tests. The trait *grows* as opcodes are
-implemented, but the **seam is fixed now**: placement rule — returns a value or
-mutates game entities synchronously → service; paced or user-facing → Effect/Request.
-**M1 step 0 produces the 65-opcode channel classification table** (checked against
-each coab handler) before `step()` is written; the classification lands as an
-appendix to this doc.
+deterministic, mockable in conformance tests. The **seam is fixed now**: placement
+rule — returns a value or mutates game entities synchronously → service; paced or
+user-facing → Effect/Request. **M1 step 0 produces the 65-opcode channel
+classification table** (checked against each coab handler) before `step()` is
+written; the classification lands as an appendix to this doc, and the **full
+`EngineServices` trait is declared in one shot from it** — no
+grow-a-method-per-opcode treadmill breaking every mock. Call recording for oracle
+traces (H4) comes from a wrapper impl around the trait, not from the trait's shape.
 
 **D-VM5 — ScriptMemory is a trait defined in `gbx-vm`, implemented in `gbx-engine`,
 with the Ecl window intercepted VM-side.** The VM sees `read/write` (word),
@@ -258,8 +309,14 @@ ON-GOTO immediate tails, IF fall-through *and* table-driven skip successor), mar
 unreached bytes as data, and resynchronizes only at known targets. Decode errors are
 diagnostics in disassembly (mark and continue from the next known target) but halts
 in execution (D-VM6). The census runs on the same traversal and **must report,
-not assume**: memory-mode menu counts (`VariableTailUnresolved`), IF-preceding-
-variable-tail sites (the skip-divergence hazard), unknown modes, unreached regions.
+not assume**: memory-mode menu counts (`VariableTailUnresolved`), IF-preceding any
+opcode whose skip size ≠ run consumption (the skip-divergence hazard — variable-tail
+opcodes plus the `0x34`/`0x36` class), unknown modes, unreached regions. Divergent
+skip successors (pc landing mid-operand) are **reported and quarantined** — decoded
+into a tagged bucket excluded from headline census counts, never silently traversed —
+because D-VM1's mode tolerance means mid-operand garbage usually decodes as plausible
+instructions, and the census is the M6 gate metric. Known limitation, stated in
+census output: regions reachable only after self-modification are reported as data.
 
 ## 3. API sketch
 
@@ -275,8 +332,11 @@ pub struct EclMachine {
     runs: Vec<Activation>,         // top = executing; empty = idle
 }
 struct Activation { pc: u16, pending: Option<Pending> }
-// Pending = per-opcode continuation: which phase of a multi-step instruction,
-// plus its decoded operands. Serializable, like everything above.
+// Pending = per-opcode continuation: which phase of a multi-step instruction, its
+// decoded operands, and — when the phase is awaiting-reply — the outstanding Request
+// stored verbatim (pending() returns exactly this; awaiting-reply is a Pending
+// phase, so "mid-instruction, more Effects coming" and "suspended on a Request" are
+// distinguishable states). Serializable, like everything above.
 
 pub enum VmStep {
     Continue,
@@ -288,18 +348,36 @@ pub enum Exit { Ended, ChainTo(BlockId) }
 
 impl EclMachine {
     pub fn load_block(block: EclBlock, dialect: &Dialect) -> Result<Self, HeaderError>;
+    pub fn reinit(&mut self);          // walk-loop re-entry without reload (§1): clears
+                                       //   flags + call stack, re-parses vectors from the
+                                       //   (possibly self-modified) resident bytes
+    pub fn restore(snapshot: Snapshot, dialect: &Dialect) -> Result<Self, RestoreError>;
     pub fn enter(&mut self, addr: u16);                  // push activation (vector or nested run)
     pub fn vector(&self, index: usize) -> Option<u16>;   // dialect-defined meaning
-    pub fn step(&mut self, ctx: &mut ScriptCtx) -> Result<VmStep, VmError>;
-    pub fn resume(&mut self, reply: Reply, ctx: &mut ScriptCtx) -> Result<VmStep, VmError>;
-    pub fn pending(&self) -> Option<&Request>;           // re-present after load
+    pub fn step(&mut self, host: &mut dyn VmHost) -> Result<VmStep, VmError>;
+    pub fn resume(&mut self, reply: Reply, host: &mut dyn VmHost) -> Result<VmStep, VmError>;
+    pub fn pending(&self) -> Option<&Request>;           // top-of-stack; re-present after load
 }
 
-pub struct ScriptCtx<'a> {
-    pub mem: &'a mut dyn ScriptMemory,      // engine windows only; Ecl intercepted internally
-    pub rng: &'a mut dyn VmRng,
-    pub services: &'a mut dyn EngineServices,  // grows per opcode; seam fixed here
+// Call legality (machine state × call → result); everything else is a VmError:
+//   step:   top has no pending, or pending mid-instruction (more Effects) → runs
+//           top is awaiting-reply → Err(StepWhilePending)
+//           runs empty → Err(Idle)
+//   resume: top is awaiting-reply + matching reply kind → completes instruction
+//           otherwise → Err(ResumeWithoutPending) / Err(ReplyMismatch)
+//   enter:  always legal (that's the nested-run case); pushes a fresh activation
+// After Err(UnknownOpcode) (D-VM6) the machine is halted: only restore/load/reinit
+// or abandoning it are meaningful.
+pub enum VmError { UnknownOpcode { pc: u16, opcode: u8 },
+                   StepWhilePending, ResumeWithoutPending, ReplyMismatch, Idle }
+
+// ONE host borrow (D-VM4): memory + services are views over the same engine state.
+pub trait VmHost: ScriptMemory + EngineServices {
+    fn rng(&mut self) -> &mut dyn VmRng;
 }
+// EngineServices: declared in full from the M1-step-0 classification appendix.
+// gbx-vm test support ships a composable TestHost (mock memory + scripted services
+// + fixed rng); trace recording wraps a VmHost, it doesn't shape the trait.
 
 pub trait ScriptMemory {
     fn read(&mut self, addr: u16, origin: Origin) -> u16;
@@ -322,13 +400,18 @@ pub enum Arg { ImmByte(u8), Mem(u16), MemAlt(u16), ImmWord(u16), InlineStr(..), 
 The engine's run loop (shape only — the M2 design owns its final form):
 
 ```rust
-match machine.step(&mut ctx)? {
-    VmStep::Continue => { /* step again, within this tick's fuel budget */ }
-    VmStep::Effect(e) => buffer(e),          // drain before further stepping if paced
-    VmStep::Request(r) => park(r),           // resume(reply, ctx) on a later tick;
+match machine.step(&mut host)? {
+    VmStep::Continue => { /* step again, within the engine's per-tick step budget */ }
+    VmStep::Effect(e) => buffer(e),          // MUST present in order before next Request UI
+    VmStep::Request(r) => park(r),           // resume(reply, host) on a later tick;
                                              // engine may machine.enter(..) meanwhile
-    VmStep::Done(Exit::Ended) => { /* activation popped; run next vector or idle */ }
-    VmStep::Done(Exit::ChainTo(id)) => chain_to(id),  // abandon stack, load, re-enter
+    VmStep::Done(Exit::Ended) => {           // activation popped; if machine.pending()
+                                             //   is Some, an outer frame awaits — else
+                                             //   next vector or idle
+    }
+    VmStep::Done(Exit::ChainTo(id)) => chain_to(id),  // swap block now; finish any
+                                             // in-progress engine flow against it,
+                                             // then abandon stack and chain (§1)
 }
 ```
 
@@ -339,15 +422,19 @@ match machine.step(&mut ctx)? {
   conformance programs asserting on the yielded step stream, memory traffic (mock
   ScriptMemory), service calls (mock EngineServices), flag state, and pc trajectory.
 - **Skip-semantics tests**: IF-false over every opcode class, asserting table-driven
-  advance (including the size-0 one-byte case and skip's string-register/`0x81` side
-  effects) — divergence here is silent plot corruption later.
+  advance (the size-0 one-byte case, the fixed-arity mismatches `0x34`/`0x36`, and
+  skip's string-register/`0x81` side effects) — divergence here is silent plot
+  corruption later.
 - **Staleness tests**: string-register persistence across instructions (mixed
   COMPARE, menu header from a prior instruction) — behavior the original exhibits.
 - **Suspension tests**: menus/inputs driven by scripted replies; nested-activation
   tests (suspend mid-instruction, `enter()` a vector, run it to `Done`, resume the
   outer); serialize the suspended machine, restore, `pending()`, resume —
   save-anywhere insurance from day one.
-- **Fuel tests**: a `GOTO`-self block trips the budget diagnostic, never hangs.
+- **Runaway-script protection** is engine policy, not H2 surface: `step()` executes
+  one instruction per call and cannot hang; the per-tick step budget and the
+  GOSUB-depth watchdog are tested in `gbx-engine` (a `GOTO`-self and a `GOSUB`-self
+  block trip their diagnostics).
 - **Unknown-access log** asserted empty for conformance programs; asserted *non-empty
   and precise* for deliberately-unknown-address programs.
 - **Disassembler goldens**: flow-following traversal on synthetic blocks with
@@ -360,13 +447,15 @@ match machine.step(&mut ctx)? {
 
 1. `0x1F` opcode semantics (unknown to coab). Census first; if unused in shipped
    CotAB scripts, no-op with rationale.
-2. Do shipped scripts ever place IF before a variable-tail opcode (skip-divergence
-   hazard), or use memory-mode menu counts? Census reports both (D-VM8).
+2. Do shipped scripts ever place IF before an opcode whose skip size ≠ run
+   consumption (the variable-tail opcodes, plus fixed-arity `0x34` ECL CLOCK and
+   `0x36` ADD NPC), or use memory-mode menu counts? Census reports all of it (D-VM8).
 3. Operand mode `0x01` vs `0x03` — identical on read *and* write paths in coab;
    presumed cosmetic. Confirm against ECLDump's rendering; low priority.
-4. Nested-run edge: can a *nested* activation trigger `ChainTo` (camp script running
-   NEWECL) in shipped content, and does the original's behavior match our
-   abandon-everything rule? Verify against the oracle when data lands.
+4. Nested `ChainTo` mechanism is now recorded from coab (§1: block swaps mid-flow,
+   the interrupted engine flow completes against the new block, chaining happens at
+   walk-loop unwind). Data-gated remainder: does shipped content actually exercise a
+   NEWECL inside camp scripts, and does our composite flow match the oracle end-to-end?
 5. Exact inline-string compression (bit-packing) — `gbx-formats` work, verified
    against ECLDump text output.
 6. Byte-exact operand/offset accounting in `vm_LoadCmdSets` (the +1/+2/wrap dance) —
