@@ -1,6 +1,8 @@
 //! `restrike` — headless CLI frontend for the Restrike engine.
 
 mod census;
+mod map;
+mod run_script;
 
 use gbx_formats::detect::{self, Detection};
 use gbx_vm::dialect::COTAB;
@@ -15,6 +17,8 @@ fn main() -> ExitCode {
         Some("detect") => cmd_detect(args.next()),
         Some("disasm") => cmd_disasm(args.collect()),
         Some("census") => census::cmd_census(args.collect()),
+        Some("map") => map::cmd_map(args.collect()),
+        Some("run-script") => run_script::cmd_run_script(args.collect()),
         Some(other) => {
             eprintln!("restrike: unknown command '{other}'");
             print_usage();
@@ -31,6 +35,11 @@ fn print_usage() {
     eprintln!("usage: restrike detect [DIR]");
     eprintln!("       restrike disasm --raw-block <PATH> [--entry 0xNNNN[,0xNNNN...]]");
     eprintln!("       restrike census [DIR] [--out <PATH>]");
+    eprintln!("       restrike map [DIR] --block <ID> [--dax <FILE>]");
+    eprintln!(
+        "       restrike run-script [DIR] --dax <FILE> --block <ID> [--vector N] [--trace] \
+         [--reply k=v ...]"
+    );
     eprintln!();
     eprintln!("If DIR is omitted, falls back to the GBX_DATA_DIR environment variable.");
     eprintln!();
