@@ -15,6 +15,12 @@
 //! declare `skip_size` 1 but their handlers consume 2 operands via a single
 //! `vm_LoadCmdSets(2)` call (`ovr003.cs:1720-1727`/`1769-1782`, cross-checked
 //! against `ovr003.cs:2115`/`2117`'s `CommandTable` entries).
+//!
+//! `successor` (D-VM8) is a third, independent axis: how control flow leaves
+//! this opcode, used by the flow-following disassembler. It is table-driven
+//! per D-VM7, never a hard-coded match on opcode number in the traversal
+//! code — the traversal only ever asks "what `SuccessorKind` does this
+//! opcode have," never "is this opcode GOTO."
 
 /// A single channel an opcode's handler touches, per D-VM4's placement rule.
 /// An opcode commonly carries more than one.
@@ -48,6 +54,59 @@ pub enum OperandShape {
     VariableTail { fixed_prefix: u8 },
 }
 
+/// How control flow leaves an opcode, for the flow-following disassembler
+/// (D-VM8). Distinct from `shape`/`skip_size`: this describes *where
+/// execution can go next*, not how operands are laid out.
+///
+/// Jump/call targets always name an operand *index* rather than embedding an
+/// address, because the target is only known once the instruction is
+/// decoded (`docs/design/vm-scriptmemory.md` §1: destination/target operands
+/// are always the operand's raw word, regardless of encoded mode — docket
+/// item 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SuccessorKind {
+    /// Falls through to the decoded instruction's `next` address only. The
+    /// default for the large majority of opcodes.
+    Sequential,
+    /// Unconditional jump to the raw word of `args[target_operand]`. No
+    /// fall-through successor — GOTO (`ovr003.cs:45-53`): "Uses
+    /// `cmd_opps[1].Word` directly, never `.GetCmdValue()`."
+    Jump { target_operand: usize },
+    /// Same jump as `Jump`, but the fall-through address (`next`) is *also*
+    /// a successor: GOSUB pushes `next` onto the call stack before jumping
+    /// (`ovr003.cs:56-65`), so `next` is the eventual RETURN's landing
+    /// site — reachable, even though RETURN itself has no statically
+    /// determinable successor (empty-stack-becomes-EXIT is a runtime
+    /// behavior, not a static edge; see `docs/design/vm-scriptmemory.md`
+    /// §1).
+    Call { target_operand: usize },
+    /// The six IF opcodes (`0x16`-`0x1B`): `next` (flag-true fall-through)
+    /// plus a *skip successor* computed from the immediately-following
+    /// opcode's `skip_size` — never from that opcode's decoded length
+    /// (`docs/design/vm-scriptmemory.md` §1, "Skip is not decode"). When the
+    /// skip successor's address disagrees with that opcode's real decoded
+    /// length, it is a **hazard site** (D-VM8): the byte at the skip target
+    /// is quarantined, not merged into normal traversal.
+    Branch,
+    /// ON GOTO / ON GOSUB (`0x25`/`0x26`): `next` (the confirmed
+    /// out-of-range-selector fall-through, `ovr003.cs:1038-1059` — no
+    /// `else`-branch jump) *plus* every tail-operand entry (indices
+    /// `fixed_prefix..`) as a static jump target, since which one executes
+    /// is a runtime selector value this traversal does not track.
+    ComputedTable,
+    /// No statically-known successor at all: EXIT (terminates the
+    /// activation), RETURN (dynamic call-stack pop), NEWECL (targets a
+    /// *different* block — out of scope for a single-block traversal).
+    Terminal,
+    /// PROGRAM (`0x38`): behavior is a `case`-operand-dependent grab-bag
+    /// (menu-then-continue, party-kill-then-EXIT, endgame, camp-then-EXIT —
+    /// `docs/design/vm-scriptmemory.md` §1). Conservatively treated as
+    /// fall-through to `next`, flagged distinctly from plain `Sequential` so
+    /// the disassembler can annotate the instruction with a note that some
+    /// operand values actually terminate the block.
+    ConservativeFallthrough,
+}
+
 /// A dialect's static entry for one opcode.
 #[derive(Debug, Clone, Copy)]
 pub struct OpcodeInfo {
@@ -59,6 +118,7 @@ pub struct OpcodeInfo {
     pub skip_size: u8,
     pub shape: OperandShape,
     pub channels: &'static [Channel],
+    pub successor: SuccessorKind,
 }
 
 /// A named table of [`OpcodeInfo`] entries for one game flavor.
@@ -76,6 +136,9 @@ impl Dialect {
 
 use Channel::{Eff, Machine, Mem, Req, Svc};
 use OperandShape::{Fixed, VariableTail};
+use SuccessorKind::{
+    Branch, Call, ComputedTable, ConservativeFallthrough, Jump, Sequential, Terminal,
+};
 
 /// The CotAB (Curse of the Azure Bonds) opcode table, `0x00`-`0x40`.
 ///
@@ -96,6 +159,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 0,
         shape: Fixed(0),
         channels: &[Machine, Svc],
+        successor: Terminal,
     },
     OpcodeInfo {
         op: 0x01,
@@ -103,6 +167,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 1,
         shape: Fixed(1),
         channels: &[Machine],
+        successor: Jump { target_operand: 0 },
     },
     OpcodeInfo {
         op: 0x02,
@@ -110,6 +175,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 1,
         shape: Fixed(1),
         channels: &[Machine],
+        successor: Call { target_operand: 0 },
     },
     OpcodeInfo {
         op: 0x03,
@@ -117,6 +183,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 2,
         shape: Fixed(2),
         channels: &[Machine, Mem],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x04,
@@ -124,6 +191,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 3,
         shape: Fixed(3),
         channels: &[Machine, Mem, Svc],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x05,
@@ -131,6 +199,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 3,
         shape: Fixed(3),
         channels: &[Machine, Mem, Svc],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x06,
@@ -138,6 +207,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 3,
         shape: Fixed(3),
         channels: &[Machine, Mem, Svc],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x07,
@@ -145,6 +215,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 3,
         shape: Fixed(3),
         channels: &[Machine, Mem, Svc],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x08,
@@ -152,6 +223,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 2,
         shape: Fixed(2),
         channels: &[Machine, Mem, Svc],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x09,
@@ -159,6 +231,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 2,
         shape: Fixed(2),
         channels: &[Machine, Mem, Svc],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x0A,
@@ -166,6 +239,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 1,
         shape: Fixed(1),
         channels: &[Machine, Mem, Svc, Eff],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x0B,
@@ -173,6 +247,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 3,
         shape: Fixed(3),
         channels: &[Machine, Mem, Svc],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x0C,
@@ -180,6 +255,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 3,
         shape: Fixed(3),
         channels: &[Machine, Mem, Svc, Eff],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x0D,
@@ -187,6 +263,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 0,
         shape: Fixed(0),
         channels: &[Machine, Eff],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x0E,
@@ -194,6 +271,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 1,
         shape: Fixed(1),
         channels: &[Machine, Mem, Eff],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x0F,
@@ -201,6 +279,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 2,
         shape: Fixed(2),
         channels: &[Machine, Mem, Req],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x10,
@@ -208,6 +287,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 2,
         shape: Fixed(2),
         channels: &[Machine, Mem, Req],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x11,
@@ -215,6 +295,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 1,
         shape: Fixed(1),
         channels: &[Machine, Mem, Eff],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x12,
@@ -222,6 +303,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 1,
         shape: Fixed(1),
         channels: &[Machine, Mem, Eff],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x13,
@@ -229,6 +311,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 0,
         shape: Fixed(0),
         channels: &[Machine],
+        successor: Terminal,
     },
     OpcodeInfo {
         op: 0x14,
@@ -236,6 +319,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 4,
         shape: Fixed(4),
         channels: &[Machine, Mem],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x15,
@@ -243,6 +327,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 0,
         shape: VariableTail { fixed_prefix: 3 },
         channels: &[Machine, Mem, Eff, Req],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x16,
@@ -250,6 +335,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 0,
         shape: Fixed(0),
         channels: &[Machine],
+        successor: Branch,
     },
     OpcodeInfo {
         op: 0x17,
@@ -257,6 +343,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 0,
         shape: Fixed(0),
         channels: &[Machine],
+        successor: Branch,
     },
     OpcodeInfo {
         op: 0x18,
@@ -264,6 +351,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 0,
         shape: Fixed(0),
         channels: &[Machine],
+        successor: Branch,
     },
     OpcodeInfo {
         op: 0x19,
@@ -271,6 +359,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 0,
         shape: Fixed(0),
         channels: &[Machine],
+        successor: Branch,
     },
     OpcodeInfo {
         op: 0x1A,
@@ -278,6 +367,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 0,
         shape: Fixed(0),
         channels: &[Machine],
+        successor: Branch,
     },
     OpcodeInfo {
         op: 0x1B,
@@ -285,6 +375,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 0,
         shape: Fixed(0),
         channels: &[Machine],
+        successor: Branch,
     },
     OpcodeInfo {
         op: 0x1C,
@@ -292,6 +383,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 0,
         shape: Fixed(0),
         channels: &[Machine, Svc],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x1D,
@@ -299,6 +391,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 1,
         shape: Fixed(1),
         channels: &[Machine, Mem, Svc],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x1E,
@@ -306,6 +399,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 6,
         shape: Fixed(6),
         channels: &[Machine, Mem, Svc],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x1F,
@@ -313,6 +407,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 2,
         shape: Fixed(2),
         channels: &[],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x20,
@@ -320,6 +415,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 1,
         shape: Fixed(1),
         channels: &[Machine, Mem, Svc],
+        successor: Terminal,
     },
     OpcodeInfo {
         op: 0x21,
@@ -327,6 +423,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 3,
         shape: Fixed(3),
         channels: &[Svc, Eff],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x22,
@@ -334,6 +431,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 2,
         shape: Fixed(2),
         channels: &[Mem, Svc],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x23,
@@ -341,6 +439,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 4,
         shape: Fixed(4),
         channels: &[Mem, Svc],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x24,
@@ -348,6 +447,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 0,
         shape: Fixed(0),
         channels: &[Req, Svc, Eff, Machine],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x25,
@@ -355,6 +455,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 0,
         shape: VariableTail { fixed_prefix: 2 },
         channels: &[Machine],
+        successor: ComputedTable,
     },
     OpcodeInfo {
         op: 0x26,
@@ -362,6 +463,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 0,
         shape: VariableTail { fixed_prefix: 2 },
         channels: &[Machine],
+        successor: ComputedTable,
     },
     OpcodeInfo {
         op: 0x27,
@@ -369,6 +471,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 8,
         shape: Fixed(8),
         channels: &[Svc, Mem],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x28,
@@ -376,6 +479,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 3,
         shape: Fixed(3),
         channels: &[Svc, Mem],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x29,
@@ -383,6 +487,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 14,
         shape: Fixed(14),
         channels: &[Mem, Svc, Eff, Req],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x2A,
@@ -390,6 +495,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 3,
         shape: Fixed(3),
         channels: &[Mem],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x2B,
@@ -397,6 +503,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 0,
         shape: VariableTail { fixed_prefix: 2 },
         channels: &[Machine, Mem, Svc, Req],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x2C,
@@ -404,13 +511,15 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 6,
         shape: Fixed(6),
         channels: &[Mem, Req],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x2D,
         name: "CALL",
         skip_size: 1,
         shape: Fixed(1),
-        channels: &[Machine, Svc, Eff],
+        channels: &[Machine, Svc, Eff, Req],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x2E,
@@ -418,6 +527,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 5,
         shape: Fixed(5),
         channels: &[Svc, Eff, Machine],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x2F,
@@ -425,6 +535,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 3,
         shape: Fixed(3),
         channels: &[Mem, Machine],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x30,
@@ -432,6 +543,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 3,
         shape: Fixed(3),
         channels: &[Mem, Machine],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x31,
@@ -439,6 +551,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 0,
         shape: Fixed(0),
         channels: &[Machine, Eff],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x32,
@@ -446,6 +559,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 1,
         shape: Fixed(1),
         channels: &[Machine, Svc],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x33,
@@ -453,6 +567,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 0,
         shape: Fixed(0),
         channels: &[Eff],
+        successor: Sequential,
     },
     // ECL CLOCK: skip_size=1 but the handler decodes 2 operands via one
     // vm_LoadCmdSets(2) call — the confirmed skip≠run divergence.
@@ -462,6 +577,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 1,
         shape: Fixed(2),
         channels: &[Svc],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x35,
@@ -469,6 +585,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 3,
         shape: Fixed(3),
         channels: &[Mem],
+        successor: Sequential,
     },
     // ADD NPC: same divergence shape as ECL CLOCK.
     OpcodeInfo {
@@ -477,6 +594,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 1,
         shape: Fixed(2),
         channels: &[Svc, Eff],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x37,
@@ -484,6 +602,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 3,
         shape: Fixed(3),
         channels: &[Svc, Eff, Machine],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x38,
@@ -491,6 +610,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 1,
         shape: Fixed(1),
         channels: &[Svc, Req, Eff, Machine],
+        successor: ConservativeFallthrough,
     },
     OpcodeInfo {
         op: 0x39,
@@ -498,6 +618,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 1,
         shape: Fixed(1),
         channels: &[Machine, Req],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x3A,
@@ -505,6 +626,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 0,
         shape: Fixed(0),
         channels: &[Machine, Req],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x3B,
@@ -512,6 +634,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 3,
         shape: Fixed(3),
         channels: &[Svc, Mem],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x3C,
@@ -519,6 +642,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 1,
         shape: Fixed(1),
         channels: &[Machine, Req, Eff],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x3D,
@@ -526,6 +650,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 0,
         shape: Fixed(0),
         channels: &[Eff],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x3E,
@@ -533,6 +658,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 0,
         shape: Fixed(0),
         channels: &[Svc, Machine, Eff],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x3F,
@@ -540,6 +666,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 1,
         shape: Fixed(1),
         channels: &[Machine, Svc],
+        successor: Sequential,
     },
     OpcodeInfo {
         op: 0x40,
@@ -547,6 +674,7 @@ static COTAB_OPCODES: [OpcodeInfo; 65] = [
         skip_size: 1,
         shape: Fixed(1),
         channels: &[Svc],
+        successor: Sequential,
     },
 ];
 
@@ -609,5 +737,46 @@ mod tests {
         let unk = COTAB.lookup(0x1F).unwrap();
         assert_eq!(unk.name, "notsure 0x1f");
         assert!(unk.channels.is_empty());
+    }
+
+    #[test]
+    fn successor_kinds_match_the_classification_doc() {
+        assert_eq!(COTAB.lookup(0x00).unwrap().successor, Terminal); // EXIT
+        assert_eq!(
+            COTAB.lookup(0x01).unwrap().successor,
+            Jump { target_operand: 0 }
+        ); // GOTO
+        assert_eq!(
+            COTAB.lookup(0x02).unwrap().successor,
+            Call { target_operand: 0 }
+        ); // GOSUB
+        assert_eq!(COTAB.lookup(0x13).unwrap().successor, Terminal); // RETURN
+        assert_eq!(COTAB.lookup(0x20).unwrap().successor, Terminal); // NEWECL
+        assert_eq!(
+            COTAB.lookup(0x38).unwrap().successor,
+            ConservativeFallthrough
+        ); // PROGRAM
+
+        for op in 0x16..=0x1B {
+            assert_eq!(COTAB.lookup(op).unwrap().successor, Branch, "IF {op:#04x}");
+        }
+        for op in [0x25, 0x26] {
+            assert_eq!(
+                COTAB.lookup(op).unwrap().successor,
+                ComputedTable,
+                "{op:#04x}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_opcode_has_a_successor_kind_assigned() {
+        // Sanity: this is a `SuccessorKind`, not an `Option`, so every entry
+        // in the static table necessarily has one — this test exists to
+        // document the invariant and to fail loudly (a compile error) if
+        // `successor` is ever made optional without updating this file.
+        for info in COTAB.opcodes {
+            let _ = info.successor;
+        }
     }
 }

@@ -81,6 +81,23 @@ pub enum Arg {
     UnknownMode { mode: u8, byte: u8 },
 }
 
+impl Arg {
+    /// The operand's raw 16-bit word, for the destination/target operands
+    /// that coab always reads via `.Word` rather than `.GetCmdValue()`
+    /// (`docs/design/vm-scriptmemory.md` §1 docket item 3 — GOTO/GOSUB
+    /// targets, ON GOTO/ON GOSUB tail entries, and every write-destination
+    /// operand). `None` for operand kinds that never carry a `.Word` in the
+    /// original (an immediate-byte-moded operand never sets coab's `high`
+    /// field, so `.Word` there would throw) — used by the disassembler to
+    /// flag an unresolvable jump target rather than guessing one.
+    pub fn raw_word(&self) -> Option<u16> {
+        match *self {
+            Arg::Mem(w) | Arg::MemAlt(w) | Arg::ImmWord(w) => Some(w),
+            Arg::ImmByte(_) | Arg::InlineStr(_) | Arg::MemStr(_) | Arg::UnknownMode { .. } => None,
+        }
+    }
+}
+
 /// One decoded instruction: which opcode, its operands in stream order, and
 /// the VM address of the next instruction (for non-branching fallthrough).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,6 +162,26 @@ pub fn decode(bytes: &BlockBytes, addr: u16, dialect: &Dialect) -> Result<Instr,
         args,
         next: cursor,
     })
+}
+
+/// Decodes `count` raw operand batches starting at `start` (the first
+/// batch's mode byte), returning the address just past the last one.
+///
+/// This mirrors the original's `vm_LoadCmdSets(count)` — the *same*
+/// batch decoder both normal decode and `CmdItem.Skip` call, with `count` a
+/// **batch count, not a byte count** (each batch's byte length depends on
+/// its own mode byte, exactly like [`decode`]'s `Fixed(n)` loop). The
+/// disassembler uses this to compute an IF's skip successor from a
+/// dialect's declared `skip_size` (`docs/design/vm-scriptmemory.md` §1,
+/// "Skip is not decode": skip advances by *this*, never by how many bytes
+/// the opcode's operands actually occupy).
+pub(crate) fn skip_batches(bytes: &BlockBytes, start: u16, count: u8) -> u16 {
+    let mut cursor = start;
+    for _ in 0..count {
+        let (_, next) = decode_operand(bytes, cursor);
+        cursor = next;
+    }
+    cursor
 }
 
 /// Decodes one operand batch starting at `addr` (the mode byte's position),

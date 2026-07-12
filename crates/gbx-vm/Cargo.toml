@@ -10,3 +10,10 @@ description = "ECL bytecode decoder, disassembler, interpreter, and ScriptMemory
 gbx-formats = { path = "../gbx-formats" }
 
 [dev-dependencies]
+
+[features]
+# Micro-ECL synthetic block builder (design doc §4): used by this crate's own
+# disassembler/decoder tests, and re-enabled as a dev-dependency by other
+# crates' conformance tests (e.g. the interpreter, later) so the builder
+# isn't duplicated per-crate.
+test-support = []

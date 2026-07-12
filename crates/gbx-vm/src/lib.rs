@@ -9,6 +9,11 @@
 
 pub mod decode;
 pub mod dialect;
+pub mod disasm;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 pub use decode::{decode, Arg, BlockBytes, DecodeError, Instr, Op};
-pub use dialect::{Channel, Dialect, OpcodeInfo, OperandShape, COTAB};
+pub use dialect::{Channel, Dialect, OpcodeInfo, OperandShape, SuccessorKind, COTAB};
+pub use disasm::disassemble;
