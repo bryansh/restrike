@@ -13,7 +13,11 @@
 > suspension/serialization/census contracts. All load-bearing citations were
 > re-verified against coab directly. Review stops here: remaining risk is carried by
 > M1's scheduled falsifiers (step-0 opcode classification, §4 conformance tests,
-> census hazard reports).
+> census hazard reports). *Post-review note:* step 0 has since run
+> ([opcode-classification.md](opcode-classification.md)) — it re-confirmed the
+> load-bearing claims with exact citations and caught one example-level
+> miscitation (PARLAY/TREASURE in D-VM3, corrected in place, adjudicated against
+> coab before editing).
 >
 > Scope: the `gbx-vm` crate — bytecode decoding, the interpreter's execution and
 > suspension model, and the ScriptMemory facade through which scripts touch engine
@@ -137,8 +141,9 @@ and performs `0x81` memory reads as side effects — and for size-**0** opcodes
 lands the pc *inside operand bytes*. And the divergence is **not limited to
 variable-tail opcodes**: a full sweep of the 65-entry table against every handler's
 operand consumption found two fixed-arity mismatches — ECL CLOCK (`0x34`) and ADD NPC
-(`0x36`) declare size 1 but their handlers consume **2** operand batches
-(`ovr003.cs:2115/2117` vs `CMD_EclClock`/`CMD_AddNPC`) — so skip sizes must be
+(`0x36`) declare size 1 but their handlers decode **two operands in a single
+`vm_LoadCmdSets(2)` call** (`ovr003.cs:2115/2117` vs `CMD_EclClock`/`CMD_AddNPC`),
+while skip runs `vm_LoadCmdSets(1)` — so skip sizes must be
 *transcribed from the original's size column, never derived from operand counts*.
 Whether shipped scripts ever skip across a divergent opcode is a census question; our
 skip must reproduce the original's table-driven behavior either way.
@@ -165,7 +170,7 @@ classified into windows (`ovr008.cs vm_GetMemoryValueType:300`, verified exact):
 | Table | `0x7A00`–`0x7BFF` | word | `stru_1B2CA` words (`0xC00 + loc*2`) |
 | Party | `0x7C00`–`0x7FFF` | word | `area2_ptr` words (`0x800 + loc*2`) **plus** read/write-through to the selected character's fields (`get_player_values` / `alter_character`) |
 | Ecl | `0x8000`–`0x9DFF` | **byte** | the resident script block itself — self-modifiable, shared with instruction fetch |
-| Global | everything else | word | a sparse set of named globals (`mapPosX/Y` at `0xC04B/0xC04C`, facing, wall info, …); unknown reads return 0, unknown writes are dropped |
+| Global | everything else | word | a sparse set of named globals (`mapPosX/Y` at `0xC04B/0xC04C`, facing, wall info, the SURPRISE result cell `0x2CB`, …); unknown reads return 0, unknown writes are dropped |
 
 Two windows have **write side effects**: writing `inDungeon` flips `game_state`
 (`ovr008.cs:704`); position/facing writes set `positionChanged`. Party-window writes
@@ -217,10 +222,13 @@ top activation and returns:
   then calls `resume(reply, host)`, which completes the instruction (post-input
   memory write-backs happen here, inside the VM, with correct Origin) and returns
   the next `VmStep`. Instructions may legitimately yield **several**
-  Effects/Requests before completing (ENCOUNTER MENU is an interactive loop;
-  PARLAY/TREASURE have multiple presentation points): `pending` therefore carries
-  per-opcode continuation state (phase + decoded operands), not just the request
-  kind. Coarse requests are preferred where the original's loop state is all engine
+  Effects/Requests before completing — ENCOUNTER MENU is an interactive loop
+  (three Effect classes plus one Request *per iteration*), and DAMAGE's
+  per-target loop has the same shape via data-dependent pagination. (v3
+  originally miscited PARLAY/TREASURE here; the step-0 classification corrected
+  it: PARLAY is single-shot — one Request, zero Effects — and TREASURE has no
+  presentation at all.) `pending` therefore carries per-opcode continuation
+  state (phase + decoded operands), not just the request kind. Coarse requests are preferred where the original's loop state is all engine
   state anyway (ENCOUNTER MENU's approach-distance dance lives in `area2_ptr` —
   the engine owns the loop, one memory write exits it);
 - `Done(exit)` — `Exit::Ended` (EXIT/vector completion, pops the activation; if the
