@@ -460,6 +460,12 @@ match machine.step(&mut host)? {
    against ECLDump text output.
 6. Byte-exact operand/offset accounting in `vm_LoadCmdSets` (the +1/+2/wrap dance) —
    pinned by implementing against ECLDump goldens rather than derived from coab prose.
+7. Version skew: coab transliterates a specific CotAB build (its demo string says
+   v1.3); our canonical target is the GOG build (PLAN §2.3). On data arrival, confirm
+   the GOG binary's version and treat any behavioral delta as a detection-table +
+   per-version quirk entry, not a coab error. More broadly: every coab-derived claim
+   in this doc is a *hypothesis* until an H1/H2 check against real data or the
+   running game confirms it — coab bootstraps, the game itself validates.
 
 Resolved since v1: PRINT pagination (it blocks; handled engine-side as buffered
 Effects + input-trace keypresses — §1, D-VM3).
