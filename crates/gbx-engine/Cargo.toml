@@ -10,5 +10,6 @@ description = "Game state, world simulation, combat, magic, UI shell, framebuffe
 gbx-formats = { path = "../gbx-formats" }
 gbx-vm = { path = "../gbx-vm" }
 gbx-rules = { path = "../gbx-rules" }
+sha2 = "0.10"
 
 [dev-dependencies]

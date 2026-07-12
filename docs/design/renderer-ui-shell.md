@@ -1053,6 +1053,17 @@ commitments.
     (block 14 in `WALLDEF5.DAX` and block 17 in `WALLDEF6.DAX`, both 2
     wallsets/1560 bytes) — the general multi-wallset path is real and
     covered, just not at id 0.
+12. **`press_any_key`'s exact-fit-trailing-space overflow check** (§1.4, M2
+    step 2): the literal decompiled comparison is `if (X > xEnd) { if (X ==
+    xEnd && ...) {trim} }` (`seg041.cs:191-198`) — since both branches test
+    the same fixed `X`, the inner `== xEnd` is unreachable given the outer
+    already asserts `X > xEnd`, making the trim branch dead code under a
+    literal transcription. `gbx-engine/src/text.rs` treats the outer bound
+    as inclusive (`>=`) instead, so the case is reachable and tested, per
+    this doc's own naming of it as real behavior (most plausibly a
+    decompiler artifact around the original's actual comparison). Verify
+    against a DOSBox capture whose wrapped line exactly fills the window
+    width and ends a token in a space.
 
 ## 5. What this unblocks (M2 build order)
 

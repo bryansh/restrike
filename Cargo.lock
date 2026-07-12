@@ -75,6 +75,7 @@ dependencies = [
  "gbx-formats",
  "gbx-rules",
  "gbx-vm",
+ "sha2",
 ]
 
 [[package]]
