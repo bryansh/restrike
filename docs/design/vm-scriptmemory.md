@@ -64,8 +64,8 @@ block bytes 1–3, 5–7, 9–11, 13–15, 17–19 (see docket item 6) — an ev
 
 | # | Vector | Fired |
 |---|--------|-------|
-| 1 | `vm_run_addr_1` | after every world-menu command (per-step handler) |
-| 2 | `SearchLocationAddr` | after **every world-menu command** (search mode distinguished via `search_flags`, forced to 1 per firing) |
+| 1 | `vm_run_addr_1` | per **step/Look/encamp attempt** — i.e. each world-menu *exit*; turns and panel commands are consumed inside the menu loop and fire nothing (`ovr015.cs:348-465`; see renderer-ui-shell.md §1.6) |
+| 2 | `SearchLocationAddr` | after each step attempt (enter-square event), and on Look with `search_flags` forced to 1 (renderer-ui-shell.md §1.6) |
 | 3 | `PreCampCheckAddr` | before camping |
 | 4 | `CampInterruptedAddr` | camp interrupted |
 | 5 | `ecl_initial_entryPoint` | block entry (move/load) |
