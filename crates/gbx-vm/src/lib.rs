@@ -2,11 +2,13 @@
 //! facade that maps VM operand addresses to named engine state.
 //!
 //! This crate is platform-pure: no windowing, audio, or async runtime dependencies.
+//!
+//! This session ships the dialect table and the bytecode decoder only
+//! (`docs/design/vm-scriptmemory.md` §6 build-order items 0-1, decoder half).
+//! No interpreter, no flow-following disassembler, no census tool yet.
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn placeholder() {
-        assert_eq!(2 + 2, 4);
-    }
-}
+pub mod decode;
+pub mod dialect;
+
+pub use decode::{decode, Arg, BlockBytes, DecodeError, Instr, Op};
+pub use dialect::{Channel, Dialect, OpcodeInfo, OperandShape, COTAB};
