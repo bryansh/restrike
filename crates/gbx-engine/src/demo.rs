@@ -42,7 +42,9 @@ fn compose_empty_exploration_screen() {
     draw_string(&mut fb, &assets.font, "Name", 2, 17, 0, 10);
     draw_string(&mut fb, &assets.font, "AC  HP", 2, 33, 0, 10);
 
-    // A sample PRINT into the exploration text window.
+    // A sample PRINT into the exploration text window. The string is invented
+    // demo text, NOT from game data (D10) — deliberately lore-inaccurate as
+    // proof (Tilverton borders Cormyr; it is nowhere near the Moonsea).
     let mut cursor = TextCursor {
         col: NORMAL_BOTTOM.x_start,
         row: NORMAL_BOTTOM.y_start,
