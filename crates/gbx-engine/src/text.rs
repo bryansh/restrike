@@ -32,7 +32,7 @@ use gbx_formats::font::Font;
 /// One of the three text regions (`seg041.bounds`, `seg041.cs:119-123`).
 /// Arbitrary bounds are supported (`press_any_key` takes them as
 /// parameters in the original); these are just the shipped presets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TextRegion {
     pub y_start: usize,
     pub y_end: usize,
@@ -64,7 +64,7 @@ pub const COMBAT_SUMMARY: TextRegion = TextRegion {
 
 /// The persistent text cursor (`gbl.textXCol`/`textYCol`) — survives across
 /// jobs, scripts, and flows (§1.4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TextCursor {
     pub col: usize,
     pub row: usize,
@@ -153,7 +153,7 @@ pub fn draw_string(
 /// A paced, wrapping, paginating text job — `press_any_key` resumed one
 /// tick's character budget at a time. `advance` never blocks: it draws up
 /// to `budget` characters, then returns.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TextJob {
     text: Vec<u8>,
     fg_color: u8,
@@ -163,7 +163,7 @@ pub struct TextJob {
     step: Step,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum DrawResume {
     /// The exact-fit-drop-space case: after the draw, still need the wrap
     /// bookkeeping (col reset, row++, post-wrap space skip, pagination
@@ -175,7 +175,7 @@ enum DrawResume {
     AfterPaginationRedraw,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum Step {
     /// Compute the next token starting at `text_start`.
     ComputeToken,
@@ -389,7 +389,7 @@ impl TextJob {
 /// tick_ms / char_ms` and `char_ms = game_speed_var × 3`. A fractional
 /// accumulator, not per-char rounding — average pacing is exact at every
 /// speed, matching D-UI1's rationale exactly.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct TextPacer {
     char_ms: f64,
     acc: f64,

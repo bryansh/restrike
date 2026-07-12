@@ -5,23 +5,35 @@
 //! Frontends are thin presenters: input events in, framebuffer + audio + window
 //! title out.
 //!
-//! M2 step 2 (`docs/design/renderer-ui-shell.md` §5 build order item 2):
-//! framebuffer + palette, draw primitives, resident symbol sets + boot
-//! slice, screen frames, and the text system. No Shell/widgets/flows (step
-//! 3), no VM wiring (step 4), no 3D corridor/wallset loading (step 5), no
-//! frontends (step 6).
+//! M2 step 3 (`docs/design/renderer-ui-shell.md` §5 build order item 3):
+//! step 2's framebuffer/text system now drives `Engine::new`/`tick`
+//! (`engine.rs`), the five prompt-line widgets (`widgets.rs`), the `Shell`
+//! state machine and walk-loop flows over a stub VM (`shell.rs`/
+//! `vm_stub.rs`), and movement/door interaction (`movement.rs`) — a
+//! synthetic map can be walked headlessly end-to-end. Real `EclMachine`
+//! binding is step 4, 3D corridor/wallset rendering is step 5 (the viewport
+//! stays black), frontends are step 6.
 
 pub mod boot;
 pub mod draw;
+pub mod engine;
 pub mod framebuffer;
 pub mod frames;
+pub mod input;
+pub mod movement;
+pub mod rng;
+pub mod shell;
 pub mod symbols;
 pub mod text;
+pub mod vm_stub;
+pub mod widgets;
 
 #[cfg(test)]
 mod demo;
 #[cfg(test)]
 mod hash_goldens;
+#[cfg(test)]
+mod walk_goldens;
 
 #[cfg(test)]
 mod tests {

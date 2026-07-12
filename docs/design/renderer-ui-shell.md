@@ -1064,6 +1064,51 @@ commitments.
     decompiler artifact around the original's actual comparison). Verify
     against a DOSBox capture whose wrapped line exactly fills the window
     width and ends a token in a space.
+13. **M2 step 3 research-pass findings** (`gbx-engine`'s `widgets.rs`/
+    `movement.rs`/`shell.rs`, `SOURCES.md`'s step-3 rows): a dedicated coab
+    read pinned several details beyond this doc's §1.5/§1.6 prose, two of
+    which are real divergences from what shipped, not just detail fill-in —
+    docketed here rather than silently absorbed either way:
+    - `displayInput`'s Enter key is conditionally inert in the original
+      (`var_8F = colors.foreground != 0 || colors.highlight != 0`,
+      `ovr027.cs:138,226-241`) — `Hotbar` here always honors Enter, since
+      this session's `Widget` model carries no color state. Low risk (every
+      real menu this session drives sets highlight colors), but a future
+      color-aware Hotbar should re-add the gate.
+    - `getUserInputString`'s Esc and Enter are indistinguishable in the
+      original (the exit key is a local, never returned — `seg041.cs:234-
+      273`), making `getUserInputShort`/INPUT NUMBER **uncancellable** by
+      the player. `TextEntry` here keeps Esc as a distinct `Cancelled`
+      outcome instead, per this doc's own §1.5 wording ("CR or Esc ends")
+      naming Esc as real, terminal behavior — a deliberate doc-directed
+      choice over the literal coab quirk, flagged per D11's "verify, don't
+      blindly follow" spirit either way.
+    - `BuildInputKeys` is not a `[0-9A-Z]+` run scanner; it detects
+      individual highlightable characters and infers word boundaries via a
+      "two positions before the next highlightable char" rule
+      (`ovr027.cs:59-86`) that only coincides with "maximal word" behavior
+      because every real CotAB menu string capitalizes exactly one leading
+      letter per word, one space apart. `widgets.rs`'s `build_words` does
+      literal `[0-9A-Z]` run-scanning instead — behaviorally identical for
+      every string this session's flows construct, but would diverge on a
+      hypothetical string with adjacent highlightable characters.
+    - `bash_door`'s STR-to-outcome tables have a confirmed asymmetry: an
+      out-of-table STR disables `can_bash_door` on a reinforced door but
+      not on a normal locked door (`ovr015.cs:118-121` vs. `:144-224`) —
+      transcribed exactly in `gbx-rules/src/bash_door.rs`.
+    - A successful bash/pick/knock does not persist an "unlocked" state
+      back into the resident map this session (`gbx_formats::geo::GeoBlock`
+      has no mutation API yet) — the original calls `MapSetDoorUnlocked` on
+      both tile sides (`ovr015.cs:212-224`) so a door stays open on a later
+      approach; here, a later re-approach to the same edge re-rolls the
+      attempt. Deferred to whichever session adds resident-map mutation
+      (naturally alongside real `ScriptMemory` map-window writes, step 4/5).
+    - `sound_a`'s real sound-catalog id (`seg044.cs`'s `Sound` enum) and the
+      real per-step game-clock minute value (`step_game_time`'s unit
+      definition) weren't in the material read this session —
+      `movement.rs`'s `SOUND_A`/`GameClock::MINUTES_PER_UNIT` are named
+      placeholders pending that read; only relative behavior (rate, which
+      calls fire) is faithful.
 
 ## 5. What this unblocks (M2 build order)
 

@@ -33,11 +33,17 @@ pub struct BootAssets {
     pub sky: [ImageBlock; 3],
 }
 
-/// [`boot`]'s failure mode.
+/// [`boot`]'s failure mode. [`BootError::Geo`] is unused by [`boot`] itself
+/// — it's here so `engine.rs`'s `Engine::new` (which also loads the M2
+/// session's hardcoded resident GEO block alongside the boot slice, D-UI1)
+/// can report both failure kinds through the one `Result<Self, BootError>`
+/// the design doc's `Engine::new` signature specifies, without a second
+/// error enum.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BootError {
     GameData(GameDataError),
     Image(ImageError),
+    Geo(gbx_formats::geo::GeoError),
 }
 
 impl From<GameDataError> for BootError {
@@ -49,6 +55,12 @@ impl From<GameDataError> for BootError {
 impl From<ImageError> for BootError {
     fn from(e: ImageError) -> Self {
         BootError::Image(e)
+    }
+}
+
+impl From<gbx_formats::geo::GeoError> for BootError {
+    fn from(e: gbx_formats::geo::GeoError) -> Self {
+        BootError::Geo(e)
     }
 }
 

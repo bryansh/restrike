@@ -107,7 +107,7 @@ pub enum Exit {
 }
 
 /// One `step()`/`resume()` result.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum VmStep {
     Continue,
     Effect(Effect),

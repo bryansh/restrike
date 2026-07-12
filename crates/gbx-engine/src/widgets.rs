@@ -1,0 +1,845 @@
+//! The five prompt-line/presentation widgets (D-UI2 `Widget`, design doc
+//! §1.5): each a blocking loop in the original, a parked state advanced one
+//! tick's input at a time here. `Widget::tick` never blocks: it consumes at
+//! most one [`InputQueue::read_key`] per call and returns
+//! [`WidgetOutcome::Pending`] until resolved.
+//!
+//! Derived by reading coab for behavior (D11, never copied):
+//! - coab `engine/ovr027.cs` `displayInput` (`:132-341`) — [`Hotbar`]'s full
+//!   input loop, incl. `accept_ctrlkeys`'s extended-key/digit mapping
+//!   through `keypad_ctrl_codes` and the timeout path.
+//! - coab `engine/ovr027.cs` `BuildInputKeys` (`:59-86`) — [`build_words`]'s
+//!   maximal-run-of-`[0-9A-Z]` word scan.
+//! - coab `engine/ovr027.cs` `sl_select_item` (`:532-673`) — [`ListMenu`]'s
+//!   highlight/paging semantics, incl. the documented Up/Down-ignored
+//!   contradiction (§1.11 item 10, design doc §4 item 9 docket).
+//! - coab `engine/ovr008.cs` `sub_317AA`'s callers (HORIZONTAL MENU,
+//!   ENCOUNTER MENU, PARLAY, `:1176-1190`) — the `ext_scrolls_party`/
+//!   `valid_keys` re-prompt behavior: Esc does not exit these menus, and any
+//!   key outside `valid_keys` re-prompts instead of returning.
+//! - coab `engine/seg041.cs` `getUserInputString`/`getUserInputShort`
+//!   (`:234-294`) — [`TextEntry`]'s echo/backspace/uppercase/numeric-reprompt
+//!   semantics.
+//! - coab `engine/seg041.cs` `DisplayAndPause` (`:297-303`) — [`PressAnyKey`].
+//! - coab `engine/seg041.cs` `GameDelay`/`SysDelay` — [`Delay`].
+//!
+//! **Implementation note (flagged per D11, not silently absorbed):** the
+//! design doc's prose leaves a few byte-level choices unstated pending a
+//! DOSBox confirmation pass; each is called out at its point of use below
+//! (comma/period cycle direction, sub_317AA `valid_keys` precedence over
+//! hotkey matching, numeric re-prompt clearing the buffer). None affect the
+//! state machine's structure, only these specific resolutions.
+
+use crate::input::{ExtKey, InputEvent, InputQueue};
+
+/// A hotkey-selectable word: a byte range (`start..end`, exclusive) into the
+/// owning [`Hotbar`]'s text.
+pub type WordRange = (usize, usize);
+
+/// `BuildInputKeys` (`ovr027.cs:59-86`): maximal runs of `[0-9A-Z]` are the
+/// hotkey-selectable words; everything else (spaces, lowercase, punctuation)
+/// is separator.
+pub fn build_words(text: &str) -> Vec<WordRange> {
+    let bytes = text.as_bytes();
+    let mut words = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_uppercase() || bytes[i].is_ascii_digit() {
+            let start = i;
+            while i < bytes.len() && (bytes[i].is_ascii_uppercase() || bytes[i].is_ascii_digit()) {
+                i += 1;
+            }
+            words.push((start, i));
+        } else {
+            i += 1;
+        }
+    }
+    words
+}
+
+/// `keypad_ctrl_codes`'s digit-key half (`ovr027.cs:124`): plain digit keys
+/// `1..=9`, when `accept_ext` is set, map through the same table as their
+/// numpad-key equivalent (design doc §1.5: "extended keys ... *and digits*
+/// map through keypad_ctrl_codes").
+fn keypad_digit_ctrl_code(c: u8) -> u8 {
+    debug_assert!((b'1'..=b'9').contains(&c));
+    let kp = match c {
+        b'1' => ExtKey::Kp1,
+        b'2' => ExtKey::Kp2,
+        b'3' => ExtKey::Kp3,
+        b'4' => ExtKey::Kp4,
+        b'5' => ExtKey::Kp5,
+        b'6' => ExtKey::Kp6,
+        b'7' => ExtKey::Kp7,
+        b'8' => ExtKey::Kp8,
+        _ => ExtKey::Kp9,
+    };
+    kp.ctrl_code()
+}
+
+/// A menu bar of hotkey-selectable words (`displayInput`, §1.5).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Hotbar {
+    pub text: String,
+    words: Vec<WordRange>,
+    pub selected: Option<usize>,
+    /// `accept_ctrlkeys`: extended keys/keypad digits resolve through
+    /// `keypad_ctrl_codes` instead of being ignored.
+    pub accept_ext: bool,
+    /// `displayInputSecondsToWait`/`displayInputTimeoutValue`: resolves with
+    /// this value once `ticks_left` ticks have elapsed with no input.
+    pub timeout: Option<(u32, u8)>,
+    /// `sub_317AA` menus: extended keys scroll the party panel while parked
+    /// instead of resolving the widget.
+    pub ext_scrolls_party: bool,
+    /// `sub_317AA` menus: any key outside this set re-prompts instead of
+    /// resolving (and Esc never exits — see [`Hotbar::tick`]).
+    pub valid_keys: Option<Vec<u8>>,
+}
+
+/// One tick's result from any [`Widget`].
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum WidgetOutcome {
+    /// Still waiting on input; call `tick` again next tick.
+    Pending,
+    /// A [`Hotbar`] resolved with this (uppercased) key.
+    Hotbar(u8),
+    /// A `ext_scrolls_party` [`Hotbar`]'s extended key scrolled the party
+    /// panel instead of resolving — the ctrl-code byte identifies direction
+    /// (`'H'`=up/`'P'`=down, per §1.5's forward/turn-around aliasing).
+    PartyScroll(u8),
+    /// A [`ListMenu`] resolved: the *item index* (into the original,
+    /// heading-inclusive list) currently highlighted, and the resolving key.
+    ListSelected {
+        index: usize,
+        key: u8,
+    },
+    ListCancelled,
+    TextSubmitted(String),
+    TextCancelled,
+    /// [`PressAnyKey`] or [`Delay`] resolved — no payload.
+    Done,
+}
+
+impl Hotbar {
+    pub fn new(text: impl Into<String>) -> Self {
+        let text = text.into();
+        let words = build_words(&text);
+        let selected = if words.is_empty() { None } else { Some(0) };
+        Hotbar {
+            text,
+            words,
+            selected,
+            accept_ext: false,
+            timeout: None,
+            ext_scrolls_party: false,
+            valid_keys: None,
+        }
+    }
+
+    pub fn words(&self) -> &[WordRange] {
+        &self.words
+    }
+
+    /// The highlighted word's first character, uppercased — Enter's normal
+    /// resolution, and `'\r'` when nothing is highlightable (§1.5).
+    pub fn highlighted_char(&self) -> Option<u8> {
+        self.selected.map(|i| self.text.as_bytes()[self.words[i].0])
+    }
+
+    fn cycle(&mut self, dir: i32) {
+        if self.words.is_empty() {
+            return;
+        }
+        let n = self.words.len() as i32;
+        let cur = self.selected.map(|i| i as i32).unwrap_or(0);
+        let next = ((cur + dir).rem_euclid(n)) as usize;
+        self.selected = Some(next);
+    }
+
+    fn select_word_starting_with(&mut self, upper: u8) -> bool {
+        if let Some(i) = self
+            .words
+            .iter()
+            .position(|&(s, _)| self.text.as_bytes()[s] == upper)
+        {
+            self.selected = Some(i);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Advances the widget by one tick, consuming at most one queued key.
+    /// `dt_ticks` drives the optional timeout countdown.
+    pub fn tick(&mut self, queue: &mut InputQueue, dt_ticks: u32) -> WidgetOutcome {
+        if let Some((ticks_left, value)) = &mut self.timeout {
+            if dt_ticks >= *ticks_left {
+                return WidgetOutcome::Hotbar(*value);
+            }
+            *ticks_left -= dt_ticks;
+        }
+
+        let Some(key) = queue.read_key() else {
+            return WidgetOutcome::Pending;
+        };
+
+        if let InputEvent::Ext(ext) = key {
+            return if self.accept_ext {
+                self.resolve_ctrl_code(ext.ctrl_code())
+            } else {
+                WidgetOutcome::Pending
+            };
+        }
+
+        match key {
+            InputEvent::Escape => {
+                // sub_317AA menus (`valid_keys` set) never exit on Esc
+                // (`ovr008.cs:1176-1190`); ordinary Hotbars return '\0'.
+                if self.valid_keys.is_some() {
+                    WidgetOutcome::Pending
+                } else {
+                    WidgetOutcome::Hotbar(0)
+                }
+            }
+            InputEvent::Enter => {
+                let ch = self.highlighted_char().unwrap_or(b'\r');
+                self.resolve_char(ch)
+            }
+            InputEvent::Char(c) if self.accept_ext && (b'1'..=b'9').contains(&c) => {
+                self.resolve_ctrl_code(keypad_digit_ctrl_code(c))
+            }
+            // Implementation note (flagged): cycle direction (',' = prev,
+            // '.' = next) matches left-right keyboard order; unconfirmed
+            // against coab's literal branch order (docket).
+            InputEvent::Char(b',') => {
+                self.cycle(-1);
+                WidgetOutcome::Pending
+            }
+            InputEvent::Char(b'.') => {
+                self.cycle(1);
+                WidgetOutcome::Pending
+            }
+            InputEvent::Char(c) => {
+                let up = c.to_ascii_uppercase();
+                // Implementation note (flagged): a sub_317AA `valid_keys`
+                // menu checks membership before hotkey matching — any
+                // allowed key resolves even if it isn't a highlightable
+                // word's first letter (e.g. a plain 'E' exit key).
+                if let Some(valid) = &self.valid_keys {
+                    return if valid.contains(&up) {
+                        WidgetOutcome::Hotbar(up)
+                    } else {
+                        WidgetOutcome::Pending
+                    };
+                }
+                if self.select_word_starting_with(up) {
+                    WidgetOutcome::Hotbar(up)
+                } else if up == b' ' {
+                    WidgetOutcome::Hotbar(b' ')
+                } else {
+                    WidgetOutcome::Pending
+                }
+            }
+            InputEvent::Backspace => WidgetOutcome::Pending,
+            InputEvent::Ext(_) => unreachable!("handled above"),
+        }
+    }
+
+    fn resolve_ctrl_code(&self, code: u8) -> WidgetOutcome {
+        if self.ext_scrolls_party {
+            return WidgetOutcome::PartyScroll(code);
+        }
+        self.resolve_char(code)
+    }
+
+    fn resolve_char(&self, ch: u8) -> WidgetOutcome {
+        match &self.valid_keys {
+            Some(valid) if !valid.contains(&ch) => WidgetOutcome::Pending,
+            _ => WidgetOutcome::Hotbar(ch),
+        }
+    }
+}
+
+/// One [`ListMenu`] row.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum ListItem {
+    Heading(String),
+    Entry(String),
+}
+
+/// `sl_select_item` (`ovr027.cs:532-673`): a vertical list combined with a
+/// Hotbar whose text grows `" Next"`/`" Prev"`/`" Exit"` (the growth itself
+/// is presentation, not modeled here — this struct owns selection/paging
+/// state only).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ListMenu {
+    pub items: Vec<ListItem>,
+    /// Indices into `items` that are selectable (headings excluded).
+    selectable: Vec<usize>,
+    /// Index into `selectable` — which selectable item is highlighted.
+    pub highlight: usize,
+    /// The first visible row, bound from the text cursor at open time
+    /// (§1.5's `textYCol + 1` coupling) — a caller concern, stored verbatim.
+    pub top_row: usize,
+    pub page_size: usize,
+}
+
+impl ListMenu {
+    pub fn new(items: Vec<ListItem>, top_row: usize, page_size: usize) -> Self {
+        let selectable: Vec<usize> = items
+            .iter()
+            .enumerate()
+            .filter_map(|(i, it)| matches!(it, ListItem::Entry(_)).then_some(i))
+            .collect();
+        ListMenu {
+            items,
+            selectable,
+            highlight: 0,
+            top_row,
+            page_size: page_size.max(1),
+        }
+    }
+
+    /// The `items` index currently highlighted (heading-inclusive
+    /// coordinates), or `None` if there are no selectable entries.
+    pub fn selected_index(&self) -> Option<usize> {
+        self.selectable.get(self.highlight).copied()
+    }
+
+    fn set_highlight(&mut self, i: usize) {
+        if !self.selectable.is_empty() {
+            self.highlight = i.min(self.selectable.len() - 1);
+        }
+    }
+
+    fn page(&mut self, dir: i32) {
+        if self.selectable.is_empty() {
+            return;
+        }
+        let n = self.selectable.len() as i32;
+        let next = (self.highlight as i32 + dir * self.page_size as i32).clamp(0, n - 1);
+        self.set_highlight(next as usize);
+        if self.highlight < self.top_row {
+            self.top_row = self.highlight;
+        } else if self.highlight >= self.top_row + self.page_size {
+            self.top_row = self.highlight + 1 - self.page_size;
+        }
+    }
+
+    /// Advances by one tick, consuming at most one queued key.
+    ///
+    /// Per coab's own special-key switch (`ovr027.cs:617-653`, design doc
+    /// §1.11 item 10 / §4 docket item 9): Home/End (`'G'`/`'O'`) jump the
+    /// highlight, PgUp/PgDn (`'I'`/`'Q'`) and the plain letters `'P'`/`'N'`
+    /// page, and **Up/Down are deliberately ignored** — not a bug here,
+    /// transcribed contradiction of common memory, pending a DOSBox check.
+    pub fn tick(&mut self, queue: &mut InputQueue) -> WidgetOutcome {
+        let Some(key) = queue.read_key() else {
+            return WidgetOutcome::Pending;
+        };
+
+        if let InputEvent::Ext(ext) = key {
+            match ext.ctrl_code() {
+                b'G' => {
+                    self.set_highlight(0);
+                    self.top_row = 0;
+                }
+                b'O' => {
+                    let last = self.selectable.len().saturating_sub(1);
+                    self.set_highlight(last);
+                    self.top_row = last.saturating_sub(self.page_size - 1);
+                }
+                b'I' => self.page(-1),
+                b'Q' => self.page(1),
+                // Up ('H')/Down ('P') and any other extended key: ignored.
+                _ => {}
+            }
+            return WidgetOutcome::Pending;
+        }
+
+        match key {
+            InputEvent::Escape => WidgetOutcome::ListCancelled,
+            InputEvent::Char(c) => match c.to_ascii_uppercase() {
+                b'E' => WidgetOutcome::ListCancelled,
+                b'P' => {
+                    self.page(-1);
+                    WidgetOutcome::Pending
+                }
+                b'N' => {
+                    self.page(1);
+                    WidgetOutcome::Pending
+                }
+                up => match self.selected_index() {
+                    Some(index) => WidgetOutcome::ListSelected { index, key: up },
+                    None => WidgetOutcome::Pending,
+                },
+            },
+            InputEvent::Enter => match self.selected_index() {
+                Some(index) => WidgetOutcome::ListSelected { index, key: b'\r' },
+                None => WidgetOutcome::Pending,
+            },
+            InputEvent::Backspace | InputEvent::Ext(_) => WidgetOutcome::Pending,
+        }
+    }
+}
+
+/// `getUserInputString`/`getUserInputShort` (`seg041.cs:234-294`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TextEntry {
+    pub prompt: String,
+    pub buf: Vec<u8>,
+    pub max: usize,
+    /// `getUserInputShort`: re-prompts (rather than submitting) until the
+    /// buffer parses as `0..=65535`.
+    pub numeric: bool,
+}
+
+impl TextEntry {
+    pub fn new(prompt: impl Into<String>, max: usize, numeric: bool) -> Self {
+        TextEntry {
+            prompt: prompt.into(),
+            buf: Vec::new(),
+            max,
+            numeric,
+        }
+    }
+
+    /// Advances by one tick, consuming at most one queued key.
+    pub fn tick(&mut self, queue: &mut InputQueue) -> WidgetOutcome {
+        let Some(key) = queue.read_key() else {
+            return WidgetOutcome::Pending;
+        };
+
+        match key {
+            InputEvent::Escape => WidgetOutcome::TextCancelled,
+            InputEvent::Backspace => {
+                self.buf.pop();
+                WidgetOutcome::Pending
+            }
+            InputEvent::Enter => {
+                if self.numeric {
+                    let text = String::from_utf8_lossy(&self.buf);
+                    if text.parse::<u16>().is_ok() {
+                        WidgetOutcome::TextSubmitted(text.to_ascii_uppercase())
+                    } else {
+                        // Implementation note (flagged): "re-runs the string
+                        // editor" (§1.5) is transcribed as a full reset of
+                        // the buffer rather than an in-place correction —
+                        // unconfirmed against coab's exact redraw sequence.
+                        self.buf.clear();
+                        WidgetOutcome::Pending
+                    }
+                } else {
+                    let text = String::from_utf8_lossy(&self.buf).to_ascii_uppercase();
+                    WidgetOutcome::TextSubmitted(text)
+                }
+            }
+            InputEvent::Char(c) if (0x20..=0x7A).contains(&c) => {
+                if self.buf.len() < self.max {
+                    self.buf.push(c);
+                }
+                WidgetOutcome::Pending
+            }
+            InputEvent::Char(_) | InputEvent::Ext(_) => WidgetOutcome::Pending,
+        }
+    }
+}
+
+/// `DisplayAndPause` (`seg041.cs:297-303`): prompt text (owned by the
+/// caller/presentation layer) plus one key, any key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct PressAnyKey;
+
+impl PressAnyKey {
+    pub fn tick(&mut self, queue: &mut InputQueue) -> WidgetOutcome {
+        match queue.read_key() {
+            Some(_) => WidgetOutcome::Done,
+            None => WidgetOutcome::Pending,
+        }
+    }
+}
+
+/// `GameDelay`/`DELAY`/animation pauses: a fixed tick count, no input
+/// consumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Delay {
+    pub ticks_left: u32,
+}
+
+impl Delay {
+    pub fn new(ticks: u32) -> Self {
+        Delay { ticks_left: ticks }
+    }
+
+    pub fn tick(&mut self, dt_ticks: u32) -> WidgetOutcome {
+        self.ticks_left = self.ticks_left.saturating_sub(dt_ticks);
+        if self.ticks_left == 0 {
+            WidgetOutcome::Done
+        } else {
+            WidgetOutcome::Pending
+        }
+    }
+}
+
+/// The interaction layer (D-UI2): one Widget parked, whatever flow/phase it
+/// belongs to (see `shell.rs`'s doc comment on the Fable review finding that
+/// generalized this beyond `VmPhase::Gate`/`WorldMenu`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum Widget {
+    Hotbar(Hotbar),
+    ListMenu(ListMenu),
+    TextEntry(TextEntry),
+    PressAnyKey(PressAnyKey),
+    Delay(Delay),
+}
+
+impl Widget {
+    /// Advances the parked widget by one tick.
+    pub fn tick(&mut self, queue: &mut InputQueue, dt_ticks: u32) -> WidgetOutcome {
+        match self {
+            Widget::Hotbar(h) => h.tick(queue, dt_ticks),
+            Widget::ListMenu(l) => l.tick(queue),
+            Widget::TextEntry(t) => t.tick(queue),
+            Widget::PressAnyKey(p) => p.tick(queue),
+            Widget::Delay(d) => d.tick(dt_ticks),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn queue_of(events: &[InputEvent]) -> InputQueue {
+        let mut q = InputQueue::new();
+        q.push_all(events);
+        q
+    }
+
+    #[test]
+    fn build_words_finds_maximal_uppercase_digit_runs() {
+        let words = build_words("Area Cast View Encamp Search Look");
+        // "Area" -> 'A' run of length 1 (only leading 'A' is uppercase).
+        let text = "Area Cast View Encamp Search Look";
+        let slices: Vec<&str> = words.iter().map(|&(s, e)| &text[s..e]).collect();
+        assert_eq!(slices, vec!["A", "C", "V", "E", "S", "L"]);
+    }
+
+    #[test]
+    fn build_words_handles_full_uppercase_words_and_digits() {
+        let words = build_words("1 BASH PICK KNOCK EXIT");
+        let text = "1 BASH PICK KNOCK EXIT";
+        let slices: Vec<&str> = words.iter().map(|&(s, e)| &text[s..e]).collect();
+        assert_eq!(slices, vec!["1", "BASH", "PICK", "KNOCK", "EXIT"]);
+    }
+
+    #[test]
+    fn hotbar_letter_matching_selects_and_returns_uppercased() {
+        let mut h = Hotbar::new("Yes No");
+        let mut q = queue_of(&[InputEvent::Char(b'n')]);
+        assert_eq!(h.tick(&mut q, 1), WidgetOutcome::Hotbar(b'N'));
+        assert_eq!(h.highlighted_char(), Some(b'N'));
+    }
+
+    #[test]
+    fn hotbar_comma_dot_cycle_the_highlighted_word() {
+        let mut h = Hotbar::new("Yes No Maybe");
+        assert_eq!(h.highlighted_char(), Some(b'Y'));
+        let mut q = queue_of(&[InputEvent::Char(b'.')]);
+        h.tick(&mut q, 1);
+        assert_eq!(h.highlighted_char(), Some(b'N'));
+        let mut q = queue_of(&[InputEvent::Char(b'.')]);
+        h.tick(&mut q, 1);
+        assert_eq!(h.highlighted_char(), Some(b'M'));
+        let mut q = queue_of(&[InputEvent::Char(b'.')]);
+        h.tick(&mut q, 1); // wraps back to first
+        assert_eq!(h.highlighted_char(), Some(b'Y'));
+        let mut q = queue_of(&[InputEvent::Char(b',')]);
+        h.tick(&mut q, 1); // wraps backward
+        assert_eq!(h.highlighted_char(), Some(b'M'));
+    }
+
+    #[test]
+    fn hotbar_enter_returns_highlighted_words_first_char() {
+        let mut h = Hotbar::new("Yes No");
+        let mut q = queue_of(&[InputEvent::Enter]);
+        assert_eq!(h.tick(&mut q, 1), WidgetOutcome::Hotbar(b'Y'));
+    }
+
+    #[test]
+    fn hotbar_enter_with_no_highlightable_word_returns_cr() {
+        let mut h = Hotbar::new("hello world"); // no uppercase runs
+        let mut q = queue_of(&[InputEvent::Enter]);
+        assert_eq!(h.tick(&mut q, 1), WidgetOutcome::Hotbar(b'\r'));
+    }
+
+    #[test]
+    fn hotbar_esc_returns_null() {
+        let mut h = Hotbar::new("Yes No");
+        let mut q = queue_of(&[InputEvent::Escape]);
+        assert_eq!(h.tick(&mut q, 1), WidgetOutcome::Hotbar(0));
+    }
+
+    #[test]
+    fn hotbar_space_passes_through() {
+        let mut h = Hotbar::new("Yes No");
+        let mut q = queue_of(&[InputEvent::Char(b' ')]);
+        assert_eq!(h.tick(&mut q, 1), WidgetOutcome::Hotbar(b' '));
+    }
+
+    #[test]
+    fn hotbar_timeout_resolves_with_the_timeout_value() {
+        let mut h = Hotbar::new("Yes No");
+        h.timeout = Some((5, 0xFF));
+        let mut q = InputQueue::new();
+        assert_eq!(h.tick(&mut q, 3), WidgetOutcome::Pending);
+        assert_eq!(h.tick(&mut q, 3), WidgetOutcome::Hotbar(0xFF));
+    }
+
+    #[test]
+    fn hotbar_accept_ext_maps_extended_keys_through_keypad_ctrl_codes() {
+        let mut h = Hotbar::new("Area Cast View Encamp Search Look");
+        h.accept_ext = true;
+        let mut q = queue_of(&[InputEvent::Ext(ExtKey::Up)]);
+        assert_eq!(h.tick(&mut q, 1), WidgetOutcome::Hotbar(b'H'));
+    }
+
+    #[test]
+    fn hotbar_accept_ext_kp5_maps_to_space() {
+        let mut h = Hotbar::new("Yes No");
+        h.accept_ext = true;
+        let mut q = queue_of(&[InputEvent::Ext(ExtKey::Kp5)]);
+        assert_eq!(h.tick(&mut q, 1), WidgetOutcome::Hotbar(b' '));
+    }
+
+    #[test]
+    fn hotbar_ignores_extended_keys_without_accept_ext() {
+        let mut h = Hotbar::new("Yes No");
+        let mut q = queue_of(&[InputEvent::Ext(ExtKey::Up)]);
+        assert_eq!(h.tick(&mut q, 1), WidgetOutcome::Pending);
+    }
+
+    #[test]
+    fn hotbar_accept_ext_digits_map_through_keypad_table() {
+        let mut h = Hotbar::new("Yes No");
+        h.accept_ext = true;
+        let mut q = queue_of(&[InputEvent::Char(b'8')]); // Kp8 -> 'H'
+        assert_eq!(h.tick(&mut q, 1), WidgetOutcome::Hotbar(b'H'));
+    }
+
+    #[test]
+    fn hotbar_ext_scrolls_party_diverts_extended_keys() {
+        let mut h = Hotbar::new("Encounter");
+        h.accept_ext = true;
+        h.ext_scrolls_party = true;
+        let mut q = queue_of(&[InputEvent::Ext(ExtKey::Up)]);
+        assert_eq!(h.tick(&mut q, 1), WidgetOutcome::PartyScroll(b'H'));
+    }
+
+    #[test]
+    fn hotbar_valid_keys_menu_never_exits_on_escape() {
+        let mut h = Hotbar::new("Yes No");
+        h.valid_keys = Some(vec![b'Y', b'N']);
+        let mut q = queue_of(&[InputEvent::Escape]);
+        assert_eq!(h.tick(&mut q, 1), WidgetOutcome::Pending);
+    }
+
+    #[test]
+    fn hotbar_valid_keys_menu_reprompts_on_disallowed_key() {
+        let mut h = Hotbar::new("Yes No");
+        h.valid_keys = Some(vec![b'Y', b'N']);
+        let mut q = queue_of(&[InputEvent::Char(b'X')]);
+        assert_eq!(h.tick(&mut q, 1), WidgetOutcome::Pending);
+    }
+
+    #[test]
+    fn hotbar_valid_keys_menu_resolves_an_allowed_non_hotkey_char() {
+        let mut h = Hotbar::new("Party Status");
+        h.valid_keys = Some(vec![b'E']); // 'E' not a word-first-letter here
+        let mut q = queue_of(&[InputEvent::Char(b'e')]);
+        assert_eq!(h.tick(&mut q, 1), WidgetOutcome::Hotbar(b'E'));
+    }
+
+    fn sample_list() -> ListMenu {
+        ListMenu::new(
+            vec![
+                ListItem::Heading("Spells".into()),
+                ListItem::Entry("Magic Missile".into()),
+                ListItem::Entry("Sleep".into()),
+                ListItem::Entry("Fireball".into()),
+                ListItem::Entry("Lightning Bolt".into()),
+            ],
+            0,
+            2,
+        )
+    }
+
+    #[test]
+    fn list_menu_headings_are_excluded_from_selection() {
+        let list = sample_list();
+        assert_eq!(list.selected_index(), Some(1)); // "Magic Missile"
+    }
+
+    #[test]
+    fn list_menu_up_down_are_ignored() {
+        let mut list = sample_list();
+        let mut q = queue_of(&[InputEvent::Ext(ExtKey::Down)]);
+        assert_eq!(list.tick(&mut q), WidgetOutcome::Pending);
+        assert_eq!(list.selected_index(), Some(1), "Down must not move");
+        let mut q = queue_of(&[InputEvent::Ext(ExtKey::Up)]);
+        assert_eq!(list.tick(&mut q), WidgetOutcome::Pending);
+        assert_eq!(list.selected_index(), Some(1), "Up must not move");
+    }
+
+    #[test]
+    fn list_menu_home_end_jump() {
+        let mut list = sample_list();
+        let mut q = queue_of(&[InputEvent::Ext(ExtKey::End)]);
+        list.tick(&mut q);
+        assert_eq!(list.selected_index(), Some(4)); // "Lightning Bolt"
+        let mut q = queue_of(&[InputEvent::Ext(ExtKey::Home)]);
+        list.tick(&mut q);
+        assert_eq!(list.selected_index(), Some(1));
+    }
+
+    #[test]
+    fn list_menu_pgdn_pgup_and_letters_page() {
+        let mut list = sample_list(); // page_size = 2, 4 selectable entries
+        let mut q = queue_of(&[InputEvent::Ext(ExtKey::PgDn)]);
+        list.tick(&mut q);
+        assert_eq!(list.highlight, 2); // moved 2 rows forward
+        let mut q = queue_of(&[InputEvent::Char(b'p')]); // letter 'P' also pages (up)
+        list.tick(&mut q);
+        assert_eq!(list.highlight, 0);
+        let mut q = queue_of(&[InputEvent::Char(b'n')]); // letter 'N' also pages (down)
+        list.tick(&mut q);
+        assert_eq!(list.highlight, 2);
+    }
+
+    #[test]
+    fn list_menu_escape_and_e_cancel() {
+        let mut list = sample_list();
+        let mut q = queue_of(&[InputEvent::Escape]);
+        assert_eq!(list.tick(&mut q), WidgetOutcome::ListCancelled);
+        let mut list = sample_list();
+        let mut q = queue_of(&[InputEvent::Char(b'e')]);
+        assert_eq!(list.tick(&mut q), WidgetOutcome::ListCancelled);
+    }
+
+    #[test]
+    fn list_menu_enter_selects_the_highlighted_item() {
+        let mut list = sample_list();
+        let mut q = queue_of(&[InputEvent::Enter]);
+        assert_eq!(
+            list.tick(&mut q),
+            WidgetOutcome::ListSelected {
+                index: 1,
+                key: b'\r'
+            }
+        );
+    }
+
+    #[test]
+    fn list_menu_top_row_is_bound_at_construction() {
+        let list = ListMenu::new(vec![ListItem::Entry("x".into())], 7, 3);
+        assert_eq!(list.top_row, 7);
+    }
+
+    #[test]
+    fn text_entry_echoes_printable_chars_and_uppercases_on_submit() {
+        let mut t = TextEntry::new("Name?", 10, false);
+        for c in b"hi" {
+            let mut q = queue_of(&[InputEvent::Char(*c)]);
+            assert_eq!(t.tick(&mut q), WidgetOutcome::Pending);
+        }
+        let mut q = queue_of(&[InputEvent::Enter]);
+        assert_eq!(t.tick(&mut q), WidgetOutcome::TextSubmitted("HI".into()));
+    }
+
+    #[test]
+    fn text_entry_backspace_edits() {
+        let mut t = TextEntry::new("Name?", 10, false);
+        let mut q = queue_of(&[
+            InputEvent::Char(b'A'),
+            InputEvent::Backspace,
+            InputEvent::Char(b'B'),
+        ]);
+        // Only one key is read per tick (drain-to-last semantics apply at
+        // the queue level) — push events across separate ticks instead.
+        let _ = t.tick(&mut q);
+        assert_eq!(t.buf, vec![b'B']); // drained-to-last already consumed A/backspace
+    }
+
+    #[test]
+    fn text_entry_backspace_edits_across_ticks() {
+        let mut t = TextEntry::new("Name?", 10, false);
+        let mut q = queue_of(&[InputEvent::Char(b'A')]);
+        t.tick(&mut q);
+        let mut q = queue_of(&[InputEvent::Backspace]);
+        t.tick(&mut q);
+        assert!(t.buf.is_empty());
+    }
+
+    #[test]
+    fn text_entry_esc_cancels() {
+        let mut t = TextEntry::new("Name?", 10, false);
+        let mut q = queue_of(&[InputEvent::Escape]);
+        assert_eq!(t.tick(&mut q), WidgetOutcome::TextCancelled);
+    }
+
+    #[test]
+    fn text_entry_respects_max_length() {
+        let mut t = TextEntry::new("Name?", 1, false);
+        let mut q = queue_of(&[InputEvent::Char(b'A')]);
+        t.tick(&mut q);
+        let mut q = queue_of(&[InputEvent::Char(b'B')]);
+        t.tick(&mut q);
+        assert_eq!(t.buf, vec![b'A']);
+    }
+
+    #[test]
+    fn text_entry_numeric_reprompts_on_invalid_input() {
+        let mut t = TextEntry::new("Amount?", 10, true);
+        for c in b"xy" {
+            let mut q = queue_of(&[InputEvent::Char(*c)]);
+            t.tick(&mut q);
+        }
+        let mut q = queue_of(&[InputEvent::Enter]);
+        assert_eq!(t.tick(&mut q), WidgetOutcome::Pending);
+        assert!(t.buf.is_empty(), "invalid numeric input resets the buffer");
+    }
+
+    #[test]
+    fn text_entry_numeric_submits_on_valid_input() {
+        let mut t = TextEntry::new("Amount?", 10, true);
+        for c in b"42" {
+            let mut q = queue_of(&[InputEvent::Char(*c)]);
+            t.tick(&mut q);
+        }
+        let mut q = queue_of(&[InputEvent::Enter]);
+        assert_eq!(t.tick(&mut q), WidgetOutcome::TextSubmitted("42".into()));
+    }
+
+    #[test]
+    fn press_any_key_resolves_on_any_key() {
+        let mut p = PressAnyKey;
+        let mut q = InputQueue::new();
+        assert_eq!(p.tick(&mut q), WidgetOutcome::Pending);
+        let mut q = queue_of(&[InputEvent::Char(b'z')]);
+        assert_eq!(p.tick(&mut q), WidgetOutcome::Done);
+    }
+
+    #[test]
+    fn delay_resolves_after_its_tick_count() {
+        let mut d = Delay::new(24);
+        assert_eq!(d.tick(23), WidgetOutcome::Pending);
+        assert_eq!(d.tick(1), WidgetOutcome::Done);
+    }
+
+    #[test]
+    fn delay_of_zero_ticks_resolves_immediately() {
+        let mut d = Delay::new(0);
+        assert_eq!(d.tick(0), WidgetOutcome::Done);
+    }
+}
