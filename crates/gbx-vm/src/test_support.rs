@@ -147,10 +147,28 @@ impl EclBuilder {
         self.push_word_fixup(label)
     }
 
-    /// mode `0x80`: inline packed-string operand (raw bytes, undecoded —
-    /// `decode.rs` docket item 5 — the length byte plus exactly that many
-    /// raw bytes).
-    pub fn inline_str(&mut self, raw: &[u8]) -> &mut Self {
+    /// mode `0x80`: inline packed-string operand, packed through the real
+    /// 6-bit ECL compression (`gbx_formats::ecl_text::compress` — task 1,
+    /// ECL inline-string decompression) so conformance tests exercise the
+    /// on-wire format the interpreter actually decodes, not a raw escape
+    /// hatch. `text` must be plain ASCII in the representable domain
+    /// (`0x20..=0x5F`, no lowercase); panics on a non-representable byte —
+    /// a test-authoring bug, matching this builder's other panics
+    /// (undefined/duplicate labels).
+    pub fn inline_str(&mut self, text: &[u8]) -> &mut Self {
+        let packed = gbx_formats::ecl_text::compress(text).unwrap_or_else(|e| {
+            panic!("EclBuilder::inline_str: byte {:#04X} at index {} isn't representable in the 6-bit ECL text scheme (use inline_str_packed for raw bytes)", e.byte, e.index)
+        });
+        self.inline_str_packed(&packed)
+    }
+
+    /// mode `0x80`: inline packed-string operand, raw bytes verbatim
+    /// (undecoded escape hatch — `decode.rs` docket item 5 — the length
+    /// byte plus exactly that many raw bytes, no compression applied). For
+    /// tests that need to exercise decode-time byte accounting itself
+    /// rather than realistic packed text (e.g. arbitrary non-ASCII payload
+    /// bytes to prove operand-length handling is content-agnostic).
+    pub fn inline_str_packed(&mut self, raw: &[u8]) -> &mut Self {
         self.push_byte(0x80);
         self.push_byte(raw.len() as u8);
         self.bytes.extend_from_slice(raw);
@@ -497,6 +515,10 @@ impl EngineServices for TestHost {
 
     fn load_bigpic(&mut self, id: u8) {
         self.calls.push(RecordedCall::LoadBigpic { id });
+    }
+
+    fn reset_wall_set(&mut self, index: u8) {
+        self.calls.push(RecordedCall::ResetWallSet { index });
     }
 
     fn step_game_time(&mut self, time_slot: u8, amount: u8) {

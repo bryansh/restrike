@@ -209,7 +209,12 @@ impl Listing {
     }
 }
 
-fn render_instr(instr: &Instr, dialect: &Dialect) -> String {
+/// Renders one decoded instruction as `NAME arg, arg, ...` (plus a
+/// `ConservativeFallthrough` note where relevant). Exposed beyond this
+/// module's own [`Listing::render`] for `restrike run-script --trace`
+/// (M1 task 3), which disassembles one live instruction at a time rather
+/// than a full flow-following listing.
+pub fn render_instr(instr: &Instr, dialect: &Dialect) -> String {
     let info = dialect.lookup(instr.op.0);
     let name = info.map(|i| i.name).unwrap_or("<unknown>");
     let args = instr
@@ -586,8 +591,8 @@ mod tests {
             .mem(0x4B00)
             .inline_str(&[])
             .imm_byte(2)
-            .inline_str(&[0xAA])
-            .inline_str(&[0xBB, 0xCC]);
+            .inline_str_packed(&[0xAA])
+            .inline_str_packed(&[0xBB, 0xCC]);
         b.op(0x00); // EXIT
 
         let entry = b.addr_of("entry");

@@ -19,6 +19,9 @@ pub mod test_support;
 #[cfg(test)]
 mod conformance;
 
+#[cfg(test)]
+mod real_data_tests;
+
 pub use decode::{
     decode, read_header_vectors, Arg, BlockBytes, DecodeError, Instr, Op, ECL_BLOCK_BASE,
     ECL_BLOCK_SIZE,
@@ -26,7 +29,7 @@ pub use decode::{
 pub use dialect::{
     Channel, Dialect, OpcodeInfo, OperandShape, SuccessorKind, COTAB, COTAB_VECTOR_COUNT,
 };
-pub use disasm::{disassemble, DataRegion, Hazard, Listing, Summary};
+pub use disasm::{disassemble, render_instr, DataRegion, Hazard, Listing, Summary};
 pub use host::{
     Effect, EngineServices, ItemHandle, MissingData, MonsterHandle, NotFound, Origin, PlayerId,
     RecordedCall, Reply, Request, ScriptMemory, VmHost, VmRng, VmString,

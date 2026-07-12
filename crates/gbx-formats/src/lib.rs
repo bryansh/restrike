@@ -5,6 +5,8 @@
 
 pub mod dax;
 pub mod detect;
+pub mod ecl_text;
+pub mod geo;
 
 #[cfg(test)]
 mod tests {

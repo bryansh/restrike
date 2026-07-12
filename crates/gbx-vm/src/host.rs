@@ -177,6 +177,13 @@ pub trait EngineServices {
     fn load_3d_map(&mut self, block_id: u8);
     fn load_walldef(&mut self, set: u8, id: u8);
     fn load_bigpic(&mut self, id: u8);
+    /// LOAD PIECES (0x37)'s `else` sub-branches: `gbl.setBlocks[index].Reset()`
+    /// (`ovr003.cs:560-576`) — under-documented in the original M1 step-0
+    /// classification pass (which traced LOAD PIECES only as far as
+    /// `Load3DMap`/`LoadWalldef`/`load_bigpic`); added when `run-script`
+    /// (M1 task 3) needed the full `CMD_LoadFiles` branch read to cover a
+    /// real demo block.
+    fn reset_wall_set(&mut self, index: u8);
     fn step_game_time(&mut self, time_slot: u8, amount: u8);
     fn move_position_forward(&mut self);
     /// CALL (0x2D) case `0xAE11`/`0x4019` — `get_wall_x2`.
@@ -407,6 +414,9 @@ pub enum RecordedCall {
     },
     LoadBigpic {
         id: u8,
+    },
+    ResetWallSet {
+        index: u8,
     },
     StepGameTime {
         time_slot: u8,

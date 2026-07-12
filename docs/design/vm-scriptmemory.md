@@ -473,8 +473,20 @@ match machine.step(&mut host)? {
    the interrupted engine flow completes against the new block, chaining happens at
    walk-loop unwind). Data-gated remainder: does shipped content actually exercise a
    NEWECL inside camp scripts, and does our composite flow match the oracle end-to-end?
-5. Exact inline-string compression (bit-packing) — `gbx-formats` work, verified
-   against ECLDump text output.
+5. ~~Exact inline-string compression (bit-packing)~~ **Resolved**: fixed 6-bit-per-
+   character packing (4 chars/3 bytes, MSB-first), 63-symbol table, code `0` skipped
+   (also the genuine `'@'`-collides-with-terminator quirk, replicated exactly) —
+   `gbx-formats/src/ecl_text.rs`, derived from coab's `DecompressString`/`inflateChar`/
+   `deflateChar` (`ovr008.cs`) and independently cross-checked against ssi-engine's
+   `EclArgument.java`/`GoldboxString.java` (byte-for-byte agreement) and the sibling
+   "Unlimited Adventures" hackdocs (`STRGFORM.TXT`, corroborating the `'@'` quirk for
+   the wider SSI 6-bit convention). The *separate* `0x81` memory-string path is
+   confirmed plain NUL-terminated ASCII, never compressed — `vm_CopyStringFromMemory`/
+   `vm_WriteStringToMemory`. Verified on real data: 417 real CotAB inline strings
+   (12,541 characters) decompress to 96.2% alphabetic/space content
+   (`gbx-vm/src/real_data_tests.rs`) — ECLDump cross-check remains open per item 6's
+   own oracle-rig deferral, but this is strong independent confirmation in the
+   meantime.
 6. Byte-exact operand/offset accounting in `vm_LoadCmdSets` (the +1/+2/wrap dance) —
    **substantially validated on real data: zero decode desyncs across all 824 blocks
    of CotAB v1.3 (census §7).** Implementation also pinned the header subtlety: the
