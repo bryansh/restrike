@@ -375,14 +375,24 @@ else — most of the project by volume — runs on Sonnet with the harness as th
 - [x] `git init`; commit BRIEF.md + PLAN.md
 - [x] Cargo workspace scaffold (crates + frontends/cli), LICENSE, SOURCES.md, .gitignore (game-data patterns), rust-toolchain.toml
 - [x] CI skeleton: build + clippy + fmt + wasm32 check + no-game-data guard
-- [ ] Buy/locate GOG FR Archives Collection Two; extract CotAB → `~/goldbox-data/cotab` (outside repo); record file hashes
+- [x] Buy/locate GOG FR Archives Collection Two; extract CotAB → `~/goldbox-data/cotab` (outside repo); record file hashes
+  *(2026-07-12: Mac offline installer unpacked via `pkgutil --expand-full`; 99 files + SHA-256
+  manifest at `~/goldbox-data/cotab.sha256`; engine v1.3 per GAME.OVR; data files byte-identical
+  to coab's bundled set and TITLE.DAX matches ssi-engine's detection MD5 — zero version skew,
+  design-doc docket item 7 closed. Manual/Cluebook/Journal PDFs included for rules-pack evidence.)*
 - [ ] Locate Buck Rogers CTD + MC originals → `~/goldbox-data/{ctd,mc}`
+  *(research 2026-07-12: no legal digital source exists — rights litigation frozen by the 2017
+  Dille trust bankruptcy; second-hand boxed DOS originals only, CIB ~$38 on eBay, prefer 3.5"
+  media for USB-floppy reading; Matrix Cubed is the rarer find — buy on sight. Needed by M7.)*
 - [x] Clone refs to `~/src/goldbox-refs/`: coab, goldboxexplorer, ssi-engine, Jzatopa workspace; fetch daxdump.zip
   *(2026-07-11; also vafada/daxviewer, plus formats/hackdocs/GBC 2.01/tlbutil2/goldboxfont archives
   from gbc.zorbus.net — daxdump.zip includes EclDump.exe, so both reference dumpers are on hand)*
-- [ ] `brew install temurin@21 innoextract`; build & run ssi-engine against the CotAB dir (day-0 sanity)
-  *(tooling done 2026-07-11: innoextract, maven, OpenJDK 21 via `openjdk@21` formula — the temurin
-  cask needs an interactive sudo; ssi-engine `mvn package` builds clean. The run awaits game data.)*
-- [ ] DOSBox Staging installed; CotAB boots in it *(0.82.2 installed 2026-07-11; boot test awaits game data)*
+- [x] `brew install temurin@21 innoextract`; build & run ssi-engine against the CotAB dir (day-0 sanity)
+  *(tooling 2026-07-11: innoextract, maven, OpenJDK 21 via `openjdk@21` formula — the temurin
+  cask needs an interactive sudo; `mvn package` clean. Day-0 run 2026-07-12: detects and renders
+  CotAB. Note: must run with `-cp "target/*:src/main/resources"` — plain `java -jar` NPEs in
+  `GameResourceConfiguration.findConfig`, which needs a directory on the classpath.)*
+- [x] DOSBox Staging installed; CotAB boots in it *(0.82.2; booted 2026-07-12 via
+  `dosbox-staging -c "mount c ~/goldbox-data/cotab" -c "c:" -c "start"`)*
 - [ ] Decide oracle rig: UTM Windows VM (GBC + DOSBox + coab) vs CrossOver experiment; timebox the coab-core-on-.NET-8 spike to one evening
 - [x] `GBX_DATA_DIR` convention wired into a hello-world `restrike detect` that fingerprints a game dir

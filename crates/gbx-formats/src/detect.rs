@@ -19,9 +19,28 @@ pub struct GameSignature {
 
 /// Fingerprint table of known Gold Box game files, keyed by name + SHA-256.
 ///
-/// Empty for now: no game data has landed yet (PLAN.md D14). Populated as
-/// real fingerprints are recorded from legally-obtained data.
-pub const DETECTION_TABLE: &[GameSignature] = &[];
+/// Hashes only — no game data ships in this repo (PLAN.md D10). Recorded
+/// 2026-07-12 from the GOG "Forgotten Realms: The Archives - Collection Two"
+/// Mac build of Curse of the Azure Bonds (engine v1.3 per the GAME.OVR
+/// version string; data files byte-identical to the set coab bundles, and
+/// TITLE.DAX carries the same MD5 farmboy0/ssi-engine detects by).
+pub const DETECTION_TABLE: &[GameSignature] = &[
+    GameSignature {
+        game: "Curse of the Azure Bonds (v1.3)",
+        file_name: "TITLE.DAX",
+        sha256: "faccba08144d8eeed3f1c457d0ef0982b1db6912e785afa3b1293c8a07585e52",
+    },
+    GameSignature {
+        game: "Curse of the Azure Bonds (v1.3)",
+        file_name: "ECL1.DAX",
+        sha256: "694d745b21912ac81469d8fbefb9d1a5a7c6209568e5476df57a24cef94c8599",
+    },
+    GameSignature {
+        game: "Curse of the Azure Bonds (v1.3)",
+        file_name: "GEO2.DAX",
+        sha256: "1d4fe936f9d78b6f7d7ef689c78ebb8f86c0e68a9e1330b0a371839f9fea1862",
+    },
+];
 
 /// SHA-256 digest of a single file, as a lowercase hex string.
 pub fn hash_file(path: &Path) -> io::Result<String> {
@@ -108,7 +127,7 @@ mod tests {
     use std::io::Write;
 
     #[test]
-    fn empty_table_yields_unknown() {
+    fn synthetic_file_yields_unknown() {
         let tmp = tempfile::tempdir().unwrap();
         let mut f = File::create(tmp.path().join("SOMEFILE.DAT")).unwrap();
         f.write_all(b"synthetic fixture data, not a real game file")
@@ -117,7 +136,26 @@ mod tests {
         let result = detect_dir(tmp.path()).unwrap();
         match result {
             Detection::Unknown { files } => assert_eq!(files.len(), 1),
-            Detection::Known { .. } => panic!("expected Unknown with an empty detection table"),
+            Detection::Known { .. } => {
+                panic!("synthetic data must never match a real fingerprint")
+            }
+        }
+    }
+
+    /// Local-only tier (PLAN.md §5): exercises the real detection table
+    /// against user-supplied game data. Silently passes when GBX_DATA_DIR is
+    /// unset — public CI never sees game data (D10).
+    #[test]
+    fn detects_real_game_when_gbx_data_dir_is_set() {
+        let Some(dir) = std::env::var_os("GBX_DATA_DIR") else {
+            return;
+        };
+        let result = detect_dir(Path::new(&dir)).unwrap();
+        match result {
+            Detection::Known { .. } => {}
+            Detection::Unknown { .. } => {
+                panic!("GBX_DATA_DIR is set but no known game was detected")
+            }
         }
     }
 
