@@ -9,7 +9,11 @@
 //! binary (the feature is off by default).
 
 use crate::decode::{BlockBytes, ECL_BLOCK_BASE, ECL_BLOCK_SIZE};
-use std::collections::HashMap;
+use crate::host::{
+    EngineServices, ItemHandle, MissingData, MonsterHandle, NotFound, Origin, PlayerId,
+    RecordedCall, ScriptMemory, VmHost, VmRng, VmString,
+};
+use std::collections::{HashMap, VecDeque};
 
 /// One pending word-sized fixup: the two bytes at `bytes[offset..offset+2]`
 /// (little-endian) get patched with the resolved address of `label` once
@@ -188,6 +192,341 @@ impl EclBuilder {
             bytes[fixup.offset + 1] = hi;
         }
         BlockBytes::from_bytes(&bytes)
+    }
+}
+
+/// A fixed-sequence RNG for deterministic conformance tests
+/// (`docs/design/vm-scriptmemory.md` §4: "fixed rng"). Cycles through
+/// `values` in order once `values` is non-empty; returns 0 if never seeded.
+#[derive(Debug, Clone, Default)]
+pub struct FixedRng {
+    values: VecDeque<u16>,
+}
+
+impl FixedRng {
+    pub fn new(values: impl IntoIterator<Item = u16>) -> Self {
+        Self {
+            values: values.into_iter().collect(),
+        }
+    }
+
+    pub fn push(&mut self, value: u16) {
+        self.values.push_back(value);
+    }
+}
+
+impl VmRng for FixedRng {
+    fn roll_uniform(&mut self, inclusive_max: u16) -> u16 {
+        self.values.pop_front().unwrap_or(0).min(inclusive_max)
+    }
+}
+
+/// The composable mock `VmHost` (`docs/design/vm-scriptmemory.md` §4): a
+/// `HashMap`-backed `ScriptMemory`, scripted `EngineServices` replies (one
+/// `VecDeque` per reply-bearing method — pop the front when called, fall
+/// back to a fixed default if the test never scripted one), a [`FixedRng`],
+/// and a single ordered `calls` log covering every `ScriptMemory`/
+/// `EngineServices` invocation (D-VM4: "full call recording").
+///
+/// Every `EngineServices` method is implemented, even the ones no opcode
+/// this session's interpreter calls — the trait was declared in one shot
+/// from `docs/design/opcode-classification.md` §3, and this mock must never
+/// need to regrow underneath an already-shipped conformance test.
+#[derive(Default)]
+pub struct TestHost {
+    words: HashMap<u16, u16>,
+    bytes: HashMap<u16, u8>,
+    strings: HashMap<u16, VmString>,
+    pub calls: Vec<RecordedCall>,
+    pub rng: FixedRng,
+
+    pub retarget_selected_player_replies: VecDeque<Result<(), NotFound>>,
+    pub free_current_player_replies: VecDeque<PlayerId>,
+    pub party_strength_replies: VecDeque<u8>,
+    pub check_party_replies: VecDeque<u16>,
+    pub party_has_item_replies: VecDeque<bool>,
+    pub find_special_replies: VecDeque<bool>,
+    pub party_surprise_check_replies: VecDeque<(u8, u8)>,
+
+    pub load_monster_replies: VecDeque<Result<MonsterHandle, MissingData>>,
+    pub calc_group_movement_replies: VecDeque<(u8, u8)>,
+    pub approach_distance_replies: VecDeque<u8>,
+
+    pub create_item_replies: VecDeque<ItemHandle>,
+    pub load_item_from_table_replies: VecDeque<ItemHandle>,
+    pub find_spell_in_party_replies: VecDeque<(u8, u8)>,
+
+    pub roll_replies: VecDeque<u8>,
+    pub roll_dice_replies: VecDeque<u16>,
+    pub roll_saving_throw_replies: VecDeque<bool>,
+    pub can_hit_target_replies: VecDeque<bool>,
+
+    pub wall_roof_replies: VecDeque<u8>,
+    pub wall_type_replies: VecDeque<u8>,
+    pub call_sound_variant_replies: VecDeque<u8>,
+}
+
+impl TestHost {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Pre-seeds a word-addressable memory cell (Area/Table/Party/Global
+    /// windows — anything the engine's real `ScriptMemory` impl would
+    /// resolve to a stored word). Ecl-window addresses never reach a
+    /// `ScriptMemory` impl (the VM intercepts them, D-VM5); seeding one here
+    /// has no effect on interpreter behavior, only on direct test assertions.
+    pub fn set_word(&mut self, addr: u16, value: u16) {
+        self.words.insert(addr, value);
+    }
+
+    pub fn word(&self, addr: u16) -> Option<u16> {
+        self.words.get(&addr).copied()
+    }
+
+    fn next_or_default<T: Default>(queue: &mut VecDeque<T>) -> T {
+        queue.pop_front().unwrap_or_default()
+    }
+}
+
+impl ScriptMemory for TestHost {
+    fn read(&mut self, addr: u16, origin: Origin) -> u16 {
+        self.calls.push(RecordedCall::MemRead { addr, origin });
+        self.words.get(&addr).copied().unwrap_or(0)
+    }
+
+    fn write(&mut self, addr: u16, value: u16, origin: Origin) {
+        self.calls.push(RecordedCall::MemWrite {
+            addr,
+            value,
+            origin,
+        });
+        self.words.insert(addr, value);
+    }
+
+    fn read_byte(&mut self, addr: u16, origin: Origin) -> u8 {
+        self.calls.push(RecordedCall::MemReadByte { addr, origin });
+        self.bytes.get(&addr).copied().unwrap_or(0)
+    }
+
+    fn write_byte(&mut self, addr: u16, value: u8, origin: Origin) {
+        self.calls.push(RecordedCall::MemWriteByte {
+            addr,
+            value,
+            origin,
+        });
+        self.bytes.insert(addr, value);
+    }
+
+    fn read_string(&mut self, addr: u16, origin: Origin) -> VmString {
+        self.calls
+            .push(RecordedCall::MemReadString { addr, origin });
+        self.strings.get(&addr).cloned().unwrap_or_default()
+    }
+
+    fn write_string(&mut self, addr: u16, s: &VmString, origin: Origin) {
+        self.calls.push(RecordedCall::MemWriteString {
+            addr,
+            value: s.clone(),
+            origin,
+        });
+        self.strings.insert(addr, s.clone());
+    }
+}
+
+impl EngineServices for TestHost {
+    fn retarget_selected_player(&mut self, index: u8) -> Result<(), NotFound> {
+        self.calls
+            .push(RecordedCall::RetargetSelectedPlayer { index });
+        self.retarget_selected_player_replies
+            .pop_front()
+            .unwrap_or(Ok(()))
+    }
+
+    fn free_current_player(&mut self, free_icon: bool, leave_party_size: bool) -> PlayerId {
+        self.calls.push(RecordedCall::FreeCurrentPlayer {
+            free_icon,
+            leave_party_size,
+        });
+        Self::next_or_default(&mut self.free_current_player_replies)
+    }
+
+    fn party_strength(&mut self) -> u8 {
+        self.calls.push(RecordedCall::PartyStrength);
+        Self::next_or_default(&mut self.party_strength_replies)
+    }
+
+    fn check_party(&mut self, query: u16) -> u16 {
+        self.calls.push(RecordedCall::CheckParty { query });
+        Self::next_or_default(&mut self.check_party_replies)
+    }
+
+    fn party_has_item(&mut self, item_type: u8) -> bool {
+        self.calls.push(RecordedCall::PartyHasItem { item_type });
+        Self::next_or_default(&mut self.party_has_item_replies)
+    }
+
+    fn find_special(&mut self, affect_type: u8) -> bool {
+        self.calls.push(RecordedCall::FindSpecial { affect_type });
+        Self::next_or_default(&mut self.find_special_replies)
+    }
+
+    fn destroy_items(&mut self, item_type: u8) {
+        self.calls.push(RecordedCall::DestroyItems { item_type });
+    }
+
+    fn rob_money(&mut self, pct: u8) {
+        self.calls.push(RecordedCall::RobMoney { pct });
+    }
+
+    fn rob_items(&mut self, chance: u8) {
+        self.calls.push(RecordedCall::RobItems { chance });
+    }
+
+    fn party_surprise_check(&mut self) -> (u8, u8) {
+        self.calls.push(RecordedCall::PartySurpriseCheck);
+        Self::next_or_default(&mut self.party_surprise_check_replies)
+    }
+
+    fn load_monster(
+        &mut self,
+        monster_id: u8,
+        num_copies: u8,
+        icon_block_id: u8,
+    ) -> Result<MonsterHandle, MissingData> {
+        self.calls.push(RecordedCall::LoadMonster {
+            monster_id,
+            num_copies,
+            icon_block_id,
+        });
+        self.load_monster_replies
+            .pop_front()
+            .unwrap_or(Ok(MonsterHandle::default()))
+    }
+
+    fn setup_monster(&mut self, sprite_id: u8, max_distance: u8, pic_id: u8) {
+        self.calls.push(RecordedCall::SetupMonster {
+            sprite_id,
+            max_distance,
+            pic_id,
+        });
+    }
+
+    fn clear_monsters(&mut self) {
+        self.calls.push(RecordedCall::ClearMonsters);
+    }
+
+    fn add_npc(&mut self, monster_id: u8, morale: u8) {
+        self.calls.push(RecordedCall::AddNpc { monster_id, morale });
+    }
+
+    fn setup_duel(&mut self, is_duel: bool) {
+        self.calls.push(RecordedCall::SetupDuel { is_duel });
+    }
+
+    fn calc_group_movement(&mut self) -> (u8, u8) {
+        self.calls.push(RecordedCall::CalcGroupMovement);
+        Self::next_or_default(&mut self.calc_group_movement_replies)
+    }
+
+    fn approach_distance(&mut self) -> u8 {
+        self.calls.push(RecordedCall::ApproachDistance);
+        Self::next_or_default(&mut self.approach_distance_replies)
+    }
+
+    fn load_encounter_visual(&mut self, flags: u8, distance: u8, pic_id: u8, sprite_id: u8) {
+        self.calls.push(RecordedCall::LoadEncounterVisual {
+            flags,
+            distance,
+            pic_id,
+            sprite_id,
+        });
+    }
+
+    fn create_item(&mut self, item_type: u8) -> ItemHandle {
+        self.calls.push(RecordedCall::CreateItem { item_type });
+        Self::next_or_default(&mut self.create_item_replies)
+    }
+
+    fn load_item_from_table(&mut self, block_id: u8) -> ItemHandle {
+        self.calls
+            .push(RecordedCall::LoadItemFromTable { block_id });
+        Self::next_or_default(&mut self.load_item_from_table_replies)
+    }
+
+    fn find_spell_in_party(&mut self, spell_id: u8) -> (u8, u8) {
+        self.calls.push(RecordedCall::FindSpellInParty { spell_id });
+        self.find_spell_in_party_replies
+            .pop_front()
+            .unwrap_or((0xFF, 0xFF))
+    }
+
+    fn roll(&mut self, max: u8) -> u8 {
+        self.calls.push(RecordedCall::Roll { max });
+        self.roll_replies.pop_front().unwrap_or(0)
+    }
+
+    fn roll_dice(&mut self, size: u8, count: u8) -> u16 {
+        self.calls.push(RecordedCall::RollDice { size, count });
+        Self::next_or_default(&mut self.roll_dice_replies)
+    }
+
+    fn roll_saving_throw(&mut self, bonus: u8, save_type: u8) -> bool {
+        self.calls
+            .push(RecordedCall::RollSavingThrow { bonus, save_type });
+        Self::next_or_default(&mut self.roll_saving_throw_replies)
+    }
+
+    fn can_hit_target(&mut self, bonus: u8) -> bool {
+        self.calls.push(RecordedCall::CanHitTarget { bonus });
+        Self::next_or_default(&mut self.can_hit_target_replies)
+    }
+
+    fn apply_damage(&mut self, player: PlayerId, damage: u16) {
+        self.calls
+            .push(RecordedCall::ApplyDamage { player, damage });
+    }
+
+    fn load_3d_map(&mut self, block_id: u8) {
+        self.calls.push(RecordedCall::Load3dMap { block_id });
+    }
+
+    fn load_walldef(&mut self, set: u8, id: u8) {
+        self.calls.push(RecordedCall::LoadWalldef { set, id });
+    }
+
+    fn load_bigpic(&mut self, id: u8) {
+        self.calls.push(RecordedCall::LoadBigpic { id });
+    }
+
+    fn step_game_time(&mut self, time_slot: u8, amount: u8) {
+        self.calls
+            .push(RecordedCall::StepGameTime { time_slot, amount });
+    }
+
+    fn move_position_forward(&mut self) {
+        self.calls.push(RecordedCall::MovePositionForward);
+    }
+
+    fn wall_roof(&mut self) -> u8 {
+        self.calls.push(RecordedCall::WallRoof);
+        Self::next_or_default(&mut self.wall_roof_replies)
+    }
+
+    fn wall_type(&mut self) -> u8 {
+        self.calls.push(RecordedCall::WallType);
+        Self::next_or_default(&mut self.wall_type_replies)
+    }
+
+    fn call_sound_variant(&mut self) -> u8 {
+        self.calls.push(RecordedCall::CallSoundVariant);
+        Self::next_or_default(&mut self.call_sound_variant_replies)
+    }
+}
+
+impl VmHost for TestHost {
+    fn rng(&mut self) -> &mut dyn VmRng {
+        &mut self.rng
     }
 }
 

@@ -8,6 +8,7 @@ description = "ECL bytecode decoder, disassembler, interpreter, and ScriptMemory
 
 [dependencies]
 gbx-formats = { path = "../gbx-formats" }
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 

@@ -126,6 +126,11 @@ pub struct OpcodeInfo {
 pub struct Dialect {
     pub name: &'static str,
     pub opcodes: &'static [OpcodeInfo],
+    /// Block-header vector count (D-VM7: "vector-table length... [is a]
+    /// per-generation parameter"), consulted by `EclMachine::load_block`/
+    /// `reinit` via [`read_header_vectors`](crate::decode::read_header_vectors)
+    /// instead of a hard-coded five.
+    pub vector_count: usize,
 }
 
 impl Dialect {
@@ -156,6 +161,7 @@ pub const COTAB_VECTOR_COUNT: usize = 5;
 pub static COTAB: Dialect = Dialect {
     name: "CotAB",
     opcodes: &COTAB_OPCODES,
+    vector_count: COTAB_VECTOR_COUNT,
 };
 
 static COTAB_OPCODES: [OpcodeInfo; 65] = [

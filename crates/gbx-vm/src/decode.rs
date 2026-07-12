@@ -23,10 +23,47 @@ pub const ECL_BLOCK_SIZE: usize = 0x1E00;
 pub const ECL_BLOCK_BASE: u16 = 0x8000;
 
 /// Read-only bytes for one resident ECL block, addressed by `0x8000`-based
-/// VM address per [`ECL_BLOCK_BASE`].
+/// VM address per [`ECL_BLOCK_BASE`]. `Serialize`/`Deserialize` (manual —
+/// serde's derive only covers fixed-size arrays up to length 32) back the
+/// machine snapshot (`docs/design/vm-scriptmemory.md` §2, D-VM3): the
+/// resident block is part of the save-anywhere unit.
 #[derive(Debug, Clone)]
 pub struct BlockBytes {
     data: [u8; ECL_BLOCK_SIZE],
+}
+
+impl serde::Serialize for BlockBytes {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(&self.data)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for BlockBytes {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct BytesVisitor;
+        impl serde::de::Visitor<'_> for BytesVisitor {
+            type Value = BlockBytes;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{ECL_BLOCK_SIZE} bytes of ECL block data")
+            }
+
+            fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> Result<Self::Value, E> {
+                if v.len() != ECL_BLOCK_SIZE {
+                    return Err(E::custom(format!(
+                        "expected {ECL_BLOCK_SIZE} bytes, got {}",
+                        v.len()
+                    )));
+                }
+                Ok(BlockBytes::from_bytes(v))
+            }
+
+            fn visit_byte_buf<E: serde::de::Error>(self, v: Vec<u8>) -> Result<Self::Value, E> {
+                self.visit_bytes(&v)
+            }
+        }
+        deserializer.deserialize_byte_buf(BytesVisitor)
+    }
 }
 
 impl BlockBytes {
@@ -233,7 +270,14 @@ pub fn read_header_vectors(bytes: &BlockBytes, count: usize) -> (Vec<Option<u16>
 
 /// Decodes one operand batch starting at `addr` (the mode byte's position),
 /// returning the operand and the address of the next unread byte.
-fn decode_operand(bytes: &BlockBytes, addr: u16) -> (Arg, u16) {
+///
+/// `pub(crate)` (not private) so the interpreter (`machine.rs`) can reuse the
+/// exact same mode-byte parsing for its own side-effecting operand loader
+/// (string-register fills, `0x81` `ScriptMemory` reads) — mirroring coab's
+/// `vm_LoadCmdSets`, which this function's caller-facing counterpart,
+/// [`decode`], deliberately does *not* perform (D-VM1: `decode()` is shared
+/// with the disassembler and census, which have no live host to side-effect).
+pub(crate) fn decode_operand(bytes: &BlockBytes, addr: u16) -> (Arg, u16) {
     let mode = bytes.get(addr);
     let payload = addr.wrapping_add(1);
 
