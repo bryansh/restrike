@@ -8,6 +8,7 @@ mod run_script;
 use gbx_formats::detect::{self, Detection};
 use gbx_vm::dialect::COTAB;
 use gbx_vm::{decode, disassemble};
+use restrike_cli::walk;
 use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -21,6 +22,7 @@ fn main() -> ExitCode {
         Some("map") => map::cmd_map(args.collect()),
         Some("run-script") => run_script::cmd_run_script(args.collect()),
         Some("dump-image") => dump_image::cmd_dump_image(args.collect()),
+        Some("walk") => walk::cmd_walk(args.collect()),
         Some(other) => {
             eprintln!("restrike: unknown command '{other}'");
             print_usage();
@@ -45,6 +47,10 @@ fn print_usage() {
     eprintln!(
         "       restrike dump-image [DIR] --dax <FILE> --block <ID> [--frame N] [--mask N] \
          --out <path.ppm>"
+    );
+    eprintln!(
+        "       restrike walk [DIR] --trace <FILE> [--dump-at TICK]... [--out-dir DIR] \
+         [--seed N]"
     );
     eprintln!();
     eprintln!("If DIR is omitted, falls back to the GBX_DATA_DIR environment variable.");

@@ -4,6 +4,9 @@
 Cargo.lock.bak
 *.pdb
 
+# wasm-bindgen packaging output (frontends/web/README.md's local build step)
+/frontends/web/pkg/
+
 # Editor/OS cruft
 .DS_Store
 .idea/

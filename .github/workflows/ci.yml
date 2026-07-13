@@ -20,6 +20,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # restrike-desktop (winit + softbuffer) needs no extra apt packages to
+      # compile on ubuntu-latest -- verified in a clean ubuntu:24.04
+      # container with nothing beyond a C toolchain installed: both crates'
+      # Linux backends dlopen X11/Wayland/xkbcommon at *runtime*, so no dev
+      # headers or link-time libs are needed here. Runtime display access
+      # (actually opening a window) is never exercised in CI -- no xvfb, no
+      # GUI tests -- so this holds regardless.
       - run: cargo build --workspace --all-targets
       - run: cargo test --workspace
 
@@ -36,7 +43,7 @@ jobs:
       - run: cargo fmt --all -- --check
 
   wasm:
-    name: wasm32 check (core crates)
+    name: wasm32 check (core crates + web frontend)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,6 +54,11 @@ jobs:
       - run: >
           cargo check --target wasm32-unknown-unknown
           -p gbx-formats -p gbx-vm -p gbx-rules -p gbx-engine -p gbx-oracle
+      # The D-UI6 gate: restrike-web must at least *check* clean for
+      # wasm32-unknown-unknown. Full wasm-bindgen packaging (running
+      # wasm-bindgen-cli to produce the JS glue + serving index.html) is a
+      # local-only concern -- see frontends/web/README.md.
+      - run: cargo check --target wasm32-unknown-unknown -p restrike-web
 
   no-game-data-guard:
     name: no-game-data guard

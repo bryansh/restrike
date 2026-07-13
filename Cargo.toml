@@ -7,6 +7,8 @@ members = [
     "crates/gbx-engine",
     "crates/gbx-oracle",
     "frontends/cli",
+    "frontends/desktop",
+    "frontends/web",
 ]
 
 [workspace.package]

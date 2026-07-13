@@ -1,0 +1,17 @@
+[package]
+name = "restrike-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Desktop frontend for Restrike: a winit + softbuffer presenter (D-UI6)."
+
+[[bin]]
+name = "restrike-desktop"
+path = "src/main.rs"
+
+[dependencies]
+gbx-formats = { path = "../../crates/gbx-formats" }
+gbx-engine = { path = "../../crates/gbx-engine" }
+winit = "0.30"
+softbuffer = "0.4"

@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Restrike</title>
+<style>
+  html, body { height: 100%; margin: 0; background: #000; }
+  body {
+    display: flex; align-items: center; justify-content: center;
+    font-family: monospace; color: #ccc;
+  }
+  #canvas {
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    background: #000;
+  }
+  #picker {
+    position: absolute; top: 1em; left: 1em;
+  }
+</style>
+</head>
+<body>
+<!--
+  The D8 proof, not a product (D-UI6): one page, one canvas, keyboard only.
+  Game data is supplied by the user at runtime -- a directory picker here --
+  and never bundled with this page (D10). See this crate's README for the
+  exact build+serve commands.
+-->
+<div id="picker">
+  <label>CotAB data directory:
+    <input type="file" id="dir-input" webkitdirectory multiple>
+  </label>
+</div>
+<canvas id="canvas" width="320" height="200"></canvas>
+
+<script type="module">
+  import init, { App, GameDataBuilder } from "./pkg/restrike_web.js";
+
+  // Determinism over novelty (D-UI6/task brief): a fixed default seed.
+  const DEFAULT_SEED = 1n;
+
+  const canvas = document.getElementById("canvas");
+  const dirInput = document.getElementById("dir-input");
+  let app = null;
+
+  // D-UI6 default scaling: aspect-correct per-axis integer scaling at the
+  // 5:6 pixel ratio, letterboxed on black -- the CSS analogue of
+  // restrike-desktop's scale.rs.
+  function applyScale() {
+    const kx = Math.floor(window.innerWidth / (320 * 5));
+    const ky = Math.floor(window.innerHeight / (200 * 6));
+    const k = Math.min(kx, ky);
+    let sx, sy;
+    if (k >= 1) {
+      sx = k * 5; sy = k * 6;
+    } else {
+      sx = sy = Math.max(1, Math.min(
+        Math.floor(window.innerWidth / 320),
+        Math.floor(window.innerHeight / 200),
+      ));
+    }
+    canvas.style.width = (320 * sx) + "px";
+    canvas.style.height = (200 * sy) + "px";
+  }
+  window.addEventListener("resize", applyScale);
+  applyScale();
+
+  dirInput.addEventListener("change", async () => {
+    const files = Array.from(dirInput.files);
+    if (files.length === 0) return;
+
+    await init();
+    const builder = new GameDataBuilder();
+    for (const file of files) {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      builder.add_file(file.name, bytes);
+    }
+    app = new App(canvas, builder, DEFAULT_SEED);
+    document.title = app.title();
+    dirInput.disabled = true;
+    requestAnimationFrame(loop);
+  });
+
+  window.addEventListener("keydown", (e) => {
+    if (!app) return;
+    app.key_down(e.key, e.code);
+    e.preventDefault();
+  });
+
+  function loop(now) {
+    if (app) {
+      app.frame(now);
+    }
+    requestAnimationFrame(loop);
+  }
+</script>
+</body>
+</html>
