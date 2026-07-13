@@ -212,6 +212,11 @@ Walk around Tilverton, looking right.
     until that file exists. Not yet run for real.
   - [ ] **FD-17/FD-18 (type-ahead, list-menu arrows) — open**, each a 30–90 second DOSBox check
     per `docs/dosbox-capture.md` §5; unresolved since M2's design pass.
+  - *Deferral note (2026-07-13, decided with Bryan):* the human-checklist items above are
+    verification of existing behavior, each isolated behind a single function/constant by design —
+    they do not gate M3, which starts now. Deadline: fold the DOSBox hour into M4's oracle-rig
+    setup at the latest; do FD-18 earlier if M3's shop/training list menus land first (it is a
+    per-widget key-map entry either way).
   - [x] **Web build:** loads the same data and walks the same circuit — manual smoke only (core
     hashes are identical by construction: the same crate compiled to wasm32), documented as a
     manual step since a scripted browser walk is out of this session's scope:
