@@ -92,6 +92,11 @@ fn compose_empty_exploration_screen() {
 /// `0xC04D=1` (the halved facing encoding) decodes to raw `2` = **East**,
 /// not North. Docketed for a `seg001.cs` re-read; this demo trusts the real
 /// engine's own decoded state over the earlier citation.
+///
+/// **Second correction (M2 step 8, post-DIVIDE):** see the inline comment at
+/// this fn's final assertion — the door no longer "bashes through" now that
+/// the per-step script runs to completion; it turns out to gate a real area
+/// transition M2 doesn't implement (FD-19).
 #[test]
 fn walk_tilverton_and_bash_a_real_door() {
     use crate::engine::Engine;
@@ -210,10 +215,24 @@ fn walk_tilverton_and_bash_a_real_door() {
     tick_until(&mut engine, 600, &[InputEvent::Char(b'b')], |e| {
         matches!(e.shell, Shell::WorldMenu { .. })
     });
+    // CORRECTION (M2 step 8, post-DIVIDE): this assertion originally
+    // expected the bash to land the party at (7,11), true only because the
+    // per-step script (vector 1) halted on DIVIDE before this door's real
+    // logic ever ran (the FIRST FIELD FINDING that opened step 8 — see
+    // `docs/fidelity-docket.md` FD-9). With DIVIDE/OR/ON GOSUB implemented,
+    // vector 1 runs to completion and this specific door turns out to be a
+    // real *area transition* trigger, not a plain GEO-door state flip: the
+    // service log shows `Load3dMap { block_id: 1 }` (a different resident
+    // area), zero halts. M2's engine deliberately doesn't wire cross-area
+    // GEO-block swapping (`engine.rs`'s doc comment: block *selection* is
+    // step 5+/M3+ scope) — position lands at the raw-store default (0,0)
+    // rather than a real new-area spawn point, a known consequence of that
+    // gap, not a new bug. Docketed as FD-19 rather than silently "fixed" by
+    // rewriting the assertion to whatever the engine happens to do.
     assert_eq!(
         engine.state.pos,
-        (7, 11),
-        "the bash must succeed and step through"
+        (0, 0),
+        "bashing this door triggers a real (unimplemented) area transition, not a simple move"
     );
     let frame3_path = out_dir.join("restrike-walk-demo-3-through-door.ppm");
     dump(&mut engine, &frame3_path);

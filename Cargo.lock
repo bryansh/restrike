@@ -2663,6 +2663,7 @@ dependencies = [
  "gbx-oracle",
  "gbx-rules",
  "gbx-vm",
+ "image",
  "serde",
  "serde_json",
  "tempfile",

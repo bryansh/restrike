@@ -106,6 +106,7 @@ fn fixture_trace_replays_to_identical_checkpoint_hashes_twice() {
         &[],
         |tick, hash| hashes_a.push((tick, hash.to_string())),
         |_, _| {},
+        |_, _| {},
     );
 
     let mut hashes_b = Vec::new();
@@ -114,6 +115,7 @@ fn fixture_trace_replays_to_identical_checkpoint_hashes_twice() {
         &trace,
         &[],
         |tick, hash| hashes_b.push((tick, hash.to_string())),
+        |_, _| {},
         |_, _| {},
     );
 
@@ -153,6 +155,7 @@ fn real_data_trace_checkpoint_hashes_are_stable_across_two_in_process_runs() {
             &trace,
             &[],
             |tick, hash| hashes.push((tick, hash.to_string())),
+            |_, _| {},
             |_, _| {},
         );
         (hashes, exit)

@@ -169,7 +169,7 @@ source document (§5 "New docket candidates").
 
 ### FD-9: DIVIDE remainder addressability at `0x7F3F`
 
-- **Status:** narrowed
+- **Status:** resolved (2026-07-13, M2 step 8)
 - **Question:** Does VM address `0x7F3F` actually read back DIVIDE's (0x06)
   remainder through the ordinary Party window, as the struct-offset
   arithmetic (`Area2.field_800_Get` mapping `field_67E`) implies?
@@ -178,10 +178,20 @@ source document (§5 "New docket candidates").
   it either way (`cotab-v1.3.md` §6: "unconfirmable from this census by
   construction" — hard-coded/computed addresses baked into a handler aren't
   visible as decoded operands).
-- **Settled by:** H2 — a conformance test once DIVIDE (0x06) is implemented
-  in `EclMachine` (not yet, per `docs/census/cotab-v1.3.md` §8's top-25 list
-  — DIVIDE ranks below the top 25 at 4 uses) that writes a division with a
-  nonzero remainder and reads back `0x7F3F` through a Party-window mock.
+- **Settled by:** DIVIDE (0x06) is now implemented in `EclMachine`
+  (`crates/gbx-vm/src/machine.rs`'s `op_divide`), writing the remainder
+  through the ordinary `mem_write` facade at `0x7F3F` alongside the
+  quotient at the operand-3 destination — the H2 conformance suite includes
+  `divide_then_gettable_via_0x7f3f_mirrors_the_shipped_pattern`
+  (`crates/gbx-vm/src/conformance.rs`), which replicates the real
+  `ECL2.DAX` block 1 instruction shapes and addresses (`0x7F7B`/`0x7F80`/
+  `0x7F3F`) exactly, substituting only GETTABLE's base (the real `0x9DB8`
+  falls inside the VM-intercepted ECL window and isn't `ScriptMemory`-mockable
+  — see the test's own doc comment). Division-by-zero also settled: coab's
+  `val_a / val_b` throws an uncaught C# exception with no `try`/`catch`
+  anywhere up the `RunEclVm` call chain, so the original crashes; modeled as
+  `VmError::DivisionByZero`, exercised by
+  `divide_by_zero_is_a_defined_error_not_a_panic`.
 
 ### FD-10: COMPARE AND / CHECKPARTY string-mode operand hazard
 
@@ -350,6 +360,42 @@ source document (§5 "New docket candidates").
   `docs/design/renderer-ui-shell.md` §1.5, §1.11 item 10).
 - **Settled by:** DOSBox check on any vertical menu (shop/training lists in
   the M2 capture sessions) before the design doc's D-UI6 key map is pinned.
+
+### FD-19: The (7,12)-North door is a real area transition, not a plain locked door
+
+- **Status:** narrowed (mechanism understood; cross-area GEO-block swapping
+  deferred to M3+)
+- **Question:** Tilverton's per-step script (`ECL2.DAX` block 1 vector 1,
+  the DIVIDE-unblocked logic FD-9 fixed) prints a short in-fiction refusal
+  when the party approaches (7,12)'s North edge from most positions — the
+  gist (not a verbatim quote, D10): this is the wrong entrance, use the
+  other one, and the party is turned away — and the M2 step 4 demo
+  (`gbx-engine/src/demo.rs::walk_tilverton_and_bash_a_real_door`) forces a
+  bash success there anyway (a party-predicate stub) — what actually happens
+  when the bash mechanically succeeds and the party steps through?
+- **Evidence so far:** the engine's own service-call log shows
+  `Load3dMap { block_id: 1 }` immediately after the forced bash, with zero
+  halts — the edge is scripted to load a *different resident area* (an
+  interior; the refusal text's framing matches: this edge is the wrong/side
+  entrance), not to just flip a GEO door bit. M2's engine deliberately keeps
+  one fixed resident GEO/ECL block for the whole session
+  (`gbx-engine/src/engine.rs`'s doc comment: block *selection* logic is
+  step 5+/M3+ scope) — `load_3d_map`/`load_walldef` update wallset assets but
+  never swap the resident `GeoBlock` movement/wall-query source, so the
+  party's position and the still-Tilverton wall/door geometry go out of
+  sync. Observed result: position lands at `(0, 0)` (the raw-store default,
+  not a real new-area spawn point) — a consequence of the gap, not a new
+  bug. `demo.rs`'s test was updated to assert this real (if imperfect)
+  outcome rather than the pre-DIVIDE-fix assumption it originally shipped
+  with (bashing through to `(7,11)`), which turned out to be an artifact of
+  vector 1 silently halting before this session (FD-9's finding).
+- **Settled by:** M3+/whenever cross-area GEO/ECL-block selection is wired
+  (the natural place to also decide what a mid-session `Load3dMap` should do
+  to party position — likely reading the new area's own boot-vector spawn,
+  the same way `INITIAL_ECL_BLOCK`'s spawn is read today). Not blocking M2's
+  exit gate: the circuit trace (`fixtures/tilverton-circuit.jsonl`) routes
+  around this door entirely, using a different, transition-free path to its
+  event squares.
 
 ## 4. How new entries get added
 

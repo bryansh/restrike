@@ -170,6 +170,24 @@ fn widget_for_request(request: &Request) -> Widget {
     }
 }
 
+/// Transcript-mode's (M2 step 8) request label — content, not widget shape:
+/// a `HorizontalMenu`'s joined option text (the same text a player reads),
+/// or a fixed descriptive label for the non-textual requests.
+fn describe_request(request: &Request) -> String {
+    match request {
+        Request::HorizontalMenu { options } => {
+            let text = options
+                .iter()
+                .map(|s| String::from_utf8_lossy(&s.0).into_owned())
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("menu: {text}")
+        }
+        Request::Delay => "delay".to_string(),
+        Request::Combat => "combat (stub)".to_string(),
+    }
+}
+
 /// The inverse of [`widget_for_request`]'s `HorizontalMenu` case: maps a
 /// resolved Hotbar key back to a `Reply::Selection` index. Implementation
 /// note (flagged): finds the first option whose leading byte (uppercased)
@@ -325,6 +343,12 @@ impl VectorRun {
             match effect {
                 Effect::Print { text, clear_first } => {
                     let text = String::from_utf8_lossy(&text.0).into_owned();
+                    ctx.vm_memory
+                        .transcript
+                        .push(crate::vmhost::TranscriptEntry::Print {
+                            text: text.clone(),
+                            clear_first,
+                        });
                     self.current_job = Some(TextJob::new(
                         &text,
                         10,
@@ -362,6 +386,11 @@ impl VectorRun {
         {
             PendingOutcome::Exit(exit) => PresentTick::Done(exit),
             PendingOutcome::Request(request) => {
+                ctx.vm_memory
+                    .transcript
+                    .push(crate::vmhost::TranscriptEntry::Request(describe_request(
+                        &request,
+                    )));
                 let widget = widget_for_request(&request);
                 self.pending = Some(PendingOutcome::Request(request));
                 self.phase = VmPhase::Gate(widget);

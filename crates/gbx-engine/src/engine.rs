@@ -211,6 +211,15 @@ impl Engine {
         &self.vm_memory
     }
 
+    /// Drains the transcript-mode content log (M2 step 8: `restrike walk
+    /// --transcript`) accumulated since the last call — every PRINT/
+    /// PRINTCLEAR text and VM-request label emitted by `tick` calls in
+    /// between. A frontend calls this once per tick (or in a batch) to
+    /// stream content out; the engine itself does no I/O (D8).
+    pub fn take_transcript(&mut self) -> Vec<crate::vmhost::TranscriptEntry> {
+        std::mem::take(&mut self.vm_memory.transcript)
+    }
+
     pub fn state(&self) -> &EngineState {
         &self.state
     }

@@ -97,6 +97,16 @@ pub enum VmError {
         pc: u16,
         opcode: u8,
     },
+    /// DIVIDE (0x06) with a zero divisor: coab's `CMD_AddSubDivMulti` (case 6,
+    /// `ovr003.cs:111-114`) computes `val_a / val_b` with C#'s integer `/`,
+    /// which throws `DivideByZeroException` uncaught by any handler up the
+    /// `RunEclVm` call chain (`ovr003.cs:2147-2227` has no `try`/`catch`) —
+    /// the original crashes. Modeled as a halting `VmError`, the same
+    /// non-aborting analogue used for LOAD MONSTER's missing-asset crash.
+    DivisionByZero {
+        pc: u16,
+        opcode: u8,
+    },
 }
 
 /// How an activation ends (D-VM3).
@@ -661,6 +671,9 @@ impl EclMachine {
             0x02 => self.op_gosub(activation, host, pc, opcode),
             0x03 => self.op_compare(activation, host, pc, opcode),
             0x04 => self.op_add(activation, host, pc, opcode),
+            0x05 => self.op_subtract(activation, host, pc, opcode),
+            0x06 => self.op_divide(activation, host, pc, opcode),
+            0x07 => self.op_multiply(activation, host, pc, opcode),
             0x08 => self.op_random(activation, host, pc, opcode),
             0x09 => self.op_save(activation, host, pc, opcode),
             0x0B => self.op_load_monster(activation, host, pc, opcode),
@@ -676,10 +689,12 @@ impl EclMachine {
             0x21 => self.op_load_files(activation, host, pc, opcode, false),
             0x24 => self.op_combat(activation),
             0x25 => self.op_on_goto(activation, host, pc, opcode),
+            0x26 => self.op_on_gosub(activation, host, pc, opcode),
             0x2A => self.op_gettable(activation, host, pc, opcode),
             0x2B => self.op_horizontal_menu(activation, host, pc, opcode),
             0x2D => self.op_call(activation, host, pc, opcode),
             0x2F => self.op_and(activation, host, pc, opcode),
+            0x30 => self.op_or(activation, host, pc, opcode),
             0x33 => self.op_print_return(activation),
             0x37 => self.op_load_files(activation, host, pc, opcode, true),
             0x3A => self.op_delay(activation),
@@ -780,6 +795,77 @@ impl EclMachine {
         let b = self.resolve_numeric(&args[1], pc, opcode, host)?;
         let dest = self.resolve_target(&args[2], pc, opcode)?;
         let value = a.wrapping_add(b);
+        self.mem_write(dest, value, host, Origin { pc });
+        activation.pc = next;
+        Ok(VmStep::Continue)
+    }
+
+    /// SUBTRACT (0x05), `CMD_AddSubDivMulti` ovr003.cs:90-130 case 5. Result
+    /// is `operand2 - operand1` (B−A), not A−B (`ovr003.cs:107`:
+    /// `value = (ushort)(val_b - val_a)`).
+    fn op_subtract(
+        &mut self,
+        activation: &mut Activation,
+        host: &mut dyn VmHost,
+        pc: u16,
+        opcode: u8,
+    ) -> Result<VmStep, VmError> {
+        let (args, next) = self.load_cmd_sets(pc.wrapping_add(1), 3, host, pc);
+        let a = self.resolve_numeric(&args[0], pc, opcode, host)?;
+        let b = self.resolve_numeric(&args[1], pc, opcode, host)?;
+        let dest = self.resolve_target(&args[2], pc, opcode)?;
+        let value = b.wrapping_sub(a);
+        self.mem_write(dest, value, host, Origin { pc });
+        activation.pc = next;
+        Ok(VmStep::Continue)
+    }
+
+    /// DIVIDE (0x06), `CMD_AddSubDivMulti` ovr003.cs:90-130 case 6:
+    /// `value = val_a / val_b; gbl.area2_ptr.field_67E = val_a % val_b`. A
+    /// zero divisor throws uncaught in coab (`VmError::DivisionByZero`, see
+    /// its doc comment). The remainder bypasses `vm_SetMemoryValue` in the
+    /// original (a direct `field_67E` struct write) but `Area2.field_800_Get`
+    /// maps that same struct offset back onto Party-window address
+    /// **`0x7F3F`** (opcode-classification.md docket item 2, confirmed by a
+    /// live example: `ECL2.DAX` block 1's `0x8295: DIVIDE mem=0x7F7B, imm=0x08
+    /// -> mem=0x7F80` feeds `0x829E: GETTABLE base=0x9DB8 index=mem[0x7F3F]`).
+    /// Writing the remainder through the ordinary `mem_write` facade at
+    /// `0x7F3F` reproduces that alias for any host without a special case.
+    fn op_divide(
+        &mut self,
+        activation: &mut Activation,
+        host: &mut dyn VmHost,
+        pc: u16,
+        opcode: u8,
+    ) -> Result<VmStep, VmError> {
+        let (args, next) = self.load_cmd_sets(pc.wrapping_add(1), 3, host, pc);
+        let a = self.resolve_numeric(&args[0], pc, opcode, host)?;
+        let b = self.resolve_numeric(&args[1], pc, opcode, host)?;
+        let dest = self.resolve_target(&args[2], pc, opcode)?;
+        if b == 0 {
+            return Err(VmError::DivisionByZero { pc, opcode });
+        }
+        let value = a / b;
+        let remainder = a % b;
+        self.mem_write(dest, value, host, Origin { pc });
+        self.mem_write(0x7F3F, remainder, host, Origin { pc });
+        activation.pc = next;
+        Ok(VmStep::Continue)
+    }
+
+    /// MULTIPLY (0x07), `CMD_AddSubDivMulti` ovr003.cs:90-130 case 7.
+    fn op_multiply(
+        &mut self,
+        activation: &mut Activation,
+        host: &mut dyn VmHost,
+        pc: u16,
+        opcode: u8,
+    ) -> Result<VmStep, VmError> {
+        let (args, next) = self.load_cmd_sets(pc.wrapping_add(1), 3, host, pc);
+        let a = self.resolve_numeric(&args[0], pc, opcode, host)?;
+        let b = self.resolve_numeric(&args[1], pc, opcode, host)?;
+        let dest = self.resolve_target(&args[2], pc, opcode)?;
+        let value = a.wrapping_mul(b);
         self.mem_write(dest, value, host, Origin { pc });
         activation.pc = next;
         Ok(VmStep::Continue)
@@ -1113,11 +1199,10 @@ impl EclMachine {
     }
 
     /// ON GOTO (0x25), `CMD_OnGotoGoSub` ovr003.cs:1032-1064 (`gbl.command
-    /// == 0x25` branch; ON GOSUB/0x26 isn't implemented this session). Both
-    /// the selector and the tail-entry count are `GetCmdValue`-resolved
-    /// (can be memory-mode, not just immediate). Out-of-range selector is a
-    /// confirmed fall-through to `next` — no `else`-branch jump in the
-    /// original (`ovr003.cs:1038-1059`).
+    /// == 0x25` branch). Both the selector and the tail-entry count are
+    /// `GetCmdValue`-resolved (can be memory-mode, not just immediate).
+    /// Out-of-range selector is a confirmed fall-through to `next` — no
+    /// `else`-branch jump in the original (`ovr003.cs:1038-1059`).
     fn op_on_goto(
         &mut self,
         activation: &mut Activation,
@@ -1133,6 +1218,38 @@ impl EclMachine {
 
         if selector < count {
             let target = self.resolve_target(&args[2 + selector as usize], pc, opcode)?;
+            activation.pc = target;
+        } else {
+            activation.pc = next;
+        }
+        Ok(VmStep::Continue)
+    }
+
+    /// ON GOSUB (0x26), `CMD_OnGotoGoSub` ovr003.cs:1032-1064 (`gbl.command
+    /// == 0x26` branch). Identical decode/dispatch shape to ON GOTO, plus a
+    /// call-stack push — but ONLY on the in-range branch
+    /// (opcode-classification.md's 0x26 row): the push at `ovr003.cs:1055`
+    /// sits inside the `if (var_1 < var_2)` body, so an out-of-range
+    /// selector neither jumps nor pushes, indistinguishable from ON GOTO's
+    /// own out-of-range fall-through. The pushed return address is `next`
+    /// (the fall-through landing after the full decoded tail), matching
+    /// GOSUB's own convention.
+    fn op_on_gosub(
+        &mut self,
+        activation: &mut Activation,
+        host: &mut dyn VmHost,
+        pc: u16,
+        opcode: u8,
+    ) -> Result<VmStep, VmError> {
+        let (mut args, cursor) = self.load_cmd_sets(pc.wrapping_add(1), 2, host, pc);
+        let selector = self.resolve_numeric(&args[0], pc, opcode, host)? as u8;
+        let count = self.resolve_numeric(&args[1], pc, opcode, host)? as u8;
+        let (tail, next) = self.load_cmd_sets(cursor, count, host, pc);
+        args.extend(tail);
+
+        if selector < count {
+            let target = self.resolve_target(&args[2 + selector as usize], pc, opcode)?;
+            self.call_stack.push(next);
             activation.pc = target;
         } else {
             activation.pc = next;
@@ -1246,7 +1363,7 @@ impl EclMachine {
     }
 
     /// AND (0x2F), `CMD_AndOr` ovr003.cs:607-632 (`gbl.command == 0x2F`
-    /// branch; OR/0x30 isn't in this session's opcode list). Flags derive
+    /// branch; shared with OR/0x30's `op_or`, `:621-624`). Flags derive
     /// from `compare_variables(resultant, 0)` — unwinding the same
     /// `arg_0`/`arg_2` swap as COMPARE gives `set_compare_flags(0,
     /// resultant)`: the relational flags effectively test the result
@@ -1263,6 +1380,27 @@ impl EclMachine {
         let b = self.resolve_numeric(&args[1], pc, opcode, host)?;
         let dest = self.resolve_target(&args[2], pc, opcode)?;
         let resultant = (a as u8) & (b as u8);
+        self.set_compare_flags(0, resultant as u16);
+        self.mem_write(dest, resultant as u16, host, Origin { pc });
+        activation.pc = next;
+        Ok(VmStep::Continue)
+    }
+
+    /// OR (0x30), `CMD_AndOr` ovr003.cs:607-632 (`gbl.command == 0x30`
+    /// branch, `:621-624`) — identical structure to AND (0x2F), bitwise OR
+    /// instead of AND.
+    fn op_or(
+        &mut self,
+        activation: &mut Activation,
+        host: &mut dyn VmHost,
+        pc: u16,
+        opcode: u8,
+    ) -> Result<VmStep, VmError> {
+        let (args, next) = self.load_cmd_sets(pc.wrapping_add(1), 3, host, pc);
+        let a = self.resolve_numeric(&args[0], pc, opcode, host)?;
+        let b = self.resolve_numeric(&args[1], pc, opcode, host)?;
+        let dest = self.resolve_target(&args[2], pc, opcode)?;
+        let resultant = (a as u8) | (b as u8);
         self.set_compare_flags(0, resultant as u16);
         self.mem_write(dest, resultant as u16, host, Origin { pc });
         activation.pc = next;

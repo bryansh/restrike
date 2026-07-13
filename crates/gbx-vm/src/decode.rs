@@ -126,11 +126,16 @@ impl Arg {
     /// operand). `None` for operand kinds that never carry a `.Word` in the
     /// original (an immediate-byte-moded operand never sets coab's `high`
     /// field, so `.Word` there would throw) — used by the disassembler to
-    /// flag an unresolvable jump target rather than guessing one.
+    /// flag an unresolvable jump target rather than guessing one. `MemStr`
+    /// (mode `0x81`) *does* set `high` at decode time (`Opperation.cs:78-96`:
+    /// `High`'s setter always populates `word`, regardless of `code`), so
+    /// `.Word` is valid there too — confirmed by a real SAVE-with-`mem_str`-
+    /// destination instance in shipped `ECL2.DAX` block 1 (`0x8328`/`0x833D`)
+    /// that a `None` here made unresolvable (`VmError::UnresolvedOperand`).
     pub fn raw_word(&self) -> Option<u16> {
         match *self {
-            Arg::Mem(w) | Arg::MemAlt(w) | Arg::ImmWord(w) => Some(w),
-            Arg::ImmByte(_) | Arg::InlineStr(_) | Arg::MemStr(_) | Arg::UnknownMode { .. } => None,
+            Arg::Mem(w) | Arg::MemAlt(w) | Arg::ImmWord(w) | Arg::MemStr(w) => Some(w),
+            Arg::ImmByte(_) | Arg::InlineStr(_) | Arg::UnknownMode { .. } => None,
         }
     }
 }

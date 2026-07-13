@@ -177,6 +177,12 @@ pub fn describe_halt(err: &gbx_vm::VmError) -> HaltRecord {
             opcode,
             description: "a required .dax asset was missing".to_string(),
         },
+        VmError::DivisionByZero { pc, opcode } => HaltRecord {
+            pc,
+            opcode,
+            description:
+                "DIVIDE by zero (the original engine crashes uncaught here too)".to_string(),
+        },
         VmError::StepWhilePending
         | VmError::ResumeWithoutPending
         | VmError::ReplyMismatch
@@ -198,6 +204,24 @@ pub struct ResidentAssets {
     pub bigpic_block: Option<u8>,
 }
 
+/// One transcript-worthy content event (M2 step 8's transcript-mode task
+/// deliverable): every PRINT/PRINTCLEAR text job the text system starts, and
+/// every VM `Request`'s widget-opening label — the player-visible content a
+/// DOSBox side-by-side transcript needs to be diffed against. Deliberately
+/// coarser than the full `Effect`/`Widget` machinery (no pacing/pagination
+/// detail) — this is a content log, not a replay format.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TranscriptEntry {
+    /// PRINT (0x11) / PRINTCLEAR (0x12) — `clear_first` distinguishes them.
+    Print { text: String, clear_first: bool },
+    /// A VM `Request`'s widget-opening label (e.g. a HORIZONTAL MENU's joined
+    /// option text, or `"delay"`/`"combat (stub)"` for the non-textual
+    /// requests) — logged at the same point `widget_for_request` builds the
+    /// `Widget`, so a transcript shows exactly what interaction the player
+    /// was presented, not just prose text.
+    Request(String),
+}
+
 /// Everything `ScriptMemory`/`EngineServices` needs beyond `EngineState`
 /// (D-VM5's raw fallback store + log, the M2-slice named-but-inert Global
 /// cells, resident-asset bookkeeping, the service-call log, and halt
@@ -214,6 +238,11 @@ pub struct VmMemoryState {
     #[serde(skip)]
     pub calls: Vec<RecordedCall>,
     pub halts: Vec<HaltRecord>,
+    /// The content log for `restrike walk --transcript` (M2 step 8) — not
+    /// save-relevant state, like `calls`; a frontend drains it per tick via
+    /// [`crate::engine::Engine::take_transcript`].
+    #[serde(skip)]
+    pub transcript: Vec<TranscriptEntry>,
     pub assets: ResidentAssets,
     /// `0x3DE` (`word_1EE76`): the CALL `0x3201` sound-variant selector —
     /// the one "dead-ish" Global cell with a real consumer

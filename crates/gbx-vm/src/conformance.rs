@@ -205,6 +205,121 @@ mod opcodes {
         assert_eq!(h.word(0x4B00), Some(8));
     }
 
+    /// SUBTRACT (0x05), `CMD_AddSubDivMulti` ovr003.cs:90-130 case 5: result
+    /// is operand2 minus operand1 (B−A), not A−B.
+    #[test]
+    fn subtract_result_is_operand2_minus_operand1() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x05).imm_byte(3).imm_byte(10).imm_word(0x4B00); // SUBTRACT 3,10 -> 0x4B00
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+
+        assert_eq!(run_until_done(&mut m, &mut h), Exit::Ended);
+        assert_eq!(h.word(0x4B00), Some(7)); // 10 - 3, not 3 - 10
+    }
+
+    /// MULTIPLY (0x07), `CMD_AddSubDivMulti` ovr003.cs:90-130 case 7.
+    #[test]
+    fn multiply_writes_product_to_destination() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x07).imm_byte(6).imm_byte(7).imm_word(0x4B00); // MULTIPLY 6,7 -> 0x4B00
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+
+        assert_eq!(run_until_done(&mut m, &mut h), Exit::Ended);
+        assert_eq!(h.word(0x4B00), Some(42));
+    }
+
+    /// DIVIDE (0x06), `CMD_AddSubDivMulti` ovr003.cs:90-130 case 6: the
+    /// quotient writes to the operand-3 destination; the remainder writes
+    /// through the ordinary `ScriptMemory` facade at the Party-window alias
+    /// address `0x7F3F` (opcode-classification.md docket item 2).
+    #[test]
+    fn divide_writes_quotient_to_destination_and_remainder_to_0x7f3f() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x06).imm_byte(17).imm_byte(5).imm_word(0x4B00); // DIVIDE 17,5 -> 0x4B00
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+
+        assert_eq!(run_until_done(&mut m, &mut h), Exit::Ended);
+        assert_eq!(h.word(0x4B00), Some(3)); // 17 / 5
+        assert_eq!(h.word(0x7F3F), Some(2)); // 17 % 5
+    }
+
+    /// DIVIDE by zero: coab's `val_a / val_b` uses C#'s integer division,
+    /// which throws `DivideByZeroException` uncaught anywhere up the
+    /// `RunEclVm` call chain — the original crashes. Modeled as a defined
+    /// `VmError`, not a Rust panic.
+    #[test]
+    fn divide_by_zero_is_a_defined_error_not_a_panic() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x06).imm_byte(9).imm_byte(0).imm_word(0x4B00); // DIVIDE 9,0 -> 0x4B00
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+
+        let err = m
+            .step(&mut h)
+            .expect_err("division by zero must be a defined error");
+        assert!(matches!(
+            err,
+            VmError::DivisionByZero {
+                pc,
+                opcode: 0x06
+            } if pc == entry
+        ));
+    }
+
+    /// The shipped pattern this opcode's implementation exists to unblock:
+    /// `ECL2.DAX` block 1's per-step script executes `0x8295: DIVIDE
+    /// mem=0x7F7B, imm=0x08 -> mem=0x7F80` immediately followed by `0x829E:
+    /// GETTABLE base=0x9DB8 index=mem[0x7F3F] -> 0x7E7A` — a modulo-8 table
+    /// lookup whose index is DIVIDE's out-of-band remainder, read back
+    /// through the ordinary Party-window address (docket item 2's confirmed
+    /// live example). Mirrors every real address except GETTABLE's base:
+    /// the real `0x9DB8` sits *inside* the ECL window (`0x8000..=0x9DFF`),
+    /// which the VM intercepts against its own resident block bytes before
+    /// ever reaching `ScriptMemory` (`host.rs`'s module doc) — the real
+    /// table lives in the shipped block's own data, not a `TestHost`-mocked
+    /// window. This fixture uses a Table-window base (`0x9E00`, just past
+    /// the ECL window) instead, so the test exercises the DIVIDE→0x7F3F→
+    /// GETTABLE data flow through the same host-visible facade a resident
+    /// mock can assert on, without fabricating in-block table bytes.
+    #[test]
+    fn divide_then_gettable_via_0x7f3f_mirrors_the_shipped_pattern() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x06).mem(0x7F7B).imm_byte(8).mem(0x7F80); // DIVIDE mem[0x7F7B],8 -> mem[0x7F80]
+        b.op(0x2A).imm_word(0x9E00).mem(0x7F3F).mem(0x7E7A); // GETTABLE base=0x9E00 idx=mem[0x7F3F] -> mem[0x7E7A]
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+        h.set_word(0x7F7B, 19); // dividend
+        h.set_word(0x9E00 + 3, 0xBEEF); // table[remainder] sentinel, 19 % 8 == 3
+
+        assert_eq!(run_until_done(&mut m, &mut h), Exit::Ended);
+        assert_eq!(h.word(0x7F80), Some(2)); // 19 / 8
+        assert_eq!(h.word(0x7F3F), Some(3)); // 19 % 8, the alias GETTABLE indexes with
+        assert_eq!(h.word(0x7E7A), Some(0xBEEF));
+    }
+
     /// RANDOM (0x08), `CMD_Random` ovr003.cs:132-151: the inclusive-bound
     /// adjustment increments the operand unless it's already `0xFF`.
     #[test]
@@ -272,6 +387,31 @@ mod opcodes {
         assert_eq!(run_until_done(&mut m, &mut h), Exit::Ended);
         assert!(h.calls.contains(&RecordedCall::MemWriteString {
             addr: 0x4B00,
+            value: VmString::from_bytes(*b"HI"),
+            origin: crate::Origin { pc: entry },
+        }));
+    }
+
+    /// SAVE (0x09) with a `mem_str` (mode `0x81`)-encoded *destination* —
+    /// real shipped content (`ECL2.DAX` block 1, `0x8328`/`0x833D`): a
+    /// destination operand's raw word must resolve regardless of its own
+    /// encoded mode (docket item 3), and `MemStr` carries one just like
+    /// `Mem`/`ImmWord` (`Arg::raw_word`'s doc comment) — this used to be
+    /// `VmError::UnresolvedOperand` before that fix.
+    #[test]
+    fn save_string_to_a_mem_str_encoded_destination_resolves() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x09).inline_str(b"HI").mem_str(0x7B89); // SAVE "HI" -> mem_str 0x7B89
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+
+        assert_eq!(run_until_done(&mut m, &mut h), Exit::Ended);
+        assert!(h.calls.contains(&RecordedCall::MemWriteString {
+            addr: 0x7B89,
             value: VmString::from_bytes(*b"HI"),
             origin: crate::Origin { pc: entry },
         }));
@@ -708,6 +848,73 @@ mod opcodes {
         assert_eq!(m.current_pc(), Some(after));
     }
 
+    /// ON GOSUB (0x26): same shape as ON GOTO, plus a call-stack push of the
+    /// fall-through address on the in-range branch — a later RETURN lands
+    /// back after the whole decoded tail, not falling straight through to
+    /// EXIT (which is what an *empty* call stack's RETURN would do, 0x13's
+    /// own note) — the distinguishing signal this test checks for.
+    #[test]
+    fn on_gosub_in_range_selector_jumps_and_pushes_the_fallthrough() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x26)
+            .imm_byte(1) // selector = 1
+            .imm_byte(2) // count = 2
+            .imm_word_label("entry0")
+            .imm_word_label("entry1");
+        b.label("fallthrough");
+        b.op(0x00); // landing site for the pushed return address
+        b.label("entry0");
+        b.op(0x00);
+        b.label("entry1");
+        b.op(0x13); // RETURN — pops the pushed fall-through address
+
+        let entry = b.addr_of("entry");
+        let entry1 = b.addr_of("entry1");
+        let fallthrough = b.addr_of("fallthrough");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+
+        assert_continue(m.step(&mut h));
+        assert_eq!(m.current_pc(), Some(entry1));
+        // If the push happened, RETURN pops it and lands back at
+        // `fallthrough`, still Continue — not Done(Ended), which is what an
+        // empty call stack's RETURN would produce instead.
+        assert_continue(m.step(&mut h));
+        assert_eq!(m.current_pc(), Some(fallthrough));
+    }
+
+    /// ON GOSUB (0x26): an out-of-range selector neither jumps nor pushes —
+    /// indistinguishable from ON GOTO's own out-of-range fall-through
+    /// (opcode-classification.md's 0x26 row).
+    #[test]
+    fn on_gosub_out_of_range_selector_falls_through_without_pushing() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x26)
+            .imm_byte(5) // selector = 5, out of range
+            .imm_byte(2) // count = 2
+            .imm_word_label("entry0")
+            .imm_word_label("entry1");
+        b.label("after");
+        b.op(0x13); // RETURN — empty call stack silently becomes EXIT (0x13's own note)
+        b.label("entry0");
+        b.op(0x00);
+        b.label("entry1");
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let after = b.addr_of("after");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+
+        assert_continue(m.step(&mut h));
+        assert_eq!(m.current_pc(), Some(after));
+        // RETURN with nothing pushed falls through to EXIT, not a jump back
+        // into the tail — proving the out-of-range branch never pushed.
+        assert_eq!(run_until_done(&mut m, &mut h), Exit::Ended);
+    }
+
     /// GETTABLE (0x2A), `CMD_GetTable` ovr003.cs:635-648: operand 1 is a raw
     /// base address, added to operand 2's *resolved* index — a computed
     /// address (docket item 12).
@@ -912,6 +1119,28 @@ mod opcodes {
         assert_eq!(run_until_done(&mut m, &mut h), Exit::Ended);
         assert_eq!(h.word(0x4B00), Some(0b1000));
         // set_compare_flags(0, 8): 0<8 is true ("<"), 0!=8 true, etc.
+        assert_eq!(m.flags(), [false, true, true, false, true, false]);
+    }
+
+    /// OR (0x30), `CMD_AndOr` ovr003.cs:607-632 (`0x30` branch): identical
+    /// structure to AND, bitwise OR instead of AND.
+    #[test]
+    fn or_writes_bitwise_or_and_sets_flags_against_zero() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x30)
+            .imm_byte(0b1100)
+            .imm_byte(0b1010)
+            .imm_word(0x4B00);
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+
+        assert_eq!(run_until_done(&mut m, &mut h), Exit::Ended);
+        assert_eq!(h.word(0x4B00), Some(0b1110));
+        // set_compare_flags(0, 14): 0<14 is true ("<"), 0!=14 true, etc.
         assert_eq!(m.flags(), [false, true, true, false, true, false]);
     }
 

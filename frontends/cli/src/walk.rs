@@ -116,6 +116,7 @@ pub fn replay(
     dump_at: &[u64],
     mut on_checkpoint: impl FnMut(u64, &str),
     mut on_dump: impl FnMut(u64, &Frame<'_>),
+    mut on_transcript: impl FnMut(u64, &gbx_engine::vmhost::TranscriptEntry),
 ) -> String {
     let empty: Vec<InputEvent> = Vec::new();
     let mut exit_hash = String::new();
@@ -132,6 +133,9 @@ pub fn replay(
         }
         if tick == last_tick {
             exit_hash = hash;
+        }
+        for entry in engine.take_transcript() {
+            on_transcript(tick, &entry);
         }
     }
     exit_hash
@@ -202,6 +206,18 @@ pub fn cmd_walk(args: Vec<String>) -> ExitCode {
         opts.trace.display(),
         opts.seed
     );
+
+    let mut transcript_file = match &opts.transcript {
+        Some(path) => match fs::File::create(path) {
+            Ok(f) => Some(std::io::BufWriter::new(f)),
+            Err(err) => {
+                eprintln!("restrike: failed to create '{}': {err}", path.display());
+                return ExitCode::FAILURE;
+            }
+        },
+        None => None,
+    };
+
     let exit_hash = replay(
         &mut engine,
         &trace,
@@ -214,9 +230,44 @@ pub fn cmd_walk(args: Vec<String>) -> ExitCode {
                 Err(err) => eprintln!("restrike: failed to write '{}': {err}", path.display()),
             }
         },
+        |tick, entry| {
+            let Some(w) = transcript_file.as_mut() else {
+                return;
+            };
+            use std::io::Write;
+            if let Err(err) = writeln!(w, "{}", format_transcript_line(tick, entry)) {
+                eprintln!("restrike: failed to write transcript line: {err}");
+            }
+        },
     );
+    if let Some(mut w) = transcript_file {
+        use std::io::Write;
+        if let Err(err) = w.flush() {
+            eprintln!("restrike: failed to flush transcript: {err}");
+        } else if let Some(path) = &opts.transcript {
+            println!("transcript written to '{}'", path.display());
+        }
+    }
     println!("tick {}: exit hash={exit_hash}", trace.max_tick.max(1));
     ExitCode::SUCCESS
+}
+
+/// One transcript line's text, shared by `--transcript`'s file writer and
+/// the local-only expected-transcript comparison test below, so the two
+/// never drift out of the same format.
+pub fn format_transcript_line(tick: u64, entry: &gbx_engine::vmhost::TranscriptEntry) -> String {
+    use gbx_engine::vmhost::TranscriptEntry;
+    match entry {
+        TranscriptEntry::Print {
+            text,
+            clear_first: false,
+        } => format!("tick {tick}: PRINT: {text}"),
+        TranscriptEntry::Print {
+            text,
+            clear_first: true,
+        } => format!("tick {tick}: PRINTCLEAR: {text}"),
+        TranscriptEntry::Request(label) => format!("tick {tick}: REQUEST: {label}"),
+    }
 }
 
 fn write_ppm(path: &std::path::Path, frame: &Frame<'_>) -> std::io::Result<()> {
@@ -248,6 +299,11 @@ struct Args {
     /// real-data walks all fix seed `1`): default to the same constant so a
     /// trace with no `--seed` reproduces the same PRNG stream everywhere.
     seed: u64,
+    /// D10: transcripts contain real game text — a LOCAL-ONLY artifact. The
+    /// caller is responsible for pointing this outside the repo (or at a
+    /// gitignored path); this tool has no opinion on where, only that it
+    /// never ships one.
+    transcript: Option<PathBuf>,
 }
 
 const DEFAULT_SEED: u64 = 1;
@@ -259,6 +315,7 @@ impl Args {
         let mut dump_at = Vec::new();
         let mut out_dir = PathBuf::from(".");
         let mut seed = DEFAULT_SEED;
+        let mut transcript = None;
 
         let mut iter = args.into_iter().peekable();
         if let Some(first) = iter.peek() {
@@ -277,6 +334,9 @@ impl Args {
                     );
                 }
                 "--out-dir" => out_dir = PathBuf::from(next_val(&mut iter, "--out-dir")?),
+                "--transcript" => {
+                    transcript = Some(PathBuf::from(next_val(&mut iter, "--transcript")?))
+                }
                 "--seed" => {
                     let v = next_val(&mut iter, "--seed")?;
                     seed = v
@@ -293,6 +353,7 @@ impl Args {
             dump_at,
             out_dir,
             seed,
+            transcript,
         })
     }
 }
@@ -308,7 +369,7 @@ fn next_val(
 fn print_usage() {
     eprintln!(
         "usage: restrike walk [DIR] --trace <FILE> [--dump-at TICK]... [--out-dir DIR] \
-         [--seed N]"
+         [--seed N] [--transcript <PATH>]"
     );
     eprintln!();
     eprintln!(
@@ -319,4 +380,88 @@ fn print_usage() {
          repeat) writes that tick's frame as a PPM into --out-dir (default '.'). --seed defaults \
          to 1 (this session's fixed-determinism convention)."
     );
+    eprintln!();
+    eprintln!(
+        "--transcript <PATH> logs every PRINT/PRINTCLEAR text and VM-request label emitted \
+         during the replay, one 'tick N: KIND: text' line per event. Transcripts contain real \
+         game text (D10) — PATH must be outside the repo (or gitignored); this tool does not \
+         enforce that."
+    );
+}
+
+/// M2 step 8's task deliverable 3: a local-only test comparing the
+/// committed circuit's live transcript against an expected-transcript file
+/// the user maintains outside the repo (a DOSBox side-by-side capture of
+/// the same walk, D10 — never committed, never auto-generated by this
+/// test). Gated on GBX_DATA_DIR like every other real-data test in this
+/// repo, AND on the expected file's own existence: until a human captures
+/// one, this test documents the convention and skips rather than failing.
+#[cfg(test)]
+mod expected_transcript {
+    use super::*;
+    use gbx_engine::engine::Engine;
+    use gbx_formats::game_data::load_dir;
+
+    /// Where the human-maintained oracle transcript lives, documented (never
+    /// committed — the directory itself is outside this repo entirely).
+    const EXPECTED_TRANSCRIPT_PATH: &str = "expected/tilverton-circuit.transcript";
+
+    #[test]
+    fn live_transcript_matches_the_human_maintained_expected_transcript() {
+        let Some(data_dir) = env::var_os("GBX_DATA_DIR") else {
+            eprintln!("GBX_DATA_DIR not set — skipping (local-only test)");
+            return;
+        };
+        // The expected-transcript directory is a sibling of GBX_DATA_DIR's
+        // usual home (~/goldbox-data), not GBX_DATA_DIR itself (which points
+        // at the game's own data files) — resolved from HOME per this
+        // repo's documented convention (`docs/dosbox-capture.md`).
+        let Some(home) = env::var_os("HOME") else {
+            eprintln!("HOME not set — skipping (local-only test)");
+            return;
+        };
+        let expected_path = PathBuf::from(home)
+            .join("goldbox-data")
+            .join(EXPECTED_TRANSCRIPT_PATH);
+        let Ok(expected) = fs::read_to_string(&expected_path) else {
+            eprintln!(
+                "no expected transcript at '{p}' yet — this test documents the convention and \
+                 skips until a human captures one from DOSBox (see docs/dosbox-capture.md). \
+                 Reference (engine-only, not an oracle): run `restrike walk $GBX_DATA_DIR \
+                 --trace fixtures/tilverton-circuit.jsonl --transcript {p}`",
+                p = expected_path.display()
+            );
+            return;
+        };
+
+        let trace_text = fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/tilverton-circuit.jsonl"
+        ))
+        .expect("fixtures/tilverton-circuit.jsonl must be readable");
+        let trace = Trace::parse(&trace_text).expect("fixtures/tilverton-circuit.jsonl must parse");
+
+        let data =
+            load_dir(std::path::Path::new(&data_dir)).expect("GBX_DATA_DIR must be readable");
+        let mut engine =
+            Engine::new(data, DEFAULT_SEED).expect("Engine::new must boot against real CotAB data");
+
+        let mut lines = Vec::new();
+        replay(
+            &mut engine,
+            &trace,
+            &[],
+            |_, _| {},
+            |_, _| {},
+            |tick, entry| lines.push(format_transcript_line(tick, entry)),
+        );
+        let live = lines.join("\n");
+
+        assert_eq!(
+            live.trim_end(),
+            expected.trim_end(),
+            "live transcript diverged from the human-maintained expected transcript at '{}'",
+            expected_path.display()
+        );
+    }
 }
