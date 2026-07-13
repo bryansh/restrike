@@ -11,6 +11,7 @@ mod panes;
 #[cfg(test)]
 mod real_data_smoke;
 mod viewmodel;
+mod widgets;
 
 use std::env;
 use std::path::PathBuf;

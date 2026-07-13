@@ -37,6 +37,12 @@ impl InspectApp {
 
 impl eframe::App for InspectApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Task brief deliverable 1: text selection everywhere. egui 0.29
+        // already defaults this to `true`, but setting it explicitly here
+        // documents the intent and survives a future egui upgrade that
+        // might change that default.
+        ctx.style_mut(|style| style.interaction.selectable_labels = true);
+
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.pane, Pane::ResourceBrowser, "Resource browser");

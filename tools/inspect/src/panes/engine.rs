@@ -20,7 +20,8 @@ use gbx_engine::vmhost::{AccessKind, UnknownAccess, VmMemoryState};
 use gbx_formats::game_data::GameData;
 
 use crate::keymap;
-use crate::viewmodel::log_table;
+use crate::viewmodel::{call_table, copy, halt_table, log_table};
+use crate::widgets;
 
 pub struct EnginePaneState {
     engine: Option<Engine>,
@@ -29,6 +30,11 @@ pub struct EnginePaneState {
     speed: u32,
     capture_keyboard: bool,
     texture: Option<TextureHandle>,
+    /// The same RGBA bytes just uploaded to `texture`, kept around for the
+    /// framebuffer's "Copy image"/"Save .ppm" buttons (task brief
+    /// deliverable 3) — `show_framebuffer` runs after the texture is
+    /// (re)built each tick and has no other way to get the raw pixels back.
+    last_rgba: Vec<u8>,
     last_serial: u64,
     tick_count: u64,
     /// Parallel to `engine.vm_memory().unknown_log.entries()`: the tick each
@@ -38,6 +44,12 @@ pub struct EnginePaneState {
     log_first_seen: Vec<u64>,
     log_kind_filter: Option<AccessKind>,
     log_addr_filter: String,
+    /// Substring filter on the service-call log (task brief deliverable 4;
+    /// [`log_kind_filter`]/[`log_addr_filter`] above are the unknown-access
+    /// log's own existing filter).
+    call_filter: String,
+    /// Shared directory every "Save .ppm" button in this pane writes into.
+    save_dir: String,
 }
 
 impl Default for EnginePaneState {
@@ -49,11 +61,14 @@ impl Default for EnginePaneState {
             speed: 1,
             capture_keyboard: false,
             texture: None,
+            last_rgba: Vec::new(),
             last_serial: 0,
             tick_count: 0,
             log_first_seen: Vec::new(),
             log_kind_filter: None,
             log_addr_filter: String::new(),
+            call_filter: String::new(),
+            save_dir: ".".to_string(),
         }
     }
 }
@@ -177,6 +192,7 @@ impl EnginePaneState {
             );
             self.texture =
                 Some(ctx.load_texture("engine_framebuffer", image, TextureOptions::NEAREST));
+            self.last_rgba = rgba;
         }
         let entries_len = engine.vm_memory().unknown_log.entries().len();
         while self.log_first_seen.len() < entries_len {
@@ -199,6 +215,20 @@ impl EnginePaneState {
         } else {
             "keyboard capture OFF — check the box above to play"
         });
+
+        ui.horizontal(|ui| {
+            ui.label("save directory:");
+            ui.text_edit_singleline(&mut self.save_dir);
+        });
+        widgets::image_actions(
+            ui,
+            "framebuffer",
+            gbx_engine::framebuffer::WIDTH,
+            gbx_engine::framebuffer::HEIGHT,
+            &self.last_rgba,
+            &self.save_dir,
+            &["framebuffer", &format!("tick{}", self.tick_count)],
+        );
     }
 
     fn show_state(&mut self, ui: &mut egui::Ui) {
@@ -207,23 +237,26 @@ impl EnginePaneState {
         ui.heading("Shell / VmPhase");
         let shell_json = serde_json::to_string_pretty(engine.shell())
             .unwrap_or_else(|e| format!("<serialize error: {e}>"));
+        widgets::copy_text_button(ui, "Copy JSON", || shell_json.clone());
         egui::ScrollArea::vertical()
             .id_salt("shell_json")
             .max_height(220.0)
             .show(ui, |ui| {
-                ui.monospace(&shell_json);
+                ui.add(
+                    egui::Label::new(egui::RichText::new(&shell_json).monospace()).selectable(true),
+                );
             });
 
         ui.separator();
         ui.heading("Engine state");
         let state = engine.state();
+        let (hh, mm) = state.clock.hh_mm();
         ui.monospace(format!("pos: {:?}", state.pos));
         ui.monospace(format!("facing: {:?}", state.facing));
         ui.monospace(format!(
             "search_flags: {:#04b}  area_map_shown: {}  area_view_allowed: {}",
             state.search_flags, state.area_map_shown, state.area_view_allowed
         ));
-        let (hh, mm) = state.clock.hh_mm();
         ui.monospace(format!("clock: {hh:02}:{mm:02}"));
         ui.monospace(format!(
             "ecl_block_id: {}  last_ecl_block_id: {}",
@@ -254,9 +287,41 @@ impl EnginePaneState {
             "3d map block: {:?}  bigpic block: {:?}  walldefs: {:?}",
             vm.assets.map_3d_block, vm.assets.bigpic_block, vm.assets.walldefs
         ));
+        widgets::copy_text_button(ui, "Copy summary (key=value)", || {
+            copy::to_key_value(&[
+                ("pos", format!("{:?}", state.pos)),
+                ("facing", format!("{:?}", state.facing)),
+                ("search_flags", format!("{:#04b}", state.search_flags)),
+                ("area_map_shown", state.area_map_shown.to_string()),
+                ("area_view_allowed", state.area_view_allowed.to_string()),
+                ("clock", format!("{hh:02}:{mm:02}")),
+                ("ecl_block_id", state.ecl_block_id.to_string()),
+                ("last_ecl_block_id", state.last_ecl_block_id.to_string()),
+                ("selected_player", state.selected_player.to_string()),
+                (
+                    "last_selected_player",
+                    state.last_selected_player.to_string(),
+                ),
+                ("chained", state.chained.to_string()),
+                ("party_killed", state.party_killed.to_string()),
+                ("game_state", format!("{:?}", state.game_state)),
+                ("byte_1ee91", vm.byte_1ee91.to_string()),
+                ("byte_1ee94", vm.byte_1ee94.to_string()),
+                ("position_changed", vm.position_changed.to_string()),
+                ("sprite_changed", vm.sprite_changed.to_string()),
+                ("can_draw_bigpic", vm.can_draw_bigpic.to_string()),
+                ("map_3d_block", format!("{:?}", vm.assets.map_3d_block)),
+                ("bigpic_block", format!("{:?}", vm.assets.bigpic_block)),
+                ("walldefs", format!("{:?}", vm.assets.walldefs)),
+            ])
+        });
 
         ui.separator();
         ui.heading(format!("Halt records ({})", vm.halts.len()));
+        widgets::copy_text_button(ui, "Copy halts (TSV)", || {
+            let rows: Vec<Vec<String>> = vm.halts.iter().map(halt_table::to_tsv_row).collect();
+            copy::to_tsv(&halt_table::TSV_HEADERS, &rows)
+        });
         egui::ScrollArea::vertical()
             .id_salt("halts")
             .max_height(120.0)
@@ -274,11 +339,25 @@ impl EnginePaneState {
 
         ui.separator();
         ui.heading(format!("Service-call log tail ({} total)", vm.calls.len()));
+        ui.horizontal(|ui| {
+            ui.label("filter:");
+            ui.text_edit_singleline(&mut self.call_filter);
+            widgets::copy_text_button(ui, "Copy calls (TSV)", || {
+                let filtered = call_table::filter_calls(&vm.calls, &self.call_filter);
+                let rows: Vec<Vec<String>> = filtered
+                    .iter()
+                    .enumerate()
+                    .map(|(i, call)| call_table::to_tsv_row(i, call))
+                    .collect();
+                copy::to_tsv(&call_table::TSV_HEADERS, &rows)
+            });
+        });
+        let filtered_calls = call_table::filter_calls(&vm.calls, &self.call_filter);
         egui::ScrollArea::vertical()
             .id_salt("calls")
             .max_height(150.0)
             .show(ui, |ui| {
-                for call in vm.calls.iter().rev().take(50) {
+                for call in filtered_calls.iter().rev().take(50) {
                     ui.monospace(format!("{call:?}"));
                 }
             });
@@ -320,6 +399,18 @@ impl EnginePaneState {
         let filtered =
             log_table::filter_entries(entries, self.log_kind_filter, &self.log_addr_filter);
         let filtered_idx: Vec<usize> = filtered.iter().map(|e| index_of(entries, e)).collect();
+        widgets::copy_text_button(ui, "Copy log (TSV)", || {
+            let rows: Vec<Vec<String>> = filtered_idx
+                .iter()
+                .map(|&idx| {
+                    let entry = &entries[idx];
+                    let first_seen = self.log_first_seen.get(idx).copied();
+                    let current_value = current_value_label(vm, entry);
+                    log_table::to_tsv_row(entry, first_seen, &current_value)
+                })
+                .collect();
+            copy::to_tsv(&log_table::TSV_HEADERS, &rows)
+        });
         egui::ScrollArea::vertical()
             .id_salt("unknown_log")
             .max_height(260.0)

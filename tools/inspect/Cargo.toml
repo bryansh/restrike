@@ -17,3 +17,4 @@ gbx-rules = { path = "../../crates/gbx-rules" }
 gbx-engine = { path = "../../crates/gbx-engine" }
 eframe = "0.29"
 serde_json = "1.0.150"
+arboard = "3.6.1"

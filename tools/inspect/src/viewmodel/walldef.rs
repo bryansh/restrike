@@ -17,6 +17,8 @@ use gbx_engine::symbols::SYMBOL_SET_FIX;
 use gbx_formats::image::{DecodedItem, ImageBlock};
 use gbx_formats::walldef::{WalldefBlock, TILE_IDS_PER_STYLE};
 
+use crate::viewmodel::palette::TRANSPARENT;
+
 /// The `8X8D{game_area}.DAX` sub-block id paired with wallset `wallset`
 /// (0-based) of a walldef block holding `wallset_count` sub-blocks total —
 /// `LoadWalldef`'s own convention (`vmhost.rs:747-751`): the walldef's own
@@ -92,6 +94,39 @@ pub fn compose_style<'a>(
         .iter()
         .map(|&id| resolve_tile(id, target_set, pixels))
         .collect()
+}
+
+/// Stitches one [`compose_style`] result (156 tile slots, `cols`-wide) into
+/// a single row-major indexed pixel buffer — the "walldef composites" image
+/// copy/save target (task brief deliverable 3): one flat image per
+/// (wallset, style) instead of 156 separate tile textures. Holes (a `None`
+/// slot) render as [`TRANSPARENT`]. Returns `(width_px, height_px, pixels)`.
+pub fn stitch_composite(
+    composed: &[Option<&DecodedItem>],
+    tile_w: usize,
+    tile_h: usize,
+    cols: usize,
+) -> (usize, usize, Vec<u8>) {
+    let cols = cols.max(1);
+    let rows = composed.len().div_ceil(cols);
+    let width = cols * tile_w;
+    let height = rows * tile_h;
+    let mut pixels = vec![TRANSPARENT; width * height];
+    for (i, tile) in composed.iter().enumerate() {
+        let Some(item) = tile else { continue };
+        let ox = (i % cols) * tile_w;
+        let oy = (i / cols) * tile_h;
+        for y in 0..tile_h {
+            for x in 0..tile_w {
+                let src = y * tile_w + x;
+                let Some(&px) = item.pixels.get(src) else {
+                    continue;
+                };
+                pixels[(oy + y) * width + ox + x] = px;
+            }
+        }
+    }
+    (width, height, pixels)
 }
 
 /// Derives the paired `8X8D{game_area}.DAX` file name from a
@@ -222,6 +257,38 @@ mod tests {
     fn sym_file_for_walldef_file_rejects_non_matching_names() {
         assert_eq!(sym_file_for_walldef_file("GEO2.DAX"), None);
         assert_eq!(sym_file_for_walldef_file("WALLDEF5.GAM"), None);
+    }
+
+    #[test]
+    fn stitch_composite_sizes_the_buffer_from_cols_and_tile_dims() {
+        let composed: Vec<Option<&DecodedItem>> = vec![None; 5];
+        let (w, h, pixels) = stitch_composite(&composed, 4, 8, 3);
+        assert_eq!(w, 12); // 3 cols * 4px
+        assert_eq!(h, 16); // ceil(5/3)=2 rows * 8px
+        assert_eq!(pixels.len(), 12 * 16);
+    }
+
+    #[test]
+    fn stitch_composite_all_holes_is_all_transparent() {
+        let composed: Vec<Option<&DecodedItem>> = vec![None; 4];
+        let (_, _, pixels) = stitch_composite(&composed, 2, 2, 2);
+        assert!(pixels.iter().all(|&p| p == TRANSPARENT));
+    }
+
+    #[test]
+    fn stitch_composite_places_a_tile_at_its_grid_offset() {
+        let tile = DecodedItem {
+            pixels: vec![7, 7, 7, 7], // 2x2, all index 7
+        };
+        let composed: Vec<Option<&DecodedItem>> = vec![None, Some(&tile), None, None];
+        let (w, _h, pixels) = stitch_composite(&composed, 2, 2, 2);
+        // slot 1 -> col 1, row 0 -> pixel offset (ox=2, oy=0)
+        assert_eq!(pixels[2], 7);
+        assert_eq!(pixels[3], 7);
+        assert_eq!(pixels[w + 2], 7);
+        assert_eq!(pixels[w + 3], 7);
+        // slot 0 (a hole) stays transparent
+        assert_eq!(pixels[0], TRANSPARENT);
     }
 
     #[test]

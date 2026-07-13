@@ -42,6 +42,31 @@ pub fn format_row(entry: &UnknownAccess, first_seen_tick: Option<u64>) -> LogRow
     }
 }
 
+/// TSV column headers for the unknown-access-log export (task brief
+/// deliverable 2).
+pub const TSV_HEADERS: [&str; 5] = ["addr", "kind", "origin_pc", "first_seen", "current_value"];
+
+/// One log entry as a TSV row matching [`TSV_HEADERS`]'s column order.
+/// `current_value` is the caller's own raw-store lookup (this module has no
+/// access to a live `VmMemoryState` — see [`format_row`]'s doc comment on
+/// `first_seen_tick` for the same split).
+pub fn to_tsv_row(
+    entry: &UnknownAccess,
+    first_seen_tick: Option<u64>,
+    current_value: &str,
+) -> Vec<String> {
+    let row = format_row(entry, first_seen_tick);
+    vec![
+        row.addr_hex,
+        row.kind.to_string(),
+        row.origin_pc_hex,
+        row.first_seen_tick
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| "?".to_string()),
+        current_value.to_string(),
+    ]
+}
+
 /// Filters `entries` by an optional `kind` and a case-insensitive substring
 /// match against the entry's hex address (e.g. typing `"7c1"` matches
 /// `0x7C10`) — the resource-light filtering a live table with a growing log
@@ -121,6 +146,32 @@ mod tests {
         let filtered = filter_entries(&entries, None, "7c1");
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].addr, 0x7C10);
+    }
+
+    #[test]
+    fn to_tsv_row_matches_header_column_count_and_order() {
+        let row = to_tsv_row(
+            &entry(0x7C10, AccessKind::Write, 0x8123),
+            Some(42),
+            "0x0005",
+        );
+        assert_eq!(row.len(), TSV_HEADERS.len());
+        assert_eq!(
+            row,
+            vec![
+                "0x7C10".to_string(),
+                "write".to_string(),
+                "0x8123".to_string(),
+                "42".to_string(),
+                "0x0005".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn to_tsv_row_unknown_first_seen_renders_as_question_mark() {
+        let row = to_tsv_row(&entry(0x100, AccessKind::Read, 0), None, "?");
+        assert_eq!(row[3], "?");
     }
 
     #[test]

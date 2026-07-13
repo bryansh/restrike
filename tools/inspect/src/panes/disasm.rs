@@ -1,16 +1,31 @@
 //! The disassembly pane (task deliverable 3): a picker over `ECL*.DAX`
 //! blocks -> the flow-following listing (`gbx_vm::disasm`) with hazard
 //! annotations visible, plus `Summary`'s per-opcode/data-region stats.
+//!
+//! Selection/copy/goto ergonomics pass: the listing renders as a selectable
+//! (drag-select + Cmd-C) monospace text box instead of the old
+//! `.interactive(false)` read-only `TextEdit` (which explicitly disabled
+//! all selection — the concrete bug behind "had to screenshot the
+//! listing"), a "Copy listing" button copies the whole plain-text blob, and
+//! a goto-address box (`0x8295` or `8295`) scrolls to and highlights that
+//! address's line by setting the `TextEdit`'s own cursor/selection range —
+//! the exact field-find workflow the task brief names.
 
 use eframe::egui::{self, Color32};
 use gbx_formats::game_data::GameData;
 use gbx_vm::dialect::{Dialect, COTAB, COTAB_VECTOR_COUNT};
 use gbx_vm::{decode, disassemble};
 
+use crate::viewmodel::goto;
+use crate::widgets;
+
 #[derive(Default)]
 pub struct DisasmState {
     selected_file: Option<String>,
     selected_block: Option<u8>,
+    goto_input: String,
+    pending_scroll_addr: Option<u16>,
+    goto_not_found: bool,
 }
 
 impl DisasmState {
@@ -129,17 +144,69 @@ impl DisasmState {
             });
 
         ui.separator();
-        let mut text = listing.render(dialect);
-        egui::ScrollArea::vertical()
+        let text = listing.render(dialect);
+
+        ui.horizontal(|ui| {
+            widgets::copy_text_button(ui, "Copy listing", || text.clone());
+            ui.label("goto address:");
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut self.goto_input)
+                    .desired_width(80.0)
+                    .hint_text("0x8295"),
+            );
+            let submitted = ui.button("Go").clicked()
+                || (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+            if submitted {
+                match goto::parse_address(&self.goto_input) {
+                    Some(addr) => {
+                        self.pending_scroll_addr = Some(addr);
+                        self.goto_not_found = false;
+                    }
+                    None => self.goto_not_found = true,
+                }
+            }
+            if self.goto_not_found {
+                ui.colored_label(Color32::RED, "not a valid/reachable address");
+            }
+        });
+
+        let id = ui.make_persistent_id(("disasm_listing", file, block_id));
+        egui::ScrollArea::both()
             .id_salt("listing")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.add(
-                    egui::TextEdit::multiline(&mut text)
-                        .font(egui::TextStyle::Monospace)
-                        .desired_width(f32::INFINITY)
-                        .interactive(false),
-                );
+                let mut buf = text.clone();
+                let output = egui::TextEdit::multiline(&mut buf)
+                    .id(id)
+                    .font(egui::TextStyle::Monospace)
+                    .desired_width(f32::INFINITY)
+                    .show(ui);
+
+                if let Some(addr) = self.pending_scroll_addr.take() {
+                    match goto::find_line_for_address(&text, addr) {
+                        Some(line_idx) => {
+                            let start = goto::char_offset_for_line(&text, line_idx);
+                            let line_len = text.lines().nth(line_idx).map(str::len).unwrap_or(0);
+                            let mut state = output.state;
+                            state
+                                .cursor
+                                .set_char_range(Some(egui::text::CCursorRange::two(
+                                    egui::text::CCursor::new(start),
+                                    egui::text::CCursor::new(start + line_len),
+                                )));
+                            state.store(ui.ctx(), id);
+
+                            let cursor =
+                                output.galley.from_ccursor(egui::text::CCursor::new(start));
+                            let rect = output
+                                .galley
+                                .pos_from_cursor(&cursor)
+                                .translate(output.galley_pos.to_vec2());
+                            ui.scroll_to_rect(rect, Some(egui::Align::Center));
+                        }
+                        None => self.goto_not_found = true,
+                    }
+                }
             });
     }
 }

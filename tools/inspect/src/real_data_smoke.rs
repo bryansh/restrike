@@ -56,8 +56,31 @@ fn every_real_block_decodes_via_the_pane_it_would_route_to() {
                         addrs.push(gbx_vm::ECL_BLOCK_BASE);
                     }
                     let listing = gbx_vm::disassemble(&block, &gbx_vm::dialect::COTAB, &addrs);
-                    let _ = listing.render(&gbx_vm::dialect::COTAB);
+                    let rendered = listing.render(&gbx_vm::dialect::COTAB);
                     let _ = listing.summary();
+
+                    // The disasm pane's goto-address box (D-UI8 copy/paste
+                    // ergonomics pass) against a real, previously-observed
+                    // field find: 0x8295 is a real instruction address in
+                    // this data set's ECL2.DAX block 1 -- exercise the exact
+                    // pipeline the pane uses (parse the typed text, then
+                    // locate its line in the rendered listing) whenever a
+                    // block's listing contains it, so this regresses if
+                    // either half of the goto pipeline breaks.
+                    if file.eq_ignore_ascii_case("ECL2.DAX") && entry.id == 1 {
+                        let addr = crate::viewmodel::goto::parse_address("0x8295")
+                            .expect("0x8295 must parse as a valid address");
+                        assert_eq!(addr, 0x8295);
+                        let line_idx = crate::viewmodel::goto::find_line_for_address(
+                            &rendered, addr,
+                        )
+                        .expect("0x8295 must resolve to a line in ECL2.DAX block 1's listing");
+                        let line = rendered.lines().nth(line_idx).unwrap();
+                        assert!(
+                            line.starts_with("0x8295:"),
+                            "goto landed on the wrong line: {line:?}"
+                        );
+                    }
                 }
                 BlockKind::Geo => {
                     let geo = gbx_formats::geo::GeoBlock::parse(&raw).unwrap_or_else(|e| {

@@ -6,6 +6,7 @@ use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
 use gbx_formats::game_data::GameData;
 
 use crate::viewmodel::{block_kind, geo_map, hex, palette, walldef as wv};
+use crate::widgets;
 
 /// Which (file, block, params) a cached texture was built for — rebuilt
 /// only when this changes, not every frame.
@@ -43,6 +44,9 @@ pub struct ResourceBrowserState {
     wallset: usize,
     style: usize,
     texture_cache: Vec<(TextureKey, TextureHandle)>,
+    /// Shared directory every "Save .ppm" button in this pane writes into
+    /// (task brief deliverable 3).
+    save_dir: String,
 }
 
 impl Default for ResourceBrowserState {
@@ -55,6 +59,7 @@ impl Default for ResourceBrowserState {
             wallset: 0,
             style: 0,
             texture_cache: Vec::new(),
+            save_dir: ".".to_string(),
         }
     }
 }
@@ -112,6 +117,10 @@ impl ResourceBrowserState {
             ui.heading(format!("{file} block {block_id}"));
             ui.label(format!("({kind:?})"));
         });
+        ui.horizontal(|ui| {
+            ui.label("save directory:");
+            ui.text_edit_singleline(&mut self.save_dir);
+        });
         ui.separator();
 
         let raw = match data.block(file, block_id) {
@@ -126,7 +135,7 @@ impl ResourceBrowserState {
             block_kind::BlockKind::Image => self.show_image(ui, file, block_id, &raw),
             block_kind::BlockKind::AnimatedPicture => self.show_anim(ui, file, block_id, &raw),
             block_kind::BlockKind::Walldef => self.show_walldef(ui, data, file, block_id, &raw),
-            block_kind::BlockKind::Geo => self.show_geo(ui, &raw),
+            block_kind::BlockKind::Geo => self.show_geo(ui, file, block_id, &raw),
             block_kind::BlockKind::Font => self.show_font(ui, file, block_id, &raw),
             block_kind::BlockKind::Ecl | block_kind::BlockKind::Unknown => {
                 self.show_hex(ui, &raw);
@@ -192,6 +201,16 @@ impl ResourceBrowserState {
                     egui::Image::new(&tex)
                         .fit_to_exact_size(egui::vec2(w as f32 * zoom, h as f32 * zoom)),
                 );
+                let rgba = palette::expand_rgba(&item.pixels);
+                widgets::image_actions(
+                    ui,
+                    ("image", file, block_id, i),
+                    w,
+                    h,
+                    &rgba,
+                    &self.save_dir,
+                    &[file, &format!("block{block_id}"), &format!("item{i}")],
+                );
             }
         });
     }
@@ -249,6 +268,20 @@ impl ResourceBrowserState {
         let tex = self.get_texture(ui.ctx(), key, || color_image(&pixels, w, h));
         ui.add(
             egui::Image::new(&tex).fit_to_exact_size(egui::vec2(w as f32 * zoom, h as f32 * zoom)),
+        );
+        let rgba = palette::expand_rgba(&frame.pixels);
+        widgets::image_actions(
+            ui,
+            ("anim", file, block_id, self.anim_frame),
+            w,
+            h,
+            &rgba,
+            &self.save_dir,
+            &[
+                file,
+                &format!("block{block_id}"),
+                &format!("frame{}", self.anim_frame),
+            ],
         );
     }
 
@@ -317,6 +350,24 @@ impl ResourceBrowserState {
         let (tile_w, tile_h) = (pixel_block.width_px().max(1), 8usize);
         let cols = 12usize;
         let zoom = self.zoom;
+
+        let (cw, ch, indexed) = wv::stitch_composite(&composed, tile_w, tile_h, cols);
+        let composite_rgba = palette::expand_rgba(&indexed);
+        widgets::image_actions(
+            ui,
+            ("walldef", file, block_id, self.wallset, self.style),
+            cw,
+            ch,
+            &composite_rgba,
+            &self.save_dir,
+            &[
+                file,
+                &format!("block{block_id}"),
+                &format!("wallset{}", self.wallset),
+                &format!("style{}", self.style),
+            ],
+        );
+
         egui::ScrollArea::both().show(ui, |ui| {
             egui::Grid::new("walldef_tiles").show(ui, |ui| {
                 for (i, tile) in composed.iter().enumerate() {
@@ -353,7 +404,7 @@ impl ResourceBrowserState {
         });
     }
 
-    fn show_geo(&mut self, ui: &mut egui::Ui, raw: &[u8]) {
+    fn show_geo(&mut self, ui: &mut egui::Ui, file: &str, block_id: u8, raw: &[u8]) {
         let geo = match gbx_formats::geo::GeoBlock::parse(raw) {
             Ok(g) => g,
             Err(err) => {
@@ -366,6 +417,16 @@ impl ResourceBrowserState {
             geo.header[0], geo.header[1]
         ));
         let geometry = geo_map::build_geometry(&geo);
+        let (raster_w, raster_h, raster_rgba) = geo_map::rasterize(&geometry, 20);
+        widgets::image_actions(
+            ui,
+            ("geo", file, block_id),
+            raster_w,
+            raster_h,
+            &raster_rgba,
+            &self.save_dir,
+            &[file, &format!("block{block_id}"), "automap"],
+        );
         let cell_size = 20.0f32;
         let size = egui::vec2(
             geometry.grid_size as f32 * cell_size,
