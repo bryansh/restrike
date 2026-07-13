@@ -1,0 +1,19 @@
+[package]
+name = "restrike-inspect"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "GBC-replacement seed: an eframe/egui resource browser, ECL disassembler, and live engine debugger (D-UI8)."
+
+[[bin]]
+name = "restrike-inspect"
+path = "src/main.rs"
+
+[dependencies]
+gbx-formats = { path = "../../crates/gbx-formats" }
+gbx-vm = { path = "../../crates/gbx-vm" }
+gbx-rules = { path = "../../crates/gbx-rules" }
+gbx-engine = { path = "../../crates/gbx-engine" }
+eframe = "0.29"
+serde_json = "1.0.150"

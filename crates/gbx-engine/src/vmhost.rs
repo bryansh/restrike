@@ -277,6 +277,22 @@ impl VmMemoryState {
     pub fn raw_word(&self, addr: u16) -> Option<u16> {
         self.raw_words.get(&addr).copied()
     }
+
+    /// The raw fallback byte store's current value at `addr` — [`raw_word`](Self::raw_word)'s
+    /// counterpart for `ScriptMemory::read_byte`/`write_byte` traffic, added
+    /// for `tools/inspect`'s ScriptMemory watch pane (D-UI8) so it can show
+    /// the raw-store contents across all three access widths, not just
+    /// words.
+    pub fn raw_byte(&self, addr: u16) -> Option<u8> {
+        self.raw_bytes.get(&addr).copied()
+    }
+
+    /// The raw fallback string store's current value at `addr` —
+    /// [`raw_word`](Self::raw_word)'s counterpart for
+    /// `ScriptMemory::read_string`/`write_string` traffic.
+    pub fn raw_string(&self, addr: u16) -> Option<&VmString> {
+        self.raw_strings.get(&addr)
+    }
 }
 
 /// The real `VmHost`: borrows engine state fresh each pump (`shell.rs`

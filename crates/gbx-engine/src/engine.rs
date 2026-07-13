@@ -215,6 +215,36 @@ impl Engine {
         &self.state
     }
 
+    /// The UI shell state machine's current node (`Boot`/`WorldMenu`/`Look`/
+    /// `Step`/`GameOver`) — read by `tools/inspect`'s live engine pane
+    /// (D-UI8) to show what flow stage the machine is in. `Shell` is a plain
+    /// serde-able enum with no engine-internal borrows, so this is a
+    /// read-only seam, not a control surface.
+    pub fn shell(&self) -> &Shell {
+        &self.shell
+    }
+
+    /// The resident GEO block (this session's fixed Tilverton City map) —
+    /// read by `tools/inspect`'s resource browser so it can render the
+    /// automap using the same block the live engine pane is walking,
+    /// without re-parsing `GameData` itself.
+    pub fn geo(&self) -> &GeoBlock {
+        &self.geo
+    }
+
+    /// The boot-loaded mono font — read by `tools/inspect` for glyph-grid
+    /// rendering and text-layout debugging.
+    pub fn font(&self) -> &Font {
+        &self.font
+    }
+
+    /// The `GameData` this engine was built from — read by `tools/inspect`'s
+    /// resource browser so it can reuse the live engine's already-loaded
+    /// archive set instead of loading a second copy from disk.
+    pub fn game_data(&self) -> &GameData {
+        &self.data
+    }
+
     /// Resident 8×8 symbol sets + wallset slots (step 5's `load_walldef`
     /// deliverable) — read by the demo/tests to confirm `load_walldef`
     /// populated the wall-texture data a walk exercises.

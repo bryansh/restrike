@@ -27,6 +27,11 @@ jobs:
       # headers or link-time libs are needed here. Runtime display access
       # (actually opening a window) is never exercised in CI -- no xvfb, no
       # GUI tests -- so this holds regardless.
+      # restrike-inspect (eframe/egui, D-UI8) was checked the same way in
+      # the same clean ubuntu:24.04 container (`apt-get install
+      # build-essential pkg-config` only) and also needed nothing extra --
+      # eframe's default glow/winit backend dlopens GL/X11/Wayland at
+      # runtime too, same as restrike-desktop's winit backend.
       - run: cargo build --workspace --all-targets
       - run: cargo test --workspace
 

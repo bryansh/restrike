@@ -9,6 +9,7 @@ members = [
     "frontends/cli",
     "frontends/desktop",
     "frontends/web",
+    "tools/inspect",
 ]
 
 [workspace.package]
