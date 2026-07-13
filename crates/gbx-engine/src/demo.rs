@@ -136,11 +136,30 @@ fn walk_tilverton_and_bash_a_real_door() {
         mut done: impl FnMut(&Engine) -> bool,
     ) {
         engine.tick(input);
+        let mut last_serial = u64::MAX;
+        let mut quiet = 0u32;
         for _ in 0..max_ticks {
             if done(engine) {
                 return;
             }
-            engine.tick(&[InputEvent::Enter]); // clears any pagination/press-any-key gate
+            // Feed a key only when the screen has gone quiet — a gate
+            // actually waiting on input. Blind Enter-spam piles keys into
+            // the queue, and drain-to-last hands the newest one to whatever
+            // widget opens next, where Enter selects the highlighted first
+            // word ("Area" in the world menu, "Bash" in the door menu).
+            let feed: &[InputEvent] = if quiet >= 2 {
+                quiet = 0;
+                &[InputEvent::Enter]
+            } else {
+                &[]
+            };
+            let serial = engine.tick(feed).serial;
+            if serial == last_serial {
+                quiet += 1;
+            } else {
+                quiet = 0;
+                last_serial = serial;
+            }
         }
         assert!(
             done(engine),
@@ -150,7 +169,7 @@ fn walk_tilverton_and_bash_a_real_door() {
 
     // Reach the world menu. The real boot vector sets pos=(7,13),
     // facing=East (see this fn's doc comment).
-    tick_until(&mut engine, 200, &[], |e| {
+    tick_until(&mut engine, 600, &[], |e| {
         matches!(e.shell, Shell::WorldMenu { .. })
     });
     assert_eq!(engine.state.pos, (7, 13));
@@ -170,7 +189,7 @@ fn walk_tilverton_and_bash_a_real_door() {
         InputEvent::Ext(ExtKey::Left),  // face North, toward the door
     ];
     for event in turns_and_steps {
-        tick_until(&mut engine, 200, &[*event], |e| {
+        tick_until(&mut engine, 600, &[*event], |e| {
             matches!(e.shell, Shell::WorldMenu { .. })
         });
     }
@@ -188,7 +207,7 @@ fn walk_tilverton_and_bash_a_real_door() {
     dump(&mut engine, &frame2_path);
 
     // Bash it down.
-    tick_until(&mut engine, 200, &[InputEvent::Char(b'b')], |e| {
+    tick_until(&mut engine, 600, &[InputEvent::Char(b'b')], |e| {
         matches!(e.shell, Shell::WorldMenu { .. })
     });
     assert_eq!(

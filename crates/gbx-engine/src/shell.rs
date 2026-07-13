@@ -386,6 +386,14 @@ impl VectorRun {
                 if let Some(job) = &mut self.current_job {
                     job.release(ctx.fb);
                 }
+                // The original drains the whole keyboard buffer right after
+                // the pagination keypress (`clear_keyboard`, seg041.cs:211;
+                // design doc §1.4/D-UI3 named this the caller's obligation —
+                // it was never wired in steps 3/4). Without it, keys typed
+                // behind the gating keypress leak to the next widget, where
+                // Enter selects the highlighted first word ("Area" in the
+                // world menu). Found via the step-5 four-facings demo.
+                ctx.input.clear();
                 self.phase = VmPhase::Present;
                 return true;
             }

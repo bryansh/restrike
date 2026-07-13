@@ -1193,6 +1193,15 @@ commitments.
       lifecycle question orthogonal to the renderer itself — docketed
       alongside §1.11 item 9's existing drain-to-last uncertainty (both
       settle together at a DOSBox type-ahead check).
+      **Root cause found and fixed at the engine level (post-session
+      audit):** §1.4/D-UI3 named the original's `clear_keyboard`-after-the-
+      pagination-keypress (`seg041.cs:211`) as the release caller's
+      obligation, and steps 3/4 never wired it — the pagination gate
+      consumed its key but left every key behind it queued. The transcribed
+      queue-clear now lives at the release site in `shell.rs`; the walk
+      demo's blind Enter-spam was also replaced with quiet-screen-gated key
+      feeding. The faithful-semantics question (drain-to-last itself, §1.11
+      item 9 / FD-17) remains open for the DOSBox check.
     - **The two sky-color-index cells (`area_ptr.indoor_sky_colour`/
       `outdoor_sky_colour`, `Area1.cs` `DataOffset` `0x1FC`/`0x1FA`) are a
       documented hypothesis, not a confirmed `ScriptMemory` address**: this
