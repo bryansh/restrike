@@ -229,3 +229,70 @@ fn walk_tilverton_and_bash_a_real_door() {
         );
     }
 }
+
+/// M2 step 4's boot-scene capture (audit addition, completing that task's
+/// demo deliverable): tick the real boot with NO input, dumping a frame each
+/// time the screen goes quiet — a gate awaiting a keypress — then feeding
+/// Enter, until the world menu arrives. The opening scene, rendered by the
+/// real pipeline.
+#[test]
+fn boot_scene_frames() {
+    use crate::engine::Engine;
+    use crate::input::InputEvent;
+    use crate::shell::Shell;
+
+    let Some(dir) = std::env::var_os("GBX_DATA_DIR") else {
+        return;
+    };
+    let data = load_dir(std::path::Path::new(&dir)).expect("GBX_DATA_DIR must be readable");
+    let mut engine = Engine::new(data, 1).expect("Engine::new must boot against real CotAB data");
+
+    let out_dir = std::env::var_os("RESTRIKE_M2_WALK_DEMO_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+
+    let mut captures = 0u32;
+    let mut quiet = 0u32;
+    let mut last_serial = u64::MAX;
+    for _ in 0..2000 {
+        let serial = engine.tick(&[]).serial;
+        if matches!(engine.shell, Shell::WorldMenu { .. }) {
+            break;
+        }
+        if serial == last_serial {
+            quiet += 1;
+        } else {
+            quiet = 0;
+            last_serial = serial;
+        }
+        if quiet >= 5 {
+            captures += 1;
+            let path = out_dir.join(format!("restrike-boot-scene-{captures}.ppm"));
+            let f = engine.tick(&[]);
+            let mut fb = Framebuffer::new();
+            for y in 0..HEIGHT {
+                for x in 0..WIDTH {
+                    fb.set_pixel(x, y, f.pixels[y * WIDTH + x]);
+                }
+            }
+            write_ppm(&fb, &path);
+            eprintln!("boot-scene capture {captures} -> {}", path.display());
+            engine.tick(&[InputEvent::Enter]);
+            quiet = 0;
+            last_serial = u64::MAX;
+            if captures >= 6 {
+                break;
+            }
+        }
+    }
+    assert!(
+        captures >= 1,
+        "expected at least one boot-scene gate to capture"
+    );
+    eprintln!(
+        "boot unknown-access log ({} entries): {:#?}",
+        engine.vm_memory().unknown_log.entries().len(),
+        engine.vm_memory().unknown_log.entries()
+    );
+    eprintln!("boot halts: {:?}", engine.vm_memory().halts);
+}
