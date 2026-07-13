@@ -245,6 +245,14 @@ fixed-arity mismatch).
    arithmetic implies VM address `0x7F3F` reads it back through the ordinary
    Party window. Derived from arithmetic, not a traced live example — confirm
    with a census/golden test before relying on it as a named global.
+   **CONFIRMED by a live example (2026-07-12, found by the human playtest via
+   the inspector's halt records + disassembly pane):** Tilverton's per-step
+   script (`ECL2.DAX` block 1) executes
+   `0x8295: DIVIDE mem=0x7F7B, imm=0x08 -> mem=0x7F80` immediately followed by
+   `0x829E: GETTABLE base=0x9DB8 index=mem[0x7F3F] -> 0x7E7A` — a modulo-8
+   table lookup whose index is the out-of-band remainder. Shipped content
+   depends on the alias; DIVIDE's implementation must write the remainder
+   through the facade at `0x7F3F` or this GETTABLE silently reads garbage.
 3. **Destination/target operands never trigger a ScriptMemory read regardless
    of encoded mode.** GOTO, GOSUB, and every `location`/`loc` write-destination
    operand across the table (ADD/SUB/DIV/MUL, RANDOM, SAVE, INPUT NUMBER/
