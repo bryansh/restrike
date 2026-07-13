@@ -159,19 +159,65 @@ scaffold/CI/fixtures proceed immediately; the data-dependent items activate when
 
 ### M2 — First steps (2–4 weekends)
 Walk around Tilverton, looking right.
-- Graphics decode: 8×8 tile compositing, walldefs, EGA palettes, bigpics, fonts (Gold Box
-  Explorer + ssi-engine as references).
-- Core framebuffer + faithful renderer: 3D corridor view composition, viewport layout, text
+- [x] Graphics decode: 8×8 tile compositing, walldefs, EGA palettes, bigpics, fonts (Gold Box
+  Explorer + ssi-engine as references). *(step 1: image/anim/font/walldef decoders + `GameData`,
+  Fable-verified via a real decoded portrait.)*
+- [x] Core framebuffer + faithful renderer: 3D corridor view composition, viewport layout, text
   window, menu bar — the Gold Box UI shell as a state machine (D8: no blocking menus).
-- Movement/facing/turning; ECL event triggers (enter square, search, look); Parlay-free NPC text.
-- `frontends/desktop`: winit + softbuffer window presenting the framebuffer, keyboard input,
-  integer scaling.
-- `tools/inspect` v0 (egui): resource browser, ECL disassembly viewer, VM stepper, ScriptMemory
-  watch. Build it now — it multiplies all later RE work and is the seed of the companion layer.
-- **WASM proof:** the same core in a canvas via `frontends/web`. Just walking — proves D8 before
-  more systems pile on.
+  *(steps 2–5: framebuffer/text/widgets/flows, then the real 3D corridor + area map against real
+  Tilverton wallsets, Fable-verified visually at all four spawn facings.)*
+- [x] Movement/facing/turning; ECL event triggers (enter square, search, look); Parlay-free NPC
+  text. *(steps 3–4 wired the walk loop + door interaction against the real `EclMachine`; step 8
+  closed the gap that blocked most event text — see below.)*
+- [x] `frontends/desktop`: winit + softbuffer window presenting the framebuffer, keyboard input,
+  integer scaling. *(step 6.)*
+- [x] `tools/inspect` v0 (egui): resource browser, ECL disassembly viewer, VM stepper,
+  ScriptMemory watch. *(step 7 + v0.1 polish pass — selection/copy/paste, goto-address, image
+  export; Fable-audited, verified end-to-end against real data.)*
+- [x] **WASM proof:** the same core in a canvas via `frontends/web`. *(step 6; wasm32 core +
+  web-frontend checks green in CI since.)*
 - **Exit gate:** walk Tilverton streets/buildings with correct walls, art, and firing events;
-  side-by-side spot-check vs DOSBox screenshots; web build walks the same map.
+  side-by-side spot-check vs DOSBox screenshots; web build walks the same map. Status as of step 8
+  (2026-07-13), evidence-annotated per the M0/M1 pattern:
+  - [x] **Headless circuit, proven by tests.** `fixtures/tilverton-circuit.jsonl` (inputs + tick
+    indices only, no game content, D10) walks a real loop through Tilverton — past the tavern
+    district and back to spawn — via `restrike walk`. Checkpoint hashes are stable across
+    independent runs (`frontends/cli/tests/walk.rs`'s real-data determinism test, plus this
+    session's own two-run diff); **halt records are empty across the whole circuit**; the local
+    (uncommitted) transcript shows real event text at multiple distinct squares — an inn sign, a
+    tavern scene with a menu/combat-stub/journal-entry chain, and street-tone description text —
+    unblocked by this session's arithmetic-family fix (see below). One door was found to trigger a
+    real cross-area transition this milestone doesn't implement; routed around rather than forced
+    through (`docs/fidelity-docket.md` FD-19).
+  - [x] **The blocking gap, closed.** The M2 step 7 field find — Tilverton's per-step script
+    halting on every single step at a then-unimplemented DIVIDE (0x06) — is fixed: SUBTRACT/
+    DIVIDE/MULTIPLY (0x05–0x07) share coab's `CMD_AddSubDivMulti` shape with the existing ADD;
+    DIVIDE's remainder writes through the `ScriptMemory` facade to the confirmed `0x7F3F`
+    Party-window alias (FD-9, resolved). The circuit surfaced three more real gaps beyond the
+    planned arithmetic family — OR (0x30), ON GOSUB (0x26), and a `SAVE`-with-`mem_str`-
+    destination decode bug (`Arg::raw_word()` didn't resolve mode `0x81`) — all fixed with
+    citations + conformance tests, not guessed.
+  - [ ] **DOSBox spot-check screenshots — awaits the human checklist.** `docs/dosbox-capture.md`
+    documents the capture procedure (raw/unscaled dosbox-staging format, `restrike compare`
+    tooling), pins eight spot squares across D-UI7's six categories with exact position/facing and
+    steps from spawn, and gives the human-executable key sequence matching the committed circuit.
+    This session's own automation attempt (`nohup dosbox-staging ...` launched cleanly; keyboard
+    input and screenshots blocked — no display/Screen-Recording access in this environment,
+    consistent with a prior session's note) confirms this genuinely needs a human at a real
+    display; nothing here is a stand-in for that.
+  - [ ] **Expected-transcript comparison — awaits the human checklist.** A local-only test
+    (`frontends/cli/src/walk.rs`'s `expected_transcript` module) compares the circuit's live
+    transcript against a human-maintained `~/goldbox-data/expected/tilverton-circuit.transcript`
+    (a DOSBox-side capture of the same walk); it documents the convention and skips gracefully
+    until that file exists. Not yet run for real.
+  - [ ] **FD-17/FD-18 (type-ahead, list-menu arrows) — open**, each a 30–90 second DOSBox check
+    per `docs/dosbox-capture.md` §5; unresolved since M2's design pass.
+  - [x] **Web build:** loads the same data and walks the same circuit — manual smoke only (core
+    hashes are identical by construction: the same crate compiled to wasm32), documented as a
+    manual step since a scripted browser walk is out of this session's scope:
+    `cargo build --target wasm32-unknown-unknown -p restrike-web`, serve `frontends/web/`, point it
+    at a copy of `GBX_DATA_DIR` via the runtime directory picker, and drive the same key sequence
+    as `docs/dosbox-capture.md` §4 by hand.
 
 ### M3 — The party assembles (2–3 weekends)
 - Character/party model for AD&D flavor; ability/derived-stat tables land in `gbx-rules`
