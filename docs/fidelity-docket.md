@@ -31,11 +31,17 @@
 
 ### FD-1: Does a natural 20 auto-hit / natural 1 auto-miss?
 
-- **Status:** open
+- **Status:** narrowed (coab side settled 2026-07-13, during the rules-pack
+  design pass's adversarial round)
 - **Question:** In CotAB's AD&D 1e-derived combat, does rolling a natural 20
   on the attack die always hit regardless of AC/THAC0, and does a natural 1
   always miss regardless of AC/THAC0? PLAN.md §1 notes the brief and
   Jzatopa's notes disagree — at least one is wrong.
+- **coab evidence:** both attack paths (`CanHitTarget` ovr024.cs:487–512,
+  `PC_CanHitTarget` :515–545) treat natural 1 as an automatic miss and
+  promote a natural 20 to a roll of 100 (guaranteeing the comparison) —
+  i.e. BOTH auto-rules exist in the engine. Jzatopa's contrary note is
+  presumptively wrong for CotAB. H4 (M4) confirms against oracle traces.
 - **Evidence so far:** None gathered yet from this project's own reading;
   the disagreement is inherited from the brief vs. Jzatopa's corpus (treat
   the latter as unverified candidate data per PLAN.md D11/§6 rule 4).
