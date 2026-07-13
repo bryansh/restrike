@@ -166,24 +166,27 @@ fn golden_walk_trace() {
     let trace = walk_trace();
     let checkpoints: &[(u32, &str)] = &[
         // Idle in WorldMenu, facing East (pos (5,5)) — the stable boot frame.
+        // Step 5: the viewport now actually composes (sky/band/ground fills
+        // at minimum — this fixture never loads a wallset, so no wall
+        // pieces draw) — every checkpoint below was regenerated for that.
         (
             2,
-            "be057d0aaba383704b96422b6dd010e185f0ee32b266d462f2fb4d29fe509ed0",
+            "da81334f1af9f2152cd71defacaa43a1416e07d67a78f142cec2978974aa0f8b",
         ),
         // Mid-turn-around: facing West after the first 180° turn.
         (
             4,
-            "631e87fc85a5acf05f3a2936f61a6714b9f471dcc655abf414d3a405ecc6a220",
+            "d76fefdfb6f55c9f7cebc4a36f596621ed886f9682a40646559d606fb6b77525",
         ),
         // Stepped into the open square (pos (6,5)), facing East again.
         (
             12,
-            "93fd35bd984572558636bac1f54ab84d862f1a852cda503f02bea1fcc08c887c",
+            "8b992717f1c12c5596ec50299e5c3fca830313f59edb16a2cb6fbadaa62f0e55",
         ),
         // Bashed through the locked door (pos (7,5)).
         (
             22,
-            "e8e6507f170102c259d58e015f686c7dc3b4cab3794cef28a18f3d13aeb74fe2",
+            "89d937d1ecb00647be8aa9bd9f9ded54052e484e7750f194d1ee2c3127856e2e",
         ),
     ];
     let mut next_checkpoint = 0usize;

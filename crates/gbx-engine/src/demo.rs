@@ -296,3 +296,113 @@ fn boot_scene_frames() {
     );
     eprintln!("boot halts: {:?}", engine.vm_memory().halts);
 }
+
+/// M2 step 5's task deliverable 5: dumps the Tilverton spawn square's real
+/// 3D corridor viewport at all four facings (turning right after each
+/// capture), through the real `EclMachine`, `LoadWalldef`-loaded wallsets,
+/// and `crate::corridor` renderer — no scripted geometry, whatever the
+/// resident `GEO2.DAX` block 1 and the area's real walldefs actually
+/// produce.
+#[test]
+fn four_facings_at_spawn() {
+    use crate::engine::Engine;
+    use crate::input::{ExtKey, InputEvent};
+    use crate::shell::Shell;
+
+    let Some(dir) = std::env::var_os("GBX_DATA_DIR") else {
+        return;
+    };
+    let data = load_dir(std::path::Path::new(&dir)).expect("GBX_DATA_DIR must be readable");
+    let mut engine = Engine::new(data, 1).expect("Engine::new must boot against real CotAB data");
+
+    let out_dir = std::env::var_os("RESTRIKE_M2_WALK_DEMO_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+
+    fn tick_until_world_menu(engine: &mut Engine, input: &[InputEvent]) {
+        let was_area_map = engine.state.area_map_shown;
+        engine.tick(input);
+        for _ in 0..200 {
+            if matches!(engine.shell, Shell::WorldMenu { .. }) {
+                break;
+            }
+            engine.tick(&[InputEvent::Enter]);
+        }
+        assert!(
+            matches!(engine.shell, Shell::WorldMenu { .. }),
+            "did not reach the world menu within budget"
+        );
+
+        // A discovered engine quirk (step 5, flagged not silently
+        // absorbed): the drain-to-last `InputQueue` can leave an
+        // unconsumed `Enter` queued by this very loop's own gate-clearing
+        // fallback — pushed on the tick that transitions e.g. Boot ->
+        // WorldMenu, but that tick's own flow stage never reads it (the
+        // newly-created WorldMenu widget doesn't exist until *after* that
+        // tick resolves). A later empty-input tick then drains it, and
+        // since WorldMenu's hotbar defaults to highlighting its first word
+        // ("Area"), a stray `Enter` silently resolves as `'A'`
+        // (`ToggleAreaView`) — found via this demo's four-facings capture
+        // showing an identical viewport across every facing (the area map
+        // doesn't depend on facing beyond the party-arrow glyph). Flush one
+        // empty tick here, where the effect is harmless to observe, and if
+        // it fired, press `'A'` again to restore the intended view.
+        // Docketed alongside §1.11 item 9's existing drain-to-last
+        // uncertainty — a DOSBox check settles whether this exact
+        // interaction is also present in the original, or is an engine-only
+        // seam (a widget created mid-tick never gets a chance to "claim"
+        // that tick's own input) worth closing in `shell.rs` directly.
+        engine.tick(&[]);
+        if engine.state.area_map_shown != was_area_map {
+            engine.tick(&[InputEvent::Char(b'a')]);
+        }
+    }
+
+    fn dump(engine: &mut Engine, path: &std::path::Path) {
+        let f = engine.tick(&[]);
+        let mut fb = Framebuffer::new();
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                fb.set_pixel(x, y, f.pixels[y * WIDTH + x]);
+            }
+        }
+        write_ppm(&fb, path);
+    }
+
+    tick_until_world_menu(&mut engine, &[]);
+    assert_eq!(
+        engine.state.pos,
+        (7, 13),
+        "spawn position must be unchanged"
+    );
+
+    let mut paths = Vec::new();
+    for i in 0..4 {
+        let facing = engine.state.facing;
+        let path = out_dir.join(format!("restrike-four-facings-{i}-{facing:?}.ppm"));
+        dump(&mut engine, &path);
+        eprintln!(
+            "four-facings capture {i}: facing {facing:?} -> {}",
+            path.display()
+        );
+        paths.push(path);
+        tick_until_world_menu(&mut engine, &[InputEvent::Ext(ExtKey::Right)]);
+    }
+    eprintln!(
+        "four-facings frames written to: {}",
+        paths
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    let symbols = engine.symbol_sets();
+    for slot in 0..3 {
+        eprintln!(
+            "wallset slot {slot} (LOAD PIECES set {}) loaded: {}",
+            slot + 1,
+            symbols.wallset(slot).is_some()
+        );
+    }
+}

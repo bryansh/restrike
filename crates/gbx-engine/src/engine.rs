@@ -24,6 +24,7 @@ use crate::vmhost::{load_ecl_block, VmMemoryState};
 use gbx_formats::font::Font;
 use gbx_formats::game_data::GameData;
 use gbx_formats::geo::GeoBlock;
+use gbx_formats::image::{DecodedItem, ImageBlock};
 use gbx_vm::{EclMachine, COTAB};
 
 /// `GEO2.DAX` block 1 — Tilverton City (this session's fixed resident map).
@@ -87,6 +88,33 @@ pub struct Engine {
     sounds: Vec<SoundEvent>,
     serial: u64,
     last_hash: Option<[u8; 32]>,
+    /// Resident 8×8 symbol sets + wallset slots (step 5's `load_walldef`
+    /// deliverable) — `load_walldef`'s real target and `crate::corridor`'s
+    /// texture source. Persistent across ticks (LOAD PIECES may reload it
+    /// mid-game).
+    symbol_sets: SymbolSets,
+    /// The three boot-loaded `SKY` blocks (moon/sun/horizon) — read-only
+    /// after boot.
+    sky: [ImageBlock; 3],
+}
+
+/// A trivial single-item `ImageBlock` fixture — [`Engine::new_fixture`]'s
+/// stand-in for the boot-loaded `SKY` blocks (moon/sun/horizon) when a
+/// fixture skips `boot()`'s real asset decode; the corridor renderer only
+/// ever reads these outdoors, and no M2 fixture test currently exercises
+/// that path.
+fn dummy_sky() -> [ImageBlock; 3] {
+    let block = ImageBlock {
+        height: 8,
+        width_cols: 1,
+        x_pos: 0,
+        y_pos: 0,
+        field_9: [0; 8],
+        items: vec![DecodedItem {
+            pixels: vec![0; 64],
+        }],
+    };
+    [block.clone(), block.clone(), block]
 }
 
 impl Engine {
@@ -100,6 +128,7 @@ impl Engine {
         Ok(Self::build(
             assets.font,
             assets.symbol_sets,
+            assets.sky,
             geo,
             data,
             seed,
@@ -122,12 +151,13 @@ impl Engine {
         data: GameData,
         seed: u64,
     ) -> Self {
-        Self::build(font, symbol_sets, geo, data, seed)
+        Self::build(font, symbol_sets, dummy_sky(), geo, data, seed)
     }
 
     fn build(
         font: Font,
         symbol_sets: SymbolSets,
+        sky: [ImageBlock; 3],
         geo: GeoBlock,
         data: GameData,
         seed: u64,
@@ -161,6 +191,8 @@ impl Engine {
             sounds: Vec::new(),
             serial: 0,
             last_hash: None,
+            symbol_sets,
+            sky,
         }
     }
 
@@ -181,6 +213,13 @@ impl Engine {
 
     pub fn state(&self) -> &EngineState {
         &self.state
+    }
+
+    /// Resident 8×8 symbol sets + wallset slots (step 5's `load_walldef`
+    /// deliverable) — read by the demo/tests to confirm `load_walldef`
+    /// populated the wall-texture data a walk exercises.
+    pub fn symbol_sets(&self) -> &SymbolSets {
+        &self.symbol_sets
     }
 
     /// Advances by one tick (D-UI1): dispatches `input`, advances the UI
@@ -207,6 +246,8 @@ impl Engine {
                 cursor: &mut self.cursor,
                 pacer: &mut self.pacer,
                 sounds: &mut self.sounds,
+                symbols: &mut self.symbol_sets,
+                sky: &self.sky,
             };
             self.shell.tick(&mut ctx);
         }

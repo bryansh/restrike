@@ -169,7 +169,10 @@ fn golden_print_frame() {
     check_golden(
         "print-hello",
         &f,
-        "eead7cb28a5c78d2b87d599dbe70aa7a29e5b8c911f2bd3d590add7c0a1d7bd2",
+        // Step 5: regenerated — the viewport now composes real sky/band/
+        // ground fills on every `enter_world_menu` (this fixture never
+        // loads a wallset, so no wall pieces draw, just the backdrop).
+        "71409d45b1bdfa1fd13242b15455789096e2e17b064342895bd070bcbe0791f2",
     );
 }
 

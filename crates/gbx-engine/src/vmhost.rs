@@ -8,19 +8,29 @@
 //! `vm_GetMemoryValueType`/`vm_GetMemoryValue`/`vm_SetMemoryValue` in full,
 //! `load_ecl_dax` (`:136-154`), `seg001.cs`'s `game_area` boot init, and
 //! `sub_30580` (`:220-276`); every address/behavior below cites that pass.
-//! Per the task brief's scope note, asset-loading services (`load_3d_map`/
-//! `load_walldef`/`load_bigpic`) **record** resident-block state; they do
-//! not draw (3D/area-map rendering is step 5).
+//! Per the M2 step 4 task brief's scope note, `load_3d_map`/`load_bigpic`
+//! **record** resident-block state; they do not draw (3D/area-map rendering
+//! is step 5). `load_walldef` graduated to a real implementation in step 5
+//! (task deliverable 1): it now actually loads the walldef's tile-id table
+//! and its paired 8×8 pixel data into [`crate::symbols::SymbolSets`], which
+//! `crate::corridor`'s renderer reads from.
 
 use crate::movement::Facing;
 use crate::shell::{EngineState, GameState};
+use crate::symbols::SymbolSets;
 use gbx_formats::game_data::{GameData, GameDataError};
 use gbx_formats::geo::GeoBlock;
+use gbx_formats::walldef::WalldefBlock;
 use gbx_vm::{
     BlockBytes, ItemHandle, MissingData, MonsterHandle, NotFound, Origin, PlayerId, RecordedCall,
     ScriptMemory, VmRng, VmString, ECL_BLOCK_SIZE,
 };
 use std::collections::{HashMap, HashSet};
+
+/// The color code every wallset's paired 8×8 symbol data is loaded masked
+/// against — the same convention as boot's `Load8x8D` (`boot.rs`'s
+/// `BOOT_MASK`, design doc §1.3).
+const WALLSET_MASK: u8 = 13;
 
 /// `load_ecl_dax` (`ovr008.cs:136-154`, this session's research §2/§3):
 /// `block_id` within `"ECL{game_area}.DAX"` — the file name embeds
@@ -215,15 +225,43 @@ pub struct VmMemoryState {
     /// surfaces later), never read back through this facade.
     word_1ee78: u16,
     word_1ee7a: u16,
-    /// `byte_1EE91`/`byte_1EE94`: redraw-dirty flags, write-only through
-    /// this facade (their real consumers are step-5 rendering paths, per
-    /// research §1.1/§1.5) — recorded for completeness, not consumed here.
+    /// `byte_1EE91`/`byte_1EE94` (redraw-dirty flags, `vm_SetMemoryValue`
+    /// locations `0xBF68+0xF1`/`0xF7` and `0x4B00`-relative `0xFD`/`0xFE`)
+    /// and `gbl.positionChanged` (`mapPosX`/`mapPosY`/`mapDirection`
+    /// writes, `MovePositionForward`): the three flags a dedicated step 5
+    /// research pass found consolidated at a single real gate, `CMD_Call`
+    /// case `0xAE11` (`ovr003.cs:1844-1860`) — `if (spriteChanged ||
+    /// displayPlayerSprite || byte_1EE91 || positionChanged || byte_1EE94)
+    /// { RedrawView(); display_map_position_time(); <clear all five> }`.
     pub byte_1ee91: bool,
     pub byte_1ee94: bool,
-    /// `gbl.positionChanged`: set by every `mapPosX`/`mapPosY`/`mapDirection`
-    /// write (research §1.1) — recorded; step 5's redraw-flag consolidation
-    /// (D-UI4) is the eventual consumer.
     pub position_changed: bool,
+    /// `gbl.spriteChanged`: set by `sub_30580` (encounter-visual dispatch)
+    /// and `CMD_Picture` — same consolidated gate above.
+    pub sprite_changed: bool,
+    /// `gbl.can_draw_bigpic`: set at many command/init sites and
+    /// unconditionally by `LoadPic`; read only by `RedrawView`'s own
+    /// non-dungeon (wilderness/bigpic, M6) branch — recorded for state
+    /// fidelity, no M2 consumer.
+    pub can_draw_bigpic: bool,
+}
+
+impl VmMemoryState {
+    /// `CMD_Call` case `0xAE11`'s consolidated redraw gate
+    /// (`ovr003.cs:1848-1860`): this session's `crate::corridor::redraw_view`
+    /// runs unconditionally at every world-menu-visible point instead of
+    /// gating on these flags (`shell.rs`'s `enter_world_menu` doc comment
+    /// explains why that's a safe, documented simplification for a
+    /// deterministic immediate-mode renderer) — but the flags themselves
+    /// are still cleared here, at the same logical point the original
+    /// clears them, so their *state* stays faithful even though nothing
+    /// currently reads them to decide *whether* to redraw.
+    pub(crate) fn clear_redraw_flags(&mut self) {
+        self.byte_1ee91 = false;
+        self.byte_1ee94 = false;
+        self.position_changed = false;
+        self.sprite_changed = false;
+    }
 }
 
 impl VmMemoryState {
@@ -250,6 +288,13 @@ pub struct EngineVmHost<'a> {
     pub party: &'a mut dyn crate::movement::PartyPredicates,
     pub rng: &'a mut crate::rng::EngineRng,
     pub sounds: &'a mut Vec<crate::shell::SoundEvent>,
+    /// `load_walldef`'s real data source (step 5, task deliverable 1):
+    /// `"WALLDEF{game_area}.DAX"`/`"8X8D{game_area}.DAX"`, the same
+    /// `game_area`-embeds-the-filename convention `load_ecl_dax`/boot's
+    /// `Load8x8D` already use.
+    pub data: &'a GameData,
+    pub game_area: u8,
+    pub symbols: &'a mut SymbolSets,
 }
 
 impl EngineVmHost<'_> {
@@ -626,11 +671,94 @@ impl gbx_vm::EngineServices for EngineVmHost<'_> {
         self.vm.assets.map_3d_block = Some(block_id);
     }
 
+    /// `LoadWalldef` (`ovr031.cs:642-687`, step 5 task deliverable 1) — a
+    /// dedicated research pass this session read the function (plus
+    /// `Classes/GeoBlock.cs`'s `WallDefs`/`WallDefBlock.Offset`) in full and
+    /// found a load call can populate *multiple consecutive* wallset slots,
+    /// not just `set` itself: it loads the walldef block's raw tile-id data
+    /// from `"WALLDEF{game_area}.DAX"` block `id`, which may hold several
+    /// internal 780-byte sub-blocks (`WalldefBlock::wallset_count`); for
+    /// each sub-block `n` (`0`-indexed), the *target* slot is `set + n`, and
+    /// only sub-blocks landing in `1..=3` are kept (`idx = symbolSet + block`,
+    /// `:664-682`) — so `LoadWalldef(1, id)` with a 3-sub-block walldef
+    /// populates sets 1, 2, *and* 3 in one call. Each kept sub-block's
+    /// paired 8×8 pixel data loads from `"8X8D{game_area}.DAX"` at `id`
+    /// (single sub-block) or `id*10 + n + 1` (multiple, 1-based, `:673-679`)
+    /// into `SymbolSets`' matching pixel slot. The `>=0x2D` rebase (`var_A =
+    /// symbol_set_fix[set] - symbol_set_fix[1]`, computed once from the
+    /// call's *original* `set` parameter, `:658`) is applied to every
+    /// touched sub-block's tile ids (wrapping byte add, `GeoBlock.cs:84`)
+    /// before storing — baked in, not reapplied at lookup time. Bookkeeping
+    /// (`vm.assets.walldefs`) records only the original `set` slot's
+    /// `(set, id)` pair, matching a real asymmetry this research pass found
+    /// in the original itself (`:669` vs `:684-685` — every touched slot
+    /// gets real texture data, only the one matching the call's own `set`
+    /// gets its `setBlocks` entry written). Any load failure (missing
+    /// block, malformed data) is a silent no-op for that sub-block beyond
+    /// the call log — real CotAB data never hits this path (this session's
+    /// demo/tests load every wallset the walk exercises without error).
     fn load_walldef(&mut self, set: u8, id: u8) {
         self.vm.calls.push(RecordedCall::LoadWalldef { set, id });
         let slot = (set.saturating_sub(1)) as usize;
         if let Some(entry) = self.vm.assets.walldefs.get_mut(slot) {
             *entry = Some((set, id));
+        }
+        if !(1..=3).contains(&set) {
+            return;
+        }
+
+        let Ok(raw) = self
+            .data
+            .block(&format!("WALLDEF{}.DAX", self.game_area), id)
+        else {
+            return;
+        };
+        let Ok(walldef) = WalldefBlock::parse(&raw) else {
+            return;
+        };
+        let block_count = walldef.wallset_count();
+        if block_count == 0 {
+            return;
+        }
+
+        let rebase = (crate::symbols::SYMBOL_SET_FIX[set as usize] as i32
+            - crate::symbols::SYMBOL_SET_FIX[1] as i32) as u8;
+        let sym_file = format!("8X8D{}.DAX", self.game_area);
+
+        for block in 0..block_count {
+            let idx = set as usize + block;
+            if !(1..=3).contains(&idx) {
+                continue;
+            }
+
+            let mut tiles = [0u8; gbx_formats::walldef::WALLSET_SIZE];
+            for style in 0..gbx_formats::walldef::STYLES_PER_WALLSET {
+                for i in 0..gbx_formats::walldef::TILE_IDS_PER_STYLE {
+                    let raw_id = walldef.tile_id(block, style, i).unwrap_or(0);
+                    tiles[style * gbx_formats::walldef::TILE_IDS_PER_STYLE + i] = if raw_id >= 0x2D
+                    {
+                        raw_id.wrapping_add(rebase)
+                    } else {
+                        raw_id
+                    };
+                }
+            }
+
+            let sym_block_id = if block_count > 1 {
+                id.wrapping_mul(10).wrapping_add(block as u8 + 1)
+            } else {
+                id
+            };
+            let Ok(bytes) = self.data.block(&sym_file, sym_block_id) else {
+                continue;
+            };
+            let Ok(decoded) = gbx_formats::image::decode(&bytes, Some(WALLSET_MASK)) else {
+                continue;
+            };
+
+            self.symbols.load(idx, decoded);
+            self.symbols
+                .load_wallset(idx - 1, crate::symbols::WallsetSlot::from_tiles(tiles));
         }
     }
 
@@ -643,6 +771,9 @@ impl gbx_vm::EngineServices for EngineVmHost<'_> {
         self.vm.calls.push(RecordedCall::ResetWallSet { index });
         if let Some(entry) = self.vm.assets.walldefs.get_mut(index as usize) {
             *entry = None;
+        }
+        if (index as usize) < crate::symbols::WALLSET_SLOT_COUNT {
+            self.symbols.reset_wallset(index as usize);
         }
     }
 
@@ -711,6 +842,8 @@ mod tests {
     use gbx_formats::geo::GEO_BLOCK_SIZE;
     use gbx_vm::EngineServices;
 
+    const GAME_AREA: u8 = 2;
+
     struct Fixture {
         state: EngineState,
         vm: VmMemoryState,
@@ -718,10 +851,16 @@ mod tests {
         party: DefaultPartyPredicates,
         rng: EngineRng,
         sounds: Vec<SoundEvent>,
+        data: GameData,
+        symbols: SymbolSets,
     }
 
     impl Fixture {
         fn new() -> Self {
+            Self::with_data(GameData::from_files(Vec::<(String, Vec<u8>)>::new()))
+        }
+
+        fn with_data(data: GameData) -> Self {
             Fixture {
                 state: EngineState::new(),
                 vm: VmMemoryState::new(),
@@ -729,6 +868,8 @@ mod tests {
                 party: DefaultPartyPredicates::default(),
                 rng: EngineRng::new(1),
                 sounds: Vec::new(),
+                data,
+                symbols: SymbolSets::new(),
             }
         }
 
@@ -740,6 +881,9 @@ mod tests {
                 party: &mut self.party,
                 rng: &mut self.rng,
                 sounds: &mut self.sounds,
+                data: &self.data,
+                game_area: GAME_AREA,
+                symbols: &mut self.symbols,
             }
         }
     }

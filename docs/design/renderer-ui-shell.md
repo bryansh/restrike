@@ -1140,6 +1140,77 @@ commitments.
       logged, counted `HaltRecord`, never a hard failure) was exercised
       against genuine real-content data, not just synthetic fixtures — see
       `vm-scriptmemory.md` §5 item 8's DIVIDE/`0x8295` finding.
+15. **M2 step 5 — the 3D corridor renderer** (`gbx-engine`'s `corridor.rs`/
+    `symbols.rs`/`vmhost.rs`'s real `load_walldef`, `SOURCES.md`'s step-5
+    row): a dedicated research pass this session read `ovr031.cs` in full
+    (`Draw3dWorld`/`Draw3dWorldBackground`/`Draw3dWorldFar`/`Mid`/`Near`/
+    `draw_3D_8x8_titles`/`DrawAreaMap`/`LoadWalldef`/the coordinate-wrap
+    helpers) plus `ovr029.cs`'s `RedrawView`, cross-checked against
+    `Classes/GeoBlock.cs`/`Gbl.cs`/`Sys.cs`. Corrections and open items
+    beyond what item 13's design pass anticipated:
+    - **`LoadWalldef` populates *multiple consecutive* wallset slots from
+      one call**, not just the slot named by its own `set` argument: a
+      multi-sub-block walldef loaded via `LoadWalldef(1, id)` writes real
+      texture data into sets 1, 2, *and* 3 in that one call (`idx = symbolSet
+      + block` for each of the loaded sub-blocks, `ovr031.cs:664-682`) —
+      `symbols.rs`'s `WallsetSlot`/`SymbolSets::load_wallset` model this
+      directly rather than the single-target-slot model item 13's prose
+      implied. Bookkeeping asymmetry, replicated: only the slot matching the
+      call's *own* `set` gets its `(set, id)` pair recorded
+      (`vm.assets.walldefs`); the other touched slots' texture data is real
+      but their bookkeeping entry stays unset, matching the original's own
+      `:669` vs `:684-685` split.
+    - **"Mask 13" (the task brief's own phrasing) applies only to the
+      paired 8×8 pixel data**, not the walldef's raw tile-id bytes — this
+      session's research found no masking anywhere in `LoadWalldef`'s own
+      path; the mask-13 convention is `Load8x8D`'s (boot's `BOOT_MASK`,
+      §1.3), reused here for the same paired-block loads.
+    - **Far's two *side* sweeps (classes B/C) were summarized, not quoted
+      line-by-line**, by this session's research (unlike the two *front*
+      sweeps and the J-filler semantics, which were). `corridor.rs`'s
+      `far_side_sweep` is a documented reconstruction from the design
+      doc's shape description (3 cells per half, starting one cell out from
+      the reference cell) — verified self-consistent by this session's own
+      unit test (`far_side_walls_draw_classes_b_and_c`) but not
+      independently re-confirmed against `ovr031.cs:463-520`'s literal
+      code. Docketed for a closer read.
+    - **A discovered engine-only bug, found via this step's own four-facings
+      demo** (`demo.rs`'s `four_facings_at_spawn`): the drain-to-last
+      `InputQueue` can leave an unconsumed key queued from a gate-clearing
+      fallback loop, pushed on the very tick a new `Widget` (e.g.
+      `WorldMenu`'s hotbar) is created mid-tick — that widget doesn't exist
+      yet when the tick starts, so it never gets a chance to claim the
+      input pushed *for* that tick, leaving it queued for the *next* tick to
+      drain instead. Concretely: a stray leftover `Enter` resolves against
+      `WorldMenu`'s hotbar (which defaults to highlighting its first word,
+      "Area") as `'A'` (`ToggleAreaView`), silently toggling the area map.
+      First noticed because the four-facings capture showed an *identical*
+      viewport at every facing (the area map's cell content doesn't depend
+      on facing beyond the party-arrow glyph) despite the real spawn
+      square's four edges having four different, distinct wall types.
+      Worked around locally in the demo (flush + detect + correct); not
+      fixed at the engine level this session, since it's an input-queue
+      lifecycle question orthogonal to the renderer itself — docketed
+      alongside §1.11 item 9's existing drain-to-last uncertainty (both
+      settle together at a DOSBox type-ahead check).
+    - **The two sky-color-index cells (`area_ptr.indoor_sky_colour`/
+      `outdoor_sky_colour`, `Area1.cs` `DataOffset` `0x1FC`/`0x1FA`) are a
+      documented hypothesis, not a confirmed `ScriptMemory` address**: this
+      session mapped them to `0x4B00 + 0x1FA`/`0x4B00 + 0x1FC` (Area-window
+      cells) by assuming `Area1`'s `DataOffset` is literally relative to the
+      window's `0x4B00` base — a mapping not independently re-verified
+      against `vmhost.rs`'s own address table this session. Neither cell is
+      ever written by real content in this session's demo (both default to
+      raw-store `0` → `SKY_COLOURS[0]` = black), so the hypothesis is
+      untested in practice; docketed alongside `vm-scriptmemory.md`'s other
+      open `ScriptMemory` items.
+    - The `sky_colours` table (16 entries, confirmed byte-for-byte:
+      `{0,F,4,B,D,2,9,E}` repeated twice) and the sun/moon hour/facing
+      matrix (narrowed South windows, the North branch's own unconditional-
+      on-hour sibling `if`, the confirmed `get_wall_x2(mapY, mapY)` bug
+      gating the whole sun/moon block) were fully quoted by this session's
+      research and are transcribed exactly, replicating the bug rather than
+      "fixing" it (D11) — see `corridor.rs`'s own doc comments for each.
 
 ## 5. What this unblocks (M2 build order)
 

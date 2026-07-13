@@ -13,6 +13,7 @@
 use crate::draw::{blit_image, Clip};
 use crate::framebuffer::Framebuffer;
 use gbx_formats::image::ImageBlock;
+use gbx_formats::walldef::{STYLES_PER_WALLSET, TILE_IDS_PER_STYLE, WALLSET_SIZE};
 
 /// Resident symbol sets: 5 slots. Sets 1-3 (wallsets) are step-5 scope —
 /// the slots exist here, nothing loads them yet.
@@ -54,11 +55,52 @@ pub fn resolve_symbol(symbol_id: u32) -> Result<(usize, usize), SymbolError> {
     Err(SymbolError::BadSymbolId { symbol_id })
 }
 
+/// LOAD PIECES' wallset slot count (sets 1-3, `ovr003.cs`'s `CMD_LoadFiles`
+/// `load_pieces` branch — step 5, task deliverable 1).
+pub const WALLSET_SLOT_COUNT: usize = 3;
+
+/// One resident wallset slot's tile-id table (`gbl.wallDef.blocks[slot]`,
+/// `Classes/GeoBlock.cs`'s `maxBlocks = 3` global array — LOAD PIECES set
+/// `slot + 1`'s single 780-byte sub-block): a research pass this session
+/// (`ovr031.cs:642-687`, `Classes/GeoBlock.cs:78-90`'s `Offset`) found a
+/// `LoadWalldef` call can populate *multiple consecutive* slots from one
+/// multi-sub-block walldef load (`idx = symbolSet + block` for each of the
+/// loaded blocks, not just `symbolSet` itself) — so this holds exactly one
+/// already-rebased sub-block, not the whole loaded [`WalldefBlock`]. The
+/// `>=0x2D` rebase (`var_A = symbol_set_fix[symbolSet] - symbol_set_fix[1]`,
+/// computed once per `LoadWalldef` call from the *original* `symbolSet`
+/// parameter, applied to every touched slot) is baked into `tiles` at load
+/// time (`GeoBlock.cs:84`: `if (data[y,x] >= 0x2D) data[y,x] += (byte)off`,
+/// wrapping byte arithmetic) — no further adjustment needed at texture
+/// lookup time.
+#[derive(Debug, Clone)]
+pub struct WallsetSlot {
+    tiles: [u8; WALLSET_SIZE],
+}
+
+impl WallsetSlot {
+    /// Builds a slot from `tiles` (`[style][idx]`, flat as
+    /// `style * TILE_IDS_PER_STYLE + idx`) — already-rebased tile ids.
+    pub fn from_tiles(tiles: [u8; WALLSET_SIZE]) -> Self {
+        WallsetSlot { tiles }
+    }
+
+    /// The rebased tile id at `(style, idx)` — `style < 5`, `idx < 156`.
+    pub fn tile_id(&self, style: usize, idx: usize) -> Option<u8> {
+        if style >= STYLES_PER_WALLSET || idx >= TILE_IDS_PER_STYLE {
+            return None;
+        }
+        self.tiles.get(style * TILE_IDS_PER_STYLE + idx).copied()
+    }
+}
+
 /// The five resident 8×8 symbol sets, each an optional decoded image block
-/// (`gbl.symbol_8x8_set`).
+/// (`gbl.symbol_8x8_set`), plus the three LOAD PIECES wallset slots
+/// (`gbl.wallDef.blocks[0..2]`) backing sets 1-3's wall-texture id tables.
 #[derive(Debug, Clone, Default)]
 pub struct SymbolSets {
     sets: [Option<ImageBlock>; SYMBOL_SET_COUNT],
+    wallsets: [Option<WallsetSlot>; WALLSET_SLOT_COUNT],
 }
 
 impl SymbolSets {
@@ -75,6 +117,25 @@ impl SymbolSets {
     pub fn get(&self, set: usize) -> Option<&ImageBlock> {
         self.sets.get(set).and_then(Option::as_ref)
     }
+
+    /// Loads a wallset slot (`slot` = LOAD PIECES `set - 1`, `0..3`).
+    /// Panics on an out-of-range slot, same contract as
+    /// [`SymbolSets::load`].
+    pub fn load_wallset(&mut self, slot: usize, tiles: WallsetSlot) {
+        self.wallsets[slot] = Some(tiles);
+    }
+
+    pub fn wallset(&self, slot: usize) -> Option<&WallsetSlot> {
+        self.wallsets.get(slot).and_then(Option::as_ref)
+    }
+
+    /// `gbl.setBlocks[index].Reset()` (LOAD PIECES' `0xFF`-argument
+    /// branch): clears both the wallset's tile-id table and the pixel data
+    /// loaded into the paired symbol set (`slot + 1`).
+    pub fn reset_wallset(&mut self, slot: usize) {
+        self.wallsets[slot] = None;
+        self.sets[slot + 1] = None;
+    }
 }
 
 /// `Put8x8Symbol`'s non-overlay path (`ovr038.cs:54-71` + `seg040.draw_picture`,
@@ -86,6 +147,32 @@ pub fn draw_symbol(
     symbol_id: u32,
     cell_row: usize,
     cell_col: usize,
+) -> Result<(), SymbolError> {
+    draw_symbol_inner(fb, sets, symbol_id, cell_row, cell_col, None)
+}
+
+/// Like [`draw_symbol`], but skips any pixel equal to `no_draw` — the
+/// area-map party arrow's transient "no-draw color 8"
+/// (`seg040.draw_clipped_nodraw(8)` around the one `Put8x8Symbol` call,
+/// `ovr031.cs:86-88`, restored to 17 immediately after).
+pub fn draw_symbol_no_draw(
+    fb: &mut Framebuffer,
+    sets: &SymbolSets,
+    symbol_id: u32,
+    cell_row: usize,
+    cell_col: usize,
+    no_draw: u8,
+) -> Result<(), SymbolError> {
+    draw_symbol_inner(fb, sets, symbol_id, cell_row, cell_col, Some(no_draw))
+}
+
+fn draw_symbol_inner(
+    fb: &mut Framebuffer,
+    sets: &SymbolSets,
+    symbol_id: u32,
+    cell_row: usize,
+    cell_col: usize,
+    no_draw: Option<u8>,
 ) -> Result<(), SymbolError> {
     let (set, index) = resolve_symbol(symbol_id)?;
     let block = sets
@@ -103,7 +190,7 @@ pub fn draw_symbol(
         cell_row,
         cell_col,
         Clip::FULL,
-        None,
+        no_draw,
         None,
     );
     Ok(())

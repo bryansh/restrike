@@ -125,6 +125,14 @@ pub struct FlowCtx<'a> {
     pub cursor: &'a mut TextCursor,
     pub pacer: &'a mut TextPacer,
     pub sounds: &'a mut Vec<SoundEvent>,
+    /// Resident 8×8 symbol sets + wallset slots (step 5, task deliverable
+    /// 1): `load_walldef`'s real target, and `crate::corridor`'s texture
+    /// source.
+    pub symbols: &'a mut crate::symbols::SymbolSets,
+    /// The three boot-loaded `SKY` blocks (moon/sun/horizon, `boot.rs`'s
+    /// `BootAssets::sky`) — read-only after boot, `crate::corridor`'s
+    /// backdrop source (step 5, task deliverable 2).
+    pub sky: &'a [gbx_formats::image::ImageBlock; 3],
 }
 
 /// `Request` -> `Widget` (design doc's table, M2 slice). Engine-owned
@@ -256,6 +264,9 @@ impl VectorRun {
                 party: &mut *ctx.party,
                 rng: &mut *ctx.rng,
                 sounds: &mut *ctx.sounds,
+                data: ctx.data,
+                game_area: ctx.game_area,
+                symbols: &mut *ctx.symbols,
             };
             let result = if let Some(reply) = self.pending_reply.take() {
                 ctx.machine.resume(reply, &mut host)
@@ -328,10 +339,19 @@ impl VectorRun {
                     ctx.cursor.col = NORMAL_BOTTOM.x_start;
                 }
                 Effect::Sound(variant) => ctx.sounds.push(SoundEvent(variant)),
-                // Picture/animation *rendering* is step 5 scope; the effect
-                // is consumed (drained) here so the queue-before-gate
-                // ordering obligation still holds for it.
-                Effect::Picture(_) | Effect::ClearPicture | Effect::AnimationFrame => {}
+                // Picture/animation *rendering* is out of M2's scope
+                // (pictures land in a later milestone); the effect is
+                // consumed (drained) here so the queue-before-gate ordering
+                // obligation still holds for it. `CMD_Picture`'s own
+                // redraw-flag side effects (`spriteChanged`/`can_draw_bigpic`
+                // — `ovr003.cs:320,348`, this session's redraw-flag
+                // consolidation research) are real regardless of whether
+                // the picture itself draws, so they're tracked here.
+                Effect::Picture(_) => {
+                    ctx.vm_memory.sprite_changed = true;
+                    ctx.vm_memory.can_draw_bigpic = true;
+                }
+                Effect::ClearPicture | Effect::AnimationFrame => {}
             }
         }
 
@@ -919,9 +939,19 @@ impl Shell {
 
     /// `main_3d_world_menu`'s entry bookkeeping (`ovr015.cs:352`): zeroes
     /// `field_592` on *every* entry, no exceptions — the required
-    /// "field_592 zeroing at menu entry" test target.
-    fn enter_world_menu(state: &mut EngineState) -> Shell {
-        state.field_592 = 0;
+    /// "field_592 zeroing at menu entry" test target. Also recomposes the
+    /// viewport (`crate::corridor::redraw_view`) — a deliberate, documented
+    /// simplification of the original's sparser, flag-gated `RedrawView`
+    /// call sites (step 5, task deliverable 4's design note): since the
+    /// composited result is deterministic and immediate-mode redraws are
+    /// idempotent (D-UI4), redrawing every time the player can see the
+    /// world menu again is behaviorally equivalent to the original's own
+    /// call-site choreography without needing to model the save-load-only
+    /// `reload_ecl_and_pictures` gate this session's research found the
+    /// original's boot-recompose path actually depends on.
+    fn enter_world_menu(ctx: &mut FlowCtx) -> Shell {
+        ctx.state.field_592 = 0;
+        crate::corridor::redraw_view(ctx);
         let mut hotbar = Hotbar::new("Area Cast View Encamp Search Look");
         hotbar.accept_ext = true;
         Shell::WorldMenu {
@@ -960,7 +990,7 @@ impl Shell {
             Shell::Boot(flow) => {
                 if flow.tick(ctx).is_some() {
                     ctx.state.last_selected_player = ctx.state.selected_player;
-                    *self = Self::enter_world_menu(ctx.state);
+                    *self = Self::enter_world_menu(ctx);
                 }
             }
             Shell::WorldMenu { menu } => {
@@ -977,12 +1007,12 @@ impl Shell {
             Shell::Look(flow) => {
                 if flow.tick(ctx).is_some() {
                     ctx.state.last_selected_player = ctx.state.selected_player; // `:2353`
-                    *self = Self::enter_world_menu(ctx.state);
+                    *self = Self::enter_world_menu(ctx);
                 }
             }
             Shell::Step(flow) => {
                 if flow.tick(ctx).is_some() {
-                    *self = Self::enter_world_menu(ctx.state);
+                    *self = Self::enter_world_menu(ctx);
                 }
             }
             Shell::GameOver => {}
@@ -995,7 +1025,7 @@ impl Shell {
         match cmd {
             ToggleAreaView => {
                 ctx.state.area_map_shown = !ctx.state.area_map_shown;
-                *self = Self::enter_world_menu(ctx.state);
+                *self = Self::enter_world_menu(ctx);
             }
             NotHere => {
                 // A timed status wait inside the menu (§1.6): parked as a
@@ -1007,11 +1037,11 @@ impl Shell {
             Cast | View | Encamp => {
                 // M3 stub: status text only, stays in the menu (task scope
                 // cut — TryEncamp's vector 3/4 dance is M3 party/camp UI).
-                *self = Self::enter_world_menu(ctx.state);
+                *self = Self::enter_world_menu(ctx);
             }
             ToggleSearch => {
                 ctx.state.search_flags ^= 1;
-                *self = Self::enter_world_menu(ctx.state);
+                *self = Self::enter_world_menu(ctx);
             }
             Look => {
                 ctx.state.search_flags |= 2;
@@ -1026,19 +1056,19 @@ impl Shell {
             TurnLeft => {
                 ctx.state.facing = ctx.state.facing.turn_left();
                 ctx.sounds.push(SoundEvent(crate::movement::SOUND_A));
-                *self = Self::enter_world_menu(ctx.state);
+                *self = Self::enter_world_menu(ctx);
             }
             TurnRight => {
                 ctx.state.facing = ctx.state.facing.turn_right();
                 ctx.sounds.push(SoundEvent(crate::movement::SOUND_A));
-                *self = Self::enter_world_menu(ctx.state);
+                *self = Self::enter_world_menu(ctx);
             }
             TurnAround => {
                 ctx.state.facing = ctx.state.facing.turn_around(); // no sound (research finding)
-                *self = Self::enter_world_menu(ctx.state);
+                *self = Self::enter_world_menu(ctx);
             }
             ScrollParty(_) | None => {
-                *self = Self::enter_world_menu(ctx.state);
+                *self = Self::enter_world_menu(ctx);
             }
         }
     }
@@ -1067,6 +1097,22 @@ mod tests {
         font::decode(&data)
     }
 
+    /// A trivial single-item 8×8 `ImageBlock` — a fixture stand-in for a
+    /// `SKY` block (moon/sun/horizon) this module's flow-control tests
+    /// never actually render.
+    fn empty_sky_block() -> gbx_formats::image::ImageBlock {
+        gbx_formats::image::ImageBlock {
+            height: 8,
+            width_cols: 1,
+            x_pos: 0,
+            y_pos: 0,
+            field_9: [0; 8],
+            items: vec![gbx_formats::image::DecodedItem {
+                pixels: vec![0; 64],
+            }],
+        }
+    }
+
     const GAME_AREA: u8 = 2;
 
     struct Harness {
@@ -1083,6 +1129,8 @@ mod tests {
         cursor: TextCursor,
         pacer: TextPacer,
         sounds: Vec<SoundEvent>,
+        symbols: crate::symbols::SymbolSets,
+        sky: [gbx_formats::image::ImageBlock; 3],
     }
 
     impl Harness {
@@ -1107,6 +1155,8 @@ mod tests {
                 cursor: TextCursor::new(),
                 pacer: TextPacer::new(4),
                 sounds: Vec::new(),
+                symbols: crate::symbols::SymbolSets::new(),
+                sky: [empty_sky_block(), empty_sky_block(), empty_sky_block()],
             }
         }
 
@@ -1131,6 +1181,8 @@ mod tests {
                 cursor: &mut self.cursor,
                 pacer: &mut self.pacer,
                 sounds: &mut self.sounds,
+                symbols: &mut self.symbols,
+                sky: &self.sky,
             }
         }
     }
@@ -1235,7 +1287,7 @@ mod tests {
         // the next step's checkpoint.
         let mut h = Harness::new();
         h.state.chained = true;
-        let shell = Shell::enter_world_menu(&mut h.state);
+        let shell = Shell::enter_world_menu(&mut h.ctx());
         assert!(matches!(shell, Shell::WorldMenu { .. }));
         assert!(
             h.state.chained,
@@ -1247,7 +1299,7 @@ mod tests {
     fn field_592_zeroes_on_every_world_menu_entry() {
         let mut h = Harness::new();
         h.state.field_592 = 0xFF;
-        let _ = Shell::enter_world_menu(&mut h.state);
+        let _ = Shell::enter_world_menu(&mut h.ctx());
         assert_eq!(h.state.field_592, 0);
     }
 
@@ -1365,7 +1417,7 @@ mod tests {
             Shell::GameOver
         ));
 
-        let world_menu = Shell::enter_world_menu(&mut h.state);
+        let world_menu = Shell::enter_world_menu(&mut h.ctx());
         assert!(matches!(
             round_trip_shell(&world_menu),
             Shell::WorldMenu { .. }
