@@ -190,10 +190,13 @@ impl EclBuilder {
         self
     }
 
-    /// Resolves all label fixups and returns the finished block. Panics if a
-    /// referenced label was never defined, or the assembled block would
-    /// exceed the `0x1E00`-byte ECL block size — both test-authoring bugs.
-    pub fn build(&self) -> BlockBytes {
+    /// Resolves all label fixups and returns the finished block's raw bytes
+    /// (pre-`BlockBytes` wrap) — the seam [`EclBuilder::build`] uses
+    /// internally, exposed separately so a consumer needing the raw bytes
+    /// (e.g. to embed the block in a synthetic DAX file for a
+    /// `GameData`-driven test) doesn't have to re-implement fixup
+    /// resolution. Same panics as `build`.
+    pub fn build_bytes(&self) -> Vec<u8> {
         let mut bytes = self.bytes.clone();
         assert!(
             bytes.len() <= ECL_BLOCK_SIZE,
@@ -209,7 +212,14 @@ impl EclBuilder {
             bytes[fixup.offset] = lo;
             bytes[fixup.offset + 1] = hi;
         }
-        BlockBytes::from_bytes(&bytes)
+        bytes
+    }
+
+    /// Resolves all label fixups and returns the finished block. Panics if a
+    /// referenced label was never defined, or the assembled block would
+    /// exceed the `0x1E00`-byte ECL block size — both test-authoring bugs.
+    pub fn build(&self) -> BlockBytes {
+        BlockBytes::from_bytes(&self.build_bytes())
     }
 }
 

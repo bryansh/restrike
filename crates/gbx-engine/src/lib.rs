@@ -5,14 +5,12 @@
 //! Frontends are thin presenters: input events in, framebuffer + audio + window
 //! title out.
 //!
-//! M2 step 3 (`docs/design/renderer-ui-shell.md` §5 build order item 3):
-//! step 2's framebuffer/text system now drives `Engine::new`/`tick`
-//! (`engine.rs`), the five prompt-line widgets (`widgets.rs`), the `Shell`
-//! state machine and walk-loop flows over a stub VM (`shell.rs`/
-//! `vm_stub.rs`), and movement/door interaction (`movement.rs`) — a
-//! synthetic map can be walked headlessly end-to-end. Real `EclMachine`
-//! binding is step 4, 3D corridor/wallset rendering is step 5 (the viewport
-//! stays black), frontends are step 6.
+//! M2 step 4 (`docs/design/renderer-ui-shell.md` §5 build order item 4):
+//! the real `EclMachine` is bound in — `vmhost.rs`'s `ScriptMemory`/
+//! `EngineServices` implementation, `shell.rs`'s walk-loop flows pump real
+//! vectors (step 3's `StubVm` stand-in is gone from production). Real
+//! CotAB scripts run inside `Engine::tick` end to end. 3D corridor/wallset
+//! rendering is step 5 (the viewport stays black), frontends are step 6.
 
 pub mod boot;
 pub mod draw;
@@ -25,13 +23,17 @@ pub mod rng;
 pub mod shell;
 pub mod symbols;
 pub mod text;
-pub mod vm_stub;
+pub mod vmhost;
 pub mod widgets;
 
 #[cfg(test)]
 mod demo;
 #[cfg(test)]
+mod h2_conformance;
+#[cfg(test)]
 mod hash_goldens;
+#[cfg(test)]
+mod test_support;
 #[cfg(test)]
 mod walk_goldens;
 

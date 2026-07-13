@@ -58,7 +58,7 @@ impl Facing {
     /// unconfirmed convention pick (the material read this session didn't
     /// pin compass-vs-grid-Y orientation) — internally consistent with this
     /// module's own `GeoBlock` fixtures either way.
-    fn delta(self) -> (i32, i32) {
+    pub(crate) fn delta(self) -> (i32, i32) {
         match self {
             Facing::North => (0, -1),
             Facing::East => (1, 0),
@@ -73,6 +73,30 @@ impl Facing {
             Facing::East => "E",
             Facing::South => "S",
             Facing::West => "W",
+        }
+    }
+
+    /// `gbl.mapDirection`'s raw encoding (`0=N,2=E,4=S,6=W`, `0x033D`'s
+    /// read-only ScriptMemory cell — this session's research).
+    pub fn raw_code(self) -> u8 {
+        match self {
+            Facing::North => 0,
+            Facing::East => 2,
+            Facing::South => 4,
+            Facing::West => 6,
+        }
+    }
+
+    /// Inverse of [`Facing::raw_code`]. Panics on an odd/out-of-range code —
+    /// a caller bug (every write site normalizes first, matching
+    /// `0xC04D`'s write handler, this session's research).
+    pub fn from_raw(code: u8) -> Self {
+        match code {
+            0 => Facing::North,
+            2 => Facing::East,
+            4 => Facing::South,
+            6 => Facing::West,
+            other => panic!("Facing::from_raw: {other} is not a valid raw facing code"),
         }
     }
 }
@@ -356,9 +380,23 @@ impl GameClock {
     const MINUTES_PER_UNIT: u32 = 10;
 
     /// `step_game_time(2, 1)` in search mode, `step_game_time(1, 1)`
-    /// otherwise (`MovePartyForward`, confirmed exact).
+    /// otherwise (`MovePartyForward`, confirmed exact) — sugar over
+    /// [`GameClock::step`].
     pub fn advance(&mut self, search_mode: bool) {
-        self.total_units += if search_mode { 2 } else { 1 };
+        self.step(if search_mode { 2 } else { 1 }, 1);
+    }
+
+    /// `EngineServices::step_game_time(time_slot, amount)` — ECL CLOCK
+    /// (0x34)'s general form: `time_slot == 2` runs at double rate (the
+    /// same search-mode multiplier `MovePartyForward` uses), any other
+    /// slot at normal rate. This session's research confirmed the field
+    /// *identities* the raw clock cells back (§ScriptMemory `0x4BC6`+) but
+    /// not the original's exact minutes-per-tick/calendar constants;
+    /// `MINUTES_PER_UNIT` and [`GameClock::raw_clock_words`]'s day/year
+    /// derivation are documented placeholders pending that read.
+    pub fn step(&mut self, time_slot: u8, amount: u8) {
+        let multiplier = if time_slot == 2 { 2 } else { 1 };
+        self.total_units += amount as u32 * multiplier;
     }
 
     pub fn hh_mm(&self) -> (u8, u8) {
@@ -367,6 +405,28 @@ impl GameClock {
             ((total_minutes / 60) % 24) as u8,
             (total_minutes % 60) as u8,
         )
+    }
+
+    /// The 7 raw ScriptMemory clock words at `0x4BC6..=0x4BD2` (this
+    /// session's research, `Classes/Area1.cs:41-61`): two unlabeled
+    /// bracketing words (kept `0`, matching the original's own "never
+    /// separately assigned" fields), minutes-ones, minutes-tens, hour, day,
+    /// year.
+    pub fn raw_clock_words(&self) -> [u16; 7] {
+        let total_minutes = self.total_units * Self::MINUTES_PER_UNIT;
+        let minutes = total_minutes % 60;
+        let hour = (total_minutes / 60) % 24;
+        let day = (total_minutes / 60 / 24) % 30 + 1;
+        let year = 1 + total_minutes / 60 / 24 / 360;
+        [
+            0,
+            (minutes % 10) as u16,
+            (minutes / 10) as u16,
+            hour as u16,
+            day as u16,
+            year as u16,
+            0,
+        ]
     }
 }
 

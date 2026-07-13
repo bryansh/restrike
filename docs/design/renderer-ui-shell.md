@@ -1109,6 +1109,37 @@ commitments.
       `movement.rs`'s `SOUND_A`/`GameClock::MINUTES_PER_UNIT` are named
       placeholders pending that read; only relative behavior (rate, which
       calls fire) is faithful.
+14. **M2 step 4 — real `EclMachine` binding + real-data walk demo**
+    (`gbx-engine`'s `vmhost.rs`/`shell.rs`, `SOURCES.md`'s step-4 row;
+    `vm-scriptmemory.md` §5 item 8 has the `ScriptMemory`/`EngineServices`
+    research detail):
+    - **Correction to item 13's boot spawn citation:** step 3's research
+      read the Tilverton spawn as `mapPosX=7, mapPosY=13, mapDirection=0`
+      (North, `seg001.cs:250-252`). Running `ECL2.DAX` block 1 vector 4 for
+      real (`restrike run-script --dax ECL2.DAX --block 1 --vector 4`
+      against real CotAB data, M2 step 4's local-only demo) shows it writes
+      `0xC04B=7, 0xC04C=13, 0xC04D=1` — position matches, but `0xC04D=1` (the
+      halved facing encoding, per `vm-scriptmemory.md`'s cell table) decodes
+      to raw `2` = **East**, not North. `demo.rs`'s walk-demo no longer
+      manually overrides `pos`/`facing` before ticking (the real boot vector
+      sets its own initial state, and the engine now trusts that over the
+      earlier citation) — docketed for a closer `seg001.cs` re-read to
+      reconcile the two readings; the demo runs and bashes through a real
+      door either way, so this is a citation correction, not a behavioral
+      bug.
+    - Wiring the real interpreter in place of step 3's `StubVm` required no
+      changes to `shell.rs`'s flow-control shape (`BootFlow`/`LookFlow`/
+      `StepFlow`, the chain runner, the Fable-review door-widget fix) —
+      every prior test converted to real (if trivial) `EclBuilder` bytecode
+      via a new shared `gbx-engine/src/test_support.rs` rather than needing
+      structural changes, and the pinned `walk_goldens.rs` hashes for an
+      EXIT-only fixture block are unchanged from step 3, empirically
+      confirming the `StubVm` → `EclMachine` swap is bit-identical for
+      trivial scripts.
+    - The M2 halt policy (any `VmError` during a vector run becomes a
+      logged, counted `HaltRecord`, never a hard failure) was exercised
+      against genuine real-content data, not just synthetic fixtures — see
+      `vm-scriptmemory.md` §5 item 8's DIVIDE/`0x8295` finding.
 
 ## 5. What this unblocks (M2 build order)
 

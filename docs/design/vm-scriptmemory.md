@@ -501,6 +501,55 @@ match machine.step(&mut host)? {
    in this doc is a *hypothesis* until an H1/H2 check against real data or the
    running game confirms it — coab bootstraps, the game itself validates.
 
+8. **M2 step 4 `ScriptMemory`/`EngineServices` research findings**
+   (`gbx-engine/src/vmhost.rs`, `SOURCES.md`'s step-4 row): a dedicated coab
+   read of `vm_GetMemoryValueType`/`vm_GetMemoryValue`/`vm_SetMemoryValue`
+   (`ovr008.cs`), `load_ecl_dax` (`:136-154`), `seg001.cs`'s `game_area` boot
+   init, and `sub_30580` (`:220-276`) pinned the Area/Table/Party/Global
+   window dispatch and most named Global cells, but left several items open:
+   - `0x2CB` (`SURPRISE`'s write target, `CMD_Surprise`/`ovr003.cs:967`): no
+     matching case was found in either the original's read or write switch —
+     the write appears to be a genuine no-op in the reference source. This
+     session's `ScriptMemory` impl falls through to the raw store instead
+     (round-trips the value), per D-VM5's explicit "unknown cells still
+     round-trip" design choice — a documented, deliberate divergence in the
+     safe direction, not a fidelity miss. Docketed for a DOSBox confirmation
+     (write `0x2CB` via a SURPRISE call, read it back another way if
+     possible).
+   - `game_area`'s boot-time default: `InitFirst`/`InitAgain`
+     (`seg001.cs:276-277,369-370`) literally set it to `1`, with a same-file
+     `game_area = 2` branch for non-demo play seemingly clobbered
+     immediately after — read as UNSURE, possibly a decompiler/
+     transliteration artifact around a conditional this session didn't fully
+     resolve. `gbx-engine`'s `Engine::GAME_AREA` stays fixed at `2` (matching
+     the already-validated M1/step-3 precedent — real Tilverton content lives
+     in `GEO2.DAX`/`ECL2.DAX`), not the literal `1` default. Docketed for a
+     closer `seg001.cs` re-read.
+   - `approach_distance`'s exact formula (`sub_304B4`, wall-type-driven):
+     not in the material read this session (also named in
+     `opcode-classification.md`'s own docket) — `EngineVmHost`'s
+     implementation is a documented neutral placeholder (`0`) pending that
+     read.
+   - INPUT NUMBER (`0x0F`)/INPUT STRING (`0x10`) are not yet implemented by
+     `gbx-vm::EclMachine::dispatch` (both fall through to
+     `VmError::Unimplemented` if a real block ever fires them) — a real
+     scope gap surfaced while writing M2 step 4's H2 conformance suite
+     (`gbx-engine/src/h2_conformance.rs`), which docketed rather than forced
+     an "INPUT NUMBER re-prompts on garbage" test against a genuine VM
+     `Request`; step 3's widget-level `TextEntry` numeric-reprompt test is
+     the closest existing coverage. Land alongside `Request::InputNumber`/
+     `Request::InputString`, `VerticalMenu` (`0x15`), and `SelectPlayer`
+     (`0x39`) — all four are still-unimplemented opcodes `widget_for_request`
+     (`shell.rs`) already docket-notes as awaiting their `gbx-vm` dispatch
+     entries.
+   - Running real `ECL2.DAX` block 1 headlessly (`restrike run-script`,
+     M2 step 4's local-only demo) surfaced a live real-content halt: vector 1
+     (`SearchLocationAddr`, fired by every `Forward`/`Look` command's second
+     phase) executes opcode `0x06` (DIVIDE) at `pc=0x8295`, which
+     `gbx-vm::EclMachine` does not implement — a genuine, reproducible M2
+     halt-policy exercise against real data (not synthetic), confirming the
+     policy holds up outside D10 fixtures.
+
 Resolved since v1: PRINT pagination (it blocks; handled engine-side as buffered
 Effects + input-trace keypresses — §1, D-VM3).
 

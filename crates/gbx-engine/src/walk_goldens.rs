@@ -1,9 +1,10 @@
 //! M2 step 3 deliverable: framebuffer-hash goldens (D-UI7) driven through
 //! `Engine::tick` end-to-end — a synthetic fixture GEO block (this module's
-//! own [`fixture_geo`]) + step-2 fixture boot assets, walked by a pinned
-//! input trace. Checkpoints are explicit `(trace, tick_index)` pairs —
-//! [`walk_trace`]'s input schedule plus the pinned tick indices in
-//! [`golden_walk_trace`] — never named moments.
+//! own [`fixture_geo`]) + step-2 fixture boot assets + a real
+//! `EclBuilder`-authored ECL block (M2 step 4: the VM is real, not a stub),
+//! walked by a pinned input trace. Checkpoints are explicit
+//! `(trace, tick_index)` pairs — [`walk_trace`]'s input schedule plus the
+//! pinned tick indices in [`golden_walk_trace`] — never named moments.
 //!
 //! Regenerate pinned hashes with `RESTRIKE_REGEN_GOLDENS=1`; a `.ppm` is
 //! dumped to the system temp dir on mismatch or during regen, mirroring
@@ -11,8 +12,9 @@
 
 #![cfg(test)]
 
-use crate::engine::{Engine, Frame};
+use crate::engine::{Engine, GAME_AREA, INITIAL_ECL_BLOCK};
 use crate::input::{ExtKey, InputEvent};
+use crate::test_support::exit_only_block;
 use gbx_formats::font::{self, Font};
 use gbx_formats::geo::{GeoBlock, GEO_BLOCK_SIZE};
 use gbx_formats::image::{DecodedItem, ImageBlock};
@@ -64,23 +66,19 @@ fn fixture_geo() -> GeoBlock {
 fn fixture_engine(seed: u64) -> Engine {
     let mut sets = crate::symbols::SymbolSets::new();
     sets.load(4, synthetic_set4());
-    let mut engine = Engine::new_fixture(synthetic_font(), sets, fixture_geo(), seed);
+    // The resident block's every vector resolves to a trivial EXIT — this
+    // trace exercises walk-loop/renderer state, not real script content
+    // (real-content H2 conformance lives in `shell.rs`'s test module).
+    let data =
+        crate::test_support::ecl_game_data(GAME_AREA, vec![(INITIAL_ECL_BLOCK, exit_only_block())]);
+    let mut engine = Engine::new_fixture(synthetic_font(), sets, fixture_geo(), data, seed);
     engine.state.pos = (5, 5);
     engine.state.facing = crate::movement::Facing::East;
     engine.party_predicates_mut().bash_candidates = vec![(25, 0)]; // automatic bash success
-                                                                   // Each of the trace's two forward steps runs a StepFlow, which pumps
-                                                                   // two scripted vector calls (1 and 2) against the stub VM — pre-script
-                                                                   // both steps' worth up front (boot's own entry vector is auto-scripted
-                                                                   // by `Engine::build`). No script fires any Effect/Request this trace;
-                                                                   // real presentation wiring is step 4.
-    for _ in 0..2 {
-        engine.script_vm_call(vec![gbx_vm::VmStep::Done(gbx_vm::Exit::Ended)]); // vector 1
-        engine.script_vm_call(vec![gbx_vm::VmStep::Done(gbx_vm::Exit::Ended)]); // vector 2
-    }
     engine
 }
 
-fn write_ppm(name: &str, frame: &Frame) {
+fn write_ppm(name: &str, frame: &crate::engine::Frame) {
     let path = std::env::temp_dir().join(format!("restrike-walk-golden-{name}.ppm"));
     let mut out = format!(
         "P6\n{} {}\n255\n",
@@ -99,7 +97,7 @@ fn write_ppm(name: &str, frame: &Frame) {
     }
 }
 
-fn check_golden(name: &str, frame: &Frame, expected_hex: &str) {
+fn check_golden(name: &str, frame: &crate::engine::Frame, expected_hex: &str) {
     let actual = frame.hash_hex();
     let regen = std::env::var_os("RESTRIKE_REGEN_GOLDENS").is_some();
     if regen {
@@ -160,8 +158,8 @@ fn walk_trace_diagnostic() {
 }
 
 /// The pinned golden checkpoints (D-UI7): explicit `(trace, tick_index)`
-/// pairs. Regenerate with `RESTRIKE_REGEN_GOLDENS=1` (reads the diagnostic
-/// test's `--nocapture` output, or this test's own eprintln on mismatch).
+/// pairs — [`walk_trace`]'s input schedule plus the pinned tick indices in
+/// [`golden_walk_trace`] — never named moments.
 #[test]
 fn golden_walk_trace() {
     let mut e = fixture_engine(1);

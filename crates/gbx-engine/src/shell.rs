@@ -1,27 +1,25 @@
-//! The UI shell state machine (D-UI2, task deliverable 3): `Shell`,
-//! `VmPhase`, the flow plans (`BootFlow`/`LookFlow`/`StepFlow`) with chain
-//! checkpoints and resume-after-chain, the persistent `chained`/
-//! `party_killed` engine state, and the walk-loop's world-menu dispatch.
-//! The VM itself is [`crate::vm_stub::StubVm`] this session (real
-//! `EclMachine` binding is step 4) — every "run a vector" site pulls from a
-//! test-scripted step sequence.
+//! The UI shell state machine (D-UI2, task deliverable 3) driven by the
+//! real `EclMachine` (M2 step 4, task deliverables 1-3): `Shell`, `VmPhase`,
+//! the flow plans (`BootFlow`/`LookFlow`/`StepFlow`) with chain checkpoints
+//! and resume-after-chain, the persistent `chained`/`party_killed` engine
+//! state, and the walk-loop's world-menu dispatch.
 //!
-//! **Fable review finding, addressed explicitly (binding for this session,
-//! per the task brief):** the design doc's prose says every blocking site is
-//! a Widget parked in `VmPhase::Gate` or `WorldMenu` — but the locked-door
-//! menu lives in a [`StepFlow`] stage (`StepStage::DoorInteraction`), which
-//! is neither: no VM vector is running during a door prompt at all. The fix
-//! applied here is the doc's own suggested alternative, "Gate generalizes to
-//! flows": [`VmPhase::Gate`] is not exclusive to `VectorRun`s — any flow
-//! stage may park a `Widget` in it directly (`StepStage::DoorInteraction`
-//! does exactly this, with no VM involvement whatsoever). There is nowhere
-//! left for a blocking interaction to hide outside this one mechanism.
+//! **Fable review finding, addressed explicitly (binding since M2 step 3):**
+//! the design doc's prose says every blocking site is a Widget parked in
+//! `VmPhase::Gate` or `WorldMenu` — but the locked-door menu lives in a
+//! [`StepFlow`] stage (`StepStage::DoorInteraction`), which is neither: no
+//! VM vector is running during a door prompt at all. The fix applied here is
+//! the doc's own suggested alternative, "Gate generalizes to flows":
+//! [`VmPhase::Gate`] is not exclusive to `VectorRun`s — any flow stage may
+//! park a `Widget` in it directly (`StepStage::DoorInteraction` does exactly
+//! this, with no VM involvement whatsoever). There is nowhere left for a
+//! blocking interaction to hide outside this one mechanism.
 //!
 //! Derived by reading coab for behavior (D11, never copied) — see
-//! `movement.rs`'s citations for `ovr015.cs`/`ovr031.cs`; this module's own
-//! citations are to `engine/ovr003.cs` `sub_29758` (the walk loop,
-//! `:2230-2396`) and `sub_29677` (the chain runner, `:2180-2227`), pinned to
-//! exact sequencing by this session's research pass.
+//! `movement.rs`'s citations for `ovr015.cs`/`ovr031.cs`, `vmhost.rs`'s for
+//! the ScriptMemory/EngineServices/`load_ecl_dax` research pass; this
+//! module's own citations are to `engine/ovr003.cs` `sub_29758` (the walk
+//! loop, `:2230-2396`) and `sub_29677` (the chain runner, `:2180-2227`).
 
 use crate::framebuffer::Framebuffer;
 use crate::input::InputQueue;
@@ -30,12 +28,14 @@ use crate::movement::{
     position_time_text, try_step_forward, wall_door_flags, DoorState, DoorStepFlags, Facing,
     GameClock, PartyPredicates, WorldMenuCommand,
 };
+use crate::rng::EngineRng;
 use crate::text::{JobStatus, TextCursor, TextJob, TextPacer, NORMAL_BOTTOM};
-use crate::vm_stub::StubVm;
+use crate::vmhost::{describe_halt, load_ecl_block, EngineVmHost, HaltRecord, VmMemoryState};
 use crate::widgets::{Delay, Hotbar, PressAnyKey, Widget, WidgetOutcome};
 use gbx_formats::font::Font;
+use gbx_formats::game_data::GameData;
 use gbx_formats::geo::GeoBlock;
-use gbx_vm::{BlockId, Effect, Exit, Request, VmRng, VmStep};
+use gbx_vm::{BlockId, EclMachine, Effect, Exit, Reply, Request, VmStep, COTAB};
 use std::collections::VecDeque;
 
 /// One audio cue this tick (D-UI1's `Frame::sounds` — M8 synthesizes).
@@ -46,6 +46,14 @@ pub struct SoundEvent(pub u8);
 /// most this many times per tick before yielding, so a `GOTO`-self script
 /// can't hang the app.
 const STEP_BUDGET: u32 = 10_000;
+
+/// The dialect's vector-table indices this session's flows fire
+/// (`docs/design/vm-scriptmemory.md` §1's table, 0-indexed as
+/// `EclMachine::vector` takes it — confirmed by `frontends/cli/run_script.rs`'s
+/// own `vector.unwrap_or(4)` default).
+const VECTOR_RUN_ADDR_1: usize = 0;
+const VECTOR_SEARCH_LOCATION: usize = 1;
+const VECTOR_ENTRY_POINT: usize = 4;
 
 /// What a flow's cursor is doing right now (D-UI2, generalized — see this
 /// module's top doc comment). `Pump`/`Present` only ever occur inside a
@@ -67,17 +75,22 @@ enum PendingOutcome {
     Exit(Exit),
 }
 
-/// One vector's execution against [`StubVm`]: pumps steps, buffers `Effect`s
-/// into an ordered presentation queue, drains that queue (pacing text
-/// through [`TextJob`], gating on pagination) before any `Request`'s Widget
-/// opens — the D-VM3 ordering obligation, mechanically enforced by this
-/// struct's own phase order.
+/// One vector's execution against the real [`EclMachine`]: pumps steps,
+/// buffers `Effect`s into an ordered presentation queue, drains that queue
+/// (pacing text through [`TextJob`], gating on pagination) before any
+/// `Request`'s Widget opens — the D-VM3 ordering obligation, mechanically
+/// enforced by this struct's own phase order.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct VectorRun {
     phase: VmPhase,
     queue: VecDeque<Effect>,
     current_job: Option<TextJob>,
     pending: Option<PendingOutcome>,
+    /// Set by [`VectorRun::tick_gate`] once a parked widget resolves;
+    /// consumed by the next [`VectorRun::tick_pump`] call, which then calls
+    /// `machine.resume(reply, ...)` instead of `machine.step(...)` exactly
+    /// once.
+    pending_reply: Option<Reply>,
 }
 
 /// One tick's result from [`VectorRun::tick`].
@@ -97,13 +110,16 @@ enum PresentTick {
 /// Everything a flow stage needs for one tick — bundled so `Shell`/flow
 /// methods don't thread a dozen parameters individually.
 pub struct FlowCtx<'a> {
-    pub vm: &'a mut StubVm,
+    pub machine: &'a mut EclMachine,
+    pub vm_memory: &'a mut VmMemoryState,
+    pub data: &'a GameData,
+    pub game_area: u8,
     pub input: &'a mut InputQueue,
     pub dt_ticks: u32,
     pub state: &'a mut EngineState,
     pub geo: &'a GeoBlock,
     pub party: &'a mut dyn PartyPredicates,
-    pub rng: &'a mut dyn VmRng,
+    pub rng: &'a mut EngineRng,
     pub fb: &'a mut Framebuffer,
     pub font: &'a Font,
     pub cursor: &'a mut TextCursor,
@@ -113,7 +129,12 @@ pub struct FlowCtx<'a> {
 
 /// `Request` -> `Widget` (design doc's table, M2 slice). Engine-owned
 /// interactions (world menu, door menu, pagination) never go through this —
-/// only a real `VectorRun`'s `Request` does.
+/// only a real `VectorRun`'s `Request` does. Only the `Request` variants
+/// `gbx-vm`'s interpreter can currently emit are handled
+/// (`HorizontalMenu`/`Delay`/`Combat`) — `VerticalMenu`/`InputNumber`/
+/// `InputString`/`SelectPlayer` await their opcodes (`0x15`/`0x0F`/`0x10`/
+/// `0x39`) landing in the interpreter; `ListMenu`/`TextEntry` already exist
+/// and are ready (step 3), this is purely a `gbx-vm` coverage gap, docketed.
 fn widget_for_request(request: &Request) -> Widget {
     match request {
         Request::HorizontalMenu { options } => {
@@ -141,18 +162,40 @@ fn widget_for_request(request: &Request) -> Widget {
     }
 }
 
-impl VectorRun {
-    /// `machine.enter` + the first pump (`RunVector(n)`, §1.6).
-    pub fn start(vm: &mut StubVm) -> Self {
-        vm.enter();
-        VectorRun {
-            phase: VmPhase::Pump,
-            queue: VecDeque::new(),
-            current_job: None,
-            pending: None,
-        }
-    }
+/// The inverse of [`widget_for_request`]'s `HorizontalMenu` case: maps a
+/// resolved Hotbar key back to a `Reply::Selection` index. Implementation
+/// note (flagged): finds the first option whose leading byte (uppercased)
+/// matches the resolved key — exact for every menu this session's flows
+/// construct (each option is its own hotkey-selectable word, per real
+/// HORIZONTAL MENU option text), but not a byte-exact replication of
+/// `sub_317AA`'s own index bookkeeping (out of scope — the original tracks
+/// the option index directly rather than re-deriving it from the key).
+fn resolve_horizontal_menu_reply(options: &[gbx_vm::VmString], key: u8) -> Reply {
+    let upper = key.to_ascii_uppercase();
+    let idx = options
+        .iter()
+        .position(|opt| opt.0.first().map(|b| b.to_ascii_uppercase()) == Some(upper))
+        .unwrap_or(0);
+    Reply::Selection(idx as u8)
+}
 
+/// `machine.vector(index)` + `machine.enter(addr)`, or `None` if that vector
+/// is unresolved in the resident block (an empty/malformed block — treated
+/// as "nothing to run," not a panic; real CotAB data never hits this per
+/// M1's census).
+fn enter_vector(machine: &mut EclMachine, index: usize) -> Option<VectorRun> {
+    let addr = machine.vector(index)?;
+    machine.enter(addr);
+    Some(VectorRun {
+        phase: VmPhase::Pump,
+        queue: VecDeque::new(),
+        current_job: None,
+        pending: None,
+        pending_reply: None,
+    })
+}
+
+impl VectorRun {
     /// Advances by one tick — internally loops through phase transitions
     /// (Pump -> Present -> Gate -> Pump -> ...) making maximal progress,
     /// per D-UI1's "bounded state advance" model: a tick only *actually*
@@ -192,20 +235,47 @@ impl VectorRun {
         }
     }
 
-    /// Pumps up to [`STEP_BUDGET`] steps. Returns `true` once a `Request`
-    /// or `Done` is pending (phase advances to `Present`), `false` if the
-    /// budget ran out first (the Fuel watchdog, D-UI2's obligations table).
+    /// Pumps up to [`STEP_BUDGET`] steps against the real `EclMachine`.
+    /// Returns `true` once a `Request` or `Done` is pending (phase advances
+    /// to `Present`), `false` if the budget ran out first (the Fuel
+    /// watchdog, D-UI2's obligations table). A `VmError` invokes the M2 halt
+    /// policy (task deliverable 4): logged to `vm_memory.halts`, the run
+    /// treated as `Done(Ended)` for flow purposes — never a hard failure.
     fn tick_pump(&mut self, ctx: &mut FlowCtx) -> bool {
         for _ in 0..STEP_BUDGET {
-            match ctx.vm.advance() {
-                VmStep::Continue => continue,
-                VmStep::Effect(e) => self.queue.push_back(e),
-                VmStep::Request(r) => {
+            // Constructed inline (not via a helper function) so the borrow
+            // checker sees these as disjoint field reborrows of `*ctx` —
+            // `ctx.machine` stays reachable alongside `host` only because
+            // this happens within the same scope, not across a call
+            // boundary (a `&mut FlowCtx`-taking helper would opaquely
+            // borrow the whole struct from the caller's view).
+            let mut host = EngineVmHost {
+                state: &mut *ctx.state,
+                vm: &mut *ctx.vm_memory,
+                geo: ctx.geo,
+                party: &mut *ctx.party,
+                rng: &mut *ctx.rng,
+                sounds: &mut *ctx.sounds,
+            };
+            let result = if let Some(reply) = self.pending_reply.take() {
+                ctx.machine.resume(reply, &mut host)
+            } else {
+                ctx.machine.step(&mut host)
+            };
+            match result {
+                Ok(VmStep::Continue) => continue,
+                Ok(VmStep::Effect(e)) => self.queue.push_back(e),
+                Ok(VmStep::Request(r)) => {
                     self.pending = Some(PendingOutcome::Request(r));
                     break;
                 }
-                VmStep::Done(exit) => {
+                Ok(VmStep::Done(exit)) => {
                     self.pending = Some(PendingOutcome::Exit(exit));
+                    break;
+                }
+                Err(err) => {
+                    ctx.vm_memory.halts.push(describe_halt(&err));
+                    self.pending = Some(PendingOutcome::Exit(Exit::Ended));
                     break;
                 }
             }
@@ -305,10 +375,21 @@ impl VectorRun {
         if matches!(outcome, WidgetOutcome::Pending) {
             return false;
         }
-        // Any resolution: the pending Request is answered (the real Reply
-        // value is unneeded — StubVm's script already bakes in the
-        // consequence, see vm_stub.rs's doc comment) and pumping resumes.
-        self.pending = None;
+
+        // Any resolution: build the real Reply matching the pending
+        // Request, then resume pumping.
+        let Some(PendingOutcome::Request(request)) = self.pending.take() else {
+            unreachable!("Gate phase without a pending Request")
+        };
+        let reply = match (&request, outcome) {
+            (Request::HorizontalMenu { options }, WidgetOutcome::Hotbar(key)) => {
+                resolve_horizontal_menu_reply(options, key)
+            }
+            (Request::Delay, _) => Reply::Delay,
+            (Request::Combat, _) => Reply::Combat,
+            _ => Reply::Selection(0), // unreachable in practice; a safe fallback, not a panic
+        };
+        self.pending_reply = Some(reply);
         self.phase = VmPhase::Pump;
         true
     }
@@ -328,17 +409,46 @@ pub enum ChainRunnerOutcome {
 }
 
 impl ChainRunner {
-    pub fn start(vm: &mut StubVm) -> Self {
-        ChainRunner {
-            run: VectorRun::start(vm),
-        }
-    }
-
     pub fn tick(&mut self, ctx: &mut FlowCtx) -> Option<ChainRunnerOutcome> {
         match self.run.tick(ctx) {
             RunTick::Working => None,
             RunTick::Done(Exit::Ended) => Some(ChainRunnerOutcome::Finished),
             RunTick::Done(Exit::ChainTo(id)) => Some(ChainRunnerOutcome::ChainedAgain(id)),
+        }
+    }
+}
+
+/// `Exit::ChainTo` bookkeeping shared by every checkpoint (§1.6): commits
+/// `LastEclBlockId` (NEWECL's own old-id write, `ovr003.cs:488`), sets
+/// `chained`, loads the new block via `load_ecl_dax`'s mapping
+/// (`vmhost.rs`), and starts its entry vector. Returns `None` if the chain
+/// already fully resolved this same tick (a load failure or an unresolved
+/// entry vector — both loudly diagnosed via `vm_memory.halts`, never a
+/// silent stall or a panic on bad/missing content).
+fn begin_chain(ctx: &mut FlowCtx, id: BlockId) -> Option<ChainRunner> {
+    ctx.state.last_ecl_block_id = ctx.state.ecl_block_id;
+    ctx.state.ecl_block_id = id.0;
+    ctx.state.chained = true;
+
+    let bytes = match load_ecl_block(ctx.data, ctx.game_area, id.0) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            ctx.vm_memory.halts.push(HaltRecord {
+                pc: 0,
+                opcode: 0,
+                description: format!("NEWECL to block {} failed to load: {err:?}", id.0),
+            });
+            ctx.state.chained = false;
+            return None;
+        }
+    };
+    *ctx.machine = EclMachine::load_block(bytes, &COTAB).unwrap_or_else(|never| match never {});
+
+    match enter_vector(ctx.machine, VECTOR_ENTRY_POINT) {
+        Some(run) => Some(ChainRunner { run }),
+        None => {
+            ctx.state.chained = false;
+            None
         }
     }
 }
@@ -353,10 +463,13 @@ fn drive_chain(chain: &mut Option<ChainRunner>, ctx: &mut FlowCtx) -> Option<()>
     match runner.tick(ctx) {
         None => None,
         Some(ChainRunnerOutcome::ChainedAgain(id)) => {
-            ctx.state.last_ecl_block_id = ctx.state.ecl_block_id;
-            ctx.state.ecl_block_id = id.0;
             ctx.state.last_selected_player = ctx.state.selected_player;
-            *chain = Some(ChainRunner::start(ctx.vm));
+            *chain = begin_chain(ctx, id);
+            if chain.is_none() {
+                ctx.state.chained = false;
+                ctx.state.last_ecl_block_id = ctx.state.ecl_block_id;
+                return Some(());
+            }
             None
         }
         Some(ChainRunnerOutcome::Finished) => {
@@ -399,6 +512,24 @@ pub struct EngineState {
     pub door_flags: DoorStepFlags,
     pub clock: GameClock,
     pub reload_ecl_and_pictures: bool,
+    /// `gbl.game_state`/`gbl.last_game_state` (`inDungeon`'s write hook,
+    /// this session's research): only `DungeonMap`/`WildernessMap` are
+    /// modeled (M2 slice — the other `game_state` values are M3+ screens).
+    pub game_state: GameState,
+    pub last_game_state: GameState,
+    /// `area2_ptr.HeadBlockId`: `0xFF` = no specific portrait head (reset by
+    /// `vm_init_ecl`); M4/combat scope carries this even though M2 draws
+    /// nothing from it yet.
+    pub head_block_id: u8,
+}
+
+/// `gbl.game_state`'s M2 slice (`Classes/Gbl.cs`'s `GameState` enum —
+/// `WildernessMap`/`DungeonMap` are the only two this session's `inDungeon`
+/// write hook can produce).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum GameState {
+    WildernessMap,
+    DungeonMap,
 }
 
 impl EngineState {
@@ -420,10 +551,13 @@ impl EngineState {
             door_flags: DoorStepFlags::all_true(),
             clock: GameClock::default(),
             reload_ecl_and_pictures: false,
+            game_state: GameState::DungeonMap,
+            last_game_state: GameState::DungeonMap,
+            head_block_id: 0xFF,
         }
     }
 
-    fn search_mode(&self) -> bool {
+    pub(crate) fn search_mode(&self) -> bool {
         self.search_flags & 1 != 0
     }
 }
@@ -451,11 +585,12 @@ pub struct BootFlow {
 }
 
 impl BootFlow {
-    pub fn start(vm: &mut StubVm, state: &mut EngineState) -> Self {
+    pub fn start(machine: &mut EclMachine, state: &mut EngineState) -> Self {
         state.last_selected_player = state.selected_player; // `:2232`
+        let run = enter_vector(machine, VECTOR_ENTRY_POINT);
         BootFlow {
             stage: BootStage::EntryVector,
-            run: Some(VectorRun::start(vm)),
+            run,
             chain: None,
         }
     }
@@ -469,7 +604,12 @@ impl BootFlow {
 
         match self.stage {
             BootStage::EntryVector => {
-                let run = self.run.as_mut().expect("EntryVector always has a run");
+                let Some(run) = self.run.as_mut() else {
+                    // The entry vector was unresolved at construction — an
+                    // immediate no-op, matching an empty block.
+                    self.stage = BootStage::PostChainResume;
+                    return None;
+                };
                 match run.tick(ctx) {
                     RunTick::Working => None,
                     RunTick::Done(Exit::Ended) => {
@@ -479,13 +619,11 @@ impl BootFlow {
                         None
                     }
                     RunTick::Done(Exit::ChainTo(id)) => {
-                        // NEWECL's own write (`ovr003.cs:488`): the *old*
-                        // id lands in LastEclBlockId before the swap.
-                        ctx.state.last_ecl_block_id = ctx.state.ecl_block_id;
-                        ctx.state.ecl_block_id = id.0;
-                        ctx.state.chained = true;
                         self.run = None;
-                        self.chain = Some(ChainRunner::start(ctx.vm));
+                        match begin_chain(ctx, id) {
+                            Some(runner) => self.chain = Some(runner),
+                            None => self.stage = BootStage::PostChainResume,
+                        }
                         None
                     }
                 }
@@ -526,12 +664,13 @@ pub struct LookFlow {
 impl LookFlow {
     /// Caller (the world-menu dispatch) has already set `search_flags |= 2`
     /// and advanced the clock (`'L'` handler, §1.6) before calling this.
-    pub fn start(vm: &mut StubVm, state: &mut EngineState) -> Self {
+    pub fn start(machine: &mut EclMachine, state: &mut EngineState) -> Self {
         let backup = state.search_flags & 1;
         state.search_flags = 1;
+        let run = enter_vector(machine, VECTOR_SEARCH_LOCATION);
         LookFlow {
             stage: LookStage::RunVector2,
-            run: Some(VectorRun::start(vm)),
+            run,
             chain: None,
             search_flags_backup: backup,
         }
@@ -545,7 +684,10 @@ impl LookFlow {
 
         match self.stage {
             LookStage::RunVector2 => {
-                let run = self.run.as_mut().expect("RunVector2 always has a run");
+                let Some(run) = self.run.as_mut() else {
+                    self.stage = LookStage::RestoreSearchFlags;
+                    return None;
+                };
                 match run.tick(ctx) {
                     RunTick::Working => None,
                     RunTick::Done(Exit::Ended) => {
@@ -554,11 +696,11 @@ impl LookFlow {
                         None
                     }
                     RunTick::Done(Exit::ChainTo(id)) => {
-                        ctx.state.last_ecl_block_id = ctx.state.ecl_block_id;
-                        ctx.state.ecl_block_id = id.0;
-                        ctx.state.chained = true;
                         self.run = None;
-                        self.chain = Some(ChainRunner::start(ctx.vm));
+                        match begin_chain(ctx, id) {
+                            Some(runner) => self.chain = Some(runner),
+                            None => self.stage = LookStage::RestoreSearchFlags,
+                        }
                         None
                     }
                 }
@@ -599,10 +741,11 @@ pub struct StepFlow {
 }
 
 impl StepFlow {
-    pub fn start(vm: &mut StubVm, state: &mut EngineState) -> Self {
+    pub fn start(machine: &mut EclMachine, state: &mut EngineState) -> Self {
+        let run = enter_vector(machine, VECTOR_RUN_ADDR_1);
         StepFlow {
             stage: StepStage::RunVector1,
-            run: Some(VectorRun::start(vm)),
+            run,
             chain: None,
             door_widget: None,
             last_pos: state.pos,
@@ -628,7 +771,11 @@ impl StepFlow {
 
         match self.stage {
             StepStage::RunVector1 => {
-                let run = self.run.as_mut().expect("RunVector1 always has a run");
+                let Some(run) = self.run.as_mut() else {
+                    self.last_pos = ctx.state.pos;
+                    self.stage = StepStage::DoorInteraction;
+                    return None;
+                };
                 match run.tick(ctx) {
                     RunTick::Working => None,
                     RunTick::Done(Exit::Ended) => {
@@ -638,18 +785,21 @@ impl StepFlow {
                         None
                     }
                     RunTick::Done(Exit::ChainTo(id)) => {
-                        ctx.state.last_ecl_block_id = ctx.state.ecl_block_id;
-                        ctx.state.ecl_block_id = id.0;
-                        ctx.state.chained = true;
                         self.run = None;
-                        self.chain = Some(ChainRunner::start(ctx.vm));
+                        match begin_chain(ctx, id) {
+                            Some(runner) => self.chain = Some(runner),
+                            None => self.stage = StepStage::Done,
+                        }
                         None
                     }
                 }
             }
             StepStage::DoorInteraction => self.tick_door_interaction(ctx),
             StepStage::RunVector2 => {
-                let run = self.run.as_mut().expect("RunVector2 always has a run");
+                let Some(run) = self.run.as_mut() else {
+                    self.stage = StepStage::Done;
+                    return Some(());
+                };
                 match run.tick(ctx) {
                     RunTick::Working => None,
                     RunTick::Done(Exit::Ended) => {
@@ -658,11 +808,11 @@ impl StepFlow {
                         Some(())
                     }
                     RunTick::Done(Exit::ChainTo(id)) => {
-                        ctx.state.last_ecl_block_id = ctx.state.ecl_block_id;
-                        ctx.state.ecl_block_id = id.0;
-                        ctx.state.chained = true;
                         self.run = None;
-                        self.chain = Some(ChainRunner::start(ctx.vm));
+                        match begin_chain(ctx, id) {
+                            Some(runner) => self.chain = Some(runner),
+                            None => self.stage = StepStage::Done,
+                        }
                         None
                     }
                 }
@@ -743,7 +893,7 @@ impl StepFlow {
         if ctx.state.pos != self.last_pos {
             ctx.sounds.push(SoundEvent(crate::movement::SOUND_A));
         }
-        self.run = Some(VectorRun::start(ctx.vm));
+        self.run = enter_vector(ctx.machine, VECTOR_SEARCH_LOCATION);
         self.stage = StepStage::RunVector2;
         None
     }
@@ -763,8 +913,8 @@ pub enum Shell {
 }
 
 impl Shell {
-    pub fn boot(vm: &mut StubVm, state: &mut EngineState) -> Self {
-        Shell::Boot(BootFlow::start(vm, state))
+    pub fn boot(machine: &mut EclMachine, state: &mut EngineState) -> Self {
+        Shell::Boot(BootFlow::start(machine, state))
     }
 
     /// `main_3d_world_menu`'s entry bookkeeping (`ovr015.cs:352`): zeroes
@@ -783,30 +933,17 @@ impl Shell {
     /// anywhere in the current state (a `Gate`, `WorldMenu`'s own menu, or a
     /// `StepFlow`'s door menu) — no vector may be pumped while this holds.
     pub fn gate_open(&self) -> bool {
+        fn run_gated(run: &Option<VectorRun>) -> bool {
+            matches!(run.as_ref().map(|r| &r.phase), Some(VmPhase::Gate(_)))
+        }
+        fn chain_gated(chain: &Option<ChainRunner>) -> bool {
+            matches!(chain.as_ref().map(|c| &c.run.phase), Some(VmPhase::Gate(_)))
+        }
         match self {
-            Shell::Boot(b) => {
-                matches!(b.run.as_ref().map(|r| &r.phase), Some(VmPhase::Gate(_)))
-                    || matches!(
-                        b.chain.as_ref().map(|c| &c.run.phase),
-                        Some(VmPhase::Gate(_))
-                    )
-            }
+            Shell::Boot(b) => run_gated(&b.run) || chain_gated(&b.chain),
             Shell::WorldMenu { .. } => true,
-            Shell::Look(l) => {
-                matches!(l.run.as_ref().map(|r| &r.phase), Some(VmPhase::Gate(_)))
-                    || matches!(
-                        l.chain.as_ref().map(|c| &c.run.phase),
-                        Some(VmPhase::Gate(_))
-                    )
-            }
-            Shell::Step(s) => {
-                s.door_widget.is_some()
-                    || matches!(s.run.as_ref().map(|r| &r.phase), Some(VmPhase::Gate(_)))
-                    || matches!(
-                        s.chain.as_ref().map(|c| &c.run.phase),
-                        Some(VmPhase::Gate(_))
-                    )
-            }
+            Shell::Look(l) => run_gated(&l.run) || chain_gated(&l.chain),
+            Shell::Step(s) => s.door_widget.is_some() || run_gated(&s.run) || chain_gated(&s.chain),
             Shell::GameOver => false,
         }
     }
@@ -879,12 +1016,12 @@ impl Shell {
             Look => {
                 ctx.state.search_flags |= 2;
                 ctx.state.clock.advance(true);
-                *self = Shell::Look(LookFlow::start(ctx.vm, ctx.state));
+                *self = Shell::Look(LookFlow::start(ctx.machine, ctx.state));
             }
             Forward => {
                 ctx.state.tried_to_exit_map =
                     try_step_forward(ctx.geo, ctx.state.pos, ctx.state.facing);
-                *self = Shell::Step(StepFlow::start(ctx.vm, ctx.state));
+                *self = Shell::Step(StepFlow::start(ctx.machine, ctx.state));
             }
             TurnLeft => {
                 ctx.state.facing = ctx.state.facing.turn_left();
@@ -917,9 +1054,9 @@ impl Shell {
 mod tests {
     use super::*;
     use crate::movement::DefaultPartyPredicates;
-    use crate::rng::EngineRng;
+    use crate::test_support::{ecl_game_data, exit_only_block, labeled_block, simple_block};
     use gbx_formats::font;
-    use gbx_vm::VmString;
+    use gbx_vm::test_support::EclBuilder;
 
     fn open_geo() -> GeoBlock {
         GeoBlock::parse(&vec![0u8; gbx_formats::geo::GEO_BLOCK_SIZE]).unwrap()
@@ -930,8 +1067,12 @@ mod tests {
         font::decode(&data)
     }
 
+    const GAME_AREA: u8 = 2;
+
     struct Harness {
-        vm: StubVm,
+        machine: EclMachine,
+        vm_memory: VmMemoryState,
+        data: GameData,
         input: InputQueue,
         state: EngineState,
         geo: GeoBlock,
@@ -945,9 +1086,17 @@ mod tests {
     }
 
     impl Harness {
-        fn new() -> Self {
+        /// `blocks`' id `1` becomes the initial resident block; every id
+        /// (including `1`) is also reachable via NEWECL/chaining through
+        /// `data` (`"ECL2.DAX"`, matching `GAME_AREA`).
+        fn with_blocks(blocks: Vec<(u8, EclBuilder)>) -> Self {
+            let data = ecl_game_data(GAME_AREA, blocks);
+            let initial = load_ecl_block(&data, GAME_AREA, 1).expect("block 1 must load");
+            let machine = EclMachine::load_block(initial, &COTAB).unwrap_or_else(|e| match e {});
             Harness {
-                vm: StubVm::new(),
+                machine,
+                vm_memory: VmMemoryState::new(),
+                data,
                 input: InputQueue::new(),
                 state: EngineState::new(),
                 geo: open_geo(),
@@ -961,9 +1110,16 @@ mod tests {
             }
         }
 
+        fn new() -> Self {
+            Self::with_blocks(vec![(1, exit_only_block())])
+        }
+
         fn ctx(&mut self) -> FlowCtx<'_> {
             FlowCtx {
-                vm: &mut self.vm,
+                machine: &mut self.machine,
+                vm_memory: &mut self.vm_memory,
+                data: &self.data,
+                game_area: GAME_AREA,
                 input: &mut self.input,
                 dt_ticks: 1,
                 state: &mut self.state,
@@ -979,34 +1135,45 @@ mod tests {
         }
     }
 
-    fn ended() -> VmStep {
-        VmStep::Done(Exit::Ended)
+    /// Ticks at least once, then up to `max_ticks` times total, stopping as
+    /// soon as `done` holds — always ticks first so a call starting already
+    /// in the target state (e.g. queued input meant to move `shell` *out*
+    /// of `WorldMenu` and back) still gets a chance to consume that input,
+    /// rather than returning immediately without ticking at all.
+    fn tick_until(
+        shell: &mut Shell,
+        h: &mut Harness,
+        max_ticks: u32,
+        done: impl Fn(&Shell) -> bool,
+    ) {
+        for _ in 0..max_ticks {
+            let mut ctx = h.ctx();
+            shell.tick(&mut ctx);
+            if done(shell) {
+                return;
+            }
+        }
+        assert!(done(shell), "did not converge within {max_ticks} ticks");
     }
 
     #[test]
     fn boot_reaches_world_menu_with_no_chain() {
         let mut h = Harness::new();
-        h.vm.script_call(vec![ended()]);
-        let mut shell = Shell::boot(&mut h.vm, &mut h.state);
-        for _ in 0..10 {
-            if matches!(shell, Shell::WorldMenu { .. }) {
-                break;
-            }
-            let mut ctx = h.ctx();
-            shell.tick(&mut ctx);
-        }
-        assert!(matches!(shell, Shell::WorldMenu { .. }));
+        let mut shell = Shell::boot(&mut h.machine, &mut h.state);
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::WorldMenu { .. })
+        });
     }
 
     #[test]
     fn boot_resume_after_chain_clears_reload_flag_only_after_the_chain_finishes() {
-        let mut h = Harness::new();
+        let newecl = simple_block(|b| {
+            b.op(0x20).imm_byte(2); // NEWECL block 2
+        });
+        let mut h = Harness::with_blocks(vec![(1, newecl), (2, exit_only_block())]);
         h.state.reload_ecl_and_pictures = true;
-        h.vm.script_call(vec![VmStep::Done(Exit::ChainTo(BlockId(2)))]);
-        h.vm.script_call(vec![ended()]);
-        let mut shell = Shell::boot(&mut h.vm, &mut h.state);
+        let mut shell = Shell::boot(&mut h.machine, &mut h.state);
 
-        // First tick: the entry vector chains — reload flag must still be set.
         {
             let mut ctx = h.ctx();
             shell.tick(&mut ctx);
@@ -1017,14 +1184,9 @@ mod tests {
         );
         assert!(h.state.chained);
 
-        for _ in 0..10 {
-            if matches!(shell, Shell::WorldMenu { .. }) {
-                break;
-            }
-            let mut ctx = h.ctx();
-            shell.tick(&mut ctx);
-        }
-        assert!(matches!(shell, Shell::WorldMenu { .. }));
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::WorldMenu { .. })
+        });
         assert!(
             !h.state.reload_ecl_and_pictures,
             "must clear once resumed post-chain"
@@ -1036,43 +1198,29 @@ mod tests {
     #[test]
     fn world_menu_forward_into_open_square_moves_and_returns_to_world_menu() {
         let mut h = Harness::new();
-        h.vm.script_call(vec![ended()]); // boot entry vector
-        let mut shell = Shell::boot(&mut h.vm, &mut h.state);
-        for _ in 0..5 {
-            let mut ctx = h.ctx();
-            shell.tick(&mut ctx);
-            if matches!(shell, Shell::WorldMenu { .. }) {
-                break;
-            }
-        }
-        assert!(matches!(shell, Shell::WorldMenu { .. }));
+        let mut shell = Shell::boot(&mut h.machine, &mut h.state);
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::WorldMenu { .. })
+        });
 
-        h.vm.script_call(vec![ended()]); // vector 1
-        h.vm.script_call(vec![ended()]); // vector 2
-                                         // Forward is driven by the extended "up" key (resolves through
-                                         // accept_ext's ctrl-code table to 'H'), not a literal typed 'h'.
+        // Forward is driven by the extended "up" key (resolves through
+        // accept_ext's ctrl-code table to 'H'), not a literal typed 'h'.
         h.input
             .push_all(&[crate::input::InputEvent::Ext(crate::input::ExtKey::Up)]);
         let start_pos = h.state.pos;
-        for _ in 0..20 {
-            let mut ctx = h.ctx();
-            shell.tick(&mut ctx);
-            if matches!(shell, Shell::WorldMenu { .. }) && h.state.pos != start_pos {
-                break;
-            }
-        }
+        tick_until(&mut shell, &mut h, 20, |s| {
+            matches!(s, Shell::WorldMenu { .. })
+        });
         assert_ne!(
             h.state.pos, start_pos,
             "an open square must let the party step forward"
         );
-        assert!(matches!(shell, Shell::WorldMenu { .. }));
     }
 
     #[test]
     fn party_killed_unwinds_to_game_over_and_resets_the_flag() {
         let mut h = Harness::new();
-        h.vm.script_call(vec![ended()]);
-        let mut shell = Shell::boot(&mut h.vm, &mut h.state);
+        let mut shell = Shell::boot(&mut h.machine, &mut h.state);
         h.state.party_killed = true;
         let mut ctx = h.ctx();
         shell.tick(&mut ctx);
@@ -1105,15 +1253,16 @@ mod tests {
 
     #[test]
     fn no_vector_pumps_while_a_gate_is_open() {
-        // Mechanical D-UI7 property: whenever `gate_open()` is true, a
-        // direct `StubVm::advance()` call must not be reachable from
-        // `Shell::tick` — proven here by observing that a widget requiring
-        // several ticks to resolve never lets the underlying run advance
-        // (StubVm has no more scripted steps, so any accidental advance
-        // would panic).
-        let mut h = Harness::new();
-        h.vm.script_call(vec![VmStep::Request(Request::Combat), ended()]);
-        let mut shell = Shell::boot(&mut h.vm, &mut h.state);
+        // Mechanical D-UI7 property: a widget requiring several ticks to
+        // resolve must keep `gate_open()` true and never advance the
+        // machine on its own (proven here by ticking many times with no
+        // input and observing the gate never silently closes).
+        let combat = simple_block(|b| {
+            b.op(0x24); // COMBAT — a Request the interpreter can really emit
+            b.op(0x00); // EXIT (after the reply resumes)
+        });
+        let mut h = Harness::with_blocks(vec![(1, combat)]);
+        let mut shell = Shell::boot(&mut h.machine, &mut h.state);
         for _ in 0..3 {
             let mut ctx = h.ctx();
             shell.tick(&mut ctx);
@@ -1122,8 +1271,6 @@ mod tests {
             shell.gate_open(),
             "Combat's PressAnyKey stub must be parked"
         );
-        // Ticking repeatedly with no input must not panic (would happen if
-        // tick_gate ever fell through to advance() while pending).
         for _ in 0..5 {
             let mut ctx = h.ctx();
             shell.tick(&mut ctx);
@@ -1137,8 +1284,7 @@ mod tests {
     #[test]
     fn shell_state_round_trips_through_serde_mid_boot() {
         let mut h = Harness::new();
-        h.vm.script_call(vec![ended()]);
-        let shell = Shell::boot(&mut h.vm, &mut h.state);
+        let shell = Shell::boot(&mut h.machine, &mut h.state);
         let json = serde_json::to_string(&shell).expect("Shell must serialize");
         let restored: Shell = serde_json::from_str(&json).expect("Shell must deserialize");
         assert!(matches!(restored, Shell::Boot(_)));
@@ -1155,25 +1301,14 @@ mod tests {
     #[test]
     fn look_flow_restores_search_flags_after_resolving() {
         let mut h = Harness::new();
-        h.vm.script_call(vec![ended()]); // boot entry
-        let mut shell = Shell::boot(&mut h.vm, &mut h.state);
-        for _ in 0..5 {
-            let mut ctx = h.ctx();
-            shell.tick(&mut ctx);
-            if matches!(shell, Shell::WorldMenu { .. }) {
-                break;
-            }
-        }
-        h.vm.script_call(vec![ended()]); // vector 2 (Look)
+        let mut shell = Shell::boot(&mut h.machine, &mut h.state);
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::WorldMenu { .. })
+        });
         h.input.push_all(&[crate::input::InputEvent::Char(b'l')]);
-        for _ in 0..10 {
-            let mut ctx = h.ctx();
-            shell.tick(&mut ctx);
-            if matches!(shell, Shell::WorldMenu { .. }) && h.state.search_flags <= 1 {
-                break;
-            }
-        }
-        assert!(matches!(shell, Shell::WorldMenu { .. }));
+        tick_until(&mut shell, &mut h, 15, |s| {
+            matches!(s, Shell::WorldMenu { .. })
+        });
         assert_eq!(h.state.search_flags, 0, "bit 1 must never survive a Look");
     }
 
@@ -1191,25 +1326,23 @@ mod tests {
         h.geo = geo;
         h.party.can_pick = false;
         h.party.can_knock = false;
-        h.vm.script_call(vec![ended()]); // vector 1
-        let mut flow = StepFlow::start(&mut h.vm, &mut h.state);
-        {
+        let mut flow = StepFlow::start(&mut h.machine, &mut h.state);
+        for _ in 0..5 {
             let mut ctx = h.ctx();
-            let _ = flow.tick(&mut ctx); // pump vector 1 to Done
-        }
-        {
-            let mut ctx = h.ctx();
-            let _ = flow.tick(&mut ctx); // door interaction opens the menu
+            let _ = flow.tick(&mut ctx);
+            if flow.door_widget_is_some() {
+                break;
+            }
         }
         assert!(
-            flow.door_widget.is_some(),
+            flow.door_widget_is_some(),
             "the Bash/Exit menu must be parked directly"
         );
     }
 
     #[test]
     fn combat_request_maps_to_press_any_key_stub() {
-        let options = vec![VmString::from_bytes(*b"Yes")];
+        let options = vec![gbx_vm::VmString::from_bytes(*b"Yes")];
         let w = widget_for_request(&Request::HorizontalMenu { options });
         assert!(matches!(w, Widget::Hotbar(_)));
         let w = widget_for_request(&Request::Combat);
@@ -1238,16 +1371,13 @@ mod tests {
             Shell::WorldMenu { .. }
         ));
 
-        h.vm.script_call(vec![ended()]);
-        let step = Shell::Step(StepFlow::start(&mut h.vm, &mut h.state));
+        let step = Shell::Step(StepFlow::start(&mut h.machine, &mut h.state));
         assert!(matches!(round_trip_shell(&step), Shell::Step(_)));
 
-        h.vm.script_call(vec![ended()]);
-        let look = Shell::Look(LookFlow::start(&mut h.vm, &mut h.state));
+        let look = Shell::Look(LookFlow::start(&mut h.machine, &mut h.state));
         assert!(matches!(round_trip_shell(&look), Shell::Look(_)));
 
-        h.vm.script_call(vec![ended()]);
-        let boot = Shell::boot(&mut h.vm, &mut h.state);
+        let boot = Shell::boot(&mut h.machine, &mut h.state);
         assert!(matches!(round_trip_shell(&boot), Shell::Boot(_)));
     }
 
@@ -1276,20 +1406,13 @@ mod tests {
     #[test]
     fn forward_at_the_grid_edge_sets_tried_to_exit_map() {
         let mut h = Harness::new();
-        h.vm.script_call(vec![ended()]); // boot entry
-        let mut shell = Shell::boot(&mut h.vm, &mut h.state);
-        for _ in 0..5 {
-            let mut ctx = h.ctx();
-            shell.tick(&mut ctx);
-            if matches!(shell, Shell::WorldMenu { .. }) {
-                break;
-            }
-        }
+        let mut shell = Shell::boot(&mut h.machine, &mut h.state);
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::WorldMenu { .. })
+        });
         // Facing North at y=0: stepping forward would exit the 16x16 grid.
         assert_eq!(h.state.pos, (0, 0));
         assert_eq!(h.state.facing, Facing::North);
-        h.vm.script_call(vec![ended()]); // vector 1
-        h.vm.script_call(vec![ended()]); // vector 2
         h.input
             .push_all(&[crate::input::InputEvent::Ext(crate::input::ExtKey::Up)]);
         for _ in 0..5 {
@@ -1310,9 +1433,7 @@ mod tests {
 
         let mut h = Harness::new();
         h.geo = geo;
-        h.vm.script_call(vec![ended()]); // vector 1
-        h.vm.script_call(vec![ended()]); // vector 2 (door interaction proceeds synchronously)
-        let mut flow = StepFlow::start(&mut h.vm, &mut h.state);
+        let mut flow = StepFlow::start(&mut h.machine, &mut h.state);
         let start_pos = h.state.pos;
         for _ in 0..5 {
             let mut ctx = h.ctx();
@@ -1334,17 +1455,15 @@ mod tests {
         h.geo = geo;
         h.party.can_pick = true;
         h.party.pick_succeeds = true; // would succeed if it ever rolled
-        h.vm.script_call(vec![ended()]); // vector 1
-        h.vm.script_call(vec![ended()]); // vector 2 (after the door attempt resolves)
-        let mut flow = StepFlow::start(&mut h.vm, &mut h.state);
+        let mut flow = StepFlow::start(&mut h.machine, &mut h.state);
         for _ in 0..5 {
             let mut ctx = h.ctx();
             let _ = flow.tick(&mut ctx);
-            if flow.door_widget.is_some() {
+            if flow.door_widget_is_some() {
                 break;
             }
         }
-        assert!(flow.door_widget.is_some());
+        assert!(flow.door_widget_is_some());
         h.input.push_all(&[crate::input::InputEvent::Char(b'p')]);
         let start_pos = h.state.pos;
         for _ in 0..5 {
@@ -1365,26 +1484,30 @@ mod tests {
 
     #[test]
     fn chain_during_look_resumes_at_restore_search_flags_not_abandoned() {
-        let mut h = Harness::new();
-        h.vm.script_call(vec![ended()]); // boot entry
-        let mut shell = Shell::boot(&mut h.vm, &mut h.state);
-        for _ in 0..5 {
-            let mut ctx = h.ctx();
-            shell.tick(&mut ctx);
-            if matches!(shell, Shell::WorldMenu { .. }) {
-                break;
-            }
-        }
+        // Block 1: vector[4] (entry) is a trivial EXIT so Boot reaches
+        // WorldMenu normally; vector[1] (SearchLocationAddr, the one Look's
+        // vector 2 fires) is a separate label that NEWECLs to block 9 —
+        // proving the chain fires specifically from the Look site.
+        let block1 = labeled_block(["entry", "search", "entry", "entry", "entry"], |b| {
+            b.label("entry");
+            b.op(0x00); // EXIT
+            b.label("search");
+            b.op(0x20).imm_byte(9); // NEWECL block 9
+        });
+        let mut h = Harness::with_blocks(vec![(1, block1), (9, exit_only_block())]);
 
-        h.vm.script_call(vec![VmStep::Done(Exit::ChainTo(BlockId(9)))]); // vector 2 chains
-        h.vm.script_call(vec![ended()]); // chain runner's entry vector
+        let mut shell = Shell::boot(&mut h.machine, &mut h.state);
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::WorldMenu { .. })
+        });
+
         h.input.push_all(&[crate::input::InputEvent::Char(b'l')]);
         for _ in 0..15 {
-            let mut ctx = h.ctx();
-            shell.tick(&mut ctx);
-            if matches!(shell, Shell::WorldMenu { .. }) && h.state.search_flags <= 1 {
+            if matches!(shell, Shell::WorldMenu { .. }) && h.state.ecl_block_id == 9 {
                 break;
             }
+            let mut ctx = h.ctx();
+            shell.tick(&mut ctx);
         }
         assert!(matches!(shell, Shell::WorldMenu { .. }));
         assert_eq!(h.state.ecl_block_id, 9);
