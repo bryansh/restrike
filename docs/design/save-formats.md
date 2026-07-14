@@ -635,7 +635,11 @@ import-only (a Pool/Hillsfar character *into* restrike-CotAB), never export.
    SHA-256 of a synthetic `.rsav`**, asserted on all three OSes + wasm32 (the
    fixture is D10-clean self-authored bytes, so its hash ships freely) — that is
    what actually guards the D-SAVE1 collection-ordering and the §3 header-encoding
-   invariants.
+   invariants. *(Implementation note, Fable review: CI currently only
+   `cargo check`s wasm32 — asserting the golden on wasm needs a wasm test
+   runner added to CI (e.g. wasmtime/wasm-pack for the one test), or the wasm
+   leg is deferred with a comment until one exists; the three-OS legs run
+   today.)*
 2. **Local real-save import (GBX_DATA_DIR, loud-skip when absent).** The user
    makes a real CotAB save in DOSBox under their own save dir (never committed,
    D10); a local-only test imports it and asserts structural sanity (party_count
