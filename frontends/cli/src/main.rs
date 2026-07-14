@@ -3,6 +3,7 @@
 mod census;
 mod compare;
 mod dump_image;
+mod extract_table;
 mod map;
 mod run_script;
 mod verify;
@@ -27,6 +28,7 @@ fn main() -> ExitCode {
         Some("walk") => walk::cmd_walk(args.collect()),
         Some("compare") => compare::cmd_compare(args.collect()),
         Some("verify") => verify::cmd_verify(args.collect()),
+        Some("extract-table") => extract_table::cmd_extract_table(args.collect()),
         Some(other) => {
             eprintln!("restrike: unknown command '{other}'");
             print_usage();
@@ -58,6 +60,7 @@ fn print_usage() {
     );
     eprintln!("       restrike compare <ours.ppm> <capture.png|capture.ppm> [--diff-out <path>]");
     eprintln!("       restrike verify [DIR]");
+    eprintln!("       restrike extract-table [DIR] --table <id>");
     eprintln!();
     eprintln!("If DIR is omitted, falls back to the GBX_DATA_DIR environment variable.");
     eprintln!();
