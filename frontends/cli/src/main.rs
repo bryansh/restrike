@@ -5,6 +5,7 @@ mod compare;
 mod dump_image;
 mod map;
 mod run_script;
+mod verify;
 
 use gbx_formats::detect::{self, Detection};
 use gbx_vm::dialect::COTAB;
@@ -25,6 +26,7 @@ fn main() -> ExitCode {
         Some("dump-image") => dump_image::cmd_dump_image(args.collect()),
         Some("walk") => walk::cmd_walk(args.collect()),
         Some("compare") => compare::cmd_compare(args.collect()),
+        Some("verify") => verify::cmd_verify(args.collect()),
         Some(other) => {
             eprintln!("restrike: unknown command '{other}'");
             print_usage();
@@ -55,6 +57,7 @@ fn print_usage() {
          [--seed N] [--transcript <PATH>]"
     );
     eprintln!("       restrike compare <ours.ppm> <capture.png|capture.ppm> [--diff-out <path>]");
+    eprintln!("       restrike verify [DIR]");
     eprintln!();
     eprintln!("If DIR is omitted, falls back to the GBX_DATA_DIR environment variable.");
     eprintln!();

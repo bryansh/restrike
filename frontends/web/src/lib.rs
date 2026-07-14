@@ -20,7 +20,7 @@ use gbx_engine::input::{InputEvent, TICK_HZ};
 use gbx_formats::game_data::GameData;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::Clamped;
-use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, ImageData};
+use web_sys::{console, CanvasRenderingContext2d, HtmlCanvasElement, ImageData};
 
 /// One tick's worth of game-presentation time, in milliseconds --
 /// `performance.now()`'s unit, matching `TICK_HZ` (D-UI1).
@@ -44,6 +44,16 @@ impl GameDataBuilder {
     /// Adds one file's raw bytes, as read by JS's `File.arrayBuffer()`.
     pub fn add_file(&mut self, name: String, bytes: Vec<u8>) {
         self.files.push((name, bytes));
+    }
+}
+
+/// D-RP4's boot plumbing: the web frontend has no real verify-report
+/// surface yet (the design doc's own placeholder — "the web frontend logs
+/// it to the console until a real surface exists"), so this just prints one
+/// line per table to the browser console via `console.log`.
+fn log_verify_report(engine: &Engine) {
+    for (id, status) in &engine.verify_report().entries {
+        console::log_1(&JsValue::from_str(&format!("verify: {id}: {status:?}")));
     }
 }
 
@@ -76,6 +86,7 @@ impl App {
         let data = GameData::from_files(builder.files);
         let engine = Engine::new(data, seed)
             .map_err(|err| JsValue::from_str(&format!("Engine::new failed to boot: {err:?}")))?;
+        log_verify_report(&engine);
         let ctx = canvas
             .get_context("2d")?
             .ok_or_else(|| JsValue::from_str("canvas has no 2d context"))?

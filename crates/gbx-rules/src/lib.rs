@@ -4,7 +4,9 @@
 //!
 //! This crate is platform-pure: no windowing, audio, or async runtime dependencies.
 
+pub mod adnd1;
 pub mod bash_door;
+pub mod pack;
 pub mod palette;
 
 #[cfg(test)]

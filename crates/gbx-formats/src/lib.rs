@@ -7,6 +7,7 @@ pub mod anim;
 pub mod dax;
 pub mod detect;
 pub mod ecl_text;
+pub mod exepack;
 pub mod font;
 pub mod game_data;
 pub mod geo;

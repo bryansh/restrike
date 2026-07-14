@@ -7,5 +7,8 @@ repository.workspace = true
 description = "Rules packs (data) and per-flavor traits (adnd1, xxvc) with verify-on-load against user data."
 
 [dependencies]
+gbx-formats = { path = "../gbx-formats" }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 
 [dev-dependencies]

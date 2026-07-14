@@ -25,6 +25,7 @@ use gbx_formats::font::Font;
 use gbx_formats::game_data::GameData;
 use gbx_formats::geo::GeoBlock;
 use gbx_formats::image::{DecodedItem, ImageBlock};
+use gbx_rules::pack::{RuleSet, VerifyReport};
 use gbx_vm::{EclMachine, COTAB};
 
 /// `GEO2.DAX` block 1 — Tilverton City (this session's fixed resident map).
@@ -96,6 +97,11 @@ pub struct Engine {
     /// The three boot-loaded `SKY` blocks (moon/sun/horizon) — read-only
     /// after boot.
     sky: [ImageBlock; 3],
+    /// D-RP4's verify-on-load report, computed once at boot against `data`
+    /// and retained for the `verify_report` getter (boot diagnostics, the
+    /// `restrike verify` CLI subcommand, and the inspector). Advisory only
+    /// — never blocks or fails boot, never serialized into saves.
+    verify_report: VerifyReport,
 }
 
 /// A trivial single-item `ImageBlock` fixture — [`Engine::new_fixture`]'s
@@ -174,6 +180,12 @@ impl Engine {
         state.ecl_block_id = INITIAL_ECL_BLOCK;
         let shell = Shell::boot(&mut machine, &mut state);
 
+        // D-RP4: runs immediately after asset loads, never blocks or fails
+        // boot -- RuleSet::load() panics only on a malformed *embedded*
+        // pack (a shipped bug the D-RP7 CI suite already catches), and
+        // verify() itself always returns a report, never an error.
+        let verify_report = RuleSet::load().verify(&data);
+
         Engine {
             fb,
             font,
@@ -193,6 +205,7 @@ impl Engine {
             last_hash: None,
             symbol_sets,
             sky,
+            verify_report,
         }
     }
 
@@ -259,6 +272,12 @@ impl Engine {
     /// populated the wall-texture data a walk exercises.
     pub fn symbol_sets(&self) -> &SymbolSets {
         &self.symbol_sets
+    }
+
+    /// D-RP4's verify-on-load report (boot diagnostics, the `restrike
+    /// verify` CLI subcommand, and the inspector). Advisory only.
+    pub fn verify_report(&self) -> &VerifyReport {
+        &self.verify_report
     }
 
     /// Advances by one tick (D-UI1): dispatches `input`, advances the UI

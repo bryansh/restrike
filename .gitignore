@@ -7,6 +7,10 @@ Cargo.lock.bak
 # wasm-bindgen packaging output (frontends/web/README.md's local build step)
 /frontends/web/pkg/
 
+# cargo-fuzz local run output (crates/gbx-formats/fuzz/README.md)
+**/fuzz/corpus/
+**/fuzz/artifacts/
+
 # Editor/OS cruft
 .DS_Store
 .idea/
