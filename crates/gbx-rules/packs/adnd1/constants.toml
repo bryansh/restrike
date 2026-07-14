@@ -1,0 +1,102 @@
+# packs/adnd1/constants.toml — D-RP9 authoring order item 6 (final
+# cluster). Every table here located in the image on the first search
+# attempt (unlike the progression/thief-skills clusters), several
+# confirming or extending the contiguous data-segment run this session
+# mapped out (time_scales immediately precedes thac0_table; class_item_
+# flags and class_training_masks sit immediately after it).
+
+[[table]]
+id = "time_scales"
+schema_version = 1
+flavor = "adnd1"
+description = "Per-unit time conversion scales (game-time bookkeeping)"
+element = "u16le"
+axes = [{ name = "unit", size = 7, index = "ovr021.cs:8's declared order (unlabeled in coab beyond the array itself); index 4 is the rest-related scale cited at ovr021.cs:139" }]
+evidence_tier = "image"
+source = [
+  { kind = "coab", loc = "engine/ovr021.cs:8 (timeScales, word_1A13C)" },
+  { kind = "original-address", loc = "word_1A13C" },
+  { kind = "original-re", loc = "START.EXE exepack image @0xea0c (v1.3), byte-exact 7x u16le block, immediately precedes thac0_table's confirmed anchor (0xea1a) with no gap, 2026-07-14" },
+]
+consumed_by = ["ovr021.cs:45", "ovr021.cs:114-119", "ovr021.cs:139", "ovr021.cs:202"]
+anchor = { kind = "image", file = "START.EXE", offset = 0xea0c, len = 14 }
+rows = [[10],[10],[6],[24],[30],[12],[256]]
+
+[[table]]
+id = "class_item_flags"
+schema_version = 1
+flavor = "adnd1"
+description = "Per-class item-usability bitmask flag"
+element = "u8"
+axes = [{ name = "class", size = 8, index = "ClassId 0..=7, cleric=0..monk=7" }]
+evidence_tier = "image"
+source = [
+  { kind = "coab", loc = "engine/ovr018.cs:308 (unk_1A1B2)" },
+  { kind = "original-address", loc = "seg600:3EA2 unk_1A1B2" },
+  { kind = "original-re", loc = "START.EXE exepack image @0xea82 (v1.3), byte-exact, immediately follows thac0_table's confirmed anchor (ends 0xea82) with no gap, 2026-07-14" },
+]
+consumed_by = ["ovr018.cs:583 (createPlayer's classFlags accumulation)", "ovr026.cs:218"]
+anchor = { kind = "image", file = "START.EXE", offset = 0xea82, len = 8 }
+rows = [[0x02],[0x10],[0x08],[0x40],[0x40],[0x01],[0x04],[0x20]]
+
+[[table]]
+id = "class_training_masks"
+schema_version = 1
+flavor = "adnd1"
+description = "Per-class training-eligibility bitmask"
+element = "u8"
+axes = [{ name = "class", size = 8, index = "ClassId 0..=7, cleric=0..monk=7" }]
+evidence_tier = "image"
+source = [
+  { kind = "coab", loc = "engine/ovr018.cs:2124 (classMasks, unk_1A1BA)" },
+  { kind = "original-address", loc = "seg600:3EAA unk_1A1BA" },
+  { kind = "original-re", loc = "START.EXE exepack image @0xea8a (v1.3), byte-exact, immediately follows class_item_flags with no gap, 2026-07-14" },
+]
+consumed_by = ["ovr018.cs:2134", "ovr018.cs:2221-2279 (train_player)", "ovr018.cs:2349-2395"]
+anchor = { kind = "image", file = "START.EXE", offset = 0xea8a, len = 8 }
+rows = [[0x02],[0x02],[0x08],[0x10],[0x20],[0x01],[0x04],[0x04]]
+
+[[table]]
+id = "paladin_cureable_diseases"
+schema_version = 1
+flavor = "adnd1"
+description = "The 6 disease-type Affects a paladin's cure ability removes"
+element = "u8"
+axes = [{ name = "slot", size = 6, index = "Classes/Affect.cs order: helpless, cause_disease_1, weaken, cause_disease_2, hot_fire_shield, affect_39" }]
+evidence_tier = "image"
+source = [
+  { kind = "coab", loc = "engine/ovr020.cs:1497-1503 (paladinCureableDiseases, unk_16B39)" },
+  { kind = "original-address", loc = "seg600 unk_16B39" },
+  { kind = "original-re", loc = "START.EXE exepack image @0xacc0 (v1.3), 2026-07-14" },
+]
+notes = """
+This session's search found a second candidate hit (0xb40a) that is \
+provably spurious -- its surrounding bytes are hit_die_size's own \
+confirmed data (0xb402-0xb409), a coincidental short-sequence overlap, \
+not a real second copy. The 0xacc0 hit is an isolated, single match \
+across the whole image; text-like bytes sit on both sides of it (a \
+digit-like run before, "Cure " immediately after), plausible for a small \
+constants table sharing the data segment with nearby UI strings but \
+lower-confidence than this cluster's other tables given the short (6-byte) \
+match length. Flagged for `restrike verify`'s Moved-vs-Verified signal as \
+the practical confirmation.
+"""
+consumed_by = ["ovr020.cs:1518 (PaladinCureDisease's Array.Exists check)", "ovr020.cs:1534 (Array.ForEach removal)"]
+anchor = { kind = "image", file = "START.EXE", offset = 0xacc0, len = 6 }
+rows = [[0x1f],[0x22],[0x2b],[0x2c],[0x32],[0x39]]
+
+[[table]]
+id = "coin_conversion_rates"
+schema_version = 1
+flavor = "adnd1"
+description = "Copper-equivalent value per coin denomination (gems/jewelry excluded -- variable-value items, computed separately)"
+element = "i32le"
+axes = [{ name = "denomination", size = 5, index = "Classes/MoneySet.cs's Money class: Copper=0, Silver=1, Electrum=2, Gold=3, Platinum=4" }]
+evidence_tier = "image"
+source = [
+  { kind = "coab", loc = "Classes/MoneySet.cs:19 (Money.per_copper)" },
+  { kind = "original-re", loc = "START.EXE exepack image @0xb884 (v1.3), byte-exact 5x i32le block, 2026-07-14. No original-address comment in coab, but this session's search found a clean, unique, byte-exact match -- ruled image tier, not coab-only (per the design doc's own contingency: 'reclassify to code if the image shows immediates' does not apply here, since this is a genuine contiguous array, not scattered immediates)." },
+]
+consumed_by = ["Classes/MoneySet.cs:75-122 (money normalization/conversion)"]
+anchor = { kind = "image", file = "START.EXE", offset = 0xb884, len = 20 }
+rows = [[1],[10],[100],[200],[1000]]
