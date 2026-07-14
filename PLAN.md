@@ -225,15 +225,29 @@ Walk around Tilverton, looking right.
     as `docs/dosbox-capture.md` §4 by hand.
 
 ### M3 — The party assembles (2–3 weekends)
-- Character/party model for AD&D flavor; ability/derived-stat tables land in `gbx-rules`
-  (evidence-tagged, verify-on-load per D6).
-- **Original save import**: read a real CotAB save (party, flags, position); prove against GBC's
-  view of the same save in the oracle VM.
-- Our save format: full engine-state snapshot (versioned; save-anywhere falls out of D8).
-- Camp/rest (minus time effects), training hall/leveling, shops/money, journal entries.
-- Character sheet + party screens in the faithful UI; same data visible in the inspector.
+- [x] Character/party model for AD&D flavor; ability/derived-stat tables land in `gbx-rules`
+  (evidence-tagged, verify-on-load per D6). *(rules-pack steps 1–3: exepack + pack loader/verify
+  engine, D-RP9 clusters, the `adnd1` flavor-trait impl. Step 4: the field-complete party/character
+  model itself, `gbx-engine::party`, D-SAVE11.)*
+- [x] **Original save import**: read a real CotAB save (party, flags, position) — headless
+  pipeline done (`gbx_engine::import::import_original`, D-SAVE5/7/8); synthetic-fixture-proven
+  (D-SAVE10 tier 1: section offsets, record decode, window placement, byte-identical round-trip,
+  a committed golden hash). *(Not yet done: proving against a real DOSBox save — D-SAVE10 tiers
+  2–4 — since no real save exists under `GBX_DATA_DIR` yet; see the exit-gate note below. GBC
+  oracle-VM comparison is deferred to M4's oracle rig per the design doc.)*
+- [x] Our save format: full engine-state snapshot (versioned; save-anywhere falls out of D8).
+  *(`docs/design/save-formats.md` D-SAVE1–4: hand-encoded `ContainerHeader` + `postcard(SaveState)`,
+  reject-not-migrate, `Engine::save`/`Engine::restore`, CI-enforced determinism + a committed
+  golden `.rsav` hash. Save/load **menu UI** is separate, still open below.)*
+- [ ] Camp/rest (minus time effects), training hall/leveling, shops/money, journal entries.
+- [ ] Character sheet + party screens in the faithful UI; same data visible in the inspector;
+  save/load menu (the `.rsav` format above has no UI yet).
 - **Exit gate:** import a real mid-game save, walk around, transact in a shop, level up a
-  character with correct numbers, save/load our format round-trip stably.
+  character with correct numbers, save/load our format round-trip stably. *(Status: the
+  headless import→walk→save/load-round-trip half is code-complete and tested against synthetic
+  fixtures; a real DOSBox save is the next session's precondition — see
+  `docs/design/save-formats.md`'s step-4 handoff for the exact procedure. Shop/level-up UI is
+  unbuilt.)*
 
 ### M4 — First blood (4–8 weekends) — the bulk
 - **H3 first:** bit-exact PRNG + seed control on both sides.

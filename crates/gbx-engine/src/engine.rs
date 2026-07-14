@@ -81,7 +81,12 @@ pub struct Engine {
     pub(crate) state: EngineState,
     machine: EclMachine,
     vm_memory: VmMemoryState,
-    party: DefaultPartyPredicates,
+    party_predicates: DefaultPartyPredicates,
+    /// The party roster (D-SAVE11/task deliverable 2) — empty until
+    /// original-save import (D-SAVE5) or (a later session's) new-game
+    /// character creation populates it; carried verbatim by `.rsav`
+    /// save/restore (D-SAVE3).
+    pub(crate) party: crate::party::Party,
     rng: EngineRng,
     input: crate::input::InputQueue,
     cursor: TextCursor,
@@ -89,6 +94,15 @@ pub struct Engine {
     sounds: Vec<SoundEvent>,
     serial: u64,
     last_hash: Option<[u8; 32]>,
+    /// The PRNG seed this engine was built/restored with — provenance only
+    /// (D-SAVE4), recorded in every `.rsav`'s header alongside
+    /// [`Engine::tick_count`]. Never re-seeds the live PRNG; resume always
+    /// continues from the saved PRNG *state* (`self.rng`).
+    boot_seed: u64,
+    /// Ticks advanced since boot/restore — provenance only (D-SAVE4), a
+    /// session/tick coordinate for pairing a save with an input trace
+    /// during H5 debugging. Not load-bearing for resume.
+    tick_count: u64,
     /// Resident 8×8 symbol sets + wallset slots (step 5's `load_walldef`
     /// deliverable) — `load_walldef`'s real target and `crate::corridor`'s
     /// texture source. Persistent across ticks (LOAD PIECES may reload it
@@ -121,6 +135,34 @@ fn dummy_sky() -> [ImageBlock; 3] {
         }],
     };
     [block.clone(), block.clone(), block]
+}
+
+/// The fields `.rsav` restore (`save.rs`, D-SAVE3) and original-save import
+/// (task deliverable 4) both reconstruct from stored/re-fetched state, as
+/// opposed to `Engine::build`'s fresh-boot defaults (`party_predicates`/
+/// `input`/`sounds`/`serial`/`last_hash` — none of which D-SAVE3 lists as
+/// save-relevant, so [`Engine::assemble`] always starts them fresh).
+pub(crate) struct AssembledEngine {
+    pub fb: Framebuffer,
+    pub font: Font,
+    pub geo: GeoBlock,
+    pub data: GameData,
+    pub shell: Shell,
+    pub state: EngineState,
+    pub machine: EclMachine,
+    pub vm_memory: VmMemoryState,
+    pub party: crate::party::Party,
+    pub rng: EngineRng,
+    pub cursor: TextCursor,
+    pub pacer: TextPacer,
+    pub symbol_sets: SymbolSets,
+    pub sky: [ImageBlock; 3],
+    pub verify_report: VerifyReport,
+    /// Provenance continuity (D-SAVE4): a restored engine's *next* `.rsav`
+    /// still reports where this session's PRNG stream/tick coordinate came
+    /// from, rather than resetting to `(0, 0)`.
+    pub boot_seed: u64,
+    pub tick_count: u64,
 }
 
 impl Engine {
@@ -195,7 +237,8 @@ impl Engine {
             state,
             machine,
             vm_memory: VmMemoryState::new(),
-            party: DefaultPartyPredicates::default(),
+            party_predicates: DefaultPartyPredicates::default(),
+            party: crate::party::Party::default(),
             rng: EngineRng::new(seed),
             input: crate::input::InputQueue::new(),
             cursor: TextCursor::new(),
@@ -203,10 +246,76 @@ impl Engine {
             sounds: Vec::new(),
             serial: 0,
             last_hash: None,
+            boot_seed: seed,
+            tick_count: 0,
             symbol_sets,
             sky,
             verify_report,
         }
+    }
+
+    /// Assembles a live `Engine` from already-reconstructed state (`save.rs`'s
+    /// `rebuild_engine`, shared by `.rsav` restore and original-save import
+    /// — both are "given engine state + `GameData`, produce a running
+    /// `Engine`"). Redraws the static exploration-frame background
+    /// (`build()`'s own first step) so a restored engine's framebuffer isn't
+    /// left blank before the next tick's redraw.
+    pub(crate) fn assemble(a: AssembledEngine) -> Self {
+        let mut fb = a.fb;
+        crate::frames::draw8x8_03(&mut fb, &a.symbol_sets)
+            .expect("Engine::assemble: symbol set 4 must be loaded for the exploration frame");
+        Engine {
+            fb,
+            font: a.font,
+            geo: a.geo,
+            data: a.data,
+            shell: a.shell,
+            state: a.state,
+            machine: a.machine,
+            vm_memory: a.vm_memory,
+            party_predicates: DefaultPartyPredicates::default(),
+            party: a.party,
+            rng: a.rng,
+            input: crate::input::InputQueue::new(),
+            cursor: a.cursor,
+            pacer: a.pacer,
+            sounds: Vec::new(),
+            serial: 0,
+            last_hash: None,
+            boot_seed: a.boot_seed,
+            tick_count: a.tick_count,
+            symbol_sets: a.symbol_sets,
+            sky: a.sky,
+            verify_report: a.verify_report,
+        }
+    }
+
+    /// Encodes this engine's full restorable state (D-SAVE3) as a `.rsav`
+    /// file — `save.rs`'s `encode`, header'd with `self.boot_seed`/
+    /// `self.tick_count` as provenance (D-SAVE4) and `data`'s fingerprint
+    /// (D-SAVE2, load-bearing).
+    pub fn save(&self) -> Vec<u8> {
+        let state = crate::save::SaveState {
+            ecl: self.machine.snapshot(),
+            shell: self.shell.clone(),
+            state: self.state.clone(),
+            palette: *self.fb.palette(),
+            cursor: self.cursor,
+            pacer: self.pacer,
+            windows: self.vm_memory.snapshot(),
+            party: self.party.clone(),
+            prng: self.rng.clone(),
+        };
+        crate::save::encode(&state, &self.data, self.boot_seed, self.tick_count)
+    }
+
+    /// Decodes a `.rsav` file and rebuilds a live `Engine` from it
+    /// (D-SAVE2's full reject-not-migrate chain: container version, save-
+    /// format version, flavor, then `data`'s fingerprint — see
+    /// `save::SaveError` for every rejection's diagnostic).
+    pub fn restore(bytes: &[u8], data: GameData) -> Result<Self, crate::save::SaveError> {
+        let (header, state) = crate::save::load(bytes, &data)?;
+        crate::save::rebuild_engine(&header, state, data)
     }
 
     /// Test/demo seam (the M3 party-predicate seam, task deliverable 4):
@@ -214,7 +323,13 @@ impl Engine {
     /// availability and rolls) so a scripted trace can exercise every door
     /// path ahead of M3's real party model.
     pub fn party_predicates_mut(&mut self) -> &mut DefaultPartyPredicates {
-        &mut self.party
+        &mut self.party_predicates
+    }
+
+    /// The party roster (task deliverable 2) — read by a save/character
+    /// screen. Empty until original-save import (D-SAVE5) populates it.
+    pub fn party(&self) -> &crate::party::Party {
+        &self.party
     }
 
     /// The ScriptMemory unknown-access log + service-call log + halt
@@ -284,6 +399,7 @@ impl Engine {
     /// shell within its step budget, and recomposes the status line before
     /// returning a borrowed view of the framebuffer.
     pub fn tick(&mut self, input: &[InputEvent]) -> Frame<'_> {
+        self.tick_count += 1;
         self.input.push_all(input);
         self.sounds.clear();
 
@@ -297,7 +413,7 @@ impl Engine {
                 dt_ticks: 1,
                 state: &mut self.state,
                 geo: &self.geo,
-                party: &mut self.party,
+                party: &mut self.party_predicates,
                 rng: &mut self.rng,
                 fb: &mut self.fb,
                 font: &self.font,

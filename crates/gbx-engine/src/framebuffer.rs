@@ -75,6 +75,14 @@ impl Framebuffer {
         &self.palette
     }
 
+    /// Restores the whole palette verbatim (`.rsav` restore, D-SAVE3's
+    /// "the mutable palette" — the counterpart to reading it via
+    /// [`Framebuffer::palette`]). Pixel indices are untouched, matching
+    /// [`Framebuffer::set_ega_palette`]'s own pointer-cheap semantics.
+    pub fn set_palette(&mut self, palette: [[u8; 3]; 16]) {
+        self.palette = palette;
+    }
+
     /// `SetEgaPalette(index, colour)` (`Display.cs:82-103`): repoints
     /// palette slot `index` at `canon_color`'s RGB triple from the fixed EGA
     /// canon — never from the currently-remapped palette, so remaps never

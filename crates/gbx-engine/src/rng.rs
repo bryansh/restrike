@@ -12,7 +12,7 @@
 
 use gbx_vm::VmRng;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EngineRng {
     state: u64,
 }

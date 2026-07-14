@@ -477,7 +477,60 @@ source document (§5 "New docket candidates").
   extract-table --table thief_skill_race_adj` is ready to confirm a
   candidate offset once one is found.
 
-## 4. How new entries get added
+## 4. Open items carried from `docs/design/save-formats.md` §5
+
+Full detail lives in the source document; summarized here so this docket
+stays the one place showing the complete open-hypothesis picture.
+
+### FD-23: The three pinned original-save record cells
+
+- **Status:** narrowed (code-decided defaults, real-data pinning still open)
+- **Question:** §1.7 items 1/2/5 — is coab's `stats2` byte order (`cur`,
+  `full`) or GBC-doc's (`original`, `current`) correct for the on-disk
+  `CHRDAT` record? Is `spellCastCount`'s row stride really 5 (GBC-doc), not
+  coab's transliterated `i*i` bug? Does exceptional-strength `Str00` really
+  need `0..=100` unclamped, against coab's own buggy `Math.Min(_, 25)` read?
+- **Evidence so far:** all three ship at their doc-specified defaults
+  (`gbx_formats::save_orig::STAT_BYTE_ORDER`/`SPELL_CAST_COUNT_STRIDE`/
+  `STR_EXCEPTIONAL_RANGE`, each a single named flip-point constant, task
+  deliverable 1). Item 2 (the stride) already has stronger-than-default
+  evidence: Fable's M3 save-format design review cross-checked it against
+  GBC's own character editor operating on real save data. Items 1 and 5
+  are un-pinned code decisions, not yet checked against a real save.
+- **Settled by:** D-SAVE10 tier 3 — a real DOSBox save with a stat-drained
+  character (item 1) and an 18/xx-strength fighter (item 5), compared
+  field-by-field against DOSBox's own display. This is also the M3 exit
+  gate's blocking precondition (no real save exists under `GBX_DATA_DIR`
+  yet as of the step-4 session, 2026-07-14) — see the step-4 session
+  handoff for the exact DOSBox procedure.
+- **Cross-reference:** `docs/design/save-formats.md` §1.7 items 1/2/5, §5
+  item 2, D-SAVE6.
+
+### FD-24: ScriptMemory window byte-offset alignment for original-save import
+
+- **Status:** open
+- **Question:** Do the named Area/Party-window engine fields import derives
+  from `Area1.cs`/`Area2.cs`'s `[DataOffset]` byte offsets, and the *raw*
+  window content import packs into restrike's own VM word-addressed
+  `ScriptMemory` store, actually refer to the same real memory cells a
+  resident script would read post-import? The step-4 implementation session
+  found these are two different, not-provably-related numbering schemes
+  (one from the save-file's own C# struct layout, one reverse-engineered
+  from real ECL operand addresses) and did not reconcile them — see the
+  implementation note this session added to save-formats.md §5 item 8 for
+  the full reasoning.
+- **Evidence so far:** none beyond the two independently-sourced numbering
+  schemes agreeing on nothing checked directly against each other. Low
+  practical risk noted: no M2/M3 opcode reads an unnamed Area/Table/Party
+  cell that matters yet.
+- **Settled by:** either reading `Area1.field_6A00_Get`/`Area2.field_800_Get`'s
+  full dispatch bodies to derive the true mapping, or empirical pinning
+  (D-SAVE10 tier 3): import a real save with a known script-stashed value at
+  a specific unnamed cell, then observe whether the resident script reads it
+  back correctly.
+- **Cross-reference:** `docs/design/save-formats.md` §1.4, §5 item 8.
+
+## 5. How new entries get added
 
 Any session that surfaces a behavioral hypothesis not derivable purely from
 static code reading — a coab claim that needs oracle confirmation, a

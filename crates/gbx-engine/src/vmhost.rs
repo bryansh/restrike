@@ -74,6 +74,115 @@ pub fn load_ecl_block(
     Ok(BlockBytes::from_bytes(payload))
 }
 
+/// Loads GEO block `block_id` from `"GEO{game_area}.DAX"` — the same
+/// `game_area`-embeds-the-filename convention `load_ecl_block`/`LoadWalldef`
+/// use. Added for original-save import (`docs/design/save-formats.md`
+/// D-SAVE5, task deliverable 4): unlike ECL/walldef reload, the live VM's
+/// `EngineServices::load_3d_map` only *records* the resident block id
+/// (`ovr031.Load3DMap`'s asset-swap isn't wired into a running script path
+/// this milestone, `renderer-ui-shell.md` FD-19) — import has no running
+/// script to drive that call anyway (the `EclMachine` starts idle, D-SAVE8),
+/// so it resolves the GEO block directly.
+pub fn load_geo_block(
+    data: &GameData,
+    game_area: u8,
+    block_id: u8,
+) -> Result<gbx_formats::geo::GeoBlock, LoadGeoError> {
+    let raw = data.block(&format!("GEO{game_area}.DAX"), block_id)?;
+    gbx_formats::geo::GeoBlock::parse(&raw).map_err(LoadGeoError::Geo)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoadGeoError {
+    GameData(GameDataError),
+    Geo(gbx_formats::geo::GeoError),
+}
+
+impl From<GameDataError> for LoadGeoError {
+    fn from(e: GameDataError) -> Self {
+        LoadGeoError::GameData(e)
+    }
+}
+
+/// `LoadWalldef`'s pixel/tile-id loading core (`ovr031.cs:642-687`), factored
+/// out of the `EngineServices` trait method so original-save import
+/// (task deliverable 4) can reload wallsets by `setBlocks` id without
+/// constructing a full `EngineVmHost` — see `EngineVmHost::load_walldef`'s
+/// doc comment for the full citation and the multi-sub-block/rebase
+/// behavior this replicates exactly. Silent no-op on any load failure
+/// (missing block, malformed data), matching the trait method's own
+/// fault-tolerance.
+fn load_walldef_pixels(symbols: &mut SymbolSets, data: &GameData, game_area: u8, set: u8, id: u8) {
+    if !(1..=3).contains(&set) {
+        return;
+    }
+
+    let Ok(raw) = data.block(&format!("WALLDEF{game_area}.DAX"), id) else {
+        return;
+    };
+    let Ok(walldef) = WalldefBlock::parse(&raw) else {
+        return;
+    };
+    let block_count = walldef.wallset_count();
+    if block_count == 0 {
+        return;
+    }
+
+    let rebase = (crate::symbols::SYMBOL_SET_FIX[set as usize] as i32
+        - crate::symbols::SYMBOL_SET_FIX[1] as i32) as u8;
+    let sym_file = format!("8X8D{game_area}.DAX");
+
+    for block in 0..block_count {
+        let idx = set as usize + block;
+        if !(1..=3).contains(&idx) {
+            continue;
+        }
+
+        let mut tiles = [0u8; gbx_formats::walldef::WALLSET_SIZE];
+        for style in 0..gbx_formats::walldef::STYLES_PER_WALLSET {
+            for i in 0..gbx_formats::walldef::TILE_IDS_PER_STYLE {
+                let raw_id = walldef.tile_id(block, style, i).unwrap_or(0);
+                tiles[style * gbx_formats::walldef::TILE_IDS_PER_STYLE + i] = if raw_id >= 0x2D {
+                    raw_id.wrapping_add(rebase)
+                } else {
+                    raw_id
+                };
+            }
+        }
+
+        let sym_block_id = if block_count > 1 {
+            id.wrapping_mul(10).wrapping_add(block as u8 + 1)
+        } else {
+            id
+        };
+        let Ok(bytes) = data.block(&sym_file, sym_block_id) else {
+            continue;
+        };
+        let Ok(decoded) = gbx_formats::image::decode(&bytes, Some(WALLSET_MASK)) else {
+            continue;
+        };
+
+        symbols.load(idx, decoded);
+        symbols.load_wallset(idx - 1, crate::symbols::WallsetSlot::from_tiles(tiles));
+    }
+}
+
+/// Reloads every non-empty `setBlocks[0..2]` slot's wallset (§1.5, task
+/// deliverable 4) — the import/restore counterpart of
+/// `EngineVmHost::load_walldef`'s live-VM path, driven directly since
+/// there's no running script during import (`EclMachine` starts idle).
+pub fn reload_walldefs(
+    symbols: &mut SymbolSets,
+    data: &GameData,
+    game_area: u8,
+    set_blocks: &[Option<(u8, u8)>; 3],
+) {
+    for entry in set_blocks.iter().flatten() {
+        let (set, id) = *entry;
+        load_walldef_pixels(symbols, data, game_area, set, id);
+    }
+}
+
 // --- Window ranges (D-VM5 / this session's research §1.0) ---
 
 const AREA_WINDOW: std::ops::RangeInclusive<u16> = 0x4B00..=0x4EFF;
@@ -321,6 +430,82 @@ impl VmMemoryState {
     /// `ScriptMemory::read_string`/`write_string` traffic.
     pub fn raw_string(&self, addr: u16) -> Option<&VmString> {
         self.raw_strings.get(&addr)
+    }
+}
+
+/// A deterministic, `.rsav`-storable projection of [`VmMemoryState`]
+/// (`docs/design/save-formats.md` D-SAVE3, task deliverable 3): the Area/
+/// Party/Table/Global window backings (named cells + the raw fallback
+/// store) plus resident-asset ids. `BTreeMap`s, never `HashMap`s (D-SAVE1's
+/// CI-enforced determinism invariant) — `VmMemoryState`'s own live
+/// `HashMap`s stay as they are (no risk to the already-tested M2 dispatch
+/// code); this type only exists at the save/restore boundary.
+///
+/// Deliberately excludes what D-SAVE3 calls diagnostic, not state: the
+/// unknown-access log, the service-call log, and past halt records. A
+/// restored `VmMemoryState` starts those three empty, exactly like a fresh
+/// [`VmMemoryState::new`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WindowsSnapshot {
+    pub raw_words: std::collections::BTreeMap<u16, u16>,
+    pub raw_bytes: std::collections::BTreeMap<u16, u8>,
+    pub raw_strings: std::collections::BTreeMap<u16, VmString>,
+    pub assets: ResidentAssets,
+    pub word_1ee76: u16,
+    pub word_1ee78: u16,
+    pub word_1ee7a: u16,
+    pub byte_1ee91: bool,
+    pub byte_1ee94: bool,
+    pub position_changed: bool,
+    pub sprite_changed: bool,
+    pub can_draw_bigpic: bool,
+}
+
+impl VmMemoryState {
+    /// Extracts a deterministic [`WindowsSnapshot`] — the `.rsav` payload's
+    /// `windows` field (D-SAVE3).
+    pub fn snapshot(&self) -> WindowsSnapshot {
+        WindowsSnapshot {
+            raw_words: self.raw_words.iter().map(|(&k, &v)| (k, v)).collect(),
+            raw_bytes: self.raw_bytes.iter().map(|(&k, &v)| (k, v)).collect(),
+            raw_strings: self
+                .raw_strings
+                .iter()
+                .map(|(&k, v)| (k, v.clone()))
+                .collect(),
+            assets: self.assets.clone(),
+            word_1ee76: self.word_1ee76,
+            word_1ee78: self.word_1ee78,
+            word_1ee7a: self.word_1ee7a,
+            byte_1ee91: self.byte_1ee91,
+            byte_1ee94: self.byte_1ee94,
+            position_changed: self.position_changed,
+            sprite_changed: self.sprite_changed,
+            can_draw_bigpic: self.can_draw_bigpic,
+        }
+    }
+
+    /// Populates raw window words/bytes/strings **and** the named-but-inert
+    /// Global cells directly from a snapshot (used by both `.rsav` restore,
+    /// D-SAVE3, and original-save import, D-SAVE7 — import writes the raw
+    /// blob first via this same path, satisfying "named cells are then read
+    /// through the same facade" for every window that already has one).
+    /// `unknown_log`/`calls`/`halts`/`transcript` are left at their current
+    /// (fresh) values — this never clears diagnostics that don't yet exist
+    /// on a freshly-built `VmMemoryState`.
+    pub fn restore_windows(&mut self, snapshot: WindowsSnapshot) {
+        self.raw_words = snapshot.raw_words.into_iter().collect();
+        self.raw_bytes = snapshot.raw_bytes.into_iter().collect();
+        self.raw_strings = snapshot.raw_strings.into_iter().collect();
+        self.assets = snapshot.assets;
+        self.word_1ee76 = snapshot.word_1ee76;
+        self.word_1ee78 = snapshot.word_1ee78;
+        self.word_1ee7a = snapshot.word_1ee7a;
+        self.byte_1ee91 = snapshot.byte_1ee91;
+        self.byte_1ee94 = snapshot.byte_1ee94;
+        self.position_changed = snapshot.position_changed;
+        self.sprite_changed = snapshot.sprite_changed;
+        self.can_draw_bigpic = snapshot.can_draw_bigpic;
     }
 }
 
@@ -748,63 +933,7 @@ impl gbx_vm::EngineServices for EngineVmHost<'_> {
         if let Some(entry) = self.vm.assets.walldefs.get_mut(slot) {
             *entry = Some((set, id));
         }
-        if !(1..=3).contains(&set) {
-            return;
-        }
-
-        let Ok(raw) = self
-            .data
-            .block(&format!("WALLDEF{}.DAX", self.game_area), id)
-        else {
-            return;
-        };
-        let Ok(walldef) = WalldefBlock::parse(&raw) else {
-            return;
-        };
-        let block_count = walldef.wallset_count();
-        if block_count == 0 {
-            return;
-        }
-
-        let rebase = (crate::symbols::SYMBOL_SET_FIX[set as usize] as i32
-            - crate::symbols::SYMBOL_SET_FIX[1] as i32) as u8;
-        let sym_file = format!("8X8D{}.DAX", self.game_area);
-
-        for block in 0..block_count {
-            let idx = set as usize + block;
-            if !(1..=3).contains(&idx) {
-                continue;
-            }
-
-            let mut tiles = [0u8; gbx_formats::walldef::WALLSET_SIZE];
-            for style in 0..gbx_formats::walldef::STYLES_PER_WALLSET {
-                for i in 0..gbx_formats::walldef::TILE_IDS_PER_STYLE {
-                    let raw_id = walldef.tile_id(block, style, i).unwrap_or(0);
-                    tiles[style * gbx_formats::walldef::TILE_IDS_PER_STYLE + i] = if raw_id >= 0x2D
-                    {
-                        raw_id.wrapping_add(rebase)
-                    } else {
-                        raw_id
-                    };
-                }
-            }
-
-            let sym_block_id = if block_count > 1 {
-                id.wrapping_mul(10).wrapping_add(block as u8 + 1)
-            } else {
-                id
-            };
-            let Ok(bytes) = self.data.block(&sym_file, sym_block_id) else {
-                continue;
-            };
-            let Ok(decoded) = gbx_formats::image::decode(&bytes, Some(WALLSET_MASK)) else {
-                continue;
-            };
-
-            self.symbols.load(idx, decoded);
-            self.symbols
-                .load_wallset(idx - 1, crate::symbols::WallsetSlot::from_tiles(tiles));
-        }
+        load_walldef_pixels(self.symbols, self.data, self.game_area, set, id);
     }
 
     fn load_bigpic(&mut self, id: u8) {

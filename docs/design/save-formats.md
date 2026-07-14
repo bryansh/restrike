@@ -831,6 +831,33 @@ byte-level spec; the importer is a straight transcription of them with the three
    enum matching the on-disk slot layout (the GBC doc's 0x79-based table with its
    gaps). That mapping is a rules/party-model concern (D-RP5), pinned when the
    model interprets the bytes, not at import.
+8. **(Implementation note, step 4 session, 2026-07-14.)** §1.4's Area/Party
+   window cells are cited two ways in this doc: `Area1.cs`'s `[DataOffset]`
+   byte offsets into the 0x800 `origData` array (verified directly against
+   source for `current_3DMap_block_id`/the clock cluster while implementing),
+   and `docs/design/vm-scriptmemory.md`'s own VM *address* space
+   (`CLOCK_BASE = 0x4BC6` etc., reverse-engineered from real ECL operand
+   census data). The two numbering schemes are **not** related by a simple
+   linear transform the implementer could find without reading
+   `Area1.field_6A00_Get`'s actual dispatch body (not read this session). The
+   shipped importer therefore does two different things for two different
+   purposes, not one unified "read through the facade" pass as D-SAVE7's
+   prose literally describes: (a) the handful of *named engine fields*
+   import needs (GEO block id, `LastEclBlockId`, the clock, `inDungeon`) are
+   read directly from the `origData` byte offsets this doc cites; (b) the
+   *entire* raw blob content (everything else, including `field_200[33]`)
+   is packed into the live `ScriptMemory` raw store using restrike's own
+   already-validated VM word-addressing (`addr = window_base + word_index`),
+   so unnamed cells round-trip self-consistently against restrike's own
+   read/write dispatch, which is what a resident script actually queries
+   post-import — but this has **not** been verified to line up cell-for-cell
+   with what the *original* game would have read at each of those addresses.
+   Low risk in practice (no M2/M3 opcode reads an unnamed Area/Table/Party
+   cell that matters yet), but a real gap: closing it needs either reading
+   `Area1.field_6A00_Get`/`Area2.field_800_Get`'s full dispatch bodies to
+   derive the true mapping, or empirical pinning against a real save's
+   observed script behavior (D-SAVE10 tier 3). Tracked here rather than
+   silently assumed correct.
 
 ## 6. What this unblocks (M3 build order)
 

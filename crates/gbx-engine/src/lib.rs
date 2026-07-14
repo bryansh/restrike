@@ -18,9 +18,12 @@ pub mod draw;
 pub mod engine;
 pub mod framebuffer;
 pub mod frames;
+pub mod import;
 pub mod input;
 pub mod movement;
+pub mod party;
 pub mod rng;
+pub mod save;
 pub mod shell;
 pub mod symbols;
 pub mod text;
@@ -33,6 +36,8 @@ mod demo;
 mod h2_conformance;
 #[cfg(test)]
 mod hash_goldens;
+#[cfg(test)]
+mod save_roundtrip_tests;
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]

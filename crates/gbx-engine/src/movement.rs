@@ -399,6 +399,24 @@ impl GameClock {
         self.total_units += amount as u32 * multiplier;
     }
 
+    /// The inverse of [`GameClock::raw_clock_words`]' inner 5 words
+    /// (minutes-ones, minutes-tens, hour, day, year) — original-save import
+    /// (task deliverable 4, `docs/design/save-formats.md` §1.4's clock
+    /// cells). `day`/`year` are 1-based on the wire (clamped to `>= 1`
+    /// here so a zeroed/malformed save can't underflow); reconstructs
+    /// `total_units` exactly for any value this module itself produced.
+    pub fn from_raw_clock_words(words: [u16; 5]) -> Self {
+        let [minutes_ones, minutes_tens, hour, day, year] = words;
+        let minutes = (minutes_tens as u32) * 10 + minutes_ones as u32;
+        let day = (day as u32).max(1);
+        let year = (year as u32).max(1);
+        let total_minutes =
+            minutes + hour as u32 * 60 + (day - 1) * 60 * 24 + (year - 1) * 360 * 24 * 60;
+        GameClock {
+            total_units: total_minutes / Self::MINUTES_PER_UNIT,
+        }
+    }
+
     pub fn hh_mm(&self) -> (u8, u8) {
         let total_minutes = self.total_units * Self::MINUTES_PER_UNIT;
         (
@@ -495,6 +513,21 @@ pub fn world_menu_command(key: u8, area_view_available: bool) -> WorldMenuComman
 mod tests {
     use super::*;
     use gbx_formats::geo::GeoBlock;
+
+    #[test]
+    fn game_clock_from_raw_words_round_trips_through_to_the_same_words() {
+        let clock = GameClock { total_units: 54321 }; // arbitrary nonzero value
+        let words = clock.raw_clock_words();
+        let rebuilt =
+            GameClock::from_raw_clock_words([words[1], words[2], words[3], words[4], words[5]]);
+        assert_eq!(rebuilt.raw_clock_words(), words);
+    }
+
+    #[test]
+    fn game_clock_from_raw_words_at_zero_is_the_default_clock() {
+        let rebuilt = GameClock::from_raw_clock_words([0, 0, 0, 1, 1]);
+        assert_eq!(rebuilt.total_units, 0);
+    }
 
     const GEO_BLOCK_SIZE: usize = gbx_formats::geo::GEO_BLOCK_SIZE;
 

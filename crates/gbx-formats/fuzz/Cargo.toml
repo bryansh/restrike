@@ -20,4 +20,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "save_orig"
+path = "fuzz_targets/save_orig.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
