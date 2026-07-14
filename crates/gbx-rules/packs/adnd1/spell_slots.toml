@@ -1,0 +1,95 @@
+# packs/adnd1/spell_slots.toml — D-RP9 authoring order item 5: the four
+# incremental spell-slot gain tables. Accumulation quirks (cleric's
+# skillLevel-2 bound, paladin/ranger's dead leading rows, ranger's
+# druid/MU column split) are Group-B code (session 3's adnd1 trait), not
+# pack data -- this pack holds only the tables themselves.
+
+[[table]]
+id = "cleric_spell_levels"
+schema_version = 1
+flavor = "adnd1"
+description = "Incremental cleric spell-slot gain per player level, by spell level (0..=4)"
+element = "u8"
+axes = [
+  { name = "player_level", size = 11, index = "sub_6A00F's `PlayerLvl` loop index, 0-based, read for PlayerLvl in 0..=(skillLevel-2)" },
+  { name = "spell_level", size = 5, index = "spell level 1..=5, 0-indexed (sp_lvl)" },
+]
+evidence_tier = "image"
+source = [
+  { kind = "coab", loc = "engine/ovr026.cs:8-18 (ClericSpellLevels, unk_1A5CC)" },
+  { kind = "original-address", loc = "seg600:42BC unk_1A5CC" },
+  { kind = "original-re", loc = "START.EXE exepack image @0xeea7 (v1.3), byte-exact 11x5 u8 block, 2026-07-14" },
+]
+consumed_by = ["ovr026.cs:71-79 (sub_6A00F)", "ovr026.cs:286 (a second reclac site)"]
+anchor = { kind = "image", file = "START.EXE", offset = 0xeea7, len = 55 }
+rows = [
+  [1,0,0,0,0], [0,1,0,0,0], [1,1,0,0,0], [0,1,1,0,0], [0,0,1,0,0],
+  [0,0,0,1,0], [0,0,1,1,0], [1,1,0,0,1], [0,0,0,1,1], [1,0,1,0,0], [1,1,1,0,0],
+]
+
+[[table]]
+id = "paladin_spell_levels"
+schema_version = 1
+flavor = "adnd1"
+description = "Incremental paladin spell-slot gain, levels 9+ only (paladins cast no spells below level 9)"
+element = "u8"
+axes = [
+  { name = "player_level", size = 4, index = "sub_6A00F's `addLvl` loop index, read for addLvl in 8..(skillLevel), i.e. player level 9+ (skillLevel > 8 gates the whole branch); coab declares 8 leading all-zero rows (addLvl 0..=7, player level 1..=8) that are NEVER read (the `skillLevel > 8` guard) -- absent from this table, matching the image (see anchor notes)" },
+  { name = "spell_level", size = 5, index = "spell level 1..=5, 0-indexed" },
+]
+evidence_tier = "image"
+source = [
+  { kind = "coab", loc = "engine/ovr026.cs:20-33 (PaladinSpellLevels, unk_1A6F5)" },
+  { kind = "original-address", loc = "seg600:43E5 unk_1A6F5" },
+  { kind = "original-re", loc = "START.EXE exepack image @0xeff3 (v1.3): the consumed 4-row tail byte-matches exactly, immediately followed by exp_thresholds_ranger's confirmed anchor (0xf007) with no gap; the 8 dead leading rows sit in the preceding, non-contiguous, unconfirmed gap and are not anchored (never read, per D-RP2 the image's real shape for this table is just the 4 consumed rows)" },
+]
+consumed_by = ["ovr026.cs:99-108 (sub_6A00F)"]
+anchor = { kind = "image", file = "START.EXE", offset = 0xeff3, len = 20 }
+rows = [
+  [1,0,0,0,0], [1,0,0,0,0], [0,1,0,0,0], [0,1,0,0,0],
+]
+
+[[table]]
+id = "ranger_spell_levels"
+schema_version = 1
+flavor = "adnd1"
+description = "Incremental ranger spell-slot gain, levels 9+ only, split across two caster tracks"
+element = "u8"
+axes = [
+  { name = "player_level", size = 5, index = "sub_6A00F's `var_3` loop index, read for var_3 in 8..=(skillLevel), i.e. player level 9+ (skillLevel > 7 gates the branch); coab declares 8 leading all-zero rows never read, absent from this table for the same reason as paladin_spell_levels" },
+  { name = "spell_level", size = 5, index = "columns 0..=2 add to spellCastCount[1, sp_lvl] (the druid-side track, ovr026.cs:134); columns 3..=4 add to spellCastCount[2, sp_lvl-3] (the MU-side track, ovr026.cs:139) -- the druid/MU split this cluster's design-doc entry names" },
+]
+evidence_tier = "image"
+source = [
+  { kind = "coab", loc = "engine/ovr026.cs:35-48 (unk_1A758)" },
+  { kind = "original-address", loc = "seg600:4448 unk_1A758" },
+  { kind = "original-re", loc = "START.EXE exepack image @0xf051 (v1.3): the consumed 5-row tail byte-matches exactly, ending precisely where mu_spell_lvl_learn's confirmed anchor (0xf096) begins, 2026-07-14" },
+]
+consumed_by = ["ovr026.cs:126-142 (sub_6A00F)"]
+anchor = { kind = "image", file = "START.EXE", offset = 0xf051, len = 25 }
+rows = [
+  [1,0,0,0,0], [0,0,0,1,0], [1,0,0,0,0], [0,0,0,1,0], [0,1,0,0,0],
+]
+
+[[table]]
+id = "mu_spell_lvl_learn"
+schema_version = 1
+flavor = "adnd1"
+description = "Incremental magic-user spell-slot gain per player level, by spell level (0..=4)"
+element = "u8"
+axes = [
+  { name = "player_level", size = 11, index = "0-based `sp_lvl`/`lvl` loop index (ovr020.cs:672-680, ovr026.cs:157-165)" },
+  { name = "spell_level", size = 5, index = "spell level 1..=5, 0-indexed" },
+]
+evidence_tier = "image"
+source = [
+  { kind = "coab", loc = "engine/ovr020.cs:625-636 (MU_spell_lvl_learn, unk_1A7C6)" },
+  { kind = "original-address", loc = "seg600:44B6 unk_1A7C6" },
+  { kind = "original-re", loc = "START.EXE exepack image @0xf096 (v1.3), byte-exact 11x5 u8 block, immediately precedes exp_thresholds_thief's confirmed anchor (0xf0cd) with no gap, 2026-07-14" },
+]
+consumed_by = ["ovr020.cs:672-680", "ovr026.cs:157-165"]
+anchor = { kind = "image", file = "START.EXE", offset = 0xf096, len = 55 }
+rows = [
+  [1,0,0,0,0], [0,1,0,0,0], [1,1,0,0,0], [1,0,1,0,0], [0,0,1,0,0],
+  [0,1,0,1,0], [0,0,1,1,0], [0,0,0,0,1], [0,1,0,0,1], [0,0,1,1,1], [0,0,0,1,1],
+]

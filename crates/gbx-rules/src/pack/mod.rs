@@ -21,6 +21,8 @@ const ADND1_PROGRESSION: &str = include_str!("../../packs/adnd1/progression.toml
 const ADND1_HP_HD: &str = include_str!("../../packs/adnd1/hp_hd.toml");
 /// D-RP9 authoring order item 4: thief skills.
 const ADND1_THIEF_SKILLS: &str = include_str!("../../packs/adnd1/thief_skills.toml");
+/// D-RP9 authoring order item 5: spell slots.
+const ADND1_SPELL_SLOTS: &str = include_str!("../../packs/adnd1/spell_slots.toml");
 
 /// Every loaded, validated rules table (D-RP1). Construct via [`RuleSet::load`].
 pub struct RuleSet {
@@ -40,6 +42,7 @@ impl RuleSet {
             ("adnd1/progression.toml", ADND1_PROGRESSION),
             ("adnd1/hp_hd.toml", ADND1_HP_HD),
             ("adnd1/thief_skills.toml", ADND1_THIEF_SKILLS),
+            ("adnd1/spell_slots.toml", ADND1_SPELL_SLOTS),
         ];
 
         let mut tables = Vec::new();
