@@ -6,6 +6,7 @@
 
 pub mod adnd1;
 pub mod bash_door;
+pub mod flavor;
 pub mod pack;
 pub mod palette;
 

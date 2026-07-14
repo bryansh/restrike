@@ -14,16 +14,24 @@ fn rows_table<'a>(rules: &'a RuleSet, id: &str) -> &'a [Vec<i64>] {
     rows
 }
 
-/// Accumulated cleric spell slots at `skill_level` (`ovr026.cs:71-79`'s
-/// `for (PlayerLvl = 0; PlayerLvl <= skillLevel - 2; PlayerLvl++)` sum over
-/// `ClericSpellLevels`). Returns `[0; 5]` for `skill_level < 2` (the loop
-/// never executes), matching coab exactly rather than underflowing.
+/// Accumulated cleric spell slots at `skill_level` (`ovr026.cs:64-81`).
+/// **Corrected in M3 session 3** against a fresh direct read: the prior
+/// session's transcription dropped `ovr026.cs:73`'s unconditional
+/// `player.spellCastCount[0, 0] += 1` (a base level-1 slot granted whenever
+/// `skillLevel > 0`, entirely separate from the `PlayerLvl` accumulation
+/// loop below) — `skill_level == 1` must return `[1,0,0,0,0]`, not `[0;
+/// 5]`. The loop itself (`for PlayerLvl = 0; PlayerLvl <= skillLevel - 2;
+/// PlayerLvl++`, summing `ClericSpellLevels`) was already correct.
 pub fn cleric_spell_slots(rules: &RuleSet, skill_level: i32) -> [u8; 5] {
-    let rows = rows_table(rules, "cleric_spell_levels");
     let mut total = [0u8; 5];
+    if skill_level < 1 {
+        return total;
+    }
+    total[0] = 1;
     if skill_level < 2 {
         return total;
     }
+    let rows = rows_table(rules, "cleric_spell_levels");
     let max_player_lvl = (skill_level - 2) as usize;
     for row in rows.iter().take(max_player_lvl + 1) {
         for (i, v) in row.iter().enumerate() {
@@ -80,16 +88,28 @@ pub fn ranger_spell_slots(rules: &RuleSet, skill_level: i32) -> ([u8; 3], [u8; 2
     (druid_track, mu_track)
 }
 
-/// Accumulated magic-user spell slots at `skill_level` (`ovr020.cs:672-680`/
-/// `ovr026.cs:157-165`'s straight `for (lvl = 0; lvl < skillLevel; lvl++)`
-/// sum over `MU_spell_lvl_learn`).
+/// Accumulated magic-user spell slots at `skill_level` (`ovr026.cs:154-166`,
+/// cross-checked against the ring-of-wizardry removal path's independent
+/// re-derivation at `ovr020.cs:664-680`, which uses the identical bound).
+/// **Corrected in M3 session 3**: the prior session's transcription both
+/// dropped the unconditional `player.spellCastCount[2, 0] += 1` base slot
+/// (mirroring cleric's, see [`cleric_spell_slots`]) *and* mistranscribed
+/// the loop bound as a straight `lvl < skillLevel` — the real bound is
+/// `lvl <= skillLevel - 2` (`ovr026.cs:157`), i.e. `skillLevel - 1` rows,
+/// exactly matching cleric's bound pattern. `skill_level == 3` must return
+/// `[2,1,0,0,0]`, not the prior `[2,2,0,0,0]`.
 pub fn mu_spell_slots(rules: &RuleSet, skill_level: i32) -> [u8; 5] {
-    let rows = rows_table(rules, "mu_spell_lvl_learn");
     let mut total = [0u8; 5];
-    if skill_level <= 0 {
+    if skill_level < 1 {
         return total;
     }
-    for row in rows.iter().take(skill_level as usize) {
+    total[0] = 1;
+    if skill_level < 2 {
+        return total;
+    }
+    let rows = rows_table(rules, "mu_spell_lvl_learn");
+    let max_lvl = (skill_level - 2) as usize;
+    for row in rows.iter().take(max_lvl + 1) {
         for (i, v) in row.iter().enumerate() {
             total[i] += *v as u8;
         }
@@ -102,17 +122,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cleric_slots_below_level_2_are_zero() {
+    fn cleric_slots_at_level_1_are_just_the_base_slot() {
         let rules = RuleSet::load();
-        assert_eq!(cleric_spell_slots(&rules, 1), [0; 5]);
+        // ovr026.cs:73's unconditional +1 fires whenever skillLevel > 0,
+        // even though the PlayerLvl accumulation loop below it doesn't run.
+        assert_eq!(cleric_spell_slots(&rules, 1), [1, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn cleric_slots_are_zero_at_level_0() {
+        let rules = RuleSet::load();
+        assert_eq!(cleric_spell_slots(&rules, 0), [0; 5]);
     }
 
     #[test]
     fn cleric_slots_accumulate_the_first_three_player_levels() {
         let rules = RuleSet::load();
-        // skill_level 4 -> PlayerLvl 0..=2 -> rows 0,1,2 summed:
-        // [1,0,0,0,0]+[0,1,0,0,0]+[1,1,0,0,0] = [2,2,0,0,0].
-        assert_eq!(cleric_spell_slots(&rules, 4), [2, 2, 0, 0, 0]);
+        // skill_level 4 -> base +1 to col0, then PlayerLvl 0..=2 -> rows
+        // 0,1,2 summed: [1,0,0,0,0]+[0,1,0,0,0]+[1,1,0,0,0] = [2,2,0,0,0].
+        // Plus the base: [3,2,0,0,0].
+        assert_eq!(cleric_spell_slots(&rules, 4), [3, 2, 0, 0, 0]);
     }
 
     #[test]
@@ -149,10 +178,17 @@ mod tests {
     }
 
     #[test]
+    fn mu_slots_at_level_1_are_just_the_base_slot() {
+        let rules = RuleSet::load();
+        assert_eq!(mu_spell_slots(&rules, 1), [1, 0, 0, 0, 0]);
+    }
+
+    #[test]
     fn mu_slots_accumulate_from_level_1() {
         let rules = RuleSet::load();
-        // skill_level 3 -> lvl 0..3 -> rows0,1,2 summed:
-        // [1,0,0,0,0]+[0,1,0,0,0]+[1,1,0,0,0] = [2,2,0,0,0].
-        assert_eq!(mu_spell_slots(&rules, 3), [2, 2, 0, 0, 0]);
+        // skill_level 3 -> base +1 to col0, then lvl 0..=1 (2 rows, the same
+        // skillLevel-1 bound as cleric) -> rows0,1 summed:
+        // [1,0,0,0,0]+[0,1,0,0,0] = [1,1,0,0,0]. Plus the base: [2,1,0,0,0].
+        assert_eq!(mu_spell_slots(&rules, 3), [2, 1, 0, 0, 0]);
     }
 }

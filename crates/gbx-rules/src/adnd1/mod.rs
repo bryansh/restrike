@@ -7,6 +7,7 @@
 pub mod constants;
 pub mod creation;
 pub mod creation_limits;
+pub mod flavor_impl;
 pub mod hp_hd;
 pub mod progression;
 pub mod spell_slots;

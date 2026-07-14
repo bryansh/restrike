@@ -38,6 +38,19 @@ pub fn dex_adj(rules: &RuleSet, dex: usize, skill: usize) -> i8 {
     rows_table(rules, "thief_skill_dex_adj")[dex][skill - 1] as i8
 }
 
+/// `unk_1A230[race, skill]` (`ovr026.cs:426-439`/`532-539`) — `coab-only`
+/// tier (see the pack's `notes`: the table's declared 13x9 shape is
+/// actively disproven against the image, and only rows 0..=7 (`Race` enum,
+/// `Classes/Enums.cs:45`) have any established meaning). `skill` is
+/// 1-based, 1..=8, matching `reclac_thief_skills`'s indexing (column 0 is
+/// an unread dead slot, stored as declared per D-RP2's `coab-only`
+/// carve-out).
+pub fn race_adj(rules: &RuleSet, race: usize, skill: usize) -> i8 {
+    assert!((1..=8).contains(&skill), "skill must be 1..=8, got {skill}");
+    assert!(race < 8, "race must be 0..=7, got {race}");
+    rows_table(rules, "thief_skill_race_adj")[race][skill] as i8
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,5 +87,22 @@ mod tests {
     fn dex_adj_skill_six_panics_never_reads_the_dropped_column() {
         let rules = RuleSet::load();
         dex_adj(&rules, 0, 6);
+    }
+
+    #[test]
+    fn race_adj_matches_the_declared_dwarf_row() {
+        let rules = RuleSet::load();
+        // dwarf (race 1): {0,0,10,15,0,0,0,-10,-5} -- skill index is the
+        // raw column, so skill 2 = 10, skill 3 = 15, skill 8 = -5.
+        assert_eq!(race_adj(&rules, 1, 2), 10);
+        assert_eq!(race_adj(&rules, 1, 3), 15);
+        assert_eq!(race_adj(&rules, 1, 8), -5);
+    }
+
+    #[test]
+    #[should_panic(expected = "1..=8")]
+    fn race_adj_skill_zero_panics() {
+        let rules = RuleSet::load();
+        race_adj(&rules, 0, 0);
     }
 }
