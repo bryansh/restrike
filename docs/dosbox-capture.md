@@ -194,3 +194,42 @@ involvement needed for those. What *does* need a human at DOSBox:
 
 None of these block M2's other deliverables; they're the honestly-labeled
 "awaits the human checklist" portion of the exit gate.
+
+## 7. The combo session (added at M3 step 4): one sitting clears everything
+
+Doing §3–§5 in the same DOSBox session that creates the M3 import save makes
+the save itself evidence. Ordered for a single boot (~45–60 min):
+
+1. **Boot capture-ready** (§1's launch line + capture dir).
+2. **Party prep** (character creation / the modify option): include an
+   18/xx exceptional-strength fighter (pins the Str00 range cell,
+   save-formats.md §1.7 item 5) and at least one cleric and one magic-user.
+3. **FD-17 type-ahead** (§5): on a long street, mash forward 5–6× during
+   the redraw; count committed steps.
+4. **The walk circuit** (§4): screenshots at the §3 spot squares; note the
+   event text for the expected transcript
+   (`~/goldbox-data/expected/tilverton-circuit.transcript`).
+5. **A shop**: FD-18 (Up/Down arrows in the list menu — do they move the
+   highlight?); BUY something and note the price paid (known money delta =
+   import evidence).
+6. **Training hall**: second FD-18 data point.
+7. **Camp**: memorize a KNOWN spell set (write the exact counts, e.g.
+   "cleric: 2×Bless 1×CLW; MU: 1×Sleep 1×MM") and rest — pins the
+   spellCastCount stride cell (§1.7 item 2). Screenshot each character
+   sheet (permanent DOSBox-side record for the D-SAVE10 tier-3
+   field-by-field comparison, incl. current/max stat pairs for the
+   byte-order cell — item 1 pins fully whenever a stat is ever drained).
+8. **One combat**: try to open the game menu mid-fight (save-formats.md
+   §5.1 — expected: unreachable). Flee or win, either way.
+9. **Backdrop bands / J-filler / exact-fit wrap** (§5 items): opportunistic
+   observations while walking, per their §5 entries.
+10. **SAVE to slot A, quit.** The `savgam?.dat`/`CHRDAT*` files land in the
+    mounted `~/goldbox-data/cotab` automatically. Then:
+    `GBX_DATA_DIR=~/goldbox-data/cotab cargo test -p gbx-engine -- import`
+    should light up the local tier, and `restrike compare` takes the
+    screenshots.
+
+Deliverables back to the repo: capture PNGs + the transcript under
+`~/goldbox-data/` (never committed, D10); the noted answers (FD-17/18,
+mid-combat menu, §5 items) reported for docket updates; the save files in
+place.
