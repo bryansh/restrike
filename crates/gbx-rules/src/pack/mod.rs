@@ -15,6 +15,10 @@ pub use verify::{VerifyReport, VerifyStatus};
 /// The embedded `adnd1` packs (D-RP9's authoring order — `creation.toml` is
 /// the first, containing `class_alignments`).
 const ADND1_CREATION: &str = include_str!("../../packs/adnd1/creation.toml");
+/// D-RP9 authoring order item 1: THAC0, saving throws, turn undead, XP thresholds.
+const ADND1_PROGRESSION: &str = include_str!("../../packs/adnd1/progression.toml");
+/// D-RP9 authoring order item 2: hit points and hit dice.
+const ADND1_HP_HD: &str = include_str!("../../packs/adnd1/hp_hd.toml");
 
 /// Every loaded, validated rules table (D-RP1). Construct via [`RuleSet::load`].
 pub struct RuleSet {
@@ -27,10 +31,13 @@ impl RuleSet {
     /// suite must catch before this ever reaches a user, so there is no
     /// error path here to plumb through callers.
     pub fn load() -> Self {
-        // D-RP9's remaining clusters (progression, HP/HD, thief skills,
-        // spell slots, constants) join this list in later sessions.
-        #[allow(clippy::single_element_loop)]
-        let packs = [("adnd1/creation.toml", ADND1_CREATION)];
+        // D-RP9's remaining clusters (thief skills, spell slots, constants)
+        // join this list in later sessions.
+        let packs = [
+            ("adnd1/creation.toml", ADND1_CREATION),
+            ("adnd1/progression.toml", ADND1_PROGRESSION),
+            ("adnd1/hp_hd.toml", ADND1_HP_HD),
+        ];
 
         let mut tables = Vec::new();
         for (pack_name, src) in packs {

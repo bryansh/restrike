@@ -1,0 +1,123 @@
+# packs/adnd1/hp_hd.toml — hit points and hit dice. D-RP9 authoring order item 2.
+
+[[table]]
+id = "max_class_hit_dice"
+schema_version = 1
+flavor = "adnd1"
+description = "The class level at which a character stops rolling hit dice and switches to a flat per-level HP bonus"
+element = "u8"
+axes = [{ name = "class", size = 8, index = "ClassId 0..=7, cleric=0..monk=7" }]
+evidence_tier = "image"
+source = [
+  { kind = "coab", loc = "Classes/Gbl.cs:273 (byte_1A1CB)" },
+  { kind = "original-address", loc = "seg600:3EBB byte_1A1CB" },
+  { kind = "original-re", loc = "START.EXE exepack image @0xea9b (v1.3), 2026-07-14" },
+]
+# ovr018.cs:2107 (calc_max_hp) and ovr018.cs:1988 (get_con_hp_adj) both gate
+# on `ClassLevel < max_class_hit_dice`; ovr018.cs:2136 (sub_509E0, the
+# level-up HP roll) uses the same gate.
+consumed_by = ["ovr018.cs:2107", "ovr018.cs:1988", "ovr018.cs:2136"]
+anchor = { kind = "image", file = "START.EXE", offset = 0xea9b, len = 8 }
+notes = """
+DIVERGENCE FROM coab, confirmed this session: coab's Gbl.cs:273 declares \
+monk's entry as decimal 13, but the image byte is 0x13 (19 decimal). The \
+surrounding bytes are byte-exact against coab on both sides (the preceding \
+7 values, and the immediately-following default_icon_colours array \
+{1,2,3,4,6,7} at offset 0xeaa3, Gbl.cs:274) -- not a misalignment, a \
+one-byte transcription slip (likely coab read the hex literal 0x13 as \
+decimal 13 when transliterating). Image wins for shape and value per D-RP2; \
+this pack stores 19.
+"""
+rows = [[10],[15],[10],[10],[11],[12],[11],[19]]
+
+[[table]]
+id = "hit_die_count_at_level_1"
+schema_version = 1
+flavor = "adnd1"
+description = "Number of hit dice rolled (best-of-2) at character level 1, per class"
+element = "u8"
+axes = [{ name = "class", size = 8, index = "ClassId 0..=7, cleric=0..monk=7" }]
+evidence_tier = "image"
+source = [
+  { kind = "coab", loc = "engine/ovr018.cs:2122 (unk_16B2A)" },
+  { kind = "original-address", loc = "seg600:081A unk_16B2A" },
+  { kind = "original-re", loc = "START.EXE exepack image @0xb3fa (v1.3), byte-exact, contiguous with hit_die_size, 2026-07-14" },
+]
+consumed_by = ["ovr018.cs:2138-2140 (sub_509E0's level-up HP roll)"]
+anchor = { kind = "image", file = "START.EXE", offset = 0xb3fa, len = 8 }
+rows = [[1],[1],[1],[1],[2],[1],[1],[2]]
+
+[[table]]
+id = "hit_die_size"
+schema_version = 1
+flavor = "adnd1"
+description = "Hit die size (d-sides) per class"
+element = "u8"
+axes = [{ name = "class", size = 8, index = "ClassId 0..=7, cleric=0..monk=7" }]
+evidence_tier = "image"
+source = [
+  { kind = "coab", loc = "engine/ovr018.cs:2123 (unk_16B32)" },
+  { kind = "original-address", loc = "seg600:0822 unk_16B32" },
+  { kind = "original-re", loc = "START.EXE exepack image @0xb402 (v1.3), byte-exact, immediately follows hit_die_count_at_level_1, 2026-07-14" },
+]
+consumed_by = ["ovr018.cs:2145-2146 (sub_509E0's roll_dice calls)"]
+anchor = { kind = "image", file = "START.EXE", offset = 0xb402, len = 8 }
+rows = [[8],[8],[10],[10],[8],[4],[6],[4]]
+
+[[table]]
+id = "con_hp_adj"
+schema_version = 1
+flavor = "adnd1"
+description = "CON hit-point adjustment per level (added once per eligible class per level-up)"
+element = "i8"
+axes = [{ name = "con", size = 23, index = "[CON-3]: coab's declared 26-entry array (Classes/... ovr018.cs:1980) zero-pads CON 0..2, which never occurs (minimum stat is 3) -- the image confirms exactly 23 entries starting at CON=3, no leading padding. Image wins for shape (D-RP2)." }]
+evidence_tier = "image"
+source = [
+  { kind = "coab", loc = "engine/ovr018.cs:1980" },
+  { kind = "original-address", loc = "seg600:4281" },
+  { kind = "original-re", loc = "START.EXE exepack image @0xee64 (v1.3), byte-exact 23-entry run (3-entry coab padding absent), 2026-07-14" },
+]
+consumed_by = ["ovr018.cs:1982-2010 (get_con_hp_adj)"]
+anchor = { kind = "image", file = "START.EXE", offset = 0xee64, len = 23 }
+rows = [[-2],[-1],[-1],[-1],[0],[0],[0],[0],[0],[0],[0],[0],[1],[2],[2],[2],[2],[2],[2],[2],[2],[2],[2]]
+
+[[table]]
+id = "hp_calc_table"
+schema_version = 1
+flavor = "adnd1"
+description = "Per-class max-HP calculation constants (calc_max_hp's alternate/display HP formula, distinct from the level-up roll path)"
+columns = [
+  { name = "dice", element = "u8", meaning = "hit die size", domain = "1..=20" },
+  { name = "lvl_bonus", element = "u8", meaning = "extra levels added to the HP formula's level term", domain = "0..=5" },
+  { name = "max_base", element = "u8", meaning = "flat HP base once past max_class_hit_dice", domain = "0..=255" },
+  { name = "max_mult", element = "u8", meaning = "per-level-past-max HP multiplier", domain = "0..=10" },
+]
+axes = [{ name = "class", size = 8, index = "ClassId 0..=7, cleric=0..monk=7" }]
+evidence_tier = "coab-only"
+source = [{ kind = "coab", loc = "engine/ovr018.cs:2068-2085 (hp_calc_table)" }]
+consumed_by = ["ovr018.cs:2088-2119 (calc_max_hp)"]
+anchor = { kind = "none" }
+notes = """
+No original-address comment in coab (unlike every other table in this \
+cluster), and this session's search (32-byte interleaved record, 64-byte \
+u16le-field record, and per-field parallel-array searches for max_base/ \
+max_mult, including subsequence probes) found no image location -- ships \
+coab-only. Partial cross-check: the `dice` column's values \
+(8,8,10,10,8,4,6,4) exactly match hit_die_size, which IS image-anchored \
+(0xb402) -- strong evidence `dice` at least is transcribed correctly, even \
+though hp_calc_table itself isn't a distinct array in the binary (likely a \
+coab-authored convenience struct partially derived from other real arrays). \
+lvl_bonus/max_base/max_mult remain unconfirmed against the image; revisit \
+with `restrike extract-table`'s alternate-width sweep if a future session \
+has more forensic time.
+"""
+rows = [
+  [8, 0, 72, 2],   # cleric
+  [8, 0, 112, 0],  # druid
+  [10, 0, 90, 3],  # fighter
+  [10, 0, 90, 3],  # paladin
+  [8, 1, 88, 2],   # ranger
+  [4, 0, 44, 1],   # magic_user
+  [6, 0, 60, 2],   # thief
+  [4, 1, 72, 0],   # monk
+]

@@ -1,0 +1,213 @@
+# packs/adnd1/progression.toml — THAC0, saving throws, turn undead, and
+# per-class XP-to-level thresholds. D-RP9 authoring order item 1.
+#
+# exp_table (coab Classes/... ovr018.cs:2179, unk_1A5A3) is NOT one pack
+# table: image forensics this session found each class's XP-threshold run
+# sitting in a separate, independently-anchored location, not the single
+# contiguous 8x13 block coab's transliteration implies (round-1 review's
+# "interleaved with the slot tables" hypothesis, confirmed). Per D-RP2
+# ("image wins for shape"), this ships as one small `rows` table per class
+# that actually HAS threshold data (druid and monk are all -1 in coab --
+# no image data exists to anchor, and the accessor short-circuits them to
+# `None` without consulting any table). Each table also drops coab's
+# synthesized leading "level 0 needs 0 XP" column, which the image does not
+# store (confirmed absent by search) -- see each table's `axes` index note.
+
+[[table]]
+id = "thac0_table"
+schema_version = 1
+flavor = "adnd1"
+description = "THAC0 (stored) by class x level; display THAC0 = 0x3C - stored"
+element = "i8"
+axes = [
+  { name = "class", size = 8, index = "ClassId 0..=7 (base classes only; coab Classes/Enums.cs:69), cleric=0..monk=7" },
+  { name = "level", size = 13, index = "[0]=physically present but never read (consumers always index from ClassLevel>=1, ovr018.cs:578/ovr026.cs:190); [1..=12]=character level directly" },
+]
+evidence_tier = "image"
+source = [
+  { kind = "coab", loc = "engine/ovr018.cs:313-321 (unk_1A14A)" },
+  { kind = "original-address", loc = "seg600:3E3A unk_1A14A" },
+  { kind = "original-re", loc = "START.EXE exepack image @0xea1a (v1.3), byte-exact contiguous 8x13 i8 block, 2026-07-14" },
+]
+# ovr018.cs:576-585 (createPlayer): max() over every trained class's
+# thac0_table[class,level] entry sets player.thac0. ovr026.cs:188-193
+# (ReclacClassBonuses): same max() pattern on level-up/reclass. Display
+# relation (0x3C - stored) is engine/seg043.cs:133's `0x3c - p.hitBonus`
+# with hitBonus == player.thac0 (ovr025.cs:18/427) -- NOT Player.cs:599
+# (that line is DisplayAc, an unrelated field; a design-doc citation error
+# this session's source read caught and corrects here). Roll consumption:
+# ovr024.cs:515-545 PC_CanHitTarget's `roll + hitBonus + team_bonus >= target_ac`.
+consumed_by = [
+  "ovr018.cs:576-585",
+  "ovr026.cs:188-193",
+  "seg043.cs:133",
+  "ovr024.cs:515-545",
+]
+anchor = { kind = "image", file = "START.EXE", offset = 0xea1a, len = 104 }
+rows = [
+  [40,40,40,40,42,42,42,44,44,44,46,46,46],  # 0 cleric
+  [40,40,40,40,42,42,42,44,44,44,46,46,46],  # 1 druid
+  [39,40,40,42,43,44,45,46,47,48,49,50,51],  # 2 fighter
+  [40,40,40,42,43,44,45,46,47,48,49,50,51],  # 3 paladin
+  [40,40,40,42,43,44,45,46,47,48,49,50,51],  # 4 ranger
+  [39,39,39,39,39,39,41,41,41,41,41,43,43],  # 5 magic_user
+  [40,40,40,40,40,41,41,41,41,44,44,44,44],  # 6 thief
+  [40,40,40,40,42,42,42,44,44,44,46,46,46],  # 7 monk
+]
+
+[[table]]
+id = "save_throw_values"
+schema_version = 1
+flavor = "adnd1"
+description = "Saving throw target numbers by class x level x save type"
+element = "u8"
+axes = [
+  { name = "class", size = 8, index = "ClassId 0..=7, cleric=0..monk=7" },
+  { name = "level", size = 12, index = "[i]=character level (i+1); coab's synthesized level-0 column ({20,20,20,20,20}, never reached since ClassLevel starts at 1) is absent from the image -- confirmed by search, image wins for shape (D-RP2)" },
+  { name = "save_type", size = 5, index = "Classes/Spells.cs:7 SaveVerseType: Poison=0, Petrification=1, RodStaffWand=2, BreathWeapon=3, Spell=4" },
+]
+evidence_tier = "image"
+source = [
+  { kind = "coab", loc = "engine/ovr026.cs:322-330" },
+  { kind = "original-re", loc = "START.EXE exepack image @0xf1a3 (v1.3), byte-exact contiguous 8x12x5 u8 block (level-0 column absent), 2026-07-14" },
+]
+consumed_by = ["ovr026.cs:334-365"]
+anchor = { kind = "image", file = "START.EXE", offset = 0xf1a3, len = 480 }
+rows = [
+  [10,13,14,16,15, 10,13,14,16,15, 10,13,14,16,15, 9,12,13,15,14, 9,12,13,15,14, 9,12,13,15,14, 7,10,11,13,12, 7,10,11,13,12, 7,10,11,13,12, 6,9,10,12,11, 6,9,10,12,11, 6,9,10,12,11],   # cleric
+  [10,13,14,16,15, 10,13,14,16,15, 10,13,14,16,15, 9,12,13,15,14, 9,12,13,15,14, 9,12,13,15,14, 7,10,11,13,12, 7,10,11,13,12, 7,10,11,13,12, 6,9,10,12,11, 6,9,10,12,11, 6,9,10,12,11],   # druid
+  [14,15,16,17,17, 14,15,16,17,17, 13,14,15,16,16, 13,14,15,16,16, 11,12,13,13,14, 11,12,13,13,14, 10,11,12,12,13, 10,11,12,12,13, 8,9,10,9,11, 8,9,10,9,11, 7,8,9,8,10, 7,8,9,8,10],     # fighter
+  [12,13,14,15,15, 12,13,14,15,15, 11,12,13,14,14, 11,12,13,14,14, 9,9,11,11,12, 9,9,11,11,12, 8,9,10,10,11, 9,9,10,10,11, 6,7,8,7,9, 6,7,8,7,9, 5,6,7,6,8, 5,6,7,6,8],                   # paladin
+  [14,15,16,17,17, 14,15,16,17,17, 13,14,15,16,16, 13,14,15,16,16, 11,12,13,13,14, 11,12,13,13,14, 10,11,12,12,13, 10,11,12,12,13, 8,9,10,9,11, 8,9,10,9,11, 7,8,9,8,10, 7,8,9,8,10],     # ranger
+  [14,13,11,15,12, 14,13,11,15,12, 14,13,11,15,12, 14,13,11,15,12, 14,13,11,15,12, 13,11,9,13,10, 13,11,9,13,10, 13,11,9,13,10, 13,11,9,13,10, 13,11,9,13,10, 11,9,7,11,8, 11,9,7,11,8], # magic_user
+  [13,12,14,16,15, 13,12,14,16,15, 13,12,14,16,15, 13,12,14,16,15, 12,11,12,15,13, 12,11,12,15,13, 12,11,12,15,13, 12,11,12,15,13, 11,10,10,14,11, 11,10,10,14,11, 11,10,10,14,11, 11,10,10,14,11], # thief
+  [13,12,14,16,15, 13,12,14,16,15, 13,12,14,16,15, 13,12,14,16,15, 12,11,12,15,13, 12,11,12,15,13, 12,11,12,15,13, 12,11,12,15,13, 11,10,10,14,11, 13,11,9,13,10, 11,9,7,11,8, 11,9,7,11,8], # monk
+]
+
+[[table]]
+id = "turn_undead"
+schema_version = 1
+flavor = "adnd1"
+description = "Turn-undead result table by undead type x cleric bracket; positive = flee threshold (1d20 roll), negative = destroy threshold (abs value), 99 = cannot be turned"
+element = "i8"
+axes = [
+  { name = "undead_type", size = 11, index = "monster field_76/Player.field_E9, 0..=10. FINDING (this session, contradicts the design doc's original hypothesis): the consumer's index formula (ovr014.cs:642, `field_E9 * 10 + var_B`) and monster field width suggested types up to 12 might be representable, but the image's data unambiguously ends at type 10 -- type 11's would-be row is ASCII text ('!Area Cast...', a menu string) at image offset 0xafb8. Types 11+ are NOT representable by this table; see docs/fidelity-docket.md for the open question of whether any shipped monster actually carries undead_type 11/12 (Group C monster data, unverified this session)." },
+  { name = "cleric_bracket", size = 10, index = "coab's var_B (ovr014.cs:604-616) reindexed 0-based: var_B 1..=8 = cleric level 1..=8 directly -> index 0..=7; var_B 9 (cleric level 9-13) -> index 8; var_B 10 (cleric level >=14) -> index 9. var_B=0 never occurs in the consuming code, so image column -1 (the byte immediately preceding this anchor, offset 0xaf49) is dead data, excluded from this table." },
+]
+evidence_tier = "image"
+source = [
+  { kind = "coab", loc = "engine/ovr014.cs:603-605 (unk_16679, a truncated 21-byte prefix covering only undead_type 0 and a partial type 1)" },
+  { kind = "original-address", loc = "seg600:0369 unk_16679" },
+  { kind = "original-re", loc = "START.EXE exepack image @0xaf4a (v1.3), byte-exact for the 20-byte prefix coab does declare; full 11x10 extent established by search + monotonic-pattern continuation, 2026-07-14" },
+]
+consumed_by = ["ovr014.cs:603-660 (turns_undead)"]
+anchor = { kind = "image", file = "START.EXE", offset = 0xaf4a, len = 110 }
+rows = [
+  [17,17,0,0,1,17,0,0,32,32],        # 0
+  [10,7,4,1,1,0,0,-1,-1,-1],         # 1 -- coab's declared prefix ends here (byte-exact match)
+  [13,10,7,1,1,0,0,0,-1,-1],         # 2
+  [16,13,10,4,1,1,0,0,0,-1],         # 3
+  [19,16,13,7,4,1,1,0,0,-1],         # 4
+  [20,19,16,10,7,4,1,1,0,0],         # 5
+  [99,20,19,13,10,7,4,1,1,0],        # 6
+  [99,99,20,16,13,10,7,4,1,0],       # 7
+  [99,99,99,20,16,13,10,7,4,1],      # 8
+  [99,99,99,99,20,16,13,10,7,1],     # 9
+  [99,99,99,99,99,20,16,13,10,4],    # 10
+]
+
+[[table]]                              # exp thresholds: one small table per class with real (non-sentinel) data
+id = "exp_thresholds_cleric"
+schema_version = 1
+flavor = "adnd1"
+description = "XP thresholds to advance from level N to N+1, cleric"
+element = "i32le"
+axes = [{ name = "level", size = 9, index = "[i] = XP to advance from character level (i+1) to (i+2); coab's synthesized level-0..1 threshold (always 0, never read since ClassLevel starts at 1) is absent from the image" }]
+evidence_tier = "image"
+source = [
+  { kind = "coab", loc = "engine/ovr018.cs:2179-2187 (exp_table, unk_1A5A3), cleric row" },
+  { kind = "original-re", loc = "START.EXE exepack image @0xee7b (v1.3), byte-exact i32le run, confirmed in the M3 step-1 anchoring experiment and re-confirmed this session" },
+]
+consumed_by = ["ovr018.cs:2226-2244 (train_player)", "ovr023.cs:2144-2150"]
+anchor = { kind = "image", file = "START.EXE", offset = 0xee7b, len = 36 }
+rows = [[1501],[3001],[6001],[13001],[27501],[55001],[110001],[225001],[450001]]
+
+[[table]]
+id = "exp_thresholds_fighter"
+schema_version = 1
+flavor = "adnd1"
+description = "XP thresholds to advance from level N to N+1, fighter"
+element = "i32le"
+axes = [{ name = "level", size = 11, index = "[i] = XP to advance from character level (i+1) to (i+2)" }]
+evidence_tier = "image"
+source = [
+  { kind = "coab", loc = "engine/ovr018.cs:2179-2187 (exp_table, unk_1A5A3), fighter row" },
+  { kind = "original-re", loc = "START.EXE exepack image @0xef41 (v1.3), byte-exact i32le run, 2026-07-14" },
+]
+consumed_by = ["ovr018.cs:2226-2244 (train_player)", "ovr023.cs:2144-2150"]
+anchor = { kind = "image", file = "START.EXE", offset = 0xef41, len = 44 }
+rows = [[2001],[4001],[8001],[18001],[35001],[70001],[125001],[250001],[500001],[750001],[1000001]]
+
+[[table]]
+id = "exp_thresholds_paladin"
+schema_version = 1
+flavor = "adnd1"
+description = "XP thresholds to advance from level N to N+1, paladin"
+element = "i32le"
+axes = [{ name = "level", size = 10, index = "[i] = XP to advance from character level (i+1) to (i+2)" }]
+evidence_tier = "image"
+source = [
+  { kind = "coab", loc = "engine/ovr018.cs:2179-2187 (exp_table, unk_1A5A3), paladin row" },
+  { kind = "original-re", loc = "START.EXE exepack image @0xefa4 (v1.3), byte-exact i32le run, 2026-07-14" },
+]
+consumed_by = ["ovr018.cs:2226-2244 (train_player)", "ovr023.cs:2144-2150"]
+anchor = { kind = "image", file = "START.EXE", offset = 0xefa4, len = 40 }
+rows = [[2751],[5501],[12001],[24001],[45001],[95001],[175001],[350001],[700001],[1050001]]
+
+[[table]]
+id = "exp_thresholds_ranger"
+schema_version = 1
+flavor = "adnd1"
+description = "XP thresholds to advance from level N to N+1, ranger"
+element = "i32le"
+axes = [{ name = "level", size = 10, index = "[i] = XP to advance from character level (i+1) to (i+2)" }]
+evidence_tier = "image"
+source = [
+  { kind = "coab", loc = "engine/ovr018.cs:2179-2187 (exp_table, unk_1A5A3), ranger row" },
+  { kind = "original-re", loc = "START.EXE exepack image @0xf007 (v1.3), byte-exact i32le run, 2026-07-14" },
+]
+consumed_by = ["ovr018.cs:2226-2244 (train_player)", "ovr023.cs:2144-2150"]
+anchor = { kind = "image", file = "START.EXE", offset = 0xf007, len = 40 }
+rows = [[2251],[4501],[10001],[20001],[40001],[90001],[150001],[225001],[325001],[650001]]
+
+[[table]]
+id = "exp_thresholds_magic_user"
+schema_version = 1
+flavor = "adnd1"
+description = "XP thresholds to advance from level N to N+1, magic_user"
+element = "i32le"
+axes = [{ name = "level", size = 10, index = "[i] = XP to advance from character level (i+1) to (i+2)" }]
+evidence_tier = "image"
+source = [
+  { kind = "coab", loc = "engine/ovr018.cs:2179-2187 (exp_table, unk_1A5A3), MU row" },
+  { kind = "original-re", loc = "START.EXE exepack image @0xf06a (v1.3), byte-exact i32le run, 2026-07-14" },
+]
+consumed_by = ["ovr018.cs:2226-2244 (train_player)", "ovr023.cs:2144-2150"]
+anchor = { kind = "image", file = "START.EXE", offset = 0xf06a, len = 40 }
+rows = [[2501],[5001],[10001],[22501],[40001],[60001],[90001],[135001],[250001],[375001]]
+
+[[table]]
+id = "exp_thresholds_thief"
+schema_version = 1
+flavor = "adnd1"
+description = "XP thresholds to advance from level N to N+1, thief"
+element = "i32le"
+axes = [{ name = "level", size = 11, index = "[i] = XP to advance from character level (i+1) to (i+2)" }]
+evidence_tier = "image"
+source = [
+  { kind = "coab", loc = "engine/ovr018.cs:2179-2187 (exp_table, unk_1A5A3), thief row" },
+  { kind = "original-re", loc = "START.EXE exepack image @0xf0cd (v1.3), byte-exact i32le run, 2026-07-14" },
+]
+consumed_by = ["ovr018.cs:2226-2244 (train_player)", "ovr023.cs:2144-2150"]
+anchor = { kind = "image", file = "START.EXE", offset = 0xf0cd, len = 44 }
+rows = [[1251],[2501],[5001],[10001],[20001],[42501],[70001],[110001],[160001],[220001],[440001]]
