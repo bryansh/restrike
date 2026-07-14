@@ -508,7 +508,23 @@ stays the one place showing the complete open-hypothesis picture.
 
 ### FD-24: ScriptMemory window byte-offset alignment for original-save import
 
-- **Status:** open
+- **Status:** resolved (2026-07-14 Fable audit — by derivation, one
+  confirming unit test still owed)
+- **Resolution:** the two numbering schemes are linearly related:
+  **origData byte offset = 2 × (vm_address − window_base)**, for both
+  windows, via the same 16-bit-wrap idiom as the ECL window (its third
+  appearance). Derivation: `vm_GetMemoryValue` calls
+  `field_6A00_Get(0x6A00 + vm×2)` and the dispatch masks `& 0xFFFF` —
+  `(0x6A00 + (0x4B00+n)×2) mod 0x10000 = 2n`; Party likewise
+  `((0x7C00+n)×2 + 0x800) mod 0x10000 = 2n`. Confirmed against two
+  independent evidence eras: `Area1.cs` case `0x18E = time_minutes_ones`
+  → VM `0x4BC7` (the M1 clock cluster), and `Area2.cs` case
+  `0x67e = field_67E` → VM `0x7F3F` — **the DIVIDE-remainder alias
+  field-verified in M2**. Consequence: the step-4 importer's raw-blob
+  packing (blob word n → VM address base+n) is the correct mapping;
+  the two-path importer can be unified in a later pass. Remaining task:
+  one unit test asserting a known blob cell reads back through the live
+  facade (e.g. blob word 0xE6 ↔ facade read at 0x4BE6/inDungeon).
 - **Question:** Do the named Area/Party-window engine fields import derives
   from `Area1.cs`/`Area2.cs`'s `[DataOffset]` byte offsets, and the *raw*
   window content import packs into restrike's own VM word-addressed
