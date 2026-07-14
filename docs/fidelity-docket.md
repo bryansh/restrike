@@ -403,6 +403,80 @@ source document (§5 "New docket candidates").
   around this door entirely, using a different, transition-free path to its
   event squares.
 
+### FD-20: Turn-undead types 11-12 — does any shipped monster actually use them?
+
+- **Status:** narrowed (image extent settled 2026-07-14; real-monster-data
+  question still open)
+- **Question:** `turns_undead` (`ovr014.cs:642`) indexes `unk_16679` by
+  `target.field_E9` (copied straight from monster data's `field_76`,
+  `ovr017.cs:286`, an unclamped byte read) with no visible upper-bound
+  check in the code read this session. The rules-pack design doc originally
+  hypothesized the image-stored table would need to cover types up to 12.
+  Does any monster actually shipped in CotAB's data carry `field_76` >= 11?
+- **Evidence so far:** the *table* question is settled: the decompressed
+  `START.EXE` image (v1.3) unambiguously stores exactly 11 rows (undead
+  types 0-10) at offset `0xaf4a` — type 11's would-be row is ASCII menu
+  text ("!Area Cast..."), not further table data, confirmed by direct
+  byte inspection. `packs/adnd1/progression.toml`'s `turn_undead` table
+  and `gbx-rules::adnd1::progression::turn_undead_entry` both encode this
+  (the accessor returns `None` for `undead_type >= 11`, never reading past
+  the confirmed extent). What's still unknown: whether the monster data
+  files (`MON*`, Group C — never pack material, not parsed this session)
+  contain any `field_76` value of 11 or higher. If none do, this is a
+  closed non-issue; if one does, `turns_undead` would read into the
+  string table's bytes as if they were turn-difficulty values — a real
+  behavioral bug in the *original*, or evidence this session's index-
+  formula reading has a gap (e.g. an unseen clamp elsewhere).
+- **Settled by:** M4 (monster data loading lands) — grep all shipped
+  `MON*` records' `field_76` byte for its observed value range.
+
+### FD-21: `thief_skill_base_chance`'s levels 6-11 diverge from a naive reading of coab's declaration
+
+- **Status:** open
+- **Question:** `base_chance`/`unk_1A1D0` (`ovr026.cs:465-477`) declares 13
+  rows (thief levels 0-12, row 0 dead) x 9 columns (skill 0-8, column 0
+  dead). Dropping the dead row/column, thief levels 1-4 and 12 byte-match
+  the image exactly at offset `0xeaa9`. Levels 6-11 do not: the image's
+  flattened byte stream runs exactly one position ahead of a naive
+  per-row reading starting partway through level 6, and self-corrects
+  precisely by level 12. What causes the one-byte local divergence?
+- **Evidence so far:** re-verified the coab source transcription
+  character-by-character twice (ruling out a transcription slip this
+  session); the image bytes are unambiguous and were used verbatim in
+  `packs/adnd1/thief_skills.toml` (byte-exact anchor, `restrike verify`
+  reports `Verified`). No working theory yet for *why* — candidates not
+  investigated this session: a genuine second coab transcription error
+  (like `max_class_hit_dice`'s monk entry, FD-adjacent but not yet its
+  own confirmed case), a column/row semantic this session's reading of
+  `reclac_thief_skills` didn't fully capture, or an intentional original-
+  engine quirk.
+- **Settled by:** a future session with `restrike extract-table` and more
+  forensic time — try reconstructing the exact VM-level access pattern
+  (disassemble `sub_6AAEA`'s real addressing rather than trusting coab's
+  transliteration) rather than pattern-matching bytes.
+
+### FD-22: `thief_skill_race_adj` (`unk_1A230`) has no confirmed image location
+
+- **Status:** open
+- **Question:** Where, if anywhere, does the real image store the race
+  adjustment table `reclac_thief_skills` reads via `unk_1A230[race, skill]`
+  (`ovr026.cs:426-439`, `:530`)?
+- **Evidence so far:** actively disproven at coab's declared shape (13
+  rows x 9 columns = 117 bytes), not just unlocated: the confirmed gap
+  between `thief_skill_base_chance`'s anchor end (`0xeb09`) and
+  `thief_skill_dex_adj`'s independently byte-verified start (`0xeb13`) is
+  only 10 bytes. The first 8 of those 10 bytes do match coab's row 1
+  (dwarf) minus a presumed dead column exactly, and the next 2 bytes
+  match the start of row 2 (elf) before being cut off — i.e. coab's own
+  transcribed extent for this array is provably too long for wherever it
+  actually lives. Ships `coab-only` in `packs/adnd1/thief_skills.toml`,
+  transcribed verbatim from coab with no guessed truncation.
+- **Settled by:** a future session — search elsewhere in the image (this
+  session only checked the gap between its two confirmed neighbors, on
+  the assumption of proximity that turned out false); `restrike
+  extract-table --table thief_skill_race_adj` is ready to confirm a
+  candidate offset once one is found.
+
 ## 4. How new entries get added
 
 Any session that surfaces a behavioral hypothesis not derivable purely from

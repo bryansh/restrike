@@ -338,18 +338,45 @@ VerifyReport` implements D-RP4.
 
 ## 5. Open questions → fidelity docket
 
-1. **Turn-undead extent:** establish the full undead-type × cleric-bracket
-   matrix from the image (coab holds a 2-row prefix; the consumer accepts
-   types to 12). Blocks that table's authoring, nothing else.
-2. Per-table image-shape confirmations during authoring: `con_hp_adj`
-   23-vs-26; **all three thief tables** (coab's address spacing proves the
-   declared shapes can't coexist — likely depadded 12×8 base and narrower
-   adj tables, with coab's DEX-adj tail rows suspect as overrun);
-   `SaveThrowValues` level-0 column; XP leading-0 column, `-1` rows, and
-   row interleaving with the slot tables.
-3. `RaceClasses`: search the image at authoring; exclude coab's 9th
-   "Cheaters" row either way (race axis = 8, `explicit` lengths); if
-   absent from the image, ships `coab-only` with an H2 scenario.
+1. **RESOLVED (2026-07-14, M3 step 2).** Turn-undead extent: the image's
+   real extent is 11 rows (undead types 0-10), **not** ~13 as this
+   hypothesis assumed — type 11's would-be row is ASCII menu text in the
+   image, not table data. `packs/adnd1/progression.toml`'s `turn_undead`
+   table and its accessor encode exactly this (11×10, a 1-byte dead
+   header excluded from the anchor). Whether any *shipped monster* actually
+   carries an undead type the table can't represent is still open —
+   tracked as `docs/fidelity-docket.md` FD-20, deferred to M4 (monster
+   data loading).
+2. **RESOLVED (2026-07-14, M3 step 2), per table:**
+   - `con_hp_adj`: image confirms 23 entries (`[CON-3]`), no leading
+     padding — as hypothesized.
+   - **All three thief tables:** the address-spacing conflict was real.
+     `thief_skill_base_chance` (base) is 12×8, image-confirmed, but its
+     thief levels 6-11 diverge from a naive per-row reading of coab's
+     declaration in a way this session didn't fully explain (docket
+     FD-21). `thief_skill_dex_adj` is 22×5 (coab's declared column 5
+     absent, not column 0 as guessed), byte-verified across all 22 rows.
+     `thief_skill_race_adj` (race adj) does **not** fit anywhere in the
+     confirmed gap between the other two — actively disproven at coab's
+     declared shape, ships `coab-only` verbatim (docket FD-22).
+   - `SaveThrowValues`: confirmed — the image has no level-0 column,
+     stored as a clean contiguous 8×12×5 `u8` block.
+   - XP table: confirmed — the leading-0 column is absent from the image
+     and each class's real thresholds sit in a separately anchored
+     location (not one contiguous 8×13 block); ships as six independent
+     per-class tables (druid/monk have none). "Row interleaving with the
+     slot tables" was directionally right but imprecise: the true image
+     layout interleaves exp-threshold runs with *other* per-class data
+     (confirmed adjacent: `save_throw_values`, `cleric_spell_levels`,
+     `paladin_spell_levels`, `ranger_spell_levels`,
+     `mu_spell_lvl_learn`), not literally the spell-slot tables sharing
+     per-class records with exp thresholds.
+3. **RESOLVED (2026-07-14, M3 step 2).** `RaceClasses`: searched the image
+   (the human row's class-id sequence, with and without a count-prefix
+   byte); no clean match found — the only hits were coincidental overlaps
+   with the already-anchored `starting_age` table. Ships `coab-only`,
+   race axis 8 (monster included, 9th "Cheaters" debug row excluded),
+   `explicit` lengths, as this item anticipated.
 4. Spell display names are not pack material; their M5 source (engine
    constants with citations? read from the user's binary at runtime?) is an
    M5 design question flagged now.
