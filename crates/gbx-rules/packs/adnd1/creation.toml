@@ -45,3 +45,361 @@ rows = [
   [7, 1,2,3,4,5,7,8, 0,0],  # 15 mc_f_mu_t (fighter/magic_user/thief): any but LG, NG
   [7, 1,2,3,4,5,7,8, 0,0],  # 16 mc_mu_t (magic_user/thief): any but LG, NG
 ]
+
+# --- D-RP9 authoring order item 3 (remainder): starting age, race classes,
+# race/sex stat limits, class stat minimums, aging. Located this session by
+# searching the decompressed image outward from class_alignments' confirmed
+# 0xedba anchor -- starting_age, race_age_brackets, class_stats_min, and
+# class_alignments turned out to sit in one unbroken contiguous run
+# (0xec2e..0xee9f, every table's end offset exactly equals the next table's
+# start offset, a strong cross-check that none of these anchors are
+# off-by-one).
+
+[[table]]
+id = "starting_age"
+schema_version = 1
+flavor = "adnd1"
+description = "Starting-age dice by race x class: base age plus NdS bonus dice"
+columns = [
+  { name = "base_age", element = "u16le", meaning = "years", domain = "0..=5000" },
+  { name = "dice_count", element = "u8", domain = "0..=20" },
+  { name = "dice_size", element = "u8", domain = "0..=20" },
+]
+axes = [
+  { name = "race", size = 8, index = "Classes/Enums.cs:45 Race enum, monster=0..human=7" },
+  { name = "class", size = 7, index = "base classes only, ClassId 0..=6 (cleric..thief); monk (7) and multiclass ids are not represented -- coab's race_ages/Struct_1A35E declares exactly 7 sub-entries per race" },
+]
+evidence_tier = "image"
+source = [
+  { kind = "coab", loc = "Classes/Gbl.cs:722-796 (race_ages, unk_1A35E)" },
+  { kind = "original-address", loc = "unk_1A35E" },
+  { kind = "original-re", loc = "START.EXE exepack image @0xec2e (v1.3), byte-exact 8x7 mixed-width record block (includes the monster row, unlike race_age_brackets below), 2026-07-14" },
+]
+consumed_by = ["ovr018.cs:624-650 (createPlayer's starting-age roll)"]
+anchor = { kind = "image", file = "START.EXE", offset = 0xec2e, len = 224 }
+rows = [
+  [6, 2, 6], [3080, 14, 0], [0, 0, 0], [0, 6, 0], [1282, 6, 3], [4, 0, 0], [0, 0, 0],           # monster
+  [250, 2, 20], [0, 0, 0], [40, 5, 4], [0, 0, 0], [0, 0, 0], [0, 0, 0], [75, 3, 6],              # dwarf
+  [650, 10, 10], [0, 0, 0], [130, 5, 6], [0, 0, 0], [0, 0, 0], [150, 5, 6], [100, 5, 6],         # elf
+  [300, 3, 12], [0, 0, 0], [60, 5, 4], [0, 0, 0], [0, 0, 0], [100, 2, 12], [80, 5, 4],           # gnome
+  [40, 2, 4], [0, 0, 0], [22, 3, 4], [0, 0, 0], [0, 0, 0], [30, 2, 8], [22, 3, 8],               # half_elf
+  [0, 0, 0], [0, 0, 0], [20, 3, 4], [0, 0, 0], [0, 0, 0], [0, 0, 0], [40, 2, 4],                 # halfling
+  [20, 1, 4], [0, 0, 0], [13, 1, 4], [0, 0, 0], [0, 0, 0], [0, 0, 0], [20, 2, 4],                # half_orc
+  [18, 1, 4], [18, 1, 4], [15, 1, 4], [17, 1, 4], [20, 1, 4], [24, 2, 4], [18, 1, 4],            # human
+]
+
+[[table]]
+id = "race_age_brackets"
+schema_version = 1
+flavor = "adnd1"
+description = "Age thresholds (years) at which each stat's per-bracket aging effect applies"
+element = "u16le"
+axes = [
+  { name = "race", size = 7, index = "RaceId 1..=7 (dwarf..human) -- coab declares an 8th 'monster, made-up' row (Race.monster=0, all 9999) but the image has no such row: the real data runs dwarf..human contiguously with class_stats_min immediately following. Monsters never go through character-creation aging, so this is not a truncation concern." },
+  { name = "bracket", size = 5, index = "matched against StatValue.AgeEffects' ageEffects[i] in the same slot (Player.cs:66-74); coab declares the array element type as int (i32) but the image stores u16le -- another coab-transliteration widening, image wins for shape" },
+]
+evidence_tier = "image"
+source = [
+  { kind = "coab", loc = "Classes/Limits.cs:9-16 (RaceAgeBrackets, unk_1A434)" },
+  { kind = "original-address", loc = "unk_1A434" },
+  { kind = "original-re", loc = "START.EXE exepack image @0xed0e (v1.3), byte-exact 7x5 u16le block, 2026-07-14" },
+]
+consumed_by = ["Classes/Player.cs:66-74 (StatValue.AgeEffects)"]
+anchor = { kind = "image", file = "START.EXE", offset = 0xed0e, len = 70 }
+rows = [
+  [50, 150, 250, 350, 450],       # dwarf
+  [175, 550, 875, 1200, 1600],    # elf
+  [90, 300, 450, 600, 750],       # gnome
+  [40, 100, 175, 250, 325],       # half_elf
+  [33, 68, 101, 144, 199],        # halfling
+  [15, 30, 45, 60, 80],           # half_orc
+  [20, 40, 60, 90, 120],          # human
+]
+
+[[table]]
+id = "class_stats_min"
+schema_version = 1
+flavor = "adnd1"
+description = "Minimum ability scores required per class (0 = no minimum)"
+columns = [
+  { name = "str", element = "u8", domain = "0..=18" },
+  { name = "int", element = "u8", domain = "0..=18" },
+  { name = "wis", element = "u8", domain = "0..=18" },
+  { name = "dex", element = "u8", domain = "0..=18" },
+  { name = "con", element = "u8", domain = "0..=18" },
+  { name = "cha", element = "u8", domain = "0..=18" },
+]
+axes = [{ name = "class", size = 17, index = "ClassId order, coab Classes/Enums.cs:69 (cleric=0 .. mc_mu_t=16)" }]
+evidence_tier = "image"
+source = [
+  { kind = "coab", loc = "Classes/Gbl.cs:701-718 (class_stats_min, unk_1A484)" },
+  { kind = "original-address", loc = "unk_1A484" },
+  { kind = "original-re", loc = "START.EXE exepack image @0xed54 (v1.3), byte-exact, immediately follows race_age_brackets and immediately precedes class_alignments, 2026-07-14" },
+]
+notes = """
+coab ALSO exposes this same data as six separate per-stat arrays \
+(Limits.cs's StrClassMin/IntClassMin/WisClassMin/DexClassMin/ConClassMin/ \
+ChaClassMin, consumed via StatValue.EnforceClassLimits, Player.cs:59-64) -- \
+spot-checked identical to this table's columns (cleric STR: class_stats_min \
+row0 col0 = 6, StrClassMin[0] = 6). Not a second pack table: same image \
+bytes, coab's own convenience re-slice for its StatValue class pattern.
+"""
+consumed_by = ["Classes/Player.cs:59-64 (StatValue.EnforceClassLimits)"]
+anchor = { kind = "image", file = "START.EXE", offset = 0xed54, len = 102 }
+rows = [
+  [6, 6, 9, 0, 0, 0],     # 0  cleric
+  [0, 0, 12, 0, 0, 15],   # 1  druid
+  [9, 0, 6, 6, 7, 0],     # 2  fighter
+  [12, 9, 13, 0, 9, 17],  # 3  paladin
+  [13, 13, 14, 0, 14, 0], # 4  ranger
+  [0, 9, 6, 6, 0, 0],     # 5  magic_user
+  [6, 6, 0, 9, 0, 0],     # 6  thief
+  [15, 0, 15, 15, 11, 0], # 7  monk
+  [9, 0, 9, 0, 0, 0],     # 8  mc_c_f
+  [9, 9, 9, 0, 0, 0],     # 9  mc_c_f_m
+  [0, 13, 14, 0, 14, 0],  # 10 mc_c_r
+  [0, 9, 9, 0, 0, 0],     # 11 mc_c_mu
+  [0, 0, 9, 9, 0, 0],     # 12 mc_c_t
+  [9, 9, 0, 0, 0, 0],     # 13 mc_f_mu
+  [9, 0, 0, 9, 0, 0],     # 14 mc_f_t
+  [9, 9, 0, 9, 0, 0],     # 15 mc_f_mu_t
+  [0, 9, 0, 9, 0, 0],     # 16 mc_mu_t
+]
+
+[[table]]
+id = "race_classes"
+schema_version = 1
+flavor = "adnd1"
+description = "Legal classes selectable per race at character creation"
+element = "u8"
+length_rule = "explicit"
+axes = [{ name = "race", size = 8, index = "Classes/Enums.cs:45 Race enum, monster=0..human=7. coab declares a 9th row ('Cheaters', RaceClasses[Race.human+1]) reachable only via the Cheats.no_race_class_restrictions debug flag (ovr018.cs:454-457) -- excluded here per D-RP9's explicit instruction, race axis is 8." }]
+evidence_tier = "coab-only"
+source = [{ kind = "coab", loc = "Classes/Gbl.cs:276-284 (RaceClasses)" }]
+notes = """
+No original-address citation in coab, and this session's image search (the \
+human row's 6-byte ClassId sequence, with and without a count-prefix byte) \
+found no clean match -- the only hits landed inside the already-anchored \
+starting_age table, coincidental byte overlap, not real RaceClasses data. \
+Ships coab-only; design doc §5 item 3's contingency.
+"""
+consumed_by = ["ovr018.cs:452-459 (createPlayer's class picker)", "ovr026.cs:604-613 (DuelClass)"]
+anchor = { kind = "none" }
+rows = [
+  [],                              # monster: no playable classes
+  [2, 6, 14],                      # dwarf: fighter, thief, mc_f_t
+  [2, 5, 6, 13, 14, 15, 16],        # elf: fighter, magic_user, thief, mc_f_mu, mc_f_t, mc_f_mu_t, mc_mu_t
+  [2, 6, 14],                      # gnome: fighter, thief, mc_f_t
+  [0, 2, 5, 6, 4, 8, 10, 9, 11, 13, 14, 15, 16], # half_elf
+  [2, 6, 14],                      # halfling: fighter, thief, mc_f_t
+  [0, 2, 6, 8, 12, 14],             # half_orc: cleric, fighter, thief, mc_c_f, mc_c_t, mc_f_t
+  [0, 2, 5, 6, 3, 4],               # human: cleric, fighter, magic_user, thief, paladin, ranger
+]
+
+[[table]]
+id = "age_effect_deltas"
+schema_version = 1
+flavor = "adnd1"
+description = "Per-stat ability-score delta applied once a character crosses each race_age_brackets threshold"
+element = "i8"
+axes = [
+  { name = "stat", size = 7, index = "str=0, str_percentile=1, int=2, wis=3, dex=4, con=5, cha=6 (Classes/Limits.cs:19-25 declaration order)" },
+  { name = "bracket", size = 5, index = "matches race_age_brackets' bracket axis" },
+]
+evidence_tier = "coab-only"
+source = [{ kind = "coab", loc = "Classes/Limits.cs:19-25" }]
+notes = "No original-address citation in coab; not searched for an image location this session (small, low-uniqueness i8 values -- high false-positive risk, low expected return on search time). Independently re-transcribed spot-check: StrAgeEffect[2] = -1 (Limits.cs:19), matches row 0 col 2 below."
+consumed_by = ["Classes/Player.cs:66-74 (StatValue.AgeEffects)"]
+anchor = { kind = "none" }
+rows = [
+  [0, 1, -1, -2, -1],   # str
+  [0, 0, 0, 0, 0],      # str_percentile
+  [0, 0, 1, 0, 1],      # int
+  [-1, 1, 1, 1, 1],     # wis
+  [0, 0, 0, -2, -1],    # dex
+  [1, 0, -1, -1, -1],   # con
+  [0, 0, 0, 0, 0],      # cha
+]
+
+[[table]]
+id = "str_race_sex_min_max"
+schema_version = 1
+flavor = "adnd1"
+description = "STR min/max by race x sex"
+element = "u8"
+axes = [
+  { name = "race", size = 8, index = "Classes/Enums.cs:45 Race enum, monster=0..human=7" },
+  { name = "min_max", size = 2, index = "[0]=min, [1]=max (Player.cs:47-51 EnforceRaceSexLimits)" },
+  { name = "sex", size = 2, index = "0=male, 1=female (coab convention, unconfirmed against original)" },
+]
+evidence_tier = "coab-only"
+source = [{ kind = "coab", loc = "Classes/Limits.cs:28-36" }]
+consumed_by = ["Classes/Player.cs:47-51 (StatValue.EnforceRaceSexLimits)"]
+anchor = { kind = "none" }
+rows = [
+  [0, 5, 10, 0],  # monster
+  [8, 8, 18, 17],  # dwarf
+  [3, 3, 18, 16],  # elf
+  [6, 6, 18, 15],  # gnome
+  [3, 3, 18, 17],  # half_elf
+  [6, 6, 17, 14],  # halfling
+  [6, 6, 18, 18],  # half_orc
+  [3, 3, 18, 18],  # human
+]
+
+[[table]]
+id = "str_percentile_race_sex_min_max"
+schema_version = 1
+flavor = "adnd1"
+description = "STR_PERCENTILE min/max by race x sex"
+element = "u8"
+axes = [
+  { name = "race", size = 8, index = "Classes/Enums.cs:45 Race enum, monster=0..human=7" },
+  { name = "min_max", size = 2, index = "[0]=min, [1]=max (Player.cs:47-51 EnforceRaceSexLimits)" },
+  { name = "sex", size = 2, index = "0=male, 1=female (coab convention, unconfirmed against original)" },
+]
+evidence_tier = "coab-only"
+source = [{ kind = "coab", loc = "Classes/Limits.cs:38-46" }]
+consumed_by = ["Classes/Player.cs:47-51 (StatValue.EnforceRaceSexLimits)"]
+anchor = { kind = "none" }
+rows = [
+  [0, 0, 5, 5],  # monster
+  [0, 0, 99, 0],  # dwarf
+  [0, 0, 75, 0],  # elf
+  [0, 0, 50, 0],  # gnome
+  [0, 0, 90, 0],  # half_elf
+  [0, 0, 0, 0],  # halfling
+  [0, 0, 99, 75],  # half_orc
+  [0, 0, 100, 50],  # human
+]
+
+[[table]]
+id = "int_race_sex_min_max"
+schema_version = 1
+flavor = "adnd1"
+description = "INT min/max by race x sex"
+element = "u8"
+axes = [
+  { name = "race", size = 8, index = "Classes/Enums.cs:45 Race enum, monster=0..human=7" },
+  { name = "min_max", size = 2, index = "[0]=min, [1]=max (Player.cs:47-51 EnforceRaceSexLimits)" },
+  { name = "sex", size = 2, index = "0=male, 1=female (coab convention, unconfirmed against original)" },
+]
+evidence_tier = "coab-only"
+source = [{ kind = "coab", loc = "Classes/Limits.cs:48-56" }]
+consumed_by = ["Classes/Player.cs:47-51 (StatValue.EnforceRaceSexLimits)"]
+anchor = { kind = "none" }
+rows = [
+  [10, 10, 15, 15],  # monster
+  [3, 3, 18, 18],  # dwarf
+  [8, 8, 18, 18],  # elf
+  [7, 7, 18, 18],  # gnome
+  [4, 4, 18, 18],  # half_elf
+  [6, 6, 18, 18],  # halfling
+  [3, 3, 17, 17],  # half_orc
+  [3, 3, 18, 18],  # human
+]
+
+[[table]]
+id = "wis_race_sex_min_max"
+schema_version = 1
+flavor = "adnd1"
+description = "WIS min/max by race x sex"
+element = "u8"
+axes = [
+  { name = "race", size = 8, index = "Classes/Enums.cs:45 Race enum, monster=0..human=7" },
+  { name = "min_max", size = 2, index = "[0]=min, [1]=max (Player.cs:47-51 EnforceRaceSexLimits)" },
+  { name = "sex", size = 2, index = "0=male, 1=female (coab convention, unconfirmed against original)" },
+]
+evidence_tier = "coab-only"
+source = [{ kind = "coab", loc = "Classes/Limits.cs:58-66" }]
+consumed_by = ["Classes/Player.cs:47-51 (StatValue.EnforceRaceSexLimits)"]
+anchor = { kind = "none" }
+rows = [
+  [5, 5, 10, 10],  # monster
+  [3, 3, 18, 18],  # dwarf
+  [3, 3, 18, 18],  # elf
+  [3, 3, 18, 18],  # gnome
+  [3, 3, 18, 18],  # half_elf
+  [3, 3, 17, 17],  # halfling
+  [3, 3, 14, 14],  # half_orc
+  [3, 3, 18, 18],  # human
+]
+
+[[table]]
+id = "dex_race_sex_min_max"
+schema_version = 1
+flavor = "adnd1"
+description = "DEX min/max by race x sex"
+element = "u8"
+axes = [
+  { name = "race", size = 8, index = "Classes/Enums.cs:45 Race enum, monster=0..human=7" },
+  { name = "min_max", size = 2, index = "[0]=min, [1]=max (Player.cs:47-51 EnforceRaceSexLimits)" },
+  { name = "sex", size = 2, index = "0=male, 1=female (coab convention, unconfirmed against original)" },
+]
+evidence_tier = "coab-only"
+source = [{ kind = "coab", loc = "Classes/Limits.cs:68-76" }]
+consumed_by = ["Classes/Player.cs:47-51 (StatValue.EnforceRaceSexLimits)"]
+anchor = { kind = "none" }
+rows = [
+  [10, 10, 15, 15],  # monster
+  [3, 3, 17, 17],  # dwarf
+  [7, 7, 19, 19],  # elf
+  [3, 3, 18, 18],  # gnome
+  [6, 6, 18, 18],  # half_elf
+  [8, 8, 18, 18],  # halfling
+  [3, 3, 17, 17],  # half_orc
+  [3, 3, 18, 18],  # human
+]
+
+[[table]]
+id = "con_race_sex_min_max"
+schema_version = 1
+flavor = "adnd1"
+description = "CON min/max by race x sex"
+element = "u8"
+axes = [
+  { name = "race", size = 8, index = "Classes/Enums.cs:45 Race enum, monster=0..human=7" },
+  { name = "min_max", size = 2, index = "[0]=min, [1]=max (Player.cs:47-51 EnforceRaceSexLimits)" },
+  { name = "sex", size = 2, index = "0=male, 1=female (coab convention, unconfirmed against original)" },
+]
+evidence_tier = "coab-only"
+source = [{ kind = "coab", loc = "Classes/Limits.cs:78-86" }]
+consumed_by = ["Classes/Player.cs:47-51 (StatValue.EnforceRaceSexLimits)"]
+anchor = { kind = "none" }
+rows = [
+  [20, 20, 10, 10],  # monster
+  [12, 12, 19, 19],  # dwarf
+  [6, 6, 18, 18],  # elf
+  [8, 8, 18, 18],  # gnome
+  [6, 6, 18, 18],  # half_elf
+  [10, 10, 19, 19],  # halfling
+  [13, 13, 19, 19],  # half_orc
+  [3, 3, 18, 18],  # human
+]
+
+[[table]]
+id = "cha_race_sex_min_max"
+schema_version = 1
+flavor = "adnd1"
+description = "CHA min/max by race x sex"
+element = "u8"
+axes = [
+  { name = "race", size = 8, index = "Classes/Enums.cs:45 Race enum, monster=0..human=7" },
+  { name = "min_max", size = 2, index = "[0]=min, [1]=max (Player.cs:47-51 EnforceRaceSexLimits)" },
+  { name = "sex", size = 2, index = "0=male, 1=female (coab convention, unconfirmed against original)" },
+]
+evidence_tier = "coab-only"
+source = [{ kind = "coab", loc = "Classes/Limits.cs:88-96" }]
+consumed_by = ["Classes/Player.cs:47-51 (StatValue.EnforceRaceSexLimits)"]
+anchor = { kind = "none" }
+rows = [
+  [12, 12, 12, 12],  # monster
+  [3, 3, 16, 16],  # dwarf
+  [8, 8, 18, 18],  # elf
+  [3, 3, 18, 18],  # gnome
+  [3, 3, 18, 18],  # half_elf
+  [3, 3, 18, 18],  # halfling
+  [3, 3, 12, 12],  # half_orc
+  [3, 3, 18, 18],  # human
+]
+
