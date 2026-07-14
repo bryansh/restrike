@@ -8,3 +8,4 @@ pub mod creation;
 pub mod creation_limits;
 pub mod hp_hd;
 pub mod progression;
+pub mod thief_skills;
