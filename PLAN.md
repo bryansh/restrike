@@ -272,7 +272,7 @@ Walk around Tilverton, looking right.
 ### M6 — Roll credits (3–6 weekends) — CotAB completable
 - Opcode census → 100% of opcodes *used by CotAB* implemented (or consciously no-op'd with
   rationale); overworld travel, random encounters, Parlay dialogue system, traps/locks/secret
-  doors, temples, vault, copy-protection prompt neutralized (answer shown, faithful-optional).
+  doors, temples, vault, copy-protection prompt neutralized (answer shown, faithful-optional; algorithm+table captured in docs/copy-protection.md).
 - **H5:** full-playthrough input trace with checkpoint hashes; runs locally in CI wrapper.
 - **Exit gate: finish Curse of the Azure Bonds start-to-end in our engine**, importing a fresh
   party, with the fidelity docket either resolved or documented per item. The "it's real" moment —
