@@ -294,7 +294,16 @@ Walk around Tilverton, looking right.
   second RNG; the `roll`/`op_random` off-by-one **confirmed and fixed**; fade
   dither moved off the PRNG to a position hash; `.rsav` → v2 + golden recomputed
   atomically; engine seed narrowed to `u32`. Docket FD-29/FD-30 filed.
-  Remaining: D-OR4 part A (8086 stepper acceptance, step 2).
+  **Step 2 landed 2026-07-15** (`crates/gbx-prng/tests/stepper.rs`: a
+  purpose-built ~20-opcode real-mode 8086, written to generic ISA semantics
+  with no address special-casing and no `gbx-prng` import per D-OR4A, executed
+  the real wrapper+`RandNext` bytes and matched `gbx-prng` bit-for-bit over
+  10,000 (K,N) pairs — 0 mismatches; the `N==0` draw-always contract confirmed
+  *by execution*; teeth tests empirically refuted the v1 scaled-high-word claim
+  (first at k=1 n=3: real=1, scaled=0 — a project first), coab's no-draw
+  short-circuit, and a wrong multiplier; zero new deps, wasm-clean, pin asserted
+  before stepping). FD-26 records the executable confirmation.
+  Remaining: D-OR4 part B (one live staging-hook session — Bryan + Fable, step 3).
 - Combat map generation from encounter data; combatant placement.
 - Initiative, action economy, movement costs, facing/rear attacks; THAC0 melee + ranged with
   range brackets; damage; attacks-per-round.

@@ -307,7 +307,14 @@ hook branch or DOSBox-X manual mode both support).
    golden recompute; seed narrows to u32.
 2. **D-OR4 part A** (same or next session): the purpose-built 8086 stepper
    + acceptance test, 10k (K, N) pairs. Pure Rust, generic-semantics rule
-   per D-OR4A.
+   per D-OR4A. **LANDED 2026-07-15** (`crates/gbx-prng/tests/stepper.rs`):
+   ~20-opcode real-mode 8086 (generic ISA, no address special-casing, no
+   `gbx-prng` import), synthetic per-opcode tests vs hand-computed ISA
+   expectations (D10-clean), acceptance = 10,000 (K,N) pairs matched
+   `gbx-prng` bit-for-bit (incl. `N==0` draw-always confirmed by execution),
+   teeth tests empirically refuting the v1 scaled claim (first at k=1 n=3),
+   coab's no-draw short-circuit, and a wrong multiplier. Zero new deps;
+   compiles on every CI leg and wasm-clean (test-only integration test).
 3. **The staging hook branch + D-OR4 part B** (Bryan + Fable): the
    two-trigger patch on a pinned 0.82.2 branch in `~/src/goldbox-refs`
    (bring-up: install meson/ninja/pkg-config + formula deps first); one
@@ -326,7 +333,10 @@ hook branch or DOSBox-X manual mode both support).
 ## 5. Open questions → docket
 
 - **FD-26** (updated): integer semantics now settled statically (modulo,
-  draw-always); D-OR4 A/B provide the executable confirmation.
+  draw-always); **D-OR4 part A now provides the executable confirmation**
+  (`crates/gbx-prng/tests/stepper.rs`, 10k (K,N) pairs, 0 mismatches; the
+  v1 scaled claim refuted by executing the real bytes); part B (live) still
+  closes the environment.
 - **FD-27** (updated): statically answered — one boot-time `Randomize`, no
   overlay RNG copies; D-OR4 part B's chain-continuity check is the dynamic
   confirmation.

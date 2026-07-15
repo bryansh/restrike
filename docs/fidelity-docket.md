@@ -641,10 +641,14 @@ stays the one place showing the complete open-hypothesis picture.
 ### FD-26: Integer `Random(N)` — modulo over the TP LCG (v1's "scaled" claim refuted in review)
 
 - **Status:** narrowed (semantics settled statically 2026-07-15 by the
-  oracle-rig adversarial round; **the implementation now exists** as
-  `crates/gbx-prng` (`Prng::next`/`random`), M4 step 1 2026-07-15 — this is
-  what D-OR4 A's stepper will be checked against; executable confirmation
-  still = D-OR4 A/B)
+  oracle-rig adversarial round; **the implementation exists** as
+  `crates/gbx-prng` (`Prng::next`/`random`), M4 step 1 2026-07-15;
+  **D-OR4 part A is now DONE** (M4 step 2, 2026-07-15) — a purpose-built
+  8086 stepper executed the real wrapper+`RandNext` bytes and matched
+  `gbx-prng` bit-for-bit over 10,000 (K,N) pairs, and the real bytes
+  *empirically refuted* the v1 "scaled high word" claim (first at k=1, n=3:
+  real bytes = 1, v1 scaled = 0 — a project first). Executable confirmation
+  now = **part A done**; part B (the live staging session) remains)
 - **Question → answer:** The original's RNG is the Borland TP LCG
   (`RandNext`, image `0xa5a9`, cs `0x8F7:0x1639`): `state = state*0x08088405
   + 1`, state dword `DS:0x47F0`. The integer wrapper (image `0xa55a`,
@@ -661,11 +665,16 @@ stays the one place showing the complete open-hypothesis picture.
   census — 29 GAME.OVR + 5 START.EXE far calls to the wrapper, matching
   coab's 29 `seg051.Random(` sites 1:1; hash pin `[0xa55a,0xa5ee)` in
   `docs/design/oracle-rig.md` §1.
-- **Settled by:** D-OR4 part A (a purpose-built 8086 stepper executing the
-  pinned routine bytes vs `gbx-prng`, 10k (K,N) pairs — round 2 replaced
-  v2's unicorn-engine pick, which does not build on this toolchain) +
-  part B (one live staging-hook session with chain-continuity checks).
-- **Cross-reference:** `docs/design/oracle-rig.md` §1/D-OR1/D-OR4.
+- **Settled by:** D-OR4 part A (**DONE** — `crates/gbx-prng/tests/stepper.rs`,
+  a purpose-built 8086 stepper executing the pinned routine bytes vs
+  `gbx-prng`, 10,000 (K,N) pairs, 0 mismatches; asserts the `[0xa55a,0xa5ee)`
+  pin before stepping; the `N==0` draw-always contract confirmed *by
+  execution* across every edge K; teeth tests prove the acceptance test can
+  fail. Round 2 replaced v2's unicorn-engine pick, which does not build on
+  this toolchain) + part B (one live staging-hook session with
+  chain-continuity checks — the last remaining piece).
+- **Cross-reference:** `docs/design/oracle-rig.md` §1/D-OR1/D-OR4;
+  `crates/gbx-prng/tests/stepper.rs`.
 
 ### FD-27: Seed lifecycle — answered statically: one boot-time `Randomize`, no overlay RNG copies
 
