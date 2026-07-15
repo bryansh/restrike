@@ -54,6 +54,16 @@ menu, if it doesn't fire — key bindings are user-remappable via
 dosbox-staging -c "mount c ~/goldbox-data/cotab" -c "c:" -c "start"
 ```
 
+**Ready-made combo-session config** (written 2026-07-14; lives with the
+user's data, never in the repo): `~/goldbox-data/restrike-capture.conf`
+pre-sets `capture_dir = ~/goldbox-data/captures`, raw+upscaled capture
+formats, and an autoexec that mounts and boots the game. One command runs
+the whole §7 session:
+
+```
+dosbox-staging -conf ~/goldbox-data/restrike-capture.conf
+```
+
 ## 2. Comparing a capture against our own output
 
 ```
