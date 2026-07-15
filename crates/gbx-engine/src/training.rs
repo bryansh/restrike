@@ -19,7 +19,6 @@ use crate::rng::EngineRng;
 use gbx_rules::adnd1::flavor_impl::Adnd1;
 use gbx_rules::adnd1::{constants, progression};
 use gbx_rules::flavor::{ClassLevel, Flavor, Roller};
-use gbx_vm::VmRng;
 
 /// The flat training fee, in gold (`ovr018.cs:2203`).
 pub const TRAINING_FEE_GP: i64 = 1000;
@@ -53,17 +52,21 @@ pub struct TrainOutcome {
     pub hp_gained: u8,
 }
 
-/// A [`Roller`] over the engine's seeded PRNG (D9): `roll(size, count)` sums
-/// `count` dice each uniform on `1..=size`, drawn from [`EngineRng`]. Exact
-/// RNG-stream parity with coab's `roll_dice` is an H3/M4 (bit-exact PRNG)
-/// concern; here the roll is deterministic and the dice *shape* is pack-correct.
+/// A [`Roller`] over the engine's one PRNG (D9): `roll(size, count)` sums
+/// `count` dice each on `1..=size`, drawn from [`EngineRng`]. As of M4 step 1
+/// this is the binary-exact stream: `1 + random(size)` per die mirrors
+/// `roll_dice`'s `Random(dice_size) + 1` (`ovr024.cs:586-598`), so RNG-stream
+/// parity is live here, not deferred (the old H3/M4 deferral ends this session
+/// — oracle-rig §6 ledger).
 struct EngineRoller<'a>(&'a mut EngineRng);
 
 impl Roller for EngineRoller<'_> {
     fn roll(&mut self, size: u32, count: u32) -> u32 {
-        let size = size.max(1);
+        // `random(size)` is exclusive `0..size` and draws even at `size == 0`
+        // (returns 0 -> die value 1), so the old `size.max(1)` underflow guard
+        // is gone — the draw-always behavior is the faithful one.
         (0..count)
-            .map(|_| self.0.roll_uniform((size - 1) as u16) as u32 + 1)
+            .map(|_| self.0.random(size as u16) as u32 + 1)
             .sum()
     }
 }

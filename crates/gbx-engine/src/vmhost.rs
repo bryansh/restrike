@@ -866,14 +866,27 @@ impl gbx_vm::EngineServices for EngineVmHost<'_> {
 
     fn roll(&mut self, max: u8) -> u8 {
         self.vm.calls.push(RecordedCall::Roll { max });
-        self.rng.roll_uniform(max as u16) as u8
+        // CORRECTED off-by-one (oracle-rig §6 ledger): the contract is
+        // `seg051.Random(max)` = `Next() % max`, EXCLUSIVE 0..max
+        // (seg051.cs:33-40; CMD_Random pre-increments at machine.rs op_random).
+        // The old `roll_uniform(max)` was inclusive 0..=max and could return
+        // `operand+1`. `random(max)` restores the exclusive bound. The
+        // mechanical rename `roll_uniform(max) -> random(max+1)` would have
+        // frozen the bug — do not.
+        self.rng.random(max as u16) as u8
     }
 
     fn roll_dice(&mut self, size: u8, count: u8) -> u16 {
         self.vm.calls.push(RecordedCall::RollDice { size, count });
+        // `roll_total += Random(dice_size) + 1` per die (ovr024.cs:586-598).
+        // `1 + random(size)` is the faithful translation. `size == 0` now
+        // *draws* (random(0) advances then returns 0 -> +1) — the binary draws;
+        // the old `roll_uniform(size-1)` short-circuited without drawing.
+        // (Byte-truncation of the total, ovr024.cs:595's `(byte)roll_total`,
+        // is docketed as FD-29 — unreachable at current call sites.)
         let mut total = 0u16;
         for _ in 0..count {
-            total += 1 + self.rng.roll_uniform(size.saturating_sub(1) as u16);
+            total += 1 + self.rng.random(size as u16);
         }
         total
     }
@@ -996,8 +1009,8 @@ impl gbx_vm::EngineServices for EngineVmHost<'_> {
 }
 
 impl VmRng for EngineVmHost<'_> {
-    fn roll_uniform(&mut self, inclusive_max: u16) -> u16 {
-        self.rng.roll_uniform(inclusive_max)
+    fn random(&mut self, n: u16) -> u16 {
+        self.rng.random(n)
     }
 }
 

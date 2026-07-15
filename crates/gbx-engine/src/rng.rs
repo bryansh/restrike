@@ -1,44 +1,61 @@
 //! The engine's one seedable PRNG (PLAN.md D9: "single seedable PRNG, no
-//! wall clock, replayable input traces"). This is a placeholder generator,
-//! not the original's bit-exact algorithm — recovering that is H3/M4 scope
-//! (PLAN.md §3). Everything that needs randomness before then (the fade
-//! recolor dither, `EngineServices::roll`/`roll_dice`, this session's stub
-//! VM) draws from this one generator, never a second one, so replays stay
-//! reproducible from `(data fingerprint, seed)` alone.
+//! wall clock, replayable input traces"). As of M4 step 1 this is the
+//! **binary-exact** generator: a thin engine-local wrapper over
+//! [`gbx_prng::Prng`] (CotAB's Turbo Pascal LCG, recovered and adversarially
+//! re-derived in `docs/design/oracle-rig.md` §1). The splitmix64 placeholder
+//! this replaced is gone; all game randomness now flows through `gbx-prng` and
+//! nothing else (D-OR1).
 //!
-//! splitmix64 (Vigna/Steele, public domain) — chosen only for its
-//! well-known, easily-reimplemented-from-the-published-constants shape;
-//! nothing about its output needs to match the original engine.
+//! `EngineRng` exists (rather than using `gbx_prng::Prng` directly) for two
+//! reasons: it is the local type that carries the `gbx_vm::VmRng` impl (neither
+//! `VmRng` nor `Prng` is local to `gbx-engine`, so the impl must hang off a
+//! type that is), and it is the field type persisted in `SaveState.prng`.
+//!
+//! Bound convention: [`EngineRng::random`] is the binary's `Random(n)` — an
+//! **exclusive** `0..n` draw that always advances the state, including `n == 0`
+//! (returns 0 *after* drawing). The old `roll_uniform`'s inclusive bound and
+//! its `== 0` short-circuit are both gone; see the M4 migration ledger in
+//! `docs/design/oracle-rig.md` §6.
 
+use gbx_prng::Prng;
 use gbx_vm::VmRng;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EngineRng {
-    state: u64,
+    inner: Prng,
 }
 
 impl EngineRng {
-    pub fn new(seed: u64) -> Self {
-        EngineRng { state: seed }
+    pub fn new(seed: u32) -> Self {
+        EngineRng {
+            inner: Prng::new(seed),
+        }
     }
 
-    fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_add(0x9E3779B97F4A7C15);
-        let mut z = self.state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
-        z ^ (z >> 31)
+    /// The binary's integer `Random(n)` wrapper — exclusive `0..n`, always
+    /// draws (including `n == 0`). Inherent method so concrete-`EngineRng`
+    /// callers (training, vmhost) need not import `VmRng`; the trait impl
+    /// delegates here.
+    pub fn random(&mut self, n: u16) -> u16 {
+        self.inner.random(n)
+    }
+
+    /// The live LCG state (`DS:0x47F0`). Read into `.rsav` and by the oracle
+    /// rig at a synchronization point.
+    pub fn state(&self) -> u32 {
+        self.inner.state()
+    }
+
+    /// Overwrites the live state — `.rsav` restore and the oracle rig's seed
+    /// poke (D-OR1: oracle mode == play mode).
+    pub fn set_state(&mut self, state: u32) {
+        self.inner.set_state(state);
     }
 }
 
 impl VmRng for EngineRng {
-    /// Uniform in `0..=inclusive_max`. `inclusive_max == 0` always returns 0
-    /// (never divides by zero).
-    fn roll_uniform(&mut self, inclusive_max: u16) -> u16 {
-        if inclusive_max == 0 {
-            return 0;
-        }
-        (self.next_u64() % (inclusive_max as u64 + 1)) as u16
+    fn random(&mut self, n: u16) -> u16 {
+        self.inner.random(n)
     }
 }
 
@@ -51,31 +68,37 @@ mod tests {
         let mut a = EngineRng::new(42);
         let mut b = EngineRng::new(42);
         for _ in 0..100 {
-            assert_eq!(a.roll_uniform(1000), b.roll_uniform(1000));
+            assert_eq!(a.random(1000), b.random(1000));
         }
     }
 
     #[test]
-    fn different_seeds_diverge() {
-        let mut a = EngineRng::new(1);
-        let mut b = EngineRng::new(2);
-        let seq_a: Vec<u16> = (0..20).map(|_| a.roll_uniform(u16::MAX)).collect();
-        let seq_b: Vec<u16> = (0..20).map(|_| b.roll_uniform(u16::MAX)).collect();
-        assert_ne!(seq_a, seq_b);
-    }
-
-    #[test]
-    fn roll_uniform_stays_within_bounds() {
-        let mut rng = EngineRng::new(7);
-        for _ in 0..1000 {
-            let v = rng.roll_uniform(5);
-            assert!(v <= 5);
+    fn wraps_gbx_prng_exactly() {
+        // EngineRng is a pass-through: same seed, same draws as the crate.
+        let mut e = EngineRng::new(0);
+        let mut p = Prng::new(0);
+        for _ in 0..200 {
+            assert_eq!(e.random(97), p.random(97));
         }
     }
 
     #[test]
-    fn roll_uniform_zero_max_never_panics() {
-        let mut rng = EngineRng::new(7);
-        assert_eq!(rng.roll_uniform(0), 0);
+    fn random_zero_still_draws() {
+        let mut e = EngineRng::new(0);
+        assert_eq!(e.random(0), 0);
+        assert_eq!(e.state(), 0x1, "random(0) advanced the state");
+    }
+
+    #[test]
+    fn state_round_trips() {
+        let mut a = EngineRng::new(7);
+        for _ in 0..50 {
+            a.random(13);
+        }
+        let s = a.state();
+        let mut b = EngineRng::new(0);
+        b.set_state(s);
+        assert_eq!(a.state(), b.state());
+        assert_eq!(a.random(13), b.random(13));
     }
 }

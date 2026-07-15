@@ -81,7 +81,7 @@ impl App {
     pub fn new(
         canvas: HtmlCanvasElement,
         builder: GameDataBuilder,
-        seed: u64,
+        seed: u32,
     ) -> Result<App, JsValue> {
         let data = GameData::from_files(builder.files);
         let engine = Engine::new(data, seed)

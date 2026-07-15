@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 gbx-formats = { path = "../../crates/gbx-formats" }
+gbx-prng = { path = "../../crates/gbx-prng" }
 gbx-vm = { path = "../../crates/gbx-vm" }
 gbx-rules = { path = "../../crates/gbx-rules" }
 gbx-engine = { path = "../../crates/gbx-engine" }

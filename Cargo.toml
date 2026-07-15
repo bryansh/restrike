@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/gbx-formats",
+    "crates/gbx-prng",
     "crates/gbx-vm",
     "crates/gbx-rules",
     "crates/gbx-engine",

@@ -63,7 +63,7 @@ fn fixture_geo() -> GeoBlock {
     GeoBlock::parse(&data).unwrap()
 }
 
-fn fixture_engine(seed: u64) -> Engine {
+fn fixture_engine(seed: u32) -> Engine {
     let mut sets = crate::symbols::SymbolSets::new();
     sets.load(4, synthetic_set4());
     // The resident block's every vector resolves to a trivial EXIT — this

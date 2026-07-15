@@ -19,7 +19,6 @@
 //!   tables and the fade path's 1-in-4 random dither.
 
 use crate::framebuffer::{Framebuffer, HEIGHT, WIDTH};
-use gbx_vm::VmRng;
 
 /// A pixel clip window: `[x0, x1) x [y0, y1)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,17 +193,31 @@ pub fn apply_recolor(pixels: &mut [u8], table: &[u8; 16]) {
     }
 }
 
-/// The fade recolor pass, with `DaxBlock.Recolor`'s 1-in-4 random dither
-/// per matching pixel (`useRandom == true`, `DaxBlock.cs:84`) — drawn from
-/// a caller-supplied [`VmRng`] per D9 (the VM never owns a clock or RNG;
-/// this is the same one PRNG, reached through the engine, not a second
-/// generator).
-pub fn apply_recolor_dithered(pixels: &mut [u8], table: &[u8; 16], rng: &mut dyn VmRng) {
-    for p in pixels.iter_mut() {
+/// A deterministic 1-in-4 dither key over a pixel's position (its index in the
+/// flat framebuffer slice). No PRNG: this is a pure position hash.
+fn dither_hit(index: usize) -> bool {
+    // Knuth multiplicative hash of the index; take two spread-out bits so
+    // adjacent pixels don't fall on an obvious 4-stride comb. ~1-in-4 by
+    // construction. Exact pattern is unspecified (dither pixels are declared
+    // non-comparable by the renderer doc) — only determinism matters.
+    ((index as u32).wrapping_mul(2_654_435_761) >> 13) & 3 == 0
+}
+
+/// The fade recolor pass, with `DaxBlock.Recolor`'s 1-in-4 dither per matching
+/// pixel (`useRandom == true`, `DaxBlock.cs:84`).
+///
+/// D-OR1(c)/FD-28: this draw has **no original counterpart in the game PRNG
+/// stream** (coab uses a *separate* time-seeded `random_number` for the dither,
+/// `DaxBlock.cs:84` — and whether the binary's dither touches `DS:0x47F0` at
+/// all is FD-28, still open). A framebuffer-content-dependent draw count would
+/// desync any traced window, so the dither draws from `gbx-prng` *not at all*:
+/// it is a deterministic position hash ([`dither_hit`]). No `VmRng` parameter.
+pub fn apply_recolor_dithered(pixels: &mut [u8], table: &[u8; 16]) {
+    for (i, p) in pixels.iter_mut().enumerate() {
         let v = *p as usize;
         if v < 16 {
             let new = table[v];
-            if new != *p && rng.roll_uniform(3) == 0 {
+            if new != *p && dither_hit(i) {
                 *p = new;
             }
         }
@@ -402,33 +415,38 @@ mod tests {
         assert_eq!(pixels, vec![16, 20]);
     }
 
-    struct AlwaysZeroRng;
-    impl VmRng for AlwaysZeroRng {
-        fn roll_uniform(&mut self, _inclusive_max: u16) -> u16 {
-            0
-        }
-    }
-
-    struct NeverZeroRng;
-    impl VmRng for NeverZeroRng {
-        fn roll_uniform(&mut self, _inclusive_max: u16) -> u16 {
-            1
-        }
+    #[test]
+    fn apply_recolor_dithered_is_deterministic_and_touches_no_rng() {
+        // No RNG parameter exists (D-OR1(c)): determinism is structural. The
+        // same input recolors the same subset every time.
+        let base: Vec<u8> = (0..256).map(|i| (i % 16) as u8).collect();
+        let mut a = base.clone();
+        let mut b = base.clone();
+        apply_recolor_dithered(&mut a, &FADE_RECOLOR);
+        apply_recolor_dithered(&mut b, &FADE_RECOLOR);
+        assert_eq!(a, b, "dither must be deterministic across calls");
     }
 
     #[test]
-    fn apply_recolor_dithered_recolors_every_matching_pixel_when_rng_always_hits() {
-        let mut pixels = vec![0u8, 1u8, 4u8]; // 0->12, 1->12, 4->4 (identity, skipped)
-        let mut rng = AlwaysZeroRng;
-        apply_recolor_dithered(&mut pixels, &FADE_RECOLOR, &mut rng);
-        assert_eq!(pixels, vec![12, 12, 4]);
+    fn apply_recolor_dithered_recolors_a_proper_subset_of_eligible_pixels() {
+        // A run of eligible pixels (0 -> 12): the dither recolors some but not
+        // all of them, keeping the 1-in-4 character. Identity/out-of-range
+        // pixels are never touched.
+        let mut pixels = vec![0u8; 64];
+        apply_recolor_dithered(&mut pixels, &FADE_RECOLOR);
+        let recolored = pixels.iter().filter(|&&p| p == 12).count();
+        assert!(recolored > 0, "some eligible pixels must recolor");
+        assert!(
+            recolored < 64,
+            "not all eligible pixels may recolor (dither)"
+        );
     }
 
     #[test]
-    fn apply_recolor_dithered_recolors_nothing_when_rng_never_hits() {
-        let mut pixels = vec![0u8, 1u8, 2u8];
-        let mut rng = NeverZeroRng;
-        apply_recolor_dithered(&mut pixels, &FADE_RECOLOR, &mut rng);
-        assert_eq!(pixels, vec![0, 1, 2]);
+    fn apply_recolor_dithered_never_touches_identity_or_out_of_range_pixels() {
+        // 4 -> 4 is identity in FADE_RECOLOR; 200 is out of the 0..16 range.
+        let mut pixels = vec![4u8, 200u8, 4u8, 200u8];
+        apply_recolor_dithered(&mut pixels, &FADE_RECOLOR);
+        assert_eq!(pixels, vec![4, 200, 4, 200]);
     }
 }

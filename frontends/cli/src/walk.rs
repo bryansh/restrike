@@ -298,7 +298,7 @@ struct Args {
     /// established, `engine.rs`'s test module and `gbx-engine/src/demo.rs`'s
     /// real-data walks all fix seed `1`): default to the same constant so a
     /// trace with no `--seed` reproduces the same PRNG stream everywhere.
-    seed: u64,
+    seed: u32,
     /// D10: transcripts contain real game text — a LOCAL-ONLY artifact. The
     /// caller is responsible for pointing this outside the repo (or at a
     /// gitignored path); this tool has no opinion on where, only that it
@@ -306,7 +306,7 @@ struct Args {
     transcript: Option<PathBuf>,
 }
 
-const DEFAULT_SEED: u64 = 1;
+const DEFAULT_SEED: u32 = 1;
 
 impl Args {
     fn parse(args: Vec<String>) -> Result<Self, String> {
@@ -340,7 +340,7 @@ impl Args {
                 "--seed" => {
                     let v = next_val(&mut iter, "--seed")?;
                     seed = v
-                        .parse::<u64>()
+                        .parse::<u32>()
                         .map_err(|_| format!("invalid --seed '{v}'"))?;
                 }
                 other => return Err(format!("unknown walk flag '{other}'")),

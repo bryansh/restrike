@@ -25,7 +25,7 @@ use crate::widgets;
 
 pub struct EnginePaneState {
     engine: Option<Engine>,
-    seed: u64,
+    seed: u32,
     running: bool,
     speed: u32,
     capture_keyboard: bool,

@@ -84,7 +84,7 @@ pub fn import_original_slot(
     save_dir: &Path,
     letter: char,
     data: GameData,
-    seed: u64,
+    seed: u32,
 ) -> Result<Engine, SlotIoError> {
     // Load the whole save directory once so every section file (master +
     // sibling CHRDAT/.swg/.fx records) is available as a borrowed slice for
@@ -109,7 +109,7 @@ pub fn fulfill(
     request: SaveLoadRequest,
     save_dir: &Path,
     data: GameData,
-    seed: u64,
+    seed: u32,
 ) -> Result<(), SlotIoError> {
     match request {
         SaveLoadRequest::Save(letter) => save_to_slot(engine, save_dir, letter),

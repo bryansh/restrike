@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use gbx_formats::dax::{self, DaxArchive};
+use gbx_prng::Prng;
 use gbx_vm::{
     decode, render_instr, BlockBytes, EclMachine, Effect, EngineServices, ItemHandle, MissingData,
     MonsterHandle, NotFound, Origin, PlayerId, Reply, Request, ScriptMemory, VmError, VmHost,
@@ -340,20 +341,21 @@ impl ReplyPolicy {
 
 /// The CLI's throwaway `VmHost`: a raw word/byte/string store (every access
 /// logged to stderr), `EngineServices` calls trace-logged with neutral
-/// scripted results, and a deterministic fixed-seed RNG (task brief: "a
-/// deterministic fixed-seed rng").
+/// scripted results, and the engine's one PRNG (D-OR1: no second RNG may
+/// exist — this diagnostic host draws from `gbx-prng` like everything else).
 struct CliHost {
     words: HashMap<u16, u16>,
     bytes: HashMap<u16, u8>,
     strings: HashMap<u16, VmString>,
     replies: ReplyPolicy,
-    rng_state: u64,
+    rng: Prng,
 }
 
-/// Fixed, arbitrary non-zero seed — deterministic across runs, not derived
-/// from wall-clock/process state (D9's spirit: no hidden nondeterminism),
-/// even though this host is a diagnostic throwaway, not the real engine PRNG.
-const RNG_SEED: u64 = 0x5EED_C0FF_EE15_1234;
+/// Fixed, arbitrary seed — deterministic across runs, not derived from
+/// wall-clock/process state (D9's spirit: no hidden nondeterminism). This host
+/// is a diagnostic throwaway, but it still uses the real engine PRNG so its
+/// rolls are the same generator the game uses.
+const RNG_SEED: u32 = 0xC0FF_EE15;
 
 impl CliHost {
     fn new(replies: ReplyPolicy) -> Self {
@@ -362,29 +364,12 @@ impl CliHost {
             bytes: HashMap::new(),
             strings: HashMap::new(),
             replies,
-            rng_state: RNG_SEED,
+            rng: Prng::new(RNG_SEED),
         }
     }
 
     fn answer(&mut self, request: &Request) -> Reply {
         self.replies.answer(request)
-    }
-
-    /// xorshift64*: small, dependency-free, deterministic from `RNG_SEED`.
-    fn next_u64(&mut self) -> u64 {
-        let mut x = self.rng_state;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.rng_state = x;
-        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
-    }
-
-    fn roll_uniform(&mut self, inclusive_max: u32) -> u32 {
-        if inclusive_max == 0 {
-            return 0;
-        }
-        (self.next_u64() % (inclusive_max as u64 + 1)) as u32
     }
 }
 
@@ -563,18 +548,21 @@ impl EngineServices for CliHost {
     }
 
     fn roll(&mut self, max: u8) -> u8 {
-        let value = self.roll_uniform(max as u32) as u8;
+        // Corrected off-by-one, same as the engine host (oracle-rig §6 ledger):
+        // exclusive `random(max)`, not the old inclusive `roll_uniform(max)`.
+        let value = self.rng.random(max as u16) as u8;
         eprintln!("svc: roll(max={max}) = {value}");
         value
     }
 
     fn roll_dice(&mut self, size: u8, count: u8) -> u16 {
-        let mut total = 0u32;
+        // `1 + random(size)` per die; `size == 0` draws (ovr024.cs:586-598).
+        let mut total = 0u16;
         for _ in 0..count {
-            total += 1 + self.roll_uniform(size.saturating_sub(1) as u32);
+            total += 1 + self.rng.random(size as u16);
         }
         eprintln!("svc: roll_dice(size={size}, count={count}) = {total}");
-        total as u16
+        total
     }
 
     fn roll_saving_throw(&mut self, bonus: u8, save_type: u8) -> bool {
@@ -632,8 +620,8 @@ impl EngineServices for CliHost {
 }
 
 impl VmRng for CliHost {
-    fn roll_uniform(&mut self, inclusive_max: u16) -> u16 {
-        self.roll_uniform(inclusive_max as u32) as u16
+    fn random(&mut self, n: u16) -> u16 {
+        self.rng.random(n)
     }
 }
 

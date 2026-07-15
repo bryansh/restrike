@@ -30,7 +30,7 @@ use winit::window::{Window, WindowId};
 /// Determinism over novelty (task brief): a fixed default seed, so two
 /// launches with no `--seed` reproduce the same PRNG stream. Override with
 /// `--seed N` for anything else.
-const DEFAULT_SEED: u64 = 1;
+const DEFAULT_SEED: u32 = 1;
 const TICK: Duration = Duration::from_nanos(1_000_000_000 / TICK_HZ as u64);
 
 fn main() {
@@ -42,7 +42,7 @@ fn main() {
         match arg.as_str() {
             "--seed" => {
                 let v = args.next().expect("--seed requires a value");
-                seed = v.parse().expect("--seed must be a u64");
+                seed = v.parse().expect("--seed must be a u32");
             }
             "--square-pixels" => square_pixels = true,
             other => dir_arg = Some(PathBuf::from(other)),

@@ -261,9 +261,13 @@ impl PartyPredicates for DefaultPartyPredicates {
 /// (`seg044.cs`'s `Sound` enum) — placeholder pending that read.
 pub const SOUND_A: u8 = 0;
 
-/// `1dN`, `N = die_size` (`roll_dice(size, 1)`, `ovr024.cs:586`).
+/// `1dN`, `N = die_size` (`roll_dice(size, 1)`, `ovr024.cs:586` =
+/// `Random(die_size) + 1`). `random(die_size)` is exclusive `0..die_size`, so
+/// `+ 1` gives `1..=die_size`. The migration drops the old `(die_size - 1)`
+/// (which underflow-panicked at `die_size == 0`); `random(0)` now draws and
+/// returns 0 -> `1`, matching the binary (oracle-rig §6 ledger).
 fn roll_die(rng: &mut dyn VmRng, die_size: u8) -> u8 {
-    rng.roll_uniform((die_size - 1) as u16) as u8 + 1
+    rng.random(die_size as u16) as u8 + 1
 }
 
 /// `locked_door`'s Bash/Pick/Knock/Exit menu build (`ovr015.cs:491-510`,

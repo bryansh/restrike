@@ -8,6 +8,7 @@ description = "Game state, world simulation, combat, magic, UI shell, framebuffe
 
 [dependencies]
 gbx-formats = { path = "../gbx-formats" }
+gbx-prng = { path = "../gbx-prng" }
 gbx-vm = { path = "../gbx-vm" }
 gbx-rules = { path = "../gbx-rules" }
 sha2 = "0.10"

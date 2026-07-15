@@ -198,14 +198,19 @@ pub trait EngineServices {
     fn call_sound_variant(&mut self) -> u8;
 }
 
-/// Raw dice/uniform-random primitive (D9: the VM never owns a clock or RNG
-/// itself; `VmHost` exposes the engine's one PRNG through this accessor).
+/// The binary's integer `Random(n)` primitive (D9: the VM never owns a clock
+/// or RNG itself; `VmHost` exposes the engine's one PRNG through this accessor).
 /// `EngineServices::roll`/`roll_dice` are the methods the interpreter's
 /// opcodes actually call; `rng()` is exposed on `VmHost` per the design
 /// doc's API sketch for engine-side service implementations (and any future
 /// opcode) to reach the same underlying generator directly.
 pub trait VmRng {
-    fn roll_uniform(&mut self, inclusive_max: u16) -> u16;
+    /// The recovered integer `Random(n)` wrapper (oracle-rig §1, image
+    /// `0xa55a`): draws over `0..n` — the bound is **exclusive** — and
+    /// **always advances the PRNG**, including `n == 0`, which returns 0 after
+    /// drawing (never a short-circuit; D-OR1(b)'s draw-parity contract). The
+    /// engine implements this over `gbx-prng`, the one and only RNG (D-OR1).
+    fn random(&mut self, n: u16) -> u16;
 }
 
 /// The interpreter's single host borrow (D-VM4): memory, services, and RNG

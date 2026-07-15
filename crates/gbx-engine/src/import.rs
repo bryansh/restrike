@@ -181,7 +181,7 @@ fn master_to_engine_state(
 pub fn import_original(
     set: &OriginalSaveSet,
     data: GameData,
-    seed: u64,
+    seed: u32,
 ) -> Result<Engine, ImportError> {
     let master = &set.master;
 
@@ -234,7 +234,8 @@ pub fn import_original(
         symbol_sets,
         sky: boot_assets.sky,
         verify_report,
-        boot_seed: seed,
+        // u64 provenance, u32 live seed zero-extended (D-OR1) — see engine.rs.
+        boot_seed: seed as u64,
         tick_count: 0,
     }))
 }

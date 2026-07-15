@@ -181,7 +181,7 @@ impl Engine {
     /// Boots from real `GameData`: the D-UI1/`boot.rs` asset slice, this
     /// session's hardcoded resident GEO block, and the initial resident ECL
     /// block (`ECL{GAME_AREA}.DAX` block [`INITIAL_ECL_BLOCK`]).
-    pub fn new(data: GameData, seed: u64) -> Result<Self, BootError> {
+    pub fn new(data: GameData, seed: u32) -> Result<Self, BootError> {
         let assets = boot::boot(&data)?;
         let geo_bytes = data.block(DEFAULT_GEO_FILE, DEFAULT_GEO_BLOCK)?;
         let geo = GeoBlock::parse(&geo_bytes)?;
@@ -209,7 +209,7 @@ impl Engine {
         symbol_sets: SymbolSets,
         geo: GeoBlock,
         data: GameData,
-        seed: u64,
+        seed: u32,
     ) -> Self {
         Self::build(font, symbol_sets, dummy_sky(), geo, data, seed)
     }
@@ -220,7 +220,7 @@ impl Engine {
         sky: [ImageBlock; 3],
         geo: GeoBlock,
         data: GameData,
-        seed: u64,
+        seed: u32,
     ) -> Self {
         let mut fb = Framebuffer::new();
         crate::frames::draw8x8_03(&mut fb, &symbol_sets)
@@ -260,7 +260,10 @@ impl Engine {
             sounds: Vec::new(),
             serial: 0,
             last_hash: None,
-            boot_seed: seed,
+            // Provenance header field stays u64 (D-OR1): the u32 live seed is
+            // zero-extended so `ContainerHeader.seed` and its byte layout don't
+            // churn. Resume never reads this — it restores `SaveState.prng`.
+            boot_seed: seed as u64,
             tick_count: 0,
             symbol_sets,
             sky,

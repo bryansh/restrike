@@ -277,7 +277,14 @@ Walk around Tilverton, looking right.
   branch as tier-1 oracle (neither stock debugger is scriptable), D-OR3 canonical `.gbxtrace`
   in `gbx-oracle`, D-OR4 purpose-built-8086-stepper acceptance + one live session, D-OR5 H4 = rng-stream (gate-carrying;
   QuickFight-first bootstrap) + RE-gated endstate checkpoints (supersedes §3 H4's wording). Docket FD-26/27 updated,
-  FD-28 filed.)*
+  FD-28 filed.)* **Step 1 landed 2026-07-15** (`crates/gbx-prng`: binary-exact
+  `next`/`random`, draw-always, no short-circuit; `[0xa55a,0xa5ee)` hash-pin
+  local-tier test re-derives from the user's binary; audited per-site migration
+  → `oracle-rig.md` §6 ledger, killing the splitmix64 placeholder and the CLI's
+  second RNG; the `roll`/`op_random` off-by-one **confirmed and fixed**; fade
+  dither moved off the PRNG to a position hash; `.rsav` → v2 + golden recomputed
+  atomically; engine seed narrowed to `u32`. Docket FD-29/FD-30 filed.
+  Remaining: D-OR4 part A (8086 stepper acceptance, step 2).
 - Combat map generation from encounter data; combatant placement.
 - Initiative, action economy, movement costs, facing/rear attacks; THAC0 melee + ranged with
   range brackets; damage; attacks-per-round.

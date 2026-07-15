@@ -1,0 +1,18 @@
+[package]
+name = "gbx-prng"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The engine's one PRNG: CotAB's binary-exact Turbo Pascal LCG (oracle-rig §1, D-OR1)."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+# Local-tier hash-pin test only: re-derives the RNG-cluster pin from the
+# user's own decompressed START.EXE. Dev-deps keep the crate a pure, wasm-clean
+# leaf at build time (D-OR1). gbx-formats has no gbx-prng dependency, so this
+# is a clean dev-only edge, not a cycle.
+gbx-formats = { path = "../gbx-formats" }
+sha2 = "0.10"

@@ -58,7 +58,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: >
           cargo check --target wasm32-unknown-unknown
-          -p gbx-formats -p gbx-vm -p gbx-rules -p gbx-engine -p gbx-oracle
+          -p gbx-formats -p gbx-prng -p gbx-vm -p gbx-rules -p gbx-engine -p gbx-oracle
       # The D-UI6 gate: restrike-web must at least *check* clean for
       # wasm32-unknown-unknown. Full wasm-bindgen packaging (running
       # wasm-bindgen-cli to produce the JS glue + serving index.html) is a

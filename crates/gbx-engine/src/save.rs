@@ -43,7 +43,14 @@ pub const CONTAINER_VERSION: u16 = 1;
 /// snapshot's own tag (`gbx_vm::Snapshot`'s `SNAPSHOT_VERSION` among them).
 /// Bump on any serialization-incompatible change to `SaveState` or anything
 /// it contains.
-pub const SAVE_FORMAT_VERSION: u32 = 1;
+/// **v2** (M4 step 1): `SaveState.prng` changed from a `u64`-state splitmix64
+/// placeholder to `gbx-prng`'s binary-exact `u32` LCG state (D-OR1). Because
+/// `prng` is the last postcard field and postcard varint-encodes integers, a v1
+/// save whose u64 state was `< 2^32` would *silently* misload into the new u32
+/// field rather than erroring — so this is a hard version bump (reject-not-
+/// migrate, D-SAVE2; pre-1.0, no migration path owed). The committed golden was
+/// recomputed in the same commit.
+pub const SAVE_FORMAT_VERSION: u32 = 2;
 
 /// This engine's one shipped flavor (M3's slice — `xxvc` is M7). An 8-byte
 /// ASCII tag rather than a numeric id, matching the header's own

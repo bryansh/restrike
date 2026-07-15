@@ -1297,6 +1297,7 @@ name = "gbx-engine"
 version = "0.1.0"
 dependencies = [
  "gbx-formats",
+ "gbx-prng",
  "gbx-rules",
  "gbx-vm",
  "postcard",
@@ -1316,6 +1317,15 @@ dependencies = [
 [[package]]
 name = "gbx-oracle"
 version = "0.1.0"
+
+[[package]]
+name = "gbx-prng"
+version = "0.1.0"
+dependencies = [
+ "gbx-formats",
+ "serde",
+ "sha2",
+]
 
 [[package]]
 name = "gbx-rules"
@@ -2745,6 +2755,7 @@ dependencies = [
  "gbx-engine",
  "gbx-formats",
  "gbx-oracle",
+ "gbx-prng",
  "gbx-rules",
  "gbx-vm",
  "image",

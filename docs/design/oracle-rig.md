@@ -341,3 +341,67 @@ hook branch or DOSBox-X manual mode both support).
   fields and any in-combat-only cells are not); the `Action` struct layout
   (coab reconstructs it without `[DataOffset]`s — needs live RE against the
   hook). GBC corroborates intra-record field layout only — never addresses.
+
+## 6. The migration ledger (M4 step 1 — additive, not a door change)
+
+D-OR1(d): the migration from the splitmix64 placeholder (`EngineRng`, killed
+this session) to `gbx-prng` is an **audited per-site checklist**, each site
+mapped to its original citation, **not a mechanical rename**. This section is
+the record a future session audits the migration against.
+
+**The trap.** The old `VmRng::roll_uniform(inclusive_max)` took an *inclusive*
+bound (`0..=max`); the binary's `random(n)` (oracle-rig §1, image `0xa55a`)
+takes an *exclusive* one (`0..n`) and **always draws** (including `n == 0`,
+returning 0 after drawing — no short-circuit, D-OR1(b)). The naive translation
+`roll_uniform(k) → random(k + 1)` is correct at some sites and **wrong at
+others**; each row below states whether the translation was *mechanical* (the
+old and new expressions denote the same range) or *corrected* (the old
+expression was itself a bug the migration fixes).
+
+The `VmRng` trait method was renamed `roll_uniform(inclusive_max) → random(n)`
+(exclusive, draw-always) so every call site expresses the binary operand
+directly rather than juggling `±1`. `EngineRng` is now a thin wrapper over
+`gbx_prng::Prng`; the state (`u32`, the `DS:0x47F0` dword) is what `.rsav`
+serializes and the oracle rig pokes.
+
+| # | Site | Original citation | Old expression | New expression | Kind | `n == 0` reachable? |
+|---|---|---|---|---|---|---|
+| 1 | `gbx-engine/src/vmhost.rs` `EngineServices::roll` | `seg051.Random(max)` = `Next() % max`, exclusive (`seg051.cs:33-40`); `CMD_Random` pre-increments (`ovr003.cs:132-151`, mirrored `machine.rs` `op_random`) | `roll_uniform(max)` = `0..=max` | `random(max)` = `0..max` | **corrected** (off-by-one; old could return `operand+1`) | **No** — `op_random` does `rand_max.saturating_add(1)` before calling, so `max ≥ 1` always. |
+| 2 | `frontends/cli/src/run_script.rs` `CliHost::roll` (+ the whole `CliHost` RNG) | same as #1 | `roll_uniform(max)` (an inherent xorshift64\*, `RNG_SEED` — a **second RNG**, D-OR1-forbidden) | `self.rng.random(max)` over `gbx_prng::Prng` | **corrected** (same off-by-one; also removed the second generator) | **No** — same `saturating_add(1)` path (this host shares the VM's `op_random`). |
+| 3 | `gbx-engine/src/vmhost.rs` `EngineServices::roll_dice` | `roll_total += Random(dice_size) + 1` per die (`ovr024.cs:586-598`) | `1 + roll_uniform(size - 1)`, with `size == 0` short-circuiting to `+1` **without drawing** (matched coab, not the binary) | `1 + random(size)` | **mechanical** for the range; **corrected** for the `size == 0` draw (now draws, per binary) | **Yes** — `size == 0` → `random(0)` draws then returns 0 → die value 1. Correct and intended. |
+| 4 | `frontends/cli/src/run_script.rs` `CliHost::roll_dice` | same as #3 | `1 + roll_uniform(size - 1)` (over the second RNG) | `1 + self.rng.random(size)` | same as #3 | **Yes** — same as #3. |
+| 5 | `gbx-engine/src/movement.rs` `roll_die` (door bash) | `roll_dice(size, 1)` = `Random(die_size) + 1` (`ovr024.cs:586`; bash `ovr015.cs:180-215`) | `roll_uniform(die_size - 1) + 1`, **underflow-panics** at `die_size == 0` | `random(die_size) + 1` | **mechanical** for the range; **corrected** for the panic (subtraction removed) | **Yes** — `die_size` from `bash_outcome`'s table; `random(0)` now safely draws → 1 instead of panicking. |
+| 6 | `gbx-engine/src/training.rs` `EngineRoller::roll` (the `gbx-rules` `Roller` adapter) | `roll_dice(size, count)` shape (`ovr024.cs:586-598`) | `size.max(1)`, then `roll_uniform(size - 1) + 1` per die | `random(size) + 1` per die (`.max(1)` guard dropped) | **mechanical** for the range; **corrected** for the `size == 0` draw | **Yes** — `size == 0` → `random(0)` draws → 1. Training dice are never 0 in practice; the guard is gone because draw-always is the faithful behavior. `gbx-rules` gains **no** `gbx-prng` dep — the `Roller` trait stays, only `EngineRoller`'s body re-points. |
+| 7 | `gbx-engine/src/draw.rs` `apply_recolor_dithered` (fade dither) | `DaxBlock.Recolor(useRandom=true)`, `(random_number.Next() % 4) == 0` (`DaxBlock.cs:84`) — coab's **separate** time-seeded RNG | `roll_uniform(3) == 0` per changed pixel, from the one engine PRNG | deterministic position hash `dither_hit(index)`, **no PRNG at all** (signature loses `&mut dyn VmRng`) | **corrected** (D-OR1(c)/FD-28: a framebuffer-content-dependent draw count would desync any traced window) | **N/A** — no PRNG draw. See FD-28. |
+
+**Sites deliberately left fixed/fake (judged on their own terms, D-OR1(d)
+item 7).** `gbx-vm/src/test_support.rs` `FixedRng` and any other test doubles
+are scripted sequences, not the generator — they were renamed
+`roll_uniform → random` and given exclusive-clamp semantics but stay
+deterministic fakes. `draw.rs`'s old `AlwaysZeroRng`/`NeverZeroRng` doubles were
+**deleted** (the dither no longer takes an RNG). No production code holds a
+generator other than `gbx-prng` after this session.
+
+**The `roll` off-by-one — CONFIRMED, fixed (rows 1, 2).** The reasoning was
+re-verified against both citations: `op_random` pre-increments the operand
+(`rand_max.saturating_add(1)`) so the *script's* intended range for operand `v`
+is inclusive `0..=v`; that requires `roll(v+1)` to yield `0..=v`, i.e. `roll`
+must be *exclusive*. `roll_uniform(max)` was inclusive `0..=max`, so
+`RANDOM x, v` could write `v+1` — one above the script's maximum. `random(max)`
+restores the exclusive bound. The mechanical rename `roll_uniform(max) →
+random(max+1)` would have **frozen the bug** — the whole reason D-OR1(d) forbids
+a mechanical rename.
+
+**The `roll_dice` byte-truncation — docketed, not fixed (FD-29).** coab returns
+`(byte)roll_total` (`ovr024.cs:595`, the original's `AL` return); our `roll_dice`
+returns `u16` and never truncates. No shipped call site sums `> 255` in one
+`roll_dice`, so the two are bit-identical for every reachable input; narrowing
+the return to `u8` would churn the `VmHost` trait for no behavioral gain yet.
+Filed as **FD-29**.
+
+**Creation-roll draw ORDER — docketed, not touched (FD-30).** The original
+interleaves the six stats within each reroll iteration (`ovr018.cs:675-683`);
+our per-stat `Flavor::roll_ability_score` cannot express that ordering. No
+production caller exists yet, so nothing is broken — but D-OR4 part B's live
+window *is* creation rerolls, so this must be resolved when creation lands.
+Filed as **FD-30**. No flavor-API redesign this session (out of scope).

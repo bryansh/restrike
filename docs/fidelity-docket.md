@@ -641,7 +641,10 @@ stays the one place showing the complete open-hypothesis picture.
 ### FD-26: Integer `Random(N)` — modulo over the TP LCG (v1's "scaled" claim refuted in review)
 
 - **Status:** narrowed (semantics settled statically 2026-07-15 by the
-  oracle-rig adversarial round; executable confirmation = D-OR4 A/B)
+  oracle-rig adversarial round; **the implementation now exists** as
+  `crates/gbx-prng` (`Prng::next`/`random`), M4 step 1 2026-07-15 — this is
+  what D-OR4 A's stepper will be checked against; executable confirmation
+  still = D-OR4 A/B)
 - **Question → answer:** The original's RNG is the Borland TP LCG
   (`RandNext`, image `0xa5a9`, cs `0x8F7:0x1639`): `state = state*0x08088405
   + 1`, state dword `DS:0x47F0`. The integer wrapper (image `0xa55a`,
@@ -693,14 +696,66 @@ stays the one place showing the complete open-hypothesis picture.
   way). Which stream does the real binary's dither use, if any?
 - **Evidence so far:** none from the binary; both references disagree with
   each other by construction.
-- **Interim posture (D-OR1 draw-parity contract):** our dither moves OFF
-  `gbx-prng` to a deterministic position-hash pattern (dither pixels are
-  already declared non-comparable by the renderer doc), so the traced draw
-  stream is dither-free regardless of the answer.
+- **Interim posture (D-OR1 draw-parity contract) — IMPLEMENTED (M4 step 1):**
+  `apply_recolor_dithered` (`crates/gbx-engine/src/draw.rs`) no longer takes a
+  `VmRng` at all; it dithers via the deterministic position hash `dither_hit`
+  (Knuth multiplicative hash of the flat pixel index, ~1-in-4). It touches
+  `gbx-prng` zero times, so the traced draw stream is dither-free regardless of
+  the answer. Dither pixels are already declared non-comparable by the renderer
+  doc.
 - **Settled by:** a tier-1 staging-hook trace captured across a
   fade/recolor transition — if RandNext fires per pixel, revisit; if not,
   the position-hash divergence is documented and permanent.
 - **Cross-reference:** `docs/design/oracle-rig.md` D-OR1(c)/§5.
+
+### FD-29: `roll_dice` truncates its total to a byte in the original; ours returns `u16`
+
+- **Status:** open (candidate, filed M4 step 1 — no observable divergence at
+  any current call site)
+- **Question:** coab's `roll_dice` returns `(byte)roll_total`
+  (`ovr024.cs:595`) — it truncates the summed total to 8 bits (the original's
+  return is `AL`). Our `EngineServices::roll_dice`
+  (`crates/gbx-engine/src/vmhost.rs`, `frontends/cli/src/run_script.rs`) and
+  its `host.rs:171` trait signature return `u16` and never truncate. Should
+  our `roll_dice` truncate to a byte to match?
+- **Evidence / reachability:** truncation is only observable when a single
+  `roll_dice(size, count)` total exceeds 255, i.e. `count * size > 255`. No
+  shipped call site comes close: door bash uses `count == 1`
+  (`ovr015.cs:180-215`), creation stats use `roll_dice(6, 3)`
+  (`ovr018.cs:675-683`, max 18), training HP uses one class die. So today the
+  `u16` return and coab's `(byte)` return are bit-identical for every reachable
+  input. Changing the signature to `u8` would churn the `VmHost` trait and all
+  impls for no behavioral gain yet.
+- **Settled by:** whenever a combat call site is found (or added) that can sum
+  `> 255` in one `roll_dice`, decide then whether to narrow the return to a
+  byte; until then the divergence is documented and inert.
+- **Cross-reference:** `docs/design/oracle-rig.md` §6 (migration ledger),
+  `crates/gbx-engine/src/vmhost.rs` `roll_dice`.
+
+### FD-30: Creation-roll draw ORDER — per-stat API cannot express the original's interleave
+
+- **Status:** open (candidate, filed M4 step 1 — no production caller today,
+  so nothing is broken; a live blocker for D-OR4 part B when creation lands)
+- **Question:** the original rolls the six ability scores **interleaved within
+  each of six reroll iterations** — `Str, Int, Wis, Dex, Con, Cha` per
+  iteration, best-of-six per stat (`ovr018.cs:675-683`, each
+  `Math.Max(prev, roll_dice(6,3) + 1)`). Our `Flavor::roll_ability_score`
+  (`crates/gbx-rules/src/flavor.rs:108`, impl `adnd1/flavor_impl.rs:121`) is
+  **per-stat**: any caller looping stats produces `Str×6, Int×6, …` — the same
+  draw *multiset* in a **different order**. Against a per-draw oracle trace that
+  is a draw-parity desync.
+- **Evidence:** there is **no production caller** of `roll_ability_score` yet
+  (only `flavor_impl.rs`'s test module, `:746`), so nothing is currently wrong.
+  But D-OR4 part B's live acceptance window is *precisely* character-creation
+  stat rerolls (the roll-heavy, boot-reachable, zero-prerequisite window the
+  door picked), so when creation rolls land they **must** interleave, and the
+  current per-stat API shape cannot express that.
+- **Settled by:** the session that implements character creation — reshape the
+  flavor API to roll all six stats per iteration (or otherwise emit draws in
+  the original's interleaved order) *before* wiring it to the part-B trace. Do
+  not redesign the flavor API speculatively before then.
+- **Cross-reference:** `docs/design/oracle-rig.md` D-OR4 part B / §6,
+  `crates/gbx-rules/src/flavor.rs`.
 
 ## 5. How new entries get added
 

@@ -244,8 +244,17 @@ impl FixedRng {
 }
 
 impl VmRng for FixedRng {
-    fn roll_uniform(&mut self, inclusive_max: u16) -> u16 {
-        self.values.pop_front().unwrap_or(0).min(inclusive_max)
+    /// Exclusive `0..n`, mirroring the real `random(n)`: pops the next scripted
+    /// value and clamps it into range. Always pops (a draw is always consumed,
+    /// even at `n == 0`) so a scripted stream stays aligned with the real PRNG's
+    /// draw-always contract.
+    fn random(&mut self, n: u16) -> u16 {
+        let v = self.values.pop_front().unwrap_or(0);
+        if n == 0 {
+            0
+        } else {
+            v.min(n - 1)
+        }
     }
 }
 
