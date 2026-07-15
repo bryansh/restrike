@@ -21,6 +21,7 @@ pub mod framebuffer;
 pub mod frames;
 pub mod import;
 pub mod input;
+pub mod money;
 pub mod movement;
 pub mod party;
 pub mod rng;
@@ -34,6 +35,7 @@ pub mod screens;
 pub mod shell;
 pub mod symbols;
 pub mod text;
+pub mod training;
 pub mod vmhost;
 pub mod widgets;
 

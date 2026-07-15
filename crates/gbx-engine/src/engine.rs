@@ -366,6 +366,19 @@ impl Engine {
         &self.slots
     }
 
+    /// Opens the training-hall screen for the current party (M3 step 6
+    /// deliverable 4) — a frontend/demo entry point for stepping onto a town
+    /// training-hall tile (the ECL trigger that would auto-open it is M6).
+    /// Returns to the walk-loop world menu on exit.
+    pub fn open_training(&mut self) {
+        self.shell = Shell::Screen(crate::screens::Screen::Training(
+            crate::screens::Training::new(
+                self.state.selected_player,
+                crate::screens::ReturnTo::World,
+            ),
+        ));
+    }
+
     /// Takes the save/load screen's pending action, if any — the host calls
     /// this after each tick and fulfills it (write/restore/import) via
     /// `saveload_fs`. Clears the request so it fires exactly once.

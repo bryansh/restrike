@@ -43,6 +43,7 @@ pub enum Screen {
     Camp(Camp),
     Magic(MagicMenu),
     SaveLoad(SaveLoad),
+    Training(Training),
 }
 
 impl Screen {
@@ -52,6 +53,7 @@ impl Screen {
             Screen::Camp(s) => s.tick(ctx),
             Screen::Magic(s) => s.tick(ctx),
             Screen::SaveLoad(s) => s.tick(ctx),
+            Screen::Training(s) => s.tick(ctx),
         }
     }
 }
@@ -484,6 +486,145 @@ fn load_bar_text(ctx: &FlowCtx) -> String {
 /// core free of the I/O outcome).
 fn camp_after_saveload() -> Camp {
     Camp::with_status("Save/Load: request sent to host")
+}
+
+// --- Training hall (ovr018.cs train_player) ---
+
+/// The training-hall screen (`train_player`, `ovr018.cs:2189`): shows the
+/// selected character's sheet, a "will become" preview, and a `Train Exit`
+/// command bar (`ovr018.cs:2371`'s "Do you wish to train?"). Training is an
+/// unrestricted hall ([`crate::training::TRAINS_ALL_CLASSES`]) — a specific
+/// hall's `training_class_mask` comes from the town ECL (M6).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Training {
+    selected: usize,
+    menu: Widget,
+    status: Option<String>,
+    return_to: ReturnTo,
+}
+
+impl Training {
+    /// Opens on `selected_player` (clamped into range in [`Training::tick`]).
+    /// Takes a plain index, not a `FlowCtx`, so a frontend can enter it from a
+    /// town training-hall tile via [`Engine::open_training`](crate::engine::Engine::open_training).
+    pub fn new(selected_player: u8, return_to: ReturnTo) -> Self {
+        Training {
+            selected: selected_player as usize,
+            menu: menu_bar("Train Exit"),
+            status: None,
+            return_to,
+        }
+    }
+
+    fn exit(&self, ctx: &FlowCtx) -> ScreenTransition {
+        match self.return_to {
+            ReturnTo::World => ScreenTransition::Exit,
+            ReturnTo::Camp => ScreenTransition::To(Screen::Camp(Camp::new(ctx))),
+        }
+    }
+
+    /// The "will become a level N {class}" preview, or the reason training is
+    /// unavailable (`ovr018.cs:2346-2368`/the early-return messages).
+    fn preview(&self, ctx: &FlowCtx) -> String {
+        let ch = &ctx.roster.members[self.selected];
+        let trainable = crate::training::trainable_classes(ch, ctx.rules, TRAINS_ALL);
+        if !trainable.is_empty() {
+            let parts: Vec<String> = trainable
+                .iter()
+                .map(|&c| format!("level {} {}", ch.class_level[c] + 1, class_name(c)))
+                .collect();
+            format!("{} will become: {}", ch.name, parts.join(", "))
+        } else if !crate::money::can_afford(&ch.money, crate::training::TRAINING_FEE_GP, ctx.rules)
+        {
+            "Training costs 1000 gp.".to_string()
+        } else {
+            "Not enough experience.".to_string()
+        }
+    }
+
+    pub fn tick(&mut self, ctx: &mut FlowCtx) -> ScreenTransition {
+        let count = ctx.roster.members.len();
+        if count == 0 {
+            return self.exit(ctx);
+        }
+        self.selected = self.selected.min(count - 1);
+
+        // Render the sheet, then the preview + status + command bar over it.
+        let view = sheet_view(&ctx.roster.members[self.selected]);
+        ctx.fb.clear(0);
+        render_sheet(ctx.fb, ctx.font, ctx.symbols, &view);
+        let preview = self.preview(ctx);
+        crate::text::draw_string(ctx.fb, ctx.font, &preview, 20, 1, 0, 0x0A);
+        if let Some(s) = &self.status {
+            crate::text::draw_string(ctx.fb, ctx.font, s, 21, 1, 0, 0x0E);
+        }
+        crate::text::draw_string(ctx.fb, ctx.font, "Train Exit", 24, 1, 0, 0x0F);
+
+        match self.menu.tick(ctx.input, ctx.dt_ticks) {
+            WidgetOutcome::Pending => ScreenTransition::Stay,
+            WidgetOutcome::PartyScroll(code) => {
+                match code {
+                    b'H' => self.selected = (self.selected + count - 1) % count,
+                    b'P' => self.selected = (self.selected + 1) % count,
+                    _ => {}
+                }
+                ctx.state.selected_player = self.selected as u8;
+                self.status = None;
+                ScreenTransition::Stay
+            }
+            WidgetOutcome::Hotbar(key) => match key.to_ascii_uppercase() {
+                b'T' => {
+                    let member = &mut ctx.roster.members[self.selected];
+                    self.status = Some(
+                        match crate::training::train(member, ctx.rules, ctx.rng, TRAINS_ALL) {
+                            Ok(o) => {
+                                let (class, level) = o.advanced.first().copied().unwrap_or((0, 0));
+                                format!(
+                                    "Trained: level {} {} (+{} HP)",
+                                    level,
+                                    class_name(class),
+                                    o.hp_gained
+                                )
+                            }
+                            Err(e) => train_error_text(e),
+                        },
+                    );
+                    ScreenTransition::Stay
+                }
+                b'E' | 0 => self.exit(ctx),
+                _ => ScreenTransition::Stay,
+            },
+            _ => ScreenTransition::Stay,
+        }
+    }
+}
+
+const TRAINS_ALL: u8 = crate::training::TRAINS_ALL_CLASSES;
+
+/// A single-word class name for the training preview (the class-name table is
+/// engine-side in `charsheet`; this maps the base-class index to it).
+fn class_name(class: usize) -> &'static str {
+    const NAMES: [&str; 8] = [
+        "Cleric",
+        "Druid",
+        "Fighter",
+        "Paladin",
+        "Ranger",
+        "Magic-User",
+        "Thief",
+        "Monk",
+    ];
+    NAMES.get(class).copied().unwrap_or("?")
+}
+
+fn train_error_text(e: crate::training::TrainError) -> String {
+    use crate::training::TrainError::*;
+    match e {
+        NotConscious => "We only train conscious people.".to_string(),
+        NotEnoughGold => "Training costs 1000 gp.".to_string(),
+        WrongClassHere => "We don't train that class here.".to_string(),
+        NotEnoughExperience => "Not enough experience.".to_string(),
+    }
 }
 
 /// A horizontal command bar of first-letter-selectable words, extended-key

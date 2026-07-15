@@ -1838,6 +1838,42 @@ mod tests {
     }
 
     #[test]
+    fn training_screen_levels_up_an_eligible_member() {
+        use crate::screens::{ReturnTo, Training};
+        let mut h = Harness::new();
+        let mut fighter = test_char("Gareth");
+        fighter.class_level = [0; 8];
+        fighter.class_level[2] = 1; // fighter level 1
+        fighter.exp = 3000; // > the 2001 needed for L1→L2
+        fighter.hit_dice = 1;
+        fighter.multiclass_level = 0;
+        fighter.stats.con.current = 12; // a valid CON (no HP adjustment)
+        fighter.money.gold = 2000;
+        fighter.hit_point_max = 20;
+        fighter.hit_point_current = 20;
+        h.roster.members = vec![fighter];
+
+        let mut shell = Shell::boot(&mut h.machine, &mut h.state);
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::WorldMenu { .. })
+        });
+        shell = Shell::Screen(Screen::Training(Training::new(0, ReturnTo::World)));
+
+        h.input.push_all(&[char_key(b't')]); // Train
+        for _ in 0..4 {
+            let mut ctx = h.ctx();
+            shell.tick(&mut ctx);
+        }
+        assert_eq!(h.roster.members[0].class_level[2], 2, "fighter leveled up");
+        assert_eq!(h.roster.members[0].exp, 3000, "exp not consumed");
+
+        h.input.push_all(&[char_key(b'e')]); // Exit → world menu
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::WorldMenu { .. })
+        });
+    }
+
+    #[test]
     fn party_view_scrolls_between_members() {
         let (mut shell, mut h) = boot_with_party();
         h.input.push_all(&[char_key(b'v')]);

@@ -162,6 +162,39 @@ pub struct Money {
     pub jewelry: i16,
 }
 
+impl Money {
+    /// One denomination by coab coin-type index (`MoneySet.cs`: Copper=0,
+    /// Silver=1, Electrum=2, Gold=3, Platinum=4, Gems=5, Jewelry=6). Any other
+    /// index reads 0.
+    pub fn get_coin(&self, index: usize) -> i16 {
+        match index {
+            0 => self.copper,
+            1 => self.silver,
+            2 => self.electrum,
+            3 => self.gold,
+            4 => self.platinum,
+            5 => self.gems,
+            6 => self.jewelry,
+            _ => 0,
+        }
+    }
+
+    /// Sets one denomination by coin-type index (see [`Self::get_coin`]). An
+    /// out-of-range index is ignored.
+    pub fn set_coin(&mut self, index: usize, value: i16) {
+        match index {
+            0 => self.copper = value,
+            1 => self.silver = value,
+            2 => self.electrum = value,
+            3 => self.gold = value,
+            4 => self.platinum = value,
+            5 => self.gems = value,
+            6 => self.jewelry = value,
+            _ => {}
+        }
+    }
+}
+
 impl From<[i16; 7]> for Money {
     fn from(m: [i16; 7]) -> Self {
         Money {
