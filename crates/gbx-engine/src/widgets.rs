@@ -363,9 +363,7 @@ impl ListMenu {
         let screen = self.screen_index as i64;
         let mut index = start;
         let mut guard = 0;
-        while guard < page
-            && (0..count).contains(&index)
-            && self.items[index as usize].is_heading()
+        while guard < page && (0..count).contains(&index) && self.items[index as usize].is_heading()
         {
             guard += 1;
             if backwards_step {
@@ -826,7 +824,11 @@ mod tests {
         let mut list = flat_list(5, 5); // cursor at the top row
         let mut q = queue_of(&[InputEvent::Ext(ExtKey::Home)]);
         list.tick(&mut q);
-        assert_eq!(list.selected_index(), Some(4), "Home from the top wraps down");
+        assert_eq!(
+            list.selected_index(),
+            Some(4),
+            "Home from the top wraps down"
+        );
     }
 
     #[test]
@@ -842,7 +844,11 @@ mod tests {
         assert_eq!(list.selected_index(), Some(0)); // "A"
         let mut q = queue_of(&[InputEvent::Ext(ExtKey::End)]);
         list.tick(&mut q);
-        assert_eq!(list.selected_index(), Some(2), "End steps over the heading to B");
+        assert_eq!(
+            list.selected_index(),
+            Some(2),
+            "End steps over the heading to B"
+        );
     }
 
     #[test]
