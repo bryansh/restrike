@@ -243,8 +243,15 @@ Walk around Tilverton, looking right.
   `Save View Magic Rest Alter Fix Exit`; training hall — pack-correct `train_player` level-up
   (fee/eligibility/HP/THAC0/spell-caps); shops — `CityShop` Buy with `ItemsValue` price
   arithmetic against the 7-coin money model. Rest's spell-memorize commit and Magic's memorize/
-  scribe are M5 (Vancian) per FD-25; journal entries remain — they need a text-presentation
-  decision, noted as the one open M3 UI item.)*
+  scribe are M5 (Vancian) per FD-25. Journal entries: DECIDED 2026-07-15 (Bryan + Fable) —
+  the engine shows the entry-number pointer exactly as the original did and never displays
+  entry text. The text was deliberately print-only (booklet-as-copy-protection, like the code
+  wheel); it exists in no data file, so embedding it would mean transcribing and
+  redistributing the booklet — a D10 violation. The faithful behavior and the clean behavior
+  coincide. QoL later per D4: a journal-log screen tracking *encountered entry numbers*
+  (facts, mirroring the booklet's own checkboxes), and optionally letting a user point the
+  engine at their own transcription file the same way they supply game data. Implementation
+  is small; fold into an early M4 session.)*
 - [x] Character sheet + party screens in the faithful UI; same data visible in the inspector;
   save/load menu. *(step 6: `charsheet` (`playerDisplayFull`) verified against MATHEW's real
   reference capture; `screens` module Shell states for party-view/camp/magic/save-load/training/
