@@ -366,3 +366,65 @@ fn local_tier_imports_a_real_save_if_present() {
         "real-save .rsav round-trip must be byte-identical"
     );
 }
+
+// --- M3 step 6 deliverable 3: save/load slot filesystem round-trip ---
+
+/// The slot ↔ `.rsav` file mapping (`saveload_fs`): save an engine into a
+/// lettered slot under a temp dir, scan it back as `RestrikeSave`, restore
+/// from the slot, and assert a byte-identical `.rsav` round-trip. Uses a
+/// process-unique temp dir (tests may touch the filesystem; the core tick
+/// loop never does — D8).
+#[test]
+fn saveload_fs_round_trips_a_slot_file() {
+    use crate::saveload::SlotStatus;
+    use crate::saveload_fs::{load_from_slot, save_to_slot, scan_slot_directory};
+
+    let engine = imported_engine();
+    let expected = engine.save();
+
+    let dir = std::env::temp_dir().join(format!("restrike-slot-roundtrip-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    save_to_slot(&engine, &dir, 'D').expect("save to slot D");
+
+    // Only slot D is occupied, and it reads back as our own format.
+    let scanned = scan_slot_directory(&dir);
+    assert_eq!(scanned.status('D'), SlotStatus::RestrikeSave);
+    assert_eq!(scanned.occupied_letters(), vec!['D']);
+
+    let restored = load_from_slot(&dir, 'D', synthetic_game_data()).expect("load from slot D");
+    assert_eq!(
+        restored.save(),
+        expected,
+        "slot round-trip must reproduce the saved state byte-for-byte"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A fulfilled `Save` request writes the same slot file the direct API does,
+/// and a missing-slot `Load` surfaces an error rather than panicking.
+#[test]
+fn saveload_fs_fulfill_save_then_errors_on_empty_slot() {
+    use crate::saveload::SaveLoadRequest;
+    use crate::saveload_fs::{fulfill, load_from_slot};
+
+    let mut engine = imported_engine();
+    let dir = std::env::temp_dir().join(format!("restrike-slot-fulfill-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    fulfill(
+        &mut engine,
+        SaveLoadRequest::Save('A'),
+        &dir,
+        synthetic_game_data(),
+        7,
+    )
+    .expect("fulfilling a Save writes the slot");
+    assert!(dir.join("SAVGAMA.RSAV").is_file());
+
+    // Loading an unwritten slot is an error, not a panic.
+    assert!(load_from_slot(&dir, 'B', synthetic_game_data()).is_err());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

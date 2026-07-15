@@ -121,6 +121,13 @@ pub struct Engine {
     /// prices, derived numbers) can read them each tick without re-parsing.
     /// Not serialized — reloaded from the embedded packs on restore/import.
     rules: RuleSet,
+    /// Host-injected save-slot directory (M3 step 6 deliverable 3): the
+    /// save/load screen renders from this; the host sets it by scanning the
+    /// save dir (`saveload_fs::scan_slot_directory`). Transient, not saved.
+    slots: crate::saveload::SlotDirectory,
+    /// The save/load screen's pending action, taken by the host after a tick
+    /// (D8: the core never does file I/O). Transient, not saved.
+    io_request: Option<crate::saveload::SaveLoadRequest>,
 }
 
 /// A trivial single-item `ImageBlock` fixture — [`Engine::new_fixture`]'s
@@ -259,6 +266,8 @@ impl Engine {
             sky,
             verify_report,
             rules,
+            slots: crate::saveload::SlotDirectory::new(),
+            io_request: None,
         }
     }
 
@@ -297,6 +306,8 @@ impl Engine {
             verify_report: a.verify_report,
             // Reloaded from the embedded packs (not carried in the save/import).
             rules: RuleSet::load(),
+            slots: crate::saveload::SlotDirectory::new(),
+            io_request: None,
         }
     }
 
@@ -340,6 +351,26 @@ impl Engine {
     /// screen. Empty until original-save import (D-SAVE5) populates it.
     pub fn party(&self) -> &crate::party::Party {
         &self.party
+    }
+
+    /// Injects the host's view of the save slots (M3 step 6 deliverable 3),
+    /// obtained by scanning the save dir (`saveload_fs::scan_slot_directory`).
+    /// The save/load screen renders from this — the core never scans itself.
+    pub fn set_slot_directory(&mut self, slots: crate::saveload::SlotDirectory) {
+        self.slots = slots;
+    }
+
+    /// The current injected slot directory (for the inspector / a frontend
+    /// that wants to reflect what the screen sees).
+    pub fn slot_directory(&self) -> &crate::saveload::SlotDirectory {
+        &self.slots
+    }
+
+    /// Takes the save/load screen's pending action, if any — the host calls
+    /// this after each tick and fulfills it (write/restore/import) via
+    /// `saveload_fs`. Clears the request so it fires exactly once.
+    pub fn take_io_request(&mut self) -> Option<crate::saveload::SaveLoadRequest> {
+        self.io_request.take()
     }
 
     /// The ScriptMemory unknown-access log + service-call log + halt
@@ -426,6 +457,8 @@ impl Engine {
                 party: &mut self.party_predicates,
                 roster: &mut self.party,
                 rules: &self.rules,
+                slots: &self.slots,
+                io_request: &mut self.io_request,
                 rng: &mut self.rng,
                 fb: &mut self.fb,
                 font: &self.font,

@@ -126,6 +126,12 @@ pub struct FlowCtx<'a> {
     /// The loaded rules pack (M3 step 6): derived numbers, training XP
     /// thresholds, spell slots, prices — the flavor's tables.
     pub rules: &'a gbx_rules::pack::RuleSet,
+    /// Host-injected view of the save slots (M3 step 6 deliverable 3): the
+    /// save/load screen renders from this, never the filesystem (D8).
+    pub slots: &'a crate::saveload::SlotDirectory,
+    /// Where the save/load screen deposits its chosen action for the host to
+    /// fulfill after the tick (D8: the core does no file I/O itself).
+    pub io_request: &'a mut Option<crate::saveload::SaveLoadRequest>,
     pub rng: &'a mut EngineRng,
     pub fb: &'a mut Framebuffer,
     pub font: &'a Font,
@@ -1198,6 +1204,8 @@ mod tests {
         party: DefaultPartyPredicates,
         roster: crate::party::Party,
         rules: gbx_rules::pack::RuleSet,
+        slots: crate::saveload::SlotDirectory,
+        io_request: Option<crate::saveload::SaveLoadRequest>,
         rng: EngineRng,
         fb: Framebuffer,
         font: Font,
@@ -1226,6 +1234,8 @@ mod tests {
                 party: DefaultPartyPredicates::default(),
                 roster: crate::party::Party::default(),
                 rules: gbx_rules::pack::RuleSet::load(),
+                slots: crate::saveload::SlotDirectory::new(),
+                io_request: None,
                 rng: EngineRng::new(1),
                 fb: Framebuffer::new(),
                 font: marker_font(),
@@ -1254,6 +1264,8 @@ mod tests {
                 party: &mut self.party,
                 roster: &mut self.roster,
                 rules: &self.rules,
+                slots: &self.slots,
+                io_request: &mut self.io_request,
                 rng: &mut self.rng,
                 fb: &mut self.fb,
                 font: &self.font,
@@ -1762,6 +1774,67 @@ mod tests {
             h.roster.members[0].magic, before,
             "rest must not fake a spell-slot restoration (FD-25)"
         );
+    }
+
+    fn feed_and_settle(shell: &mut Shell, h: &mut Harness, key: u8) {
+        h.input.push_all(&[char_key(key)]);
+        for _ in 0..4 {
+            let mut ctx = h.ctx();
+            shell.tick(&mut ctx);
+        }
+    }
+
+    #[test]
+    fn camp_save_opens_saveload_and_emits_a_save_request() {
+        use crate::saveload::SaveLoadRequest;
+        let (mut shell, mut h) = boot_with_party();
+        h.input.push_all(&[char_key(b'e')]); // Encamp
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::Camp(_)))
+        });
+        h.input.push_all(&[char_key(b's')]); // Save → SaveLoad
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::SaveLoad(_)))
+        });
+        feed_and_settle(&mut shell, &mut h, b's'); // choose Save action
+        h.input.push_all(&[char_key(b'a')]); // pick slot A
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::Camp(_)))
+        });
+        assert_eq!(h.io_request, Some(SaveLoadRequest::Save('A')));
+    }
+
+    #[test]
+    fn saveload_load_emits_load_for_restrike_and_import_for_original() {
+        use crate::saveload::{SaveLoadRequest, SlotStatus};
+        let (mut shell, mut h) = boot_with_party();
+        h.slots.set('B', SlotStatus::RestrikeSave);
+        h.slots.set('C', SlotStatus::OriginalSave);
+
+        h.input.push_all(&[char_key(b'e')]);
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::Camp(_)))
+        });
+        h.input.push_all(&[char_key(b's')]);
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::SaveLoad(_)))
+        });
+        feed_and_settle(&mut shell, &mut h, b'l'); // Load action
+                                                   // A restrike slot → Load; an original slot → ImportOriginal.
+        feed_and_settle(&mut shell, &mut h, b'b');
+        assert_eq!(h.io_request, Some(SaveLoadRequest::Load('B')));
+        // Emitting returned us to camp (ReturnTo::Camp).
+        assert!(matches!(shell, Shell::Screen(Screen::Camp(_))));
+
+        // Re-open save/load from camp and test the original-import path.
+        h.io_request = None;
+        h.input.push_all(&[char_key(b's')]);
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::SaveLoad(_)))
+        });
+        feed_and_settle(&mut shell, &mut h, b'l');
+        feed_and_settle(&mut shell, &mut h, b'c');
+        assert_eq!(h.io_request, Some(SaveLoadRequest::ImportOriginal('C')));
     }
 
     #[test]

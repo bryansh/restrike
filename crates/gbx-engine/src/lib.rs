@@ -25,6 +25,11 @@ pub mod movement;
 pub mod party;
 pub mod rng;
 pub mod save;
+pub mod saveload;
+/// Host-side (filesystem) save/load glue — kept off the wasm target and out
+/// of the tick core (D8).
+#[cfg(not(target_arch = "wasm32"))]
+pub mod saveload_fs;
 pub mod screens;
 pub mod shell;
 pub mod symbols;

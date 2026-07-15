@@ -12,6 +12,7 @@
 //! per-screen below.
 
 use crate::charsheet::{render_sheet, sheet_view};
+use crate::saveload::{SaveLoadRequest, SlotStatus};
 use crate::shell::FlowCtx;
 use crate::widgets::{Hotbar, Widget, WidgetOutcome};
 
@@ -41,6 +42,7 @@ pub enum Screen {
     PartyView(PartyView),
     Camp(Camp),
     Magic(MagicMenu),
+    SaveLoad(SaveLoad),
 }
 
 impl Screen {
@@ -49,6 +51,7 @@ impl Screen {
             Screen::PartyView(s) => s.tick(ctx),
             Screen::Camp(s) => s.tick(ctx),
             Screen::Magic(s) => s.tick(ctx),
+            Screen::SaveLoad(s) => s.tick(ctx),
         }
     }
 }
@@ -221,12 +224,7 @@ impl Camp {
                 ScreenTransition::Stay
             }
             // Save → the save/load menu (ovr016.cs:1114 → ovr017.SaveGame).
-            // Wired to the save/load screen by deliverable 3; a placeholder
-            // status until then keeps camp navigable.
-            b'S' => {
-                *self = Camp::with_status("Save/Load: menu lands in deliverable 3");
-                ScreenTransition::Stay
-            }
+            b'S' => ScreenTransition::To(Screen::SaveLoad(SaveLoad::new(ReturnTo::Camp))),
             // Alter (Order/Drop/Speed/Icon, ovr016.cs:1141 → alter_menu) and
             // Fix (auto-heal via cure spells + rest, ovr016.cs:1137 →
             // FixTeam): stubbed. Alter's Order/Drop are simple roster edits
@@ -338,6 +336,154 @@ impl Default for MagicMenu {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// --- Save / Load (ovr017.cs SaveGame/loadGameMenu) ---
+
+/// Whether the slot picker is choosing a slot to save into or load from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum SlMode {
+    Save,
+    Load,
+}
+
+/// The save/load screen (`SaveGame`/`loadGameMenu`, `ovr017.cs:1109`/`929`).
+/// Two steps: a `Save Load Exit` chooser, then a lettered-slot picker (all ten
+/// A-J for Save, `ovr017.cs:1117`; only occupied slots for Load,
+/// `ovr017.cs:935-941`). Picking a slot sets a [`SaveLoadRequest`] the host
+/// fulfills after the tick (D8 — the core never does file I/O).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SaveLoad {
+    phase: SlPhase,
+    menu: Widget,
+    return_to: ReturnTo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum SlPhase {
+    Choose,
+    Pick(SlMode),
+}
+
+impl SaveLoad {
+    pub fn new(return_to: ReturnTo) -> Self {
+        SaveLoad {
+            phase: SlPhase::Choose,
+            menu: menu_bar("Save Load Exit"),
+            return_to,
+        }
+    }
+
+    fn exit(&self) -> ScreenTransition {
+        match self.return_to {
+            ReturnTo::World => ScreenTransition::Exit,
+            // Rebuild camp fresh (its menu is stateless); a status hint would
+            // need the outcome of the host's I/O, which isn't known here.
+            ReturnTo::Camp => ScreenTransition::To(Screen::Camp(camp_after_saveload())),
+        }
+    }
+
+    pub fn tick(&mut self, ctx: &mut FlowCtx) -> ScreenTransition {
+        // Backdrop: title, the per-slot status list, then the command bar.
+        let bar = match self.phase {
+            SlPhase::Choose => "Save Load Exit".to_string(),
+            SlPhase::Pick(SlMode::Save) => "A B C D E F G H I J".to_string(),
+            SlPhase::Pick(SlMode::Load) => load_bar_text(ctx),
+        };
+        ctx.fb.clear(0);
+        let _ = crate::frames::draw_frame_outer(ctx.fb, ctx.symbols);
+        crate::text::draw_string(ctx.fb, ctx.font, "Save / Load", 1, 1, 0, 0x0F);
+        for (i, (letter, status)) in ctx.slots.entries().enumerate() {
+            let line = format!("{letter}  {}", status.label());
+            crate::text::draw_string(ctx.fb, ctx.font, &line, 3 + i, 1, 0, 0x0A);
+        }
+        crate::text::draw_string(ctx.fb, ctx.font, &bar, 24, 1, 0, 0x0F);
+
+        match self.menu.tick(ctx.input, ctx.dt_ticks) {
+            WidgetOutcome::Pending => ScreenTransition::Stay,
+            WidgetOutcome::Hotbar(key) => self.dispatch(key, ctx),
+            _ => ScreenTransition::Stay,
+        }
+    }
+
+    fn dispatch(&mut self, key: u8, ctx: &mut FlowCtx) -> ScreenTransition {
+        let key = key.to_ascii_uppercase();
+        match self.phase {
+            SlPhase::Choose => match key {
+                b'S' => {
+                    self.phase = SlPhase::Pick(SlMode::Save);
+                    self.menu = menu_bar("A B C D E F G H I J");
+                    ScreenTransition::Stay
+                }
+                b'L' => {
+                    self.phase = SlPhase::Pick(SlMode::Load);
+                    self.menu = menu_bar(&load_bar_text(ctx));
+                    ScreenTransition::Stay
+                }
+                b'E' | 0 => self.exit(),
+                _ => ScreenTransition::Stay,
+            },
+            SlPhase::Pick(mode) => {
+                // Escape / null returns to the chooser rather than leaving.
+                if key == 0 {
+                    self.phase = SlPhase::Choose;
+                    self.menu = menu_bar("Save Load Exit");
+                    return ScreenTransition::Stay;
+                }
+                // A load screen with no games shows only "Exit".
+                if key == b'E'
+                    && matches!(mode, SlMode::Load)
+                    && ctx.slots.occupied_letters().is_empty()
+                {
+                    return self.exit();
+                }
+                if !crate::saveload::SLOT_LETTERS.contains(&(key as char)) {
+                    return ScreenTransition::Stay;
+                }
+                let letter = key as char;
+                let request = match mode {
+                    SlMode::Save => Some(SaveLoadRequest::Save(letter)),
+                    SlMode::Load => match ctx.slots.status(letter) {
+                        // A one-way import for an original slot (D-SAVE12).
+                        SlotStatus::OriginalSave => Some(SaveLoadRequest::ImportOriginal(letter)),
+                        SlotStatus::RestrikeSave => Some(SaveLoadRequest::Load(letter)),
+                        // An empty slot in Load mode: re-prompt (ovr017 only
+                        // lists occupied letters, so this is belt-and-braces).
+                        SlotStatus::Empty => None,
+                    },
+                };
+                match request {
+                    Some(req) => {
+                        *ctx.io_request = Some(req);
+                        self.exit()
+                    }
+                    None => ScreenTransition::Stay,
+                }
+            }
+        }
+    }
+}
+
+/// The Load-mode command bar: the occupied slot letters (`loadGameMenu`'s
+/// `games_list`), or just `Exit` when nothing is saved.
+fn load_bar_text(ctx: &FlowCtx) -> String {
+    let occupied = ctx.slots.occupied_letters();
+    if occupied.is_empty() {
+        "Exit".to_string()
+    } else {
+        occupied
+            .iter()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+/// Camp rebuilt after leaving save/load — the host fulfills the request
+/// between ticks, so the confirmation is left to the frontend (this keeps the
+/// core free of the I/O outcome).
+fn camp_after_saveload() -> Camp {
+    Camp::with_status("Save/Load: request sent to host")
 }
 
 /// A horizontal command bar of first-letter-selectable words, extended-key
