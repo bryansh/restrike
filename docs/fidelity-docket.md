@@ -338,21 +338,28 @@ source document (§5 "New docket candidates").
 
 ### FD-17: Keyboard type-ahead — does the original drain the buffer to the newest key?
 
-- **Status:** open
+- **Status:** RESOLVED (2026-07-14, live DOSBox mash test by Bryan —
+  dosbox-staging 0.82.2, 3000 cycles)
 - **Question:** coab's `GetInputKey` discards the entire keyboard buffer
   after reading any nonzero key, keeping only the newest
   (`~/src/goldbox-refs/coab/engine/seg043.cs:55-62`) — so mashing forward
   five times during a slow redraw commits **one** step, and type-ahead is
   largely lost. Is this the original binary's behavior, or a coab
   transliteration/anti-key-repeat artifact?
-- **Evidence so far:** coab source only (found during the 2026-07-12 M2
-  renderer/UI-shell adversarial review round —
-  `docs/design/renderer-ui-shell.md` §1.5, §1.11 item 9). Player-visible:
-  it determines whether queued movement keys walk multiple squares.
-- **Settled by:** DOSBox test (no harness rung needed): mash forward during
-  a slow redraw / event text, count committed steps. The engine's
-  input-queue read is a single function to swap if this falsifies
-  drain-to-last (design doc D-UI1 ships coab's semantics meanwhile).
+- **Resolution: the original BUFFERS type-ahead — coab's drain-to-newest is
+  a transliteration/anti-key-repeat artifact, not original behavior.**
+  Bryan mashed forward repeatedly in the real game's 3D view and the party
+  committed multiple queued steps, not one. Fifth confirmed
+  coab-vs-original divergence (after monk hit dice, thief base_chance, the
+  spellCastCount stride, and the Str00 clamp).
+- **Consequence for D-UI1:** the engine's input queue keeps FIFO type-ahead
+  for movement (per the design doc, the queue read is a single function —
+  flip it off coab's drain semantics). This coexists with the *documented*
+  pagination-release queue-clear (`seg041.cs:211`, wired in the M2 step-5
+  stale-Enter fix): that clear is a specific, sourced behavior at page
+  release, not a general drain policy.
+- **Cross-reference:** `docs/design/renderer-ui-shell.md` §1.5, §1.11
+  item 9 (found in the 2026-07-12 M2 adversarial review round).
 
 ### FD-18: Do Up/Down arrows move list-menu highlights?
 
@@ -506,10 +513,14 @@ stays the one place showing the complete open-hypothesis picture.
   doc's predicted sizes. Our real importer (`load_from_lookup` +
   `import_original`) parsed it clean on the first try: a 6-char party
   (MATHEW/MARK/TRAVIS/LEDERA/SHARA/PHILIPPE) at pos (7,13) area 2 (Tilverton).
-  - **Item 5 (Str00 range) PINNED to `0..=100`:** MATHEW decodes to
-    exceptional strength **100** (18/00); coab's `Math.Min(_,25)` clamp would
-    read 25. Our un-clamped decode is correct — confirms the design doc's
-    call and coab bug. Real-data proof, not a code guess.
+  - **Item 5 (Str00 range) PINNED to `0..=100` — and display-confirmed:**
+    MATHEW decodes to exceptional strength **100** (18/00); coab's
+    `Math.Min(_,25)` clamp would read 25. Bryan then loaded slot A in the
+    real game and the character sheet displays **STR 18(00)** — the exact
+    field-by-field-against-DOSBox's-display criterion this entry's
+    "settled by" clause demanded. Same screen also display-matched our
+    decode of LEVEL 5 / EXP 25000 / HP 49 / PALADIN / LAWFUL GOOD
+    (alignment byte 0 = LG). Fully closed.
   - **Item 2 (spell stride) corroborated:** all 6 records decode fully and
     sanely at stride 5; combined with the GBC-editor cross-check, effectively
     settled (a memorized-spell golden would fully close it).
