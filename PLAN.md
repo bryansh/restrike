@@ -250,8 +250,18 @@ Walk around Tilverton, looking right.
   redistributing the booklet — a D10 violation. The faithful behavior and the clean behavior
   coincide. QoL later per D4: a journal-log screen tracking *encountered entry numbers*
   (facts, mirroring the booklet's own checkboxes), and optionally letting a user point the
-  engine at their own transcription file the same way they supply game data. Implementation
-  is small; fold into an early M4 session.)*
+  engine at their own transcription file the same way they supply game data.
+  **CLOSED 2026-07-15 (M4 orchestrator audit) — no implementation was required.** The
+  entry pointer is not a coded feature at all: it arrives as ordinary script text through
+  PRINT (0x11), and the entry *number* is a literal inside the script's own strings.
+  Verified against real data on the committed circuit (`fixtures/tilverton-circuit.jsonl`,
+  `restrike walk --transcript`): the tavern chain prints the lead-in at tick 316 and the
+  entry number at tick 342, correctly, today — a behavior live since M2 step 8 unblocked
+  event text. Corroboration: coab (a full transliteration of the binary) contains **zero**
+  journal references, so there is no journal subsystem, screen, or opcode to reimplement.
+  "Pointer only, never text" therefore holds *by construction* — the booklet text is in no
+  data file, so the engine cannot show it. Only the QoL half (encountered-number log,
+  user-supplied transcription file) remains, deferred by design per D4.)*
 - [x] Character sheet + party screens in the faithful UI; same data visible in the inspector;
   save/load menu. *(step 6: `charsheet` (`playerDisplayFull`) verified against MATHEW's real
   reference capture; `screens` module Shell states for party-view/camp/magic/save-load/training/
