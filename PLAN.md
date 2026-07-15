@@ -239,15 +239,26 @@ Walk around Tilverton, looking right.
   *(`docs/design/save-formats.md` D-SAVE1–4: hand-encoded `ContainerHeader` + `postcard(SaveState)`,
   reject-not-migrate, `Engine::save`/`Engine::restore`, CI-enforced determinism + a committed
   golden `.rsav` hash. Save/load **menu UI** is separate, still open below.)*
-- [ ] Camp/rest (minus time effects), training hall/leveling, shops/money, journal entries.
-- [ ] Character sheet + party screens in the faithful UI; same data visible in the inspector;
-  save/load menu (the `.rsav` format above has no UI yet).
-- **Exit gate:** import a real mid-game save, walk around, transact in a shop, level up a
-  character with correct numbers, save/load our format round-trip stably. *(Status: the
-  headless import→walk→save/load-round-trip half is code-complete and tested against synthetic
-  fixtures; a real DOSBox save is the next session's precondition — see
-  `docs/design/save-formats.md`'s step-4 handoff for the exact procedure. Shop/level-up UI is
-  unbuilt.)*
+- [x] Camp/rest (minus time effects), training hall/leveling, shops/money. *(step 6: camp menu
+  `Save View Magic Rest Alter Fix Exit`; training hall — pack-correct `train_player` level-up
+  (fee/eligibility/HP/THAC0/spell-caps); shops — `CityShop` Buy with `ItemsValue` price
+  arithmetic against the 7-coin money model. Rest's spell-memorize commit and Magic's memorize/
+  scribe are M5 (Vancian) per FD-25; journal entries remain — they need a text-presentation
+  decision, noted as the one open M3 UI item.)*
+- [x] Character sheet + party screens in the faithful UI; same data visible in the inspector;
+  save/load menu. *(step 6: `charsheet` (`playerDisplayFull`) verified against MATHEW's real
+  reference capture; `screens` module Shell states for party-view/camp/magic/save-load/training/
+  shop; inspector live-engine pane shows each member's `SheetView`; save/load screen emits
+  host-fulfilled `SaveLoadRequest`s, slots ↔ `.rsav` via `saveload_fs`.)*
+- **Exit gate: PASSED** (2026-07-15, step 6 deliverable 6). The local-only, `GBX_DATA_DIR`-gated
+  `gbx_engine::demo::m3_exit_gate` imports GOG's bundled slot-A save → walks Tilverton
+  (7,13)→(5,13) → enters a shop and buys an item (MATHEW, inventory 0→1, weight 300→310) →
+  trains an eligible character with pack-correct numbers (MATHEW paladin L5→L6, HP 49→62; no
+  bundled member has natural XP, so a clearly-marked dev-only hook grants exactly the L5→L6
+  threshold 45001 — the *training numbers* stay pack-correct) → `Engine::save` →
+  `Engine::restore` → `Engine::save` is **byte-identical (state-hash equality holds)** and the
+  trained level survives the round trip. One reproducible command:
+  `GBX_DATA_DIR=~/goldbox-data/cotab cargo test -p gbx-engine -- --nocapture m3_exit_gate`.
 
 ### M4 — First blood (4–8 weekends) — the bulk
 - **H3 first:** bit-exact PRNG + seed control on both sides.

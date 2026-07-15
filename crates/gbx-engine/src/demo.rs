@@ -516,3 +516,187 @@ fn four_facings_at_spawn() {
         );
     }
 }
+
+// --- M3 step 6 deliverable 6: the exit-gate demo ---
+
+/// The M3 exit gate (local-only, `GBX_DATA_DIR`): import GOG's bundled slot-A
+/// save → walk a few squares in Tilverton → enter a shop and buy an item →
+/// train an XP-eligible character with pack-correct numbers → `Engine::save`
+/// → `Engine::restore` → assert the save round-trips byte-identically (the
+/// state-hash equality). Prints a step-by-step transcript.
+///
+/// One reproducible command:
+/// `GBX_DATA_DIR=~/goldbox-data/cotab cargo test -p gbx-engine \
+///   -- --nocapture m3_exit_gate`
+#[test]
+fn m3_exit_gate() {
+    use crate::engine::Engine;
+    use crate::input::{ExtKey, InputEvent};
+    use crate::shell::Shell;
+    use crate::shop::{Shop, ShopItem};
+    use sha2::{Digest, Sha256};
+
+    let Some(root) = std::env::var_os("GBX_DATA_DIR") else {
+        eprintln!("SKIPPED: M3 exit gate needs GBX_DATA_DIR (m3_exit_gate)");
+        return;
+    };
+    let root = std::path::Path::new(&root);
+    let data = load_dir(root).expect("GBX_DATA_DIR must be readable");
+
+    // --- Step 1: import the bundled slot-A save ---
+    let save_dir = root.join("SAVE");
+    let saves = load_dir(&save_dir).expect("GBX_DATA_DIR/SAVE must be readable");
+    let master = saves
+        .raw_file("SAVGAMA.DAT")
+        .expect("bundled SAVGAMA.DAT must exist");
+    let set = gbx_formats::save_orig::load_from_lookup(master, 'A', |n| saves.raw_file(n))
+        .expect("bundled slot-A save must parse");
+    let mut engine =
+        crate::import::import_original(&set, data.clone(), 0x5A1E_5A1E).expect("import succeeds");
+    eprintln!("== M3 EXIT GATE ==");
+    eprintln!(
+        "[1] imported slot-A: Tilverton at {:?}, {} members",
+        engine.state().pos,
+        engine.party().members.len()
+    );
+
+    /// Ticks to the world menu, feeding Enter on any gate that goes quiet so
+    /// real event text doesn't stall the walk (the M2 demo's pattern).
+    fn to_world_menu(engine: &mut Engine, input: &[InputEvent]) {
+        engine.tick(input);
+        let mut last = u64::MAX;
+        let mut quiet = 0u32;
+        for _ in 0..800 {
+            if matches!(engine.shell(), Shell::WorldMenu { .. }) {
+                return;
+            }
+            let feed: &[InputEvent] = if quiet >= 2 {
+                quiet = 0;
+                &[InputEvent::Enter]
+            } else {
+                &[]
+            };
+            let serial = engine.tick(feed).serial;
+            if serial == last {
+                quiet += 1;
+            } else {
+                quiet = 0;
+                last = serial;
+            }
+        }
+        assert!(
+            matches!(engine.shell(), Shell::WorldMenu { .. }),
+            "did not reach the world menu"
+        );
+    }
+
+    // --- Step 2: walk a few squares ---
+    to_world_menu(&mut engine, &[]);
+    let spawn = engine.state().pos;
+    // Turn around (face West) then step a couple of squares.
+    to_world_menu(&mut engine, &[InputEvent::Ext(ExtKey::Down)]);
+    to_world_menu(&mut engine, &[InputEvent::Ext(ExtKey::Up)]);
+    to_world_menu(&mut engine, &[InputEvent::Ext(ExtKey::Up)]);
+    let walked = engine.state().pos;
+    eprintln!("[2] walked {spawn:?} -> {walked:?}");
+    assert_ne!(walked, spawn, "the party moved");
+
+    // --- Step 3: enter a shop and buy an item ---
+    // Tilverton's arms shop stock (the real inventory comes from the ECL
+    // TREASURE opcode, M6 — see shop.rs; here it is host-supplied, D10-clean).
+    engine.state.selected_player = 0;
+    let buyer_name = engine.party().members[0].name.clone();
+    let items_before = engine.party().members[0].items.len();
+    let shop = Shop::new(
+        vec![
+            ShopItem::synthetic("Dagger", 2, 10),
+            ShopItem::synthetic("Long Sword", 10, 60),
+        ],
+        0x00,
+    );
+    engine.enter_shop(shop);
+    // Buy → pick the first item.
+    engine.tick(&[InputEvent::Char(b'b')]);
+    engine.tick(&[InputEvent::Enter]);
+    engine.tick(&[]);
+    let items_after = engine.party().members[0].items.len();
+    eprintln!(
+        "[3] {buyer_name} bought an item: inventory {items_before} -> {items_after}, weight {}",
+        engine.party().members[0].combat.weight
+    );
+    assert_eq!(items_after, items_before + 1, "an item was purchased");
+    // Leave the shop back to the walk loop: Esc closes the Buy list, then
+    // Exit from the shop menu returns to the world menu.
+    engine.tick(&[InputEvent::Escape]);
+    engine.tick(&[InputEvent::Char(b'e')]);
+    to_world_menu(&mut engine, &[]);
+
+    // --- Step 4: train an eligible character ---
+    // Probe the bundled six for a naturally XP-eligible member.
+    let natural = engine.party().members.iter().position(|m| {
+        !crate::training::trainable_classes(m, engine.rules(), crate::training::TRAINS_ALL_CLASSES)
+            .is_empty()
+    });
+    let trainee = match natural {
+        Some(i) => {
+            eprintln!("[4] member {i} is XP-eligible naturally");
+            i
+        }
+        None => {
+            // DEV-ONLY HOOK (clearly marked): no bundled member has enough XP
+            // (MATHEW the paladin is L5 with 25000 XP; L5->L6 needs 45001).
+            // Grant member 0 exactly the threshold so training proceeds — the
+            // *training numbers* below are still fully pack-correct.
+            let m = &mut engine.party.members[0];
+            let (class, level) = (
+                m.class_levels()[0].class,
+                m.class_levels()[0].level as usize,
+            );
+            let threshold =
+                gbx_rules::adnd1::progression::exp_threshold(engine.rules(), class, level)
+                    .expect("a trainable class has a threshold");
+            engine.party.members[0].exp = threshold;
+            eprintln!(
+                "[4] DEV-HOOK: granted member 0 the L{level}->L{} XP threshold ({threshold})",
+                level + 1
+            );
+            0
+        }
+    };
+    engine.state.selected_player = trainee as u8;
+    let level_before = engine.party().members[trainee].class_level;
+    let hp_before = engine.party().members[trainee].hit_point_max;
+    engine.open_training();
+    engine.tick(&[InputEvent::Char(b't')]); // Train
+    engine.tick(&[]);
+    let level_after = engine.party().members[trainee].class_level;
+    let hp_after = engine.party().members[trainee].hit_point_max;
+    eprintln!(
+        "[4] trained member {trainee}: levels {:?} -> {:?}, HP {hp_before} -> {hp_after}",
+        level_before, level_after
+    );
+    assert_ne!(level_before, level_after, "the trainee leveled up");
+    assert!(hp_after >= hp_before, "HP did not decrease");
+    engine.tick(&[InputEvent::Char(b'e')]); // leave training
+    to_world_menu(&mut engine, &[]);
+
+    // --- Step 5: save → restore → assert state-hash equality ---
+    let bytes1 = engine.save();
+    let hash1 = Sha256::digest(&bytes1);
+    let restored = Engine::restore(&bytes1, data).expect("restore succeeds");
+    let bytes2 = restored.save();
+    let hash2 = Sha256::digest(&bytes2);
+    eprintln!("[5] save {} bytes, hash {:x}", bytes1.len(), hash1);
+    assert_eq!(
+        hash1, hash2,
+        "save->restore->save state hash must be identical"
+    );
+    // The trained level survived the round trip.
+    assert_eq!(
+        restored.party().members[trainee].class_level,
+        level_after,
+        "the trained level survives save/restore"
+    );
+    eprintln!("[5] state-hash equality holds; trained level survives restore");
+    eprintln!("== EXIT GATE PASSED ==");
+}

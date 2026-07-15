@@ -366,6 +366,12 @@ impl Engine {
         &self.slots
     }
 
+    /// The loaded rules pack (M3 step 6) — for a frontend/demo that drives the
+    /// party-facing logic (training eligibility, prices) outside the tick loop.
+    pub fn rules(&self) -> &RuleSet {
+        &self.rules
+    }
+
     /// Opens the training-hall screen for the current party (M3 step 6
     /// deliverable 4) — a frontend/demo entry point for stepping onto a town
     /// training-hall tile (the ECL trigger that would auto-open it is M6).
