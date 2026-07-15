@@ -272,11 +272,11 @@ Walk around Tilverton, looking right.
   adversarially re-derived: the binary's `RandNext` is the Borland TP LCG `state*0x08088405+1`,
   state dword `DS:0x47F0`, integer `Random(N)` = `hi16 mod N` (TP 5.x — the review refuted a
   scaled-high-word v1 claim), `Randomize` = DOS clock, called once at boot; no overlay RNG
-  copies (29+5 call sites, 1:1 with coab's). Door: `docs/design/oracle-rig.md` **v2** — D-OR1
+  copies (29+5 call sites, 1:1 with coab's). Door: `docs/design/oracle-rig.md` **v3** (two adversarial rounds) — D-OR1
   `gbx-prng` + draw-parity contract + `.rsav` v2 bump, D-OR2 pinned dosbox-staging trace-hook
   branch as tier-1 oracle (neither stock debugger is scriptable), D-OR3 canonical `.gbxtrace`
-  in `gbx-oracle`, D-OR4 unicorn-emulated acceptance + one live session, D-OR5 H4 = rng-stream
-  + endstate equality (supersedes §3 H4's per-action-oracle wording). Docket FD-26/27 updated,
+  in `gbx-oracle`, D-OR4 purpose-built-8086-stepper acceptance + one live session, D-OR5 H4 = rng-stream (gate-carrying;
+  QuickFight-first bootstrap) + RE-gated endstate checkpoints (supersedes §3 H4's wording). Docket FD-26/27 updated,
   FD-28 filed.)*
 - Combat map generation from encounter data; combatant placement.
 - Initiative, action economy, movement costs, facing/rear attacks; THAC0 melee + ranged with

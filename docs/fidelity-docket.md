@@ -658,9 +658,10 @@ stays the one place showing the complete open-hypothesis picture.
   census — 29 GAME.OVR + 5 START.EXE far calls to the wrapper, matching
   coab's 29 `seg051.Random(` sites 1:1; hash pin `[0xa55a,0xa5ee)` in
   `docs/design/oracle-rig.md` §1.
-- **Settled by:** D-OR4 part A (unicorn-engine execution of the pinned
-  routine vs `gbx-prng`, 10k (K,N) pairs) + part B (one live staging-hook
-  session with chain-continuity checks).
+- **Settled by:** D-OR4 part A (a purpose-built 8086 stepper executing the
+  pinned routine bytes vs `gbx-prng`, 10k (K,N) pairs — round 2 replaced
+  v2's unicorn-engine pick, which does not build on this toolchain) +
+  part B (one live staging-hook session with chain-continuity checks).
 - **Cross-reference:** `docs/design/oracle-rig.md` §1/D-OR1/D-OR4.
 
 ### FD-27: Seed lifecycle — answered statically: one boot-time `Randomize`, no overlay RNG copies

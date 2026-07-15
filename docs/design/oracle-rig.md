@@ -1,11 +1,18 @@
 # The M4 oracle rig: bit-exact PRNG (H3) and combat-trace equality (H4)
 
-Status: **v2** (Fable-authored 2026-07-15; v1 → three-lens adversarial round →
-v2 same day). The round refuted two v1 claims outright (integer `Random(N)`
-semantics; the cs-base constant), demoted both of v1's oracle-host picks, and
-restructured the H3 acceptance test and the H4 definition. Findings and their
-dispositions are inline. A bounded round 2 on the *new* surface (D-OR2's
-staging hook, D-OR4's emulated tier, D-OR5) is warranted before build.
+Status: **v3** (Fable-authored 2026-07-15; v1 → three-lens round → v2 →
+bounded round 2 on the new surface → v3 same day). Round 1 refuted two v1
+claims (integer `Random(N)` semantics; the cs-base constant) and demoted both
+oracle-host picks. Round 2 killed v2's `unicorn-engine` tier (does not build
+on this machine's toolchain — verified empirically — and its dev-dep would
+redden the tri-OS CI) and v2's D-OR5(b) as written (combatants are
+heap-pointer-chased, not pinned addresses — the watch was circular with the
+RE it validates). v3's replacements are reviewer-designed and
+source-verified: a purpose-built 8086 stepper (D-OR4A), a two-trigger
+offset-keyed hook (D-OR2), and a projection-based, RE-gated endstate
+checkpoint with a verified `combat_round` trigger and a QuickFight-first
+bootstrap (D-OR5). Review closes here; the step-1/step-2 builds validate
+empirically from this point.
 
 ## 0. What M4 needs from this door
 
@@ -98,23 +105,36 @@ loud-fails on mismatch (another game version needs re-pinning, not trust).
 ### D-OR2 — Oracle hosts: a pinned dosbox-staging trace hook is tier 1 (v1's picks demoted)
 
 - **Tier 1 (ground truth): a pinned local branch of dosbox-staging 0.82.2**
-  (the emulator this project already uses) carrying a ~30-line trace hook in
-  the normal-core dispatch: when CS:IP matches the pinned RandNext location
-  **and the prologue bytes match** (self-locating; robust to load base and,
-  if it ever mattered, overlay swaps), append `{before, after, ss_sp_words}`
-  for `DS:0x47F0` as JSONL to an env-var path; a second env var performs a
-  one-shot seed poke at first hit; a third hooks `Randomize` and marks the
-  trace if it ever fires post-boot. `AUTOTYPE` scripts the fixed input;
-  `core=normal` + fixed cycles pinned in the rig conf. The branch lives in
-  `~/src/goldbox-refs` beside the coab fork (never in our repo; the hook
-  references only our own pinned offsets — D10-clean). *Why the change:*
-  review established that **neither** DOSBox-X's nor staging's debugger is
-  scriptable — both inherit the same interactive TUI (`debug.cpp`); every
-  breakpoint hit is a manual curses stop (plus an open macOS break-in bug in
-  DOSBox-X). v1's "DOSBox-X ships machinery we can drive" was false; the
-  tiny owned patch is less total work than puppeting a TUI and is
-  deterministic and headless. DOSBox-X (Homebrew, debugger enabled) is kept
-  only as a *manual inspection* aide (`MEMFIND`, one-off memory reads).
+  (the emulator this project already uses) carrying a small trace hook in
+  the normal-core per-instruction dispatch (`core_normal.cpp`'s
+  fetch/decode/execute loop — verified a true per-instruction interpreter at
+  0.82.2, and `core=auto` already picks it for real-mode games, so forcing
+  `core=normal` costs nothing). **Two trigger points, keyed on the
+  load-base-invariant in-segment offset + a byte signature at CS:IP** (round
+  2 corrected v2 on both counts — one point cannot observe both `before` and
+  `after`, and an absolute CS:IP compare breaks under DOS relocation):
+  `reg_ip == 0x1639` + RandNext prologue bytes → log `before = [DS:0x47F0]`
+  and `ss_sp_words`; `reg_ip == 0x166E` + the `ret` signature → log
+  `after = [DS:0x47F0]`. (Capturing `after` independently is what makes the
+  chain-continuity check non-trivial; computing it hook-side would
+  re-implement the LCG and forfeit independence.) JSONL to an env-var path;
+  a second env var performs a one-shot seed poke at first entry-hit; a third
+  trigger on `Randomize` (`reg_ip == 0x1671`) marks the trace if it fires
+  post-boot. DS is trustworthy at these offsets: a TP program's DS is the
+  fixed global data segment and RandNext itself depends on that invariant.
+  `AUTOTYPE` (verified present in 0.82: `-w` initial wait, `-p` pace)
+  scripts the fixed input — it is open-loop/timing-based, so a dropped
+  keystroke is possible; chain-continuity + the Randomize flag turn a bad
+  run into a *detected re-run*, never silent corruption. Fixed cycles pinned
+  in the rig conf. The branch lives in `~/src/goldbox-refs` beside the coab
+  fork (never in our repo; the hook references only our own pinned offsets —
+  D10-clean). Bring-up note: a local source build needs `meson`, `ninja`,
+  `pkg-config` (+ the formula's dep set) installed first — a few hours, once.
+  *Why not a stock debugger:* round 1 established **neither** DOSBox-X's nor
+  staging's debugger is scriptable — both inherit the same interactive TUI
+  (`debug.cpp`); every breakpoint hit is a manual curses stop (plus an open
+  macOS break-in bug in DOSBox-X). DOSBox-X (Homebrew, debugger enabled) is
+  kept only as a *manual inspection* aide (`MEMFIND`, one-off memory reads).
 - **Tier 2 (contingent, was "cheap"):** an instrumented coab fork emits
   action-level structural traces — but coab is a WinForms .NET 4.5.2 app;
   on this machine (darwin/arm64, no mono/dotnet, Mono WinForms effectively
@@ -169,12 +189,25 @@ target (training hall) isn't even reachable from the bundled save, which has
 no naturally trainable member.)*
 
 - **Part A (hermetic, closes stream + return-path equality):** a local-tier
-  Rust test maps the decompressed image under a CPU emulator library
-  (`unicorn-engine` crate, works on darwin/arm64), seeds `DS:0x47F0` = K,
-  calls the integer wrapper at `0x8F7:0x15EA` with chosen N, and compares
-  `(state', AX)` against `gbx-prng` — for ten thousand (K, N) pairs, no
-  boot, no copy protection, no wall clock. Closes FD-26's return path and
-  the stream math. Gated on `GBX_DATA_DIR` like every real-data test.
+  Rust test executes the **actual RNG-cluster bytes from the user's
+  decompressed image** under a purpose-built minimal real-mode 8086 stepper
+  (the cluster is ~150 bytes over ~20 distinct opcodes: `mov`/`xchg`/`mul`/
+  `div`/`shl`/`add`/`adc`/`jz`/`call`/`ret(f)`), seeds the emulated
+  `DS:0x47F0` = K, calls the integer wrapper at `0x8F7:0x15EA` with chosen
+  N, and compares `(state', AX)` against `gbx-prng` — for ten thousand
+  (K, N) pairs, no boot, no copy protection, no wall clock. **Independence
+  rule:** the stepper is written to *generic x86 semantics* (`div` =
+  DX:AX ÷ BX → AX quotient / DX remainder, `#DE` on overflow; never
+  "shaped" to the RNG), so it still catches a wrong multiplier, mod-vs-scale
+  errors, or a bad `Random(0)` short-circuit. Pure Rust, zero deps,
+  compiles on every CI leg and wasm-clean; runtime-gated on `GBX_DATA_DIR`
+  like every real-data test. *(Round 2 killed v2's `unicorn-engine` pick
+  empirically: the crate's vendored QEMU does not compile under this
+  machine's toolchain — Apple clang 21 / SDK 26, latest crate version — and
+  as a dev-dependency it would have been compiled by the tri-OS CI `test`
+  job regardless of the runtime gate, reddening at least the arm64 macOS
+  leg. The reviewer's recommended stepper is strictly cheaper and keeps the
+  independent-execution value.)*
 - **Part B (live, closes the environment):** **one** session under the
   D-OR2 staging hook: boot → past copy protection → poke seed → a scripted
   roll-heavy window (character-creation stat **rerolls**: fixed keystrokes,
@@ -187,28 +220,75 @@ no naturally trainable member.)*
   predict the full stream and results.
 - H3 closes on A + B together.
 
-### D-OR5 — What H4 "traces match" means (new in v2; v1's definition was circular)
+### D-OR5 — What H4 "traces match" means (v3: reweighted after round 2 broke (b)'s premise)
 
 v1 defined H4 as action-profile equality — an artifact no permitted tier
-produces (tier 1 emits rng events; tier 2 was barred from closing dockets).
-Redefined as a three-part composite:
+produces. v2 split it into rng-stream + endstate halves, but specified (b)
+as "pinned combatant-struct memory dumps," which round 2 refuted: in the
+original, combatants are a **heap linked list** (coab `Gbl.cs` `TeamList`
+with its `player_next_ptr` annotation; monsters `ShallowClone`d per
+encounter, up to 63), initiative/turn state hangs off a *second*
+pointer-chased `Action` struct with **no** `[DataOffset]`s at all, and the
+only fixed-address combat array (`CombatMap`, `seg600:66BD`) holds grid
+geometry only. There is no address to pin; a watch requires the very combat
+RE it was meant to validate. GBC doesn't rescue it: GBC *signature-scans*
+DOSBox memory for the character block each session — it corroborates
+**intra-record field layout** (as coab's `[DataOffset]`s already do), never
+struct addresses. v3:
 
-- **(a) Ground truth, gate-closing:** rng-profile equality vs the tier-1
-  hook — from a poked seed through a fixed input script, over N seeds × M
-  encounters, on the D-OR3 equality surface with chain continuity.
-- **(b) Endstate equality, gate-closing:** the tier-1 hook additionally
-  dumps pinned combatant-struct memory (tier-3 GBC offsets, verified against
-  coab's `[DataOffset]`s) at defined checkpoints — round boundaries and
-  fight end. Our engine's state at the same checkpoints must match
-  field-for-field. This is what makes action *semantics* falsifiable against
-  ground truth without oracle action events. Promoted from v1's §5
-  "only if needed" to half of the H4 definition.
-- **(c) Structural, advisory:** our action profile vs a tier-2 coab-fork
-  trace, if tier 2 is ever stood up. Bisection aid; never closes a docket.
+- **(a) Ground truth, gate-closing, carries H4's weight:** rng-profile
+  equality vs the tier-1 hook on the D-OR3 equality surface with chain
+  continuity, over ≥10 seeds × M encounters. Credited properly now:
+  **draw-order parity settles FD-2 by itself** — the original *consumes*
+  initiative ordering (`CalculateInitiative`'s d6+DexReact rolls, then
+  `FindNextCombatant`'s per-pick d100 re-rolls against `delay`,
+  `ovr009.cs:59-99`) and never persists it, so two orderings can share an
+  endstate; only the draw stream distinguishes them.
+  **Bootstrap order (mandatory — a fixed input script through combat
+  otherwise presupposes the parity it validates):**
+  1. *Phase 0 — observe-only, all-AI:* both sides on QuickFight (coab
+     `quick_fight` @ Player+0x198, `SetPlayerQuickFight`/`PlayerQuickFight`,
+     `ovr009.cs:707`/`ovr010.cs:8`) — the only scripted input is the
+     keystroke that triggers the fight, so `AUTOTYPE` cannot desync.
+     Capture oracle rng-stream (+ checkpoints when (b) exists).
+  2. *Phase 1 — replay to parity:* implement combat until our headless
+     replay matches Phase-0 draw order for ≥10 seeds. AI-decision parity
+     closes here.
+  3. *Phase 2 — scripted player turns:* only after Phase 1 holds; parity
+     guarantees AI-turn shape, so fixed menu scripts stay synced.
+- **(b) Endstate checkpoints — RE-gated, promoted to gate-closing only when
+  its walk is pinned and validated:** a **structure-walk snapshot**, not an
+  address dump: locate the `TeamList` head global, walk the
+  `player_next_ptr` chain, decode each node per the (known) 0x1A6 record
+  layout plus the (unpinned, needs live RE) `Action` struct via the pointer
+  at +0x18d. The walk's prerequisites — list-head address, in-memory node
+  layout vs the on-disk record, `Action` layout — are their own RE
+  deliverables, sequenced *before* (b) can close anything. **Checkpoint
+  trigger (verified fixed address):** a hook watch on the round counter
+  `combat_round` = `byte_1D8B7` (data-segment global, coab `Gbl.cs:382`;
+  incremented in `BattleRoundChecks`, `ovr009.cs:366`) → snapshot per round;
+  fallback until the walk is pinned: fight-end only. **Equality is over a
+  declared, versioned checkpoint projection** (the D-OR3 discipline; v2's
+  "field-for-field" was undefined across the representation gap — our party
+  model holds opaque cells and reconstructed sets, and has no runtime combat
+  struct yet): `{combatant_id, hp_current, hp_max, status, grid_pos,
+  attacks_left, ac}` + a per-round **turn-order list** (acted combatant ids
+  with rolled delays) so ordering is checkpoint-visible too.
+- **(c) Structural, advisory:** unchanged — our action profile vs a tier-2
+  coab-fork trace, if ever stood up. Never closes a docket.
+
+**Settling FD-1..FD-4 concretely:** FD-2 → (a) draw order (above). FD-3 →
+(b) round-start `attacks_left` + (a) draw count. FD-1 and FD-4 → need
+**round-granular** checkpoints *plus curated minimal encounters* (one
+attacker, one target) so an HP delta or status transition is attributable
+to a specific draw — fight-end endstate cannot attribute either. The M4
+exit-gate encounter set must include these curated fights.
 
 PLAN §3's H4 wording ("instrument the oracle to emit per-action JSON
-traces") predates this door and is superseded by (a)+(b); the M4 exit-gate
-"traces match the oracle exactly" = (a)+(b) for ≥10 seeds. PLAN annotated.
+traces") predates this door and is superseded; the M4 exit-gate "traces
+match the oracle exactly" = (a) for ≥10 seeds, plus (b) at whatever
+checkpoint granularity is pinned by then (fight-end minimum). PLAN
+annotated.
 
 ## 3. What this absorbs from the deferred human-validation list
 
@@ -225,18 +305,23 @@ hook branch or DOSBox-X manual mode both support).
    re-derivation local-tier test; the audited per-site migration checklist
    (incl. dither → position-hash, FD-28 filed); `SAVE_FORMAT_VERSION` 2 +
    golden recompute; seed narrows to u32.
-2. **D-OR4 part A** (same or next session): the unicorn-engine local-tier
-   acceptance test, 10k (K, N) pairs.
-3. **The staging hook branch + D-OR4 part B** (Bryan + Fable): ~30-line
-   patch on a pinned 0.82.2 branch in `~/src/goldbox-refs`; one live
-   session; absorbs §3's human items opportunistically.
+2. **D-OR4 part A** (same or next session): the purpose-built 8086 stepper
+   + acceptance test, 10k (K, N) pairs. Pure Rust, generic-semantics rule
+   per D-OR4A.
+3. **The staging hook branch + D-OR4 part B** (Bryan + Fable): the
+   two-trigger patch on a pinned 0.82.2 branch in `~/src/goldbox-refs`
+   (bring-up: install meson/ninja/pkg-config + formula deps first); one
+   live session; absorbs §3's human items opportunistically.
 4. **Trace plumbing** (session): `gbx-oracle` (format types, canonical
    writer, projection comparator, replay driver), engine sink, CLI wrapper,
    synthetic goldens in CI.
-5. **Combat systems** (sessions): map gen, initiative, action economy, … —
-   each landing with its action-profile events and, where GBC/coab offsets
-   allow, its D-OR5b endstate checkpoint fields, keeping H4 continuously
-   checkable.
+5. **Combat systems** (sessions), in D-OR5(a)'s bootstrap order: Phase-0
+   observe-only QuickFight captures first, then implement-to-parity, then
+   scripted player turns — each system landing with its action-profile
+   events. The (b) structure-walk RE (TeamList head, in-memory node layout,
+   `Action` struct) proceeds alongside; the `combat_round` watch +
+   fight-end checkpoints come first, round-granular + curated 1v1
+   encounters (FD-1/FD-4) once the walk is pinned.
 
 ## 5. Open questions → docket
 
@@ -249,6 +334,10 @@ hook branch or DOSBox-X manual mode both support).
   all (coab uses a separate time-seeded RNG for it — unfaithful either way)?
   Settled by a tier-1 trace across a fade; until then our dither is a
   deterministic position hash and dither pixels stay non-comparable.
-- Combat-overlay memory map for D-OR5b checkpoints: built incrementally per
-  combat system from coab `[DataOffset]`s + GBC maps, verified by the first
-  endstate comparisons.
+- **The D-OR5(b) structure-walk prerequisites** (each its own RE
+  deliverable, tracked in the docket when M4's combat work opens them): the
+  `TeamList` head global's data-segment address; the in-memory combatant
+  node layout (the 0x1A6 record fields are known — the runtime pointer
+  fields and any in-combat-only cells are not); the `Action` struct layout
+  (coab reconstructs it without `[DataOffset]`s — needs live RE against the
+  hook). GBC corroborates intra-record field layout only — never addresses.
