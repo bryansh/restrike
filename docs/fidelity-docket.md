@@ -719,16 +719,32 @@ stays the one place showing the complete open-hypothesis picture.
   its `host.rs:171` trait signature return `u16` and never truncate. Should
   our `roll_dice` truncate to a byte to match?
 - **Evidence / reachability:** truncation is only observable when a single
-  `roll_dice(size, count)` total exceeds 255, i.e. `count * size > 255`. No
-  shipped call site comes close: door bash uses `count == 1`
-  (`ovr015.cs:180-215`), creation stats use `roll_dice(6, 3)`
-  (`ovr018.cs:675-683`, max 18), training HP uses one class die. So today the
-  `u16` return and coab's `(byte)` return are bit-identical for every reachable
-  input. Changing the signature to `u8` would churn the `VmHost` trait and all
-  impls for no behavioral gain yet.
-- **Settled by:** whenever a combat call site is found (or added) that can sum
-  `> 255` in one `roll_dice`, decide then whether to narrow the return to a
-  byte; until then the divergence is documented and inert.
+  `roll_dice(size, count)` total exceeds 255, i.e. `count * size > 255`.
+  A full census of coab's call sites (2026-07-15 orchestrator audit,
+  `grep -rhoE "roll_dice\([^)]*\)" engine/ Classes/`) splits them in two:
+  - **Literal-argument sites — all provably inert.** The largest single-call
+    maximum across every literal site is **100** (`roll_dice(100, 1)`, 26
+    sites); the largest *multi-die* literals are `roll_dice(4, 5)` = 20,
+    `roll_dice(8, 3)` = 24, and `roll_dice(6, 3)` = 18 (`ovr018.cs:675-683`,
+    creation stats). Door bash uses `count == 1` (`ovr015.cs:180-215`).
+    Nothing literal comes within 2× of 255.
+  - **Data-driven sites — bounded by data NOT yet enumerated** (so "inert" is
+    *likely* but **not proven** for these): `roll_dice(v5.dice_size,
+    v5.dice_count)` (weapon/monster damage dice), `roll_dice(unk_16B32[_class],
+    var_5)` (class hit die × count — a multi-level grant would raise `count`),
+    `roll_dice(unk_1A8C4[class_idx], unk_1A8C3[class_idx])` (monster hit dice),
+    `roll_dice(6, ovr025.spellMaxTargetCount(gbl.spell_id))`, and
+    `roll_dice(nearTargets.Count, 1)` / `roll_dice(gbl.area2_ptr.party_size, 1)`
+    (small by construction).
+  So the `u16` return and coab's `(byte)` return are bit-identical for every
+  input reachable *today*, and the divergence is inert at every call site our
+  engine currently has. Changing the signature to `u8` would churn the
+  `VmHost` trait and all impls for no behavioral gain yet.
+- **Settled by:** the M4/M5 sessions that land the data-driven sites — when
+  monster/weapon damage dice and HP dice are wired, check their real data
+  extents against `count * size > 255` (the `MON*` records are the same read
+  FD-20 needs) and decide then whether to narrow the return to a byte. Until
+  then the divergence is documented and inert-as-far-as-checked.
 - **Cross-reference:** `docs/design/oracle-rig.md` §6 (migration ledger),
   `crates/gbx-engine/src/vmhost.rs` `roll_dice`.
 

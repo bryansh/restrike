@@ -394,9 +394,13 @@ a mechanical rename.
 
 **The `roll_dice` byte-truncation — docketed, not fixed (FD-29).** coab returns
 `(byte)roll_total` (`ovr024.cs:595`, the original's `AL` return); our `roll_dice`
-returns `u16` and never truncates. No shipped call site sums `> 255` in one
-`roll_dice`, so the two are bit-identical for every reachable input; narrowing
-the return to `u8` would churn the `VmHost` trait for no behavioral gain yet.
+returns `u16` and never truncates. Every **literal**-argument call site in coab
+is provably inert (largest single-call max is 100, `roll_dice(100, 1)`; largest
+multi-die literal is `roll_dice(8, 3)` = 24 — full census in FD-29), so the two
+are bit-identical for every input reachable today; narrowing the return to `u8`
+would churn the `VmHost` trait for no behavioral gain yet. The **data-driven**
+sites (weapon/monster damage dice, class hit dice) are bounded by data not yet
+enumerated — likely inert, not proven, and re-checked when those sites land.
 Filed as **FD-29**.
 
 **Creation-roll draw ORDER — docketed, not touched (FD-30).** The original
