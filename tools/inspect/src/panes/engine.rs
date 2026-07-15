@@ -272,6 +272,9 @@ impl EnginePaneState {
         ));
 
         ui.separator();
+        show_party(ui, engine);
+
+        ui.separator();
         ui.heading("VM memory flags / resident assets");
         let vm = engine.vm_memory();
         ui.monospace(format!(
@@ -440,6 +443,69 @@ impl EnginePaneState {
                             ui.end_row();
                         }
                     });
+            });
+    }
+}
+
+/// The party / character-sheet panel (M3 step 6 deliverable 1: "same data
+/// visible in the inspector"). Renders each imported party member's computed
+/// [`gbx_engine::charsheet::SheetView`] — the identical presentation snapshot
+/// the faithful character-sheet screen draws — in a collapsing section, so a
+/// developer can read every derived number (AC/THAC0/damage/encumbrance/
+/// movement, the `18(00)` STR, the slash-joined level, money) without booting
+/// the framebuffer view.
+fn show_party(ui: &mut egui::Ui, engine: &Engine) {
+    let party = engine.party();
+    ui.heading(format!("Party ({} members)", party.members.len()));
+    if party.members.is_empty() {
+        ui.label("(no party — import an original save or start a new game)");
+        return;
+    }
+    for (i, member) in party.members.iter().enumerate() {
+        let view = gbx_engine::charsheet::sheet_view(member);
+        let header = format!("{}. {} — {} {}", i + 1, view.name, view.class, view.level);
+        egui::CollapsingHeader::new(header)
+            .id_salt(("party_member", i))
+            .show(ui, |ui| {
+                ui.monospace(&view.identity);
+                ui.monospace(format!("Alignment: {}", view.alignment));
+                let stats: Vec<String> = view
+                    .stats
+                    .iter()
+                    .map(|s| {
+                        format!(
+                            "{} {}{}",
+                            s.label,
+                            s.value,
+                            s.exceptional.as_deref().unwrap_or("")
+                        )
+                    })
+                    .collect();
+                ui.monospace(stats.join("  "));
+                ui.monospace(format!(
+                    "Exp {}   HP {}/{}",
+                    view.exp, view.hp_current, view.hp_max
+                ));
+                ui.monospace(format!(
+                    "AC {}   THAC0 {}   Damage {}",
+                    view.ac, view.thac0, view.damage
+                ));
+                ui.monospace(format!(
+                    "Encumbrance {}   Movement {}   Status {}",
+                    view.encumbrance, view.movement, view.status
+                ));
+                if !view.money.is_empty() {
+                    let money: Vec<String> = view
+                        .money
+                        .iter()
+                        .map(|c| format!("{} {}", c.name, c.amount))
+                        .collect();
+                    ui.monospace(format!("Money: {}", money.join(", ")));
+                }
+                widgets::copy_text_button(ui, "Copy JSON", || {
+                    serde_json::to_string_pretty(&view)
+                        .unwrap_or_else(|e| format!("<serialize error: {e}>"))
+                });
             });
     }
 }

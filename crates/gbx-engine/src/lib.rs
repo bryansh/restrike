@@ -13,6 +13,7 @@
 //! rendering is step 5 (the viewport stays black), frontends are step 6.
 
 pub mod boot;
+pub mod charsheet;
 pub mod corridor;
 pub mod draw;
 pub mod engine;

@@ -335,6 +335,78 @@ fn boot_scene_frames() {
     eprintln!("boot halts: {:?}", engine.vm_memory().halts);
 }
 
+/// M3 step 6 deliverable 1's acceptance check (local-only, `GBX_DATA_DIR`):
+/// import GOG's bundled slot-A save and render MATHEW's real character sheet,
+/// asserting every value on `charsheet-mathew-slotA.png` is reproduced *from
+/// the real save bytes* (the synthetic-fixture test in `charsheet.rs` proves
+/// the transforms; this proves they land on the genuine record). Dumps the
+/// rendered sheet as a `.ppm` outside the repo (D10). Loud-skips without data.
+///
+/// Run: `GBX_DATA_DIR=~/goldbox-data/cotab cargo test -p gbx-engine \
+///   -- --nocapture render_mathews_real_character_sheet`
+#[test]
+fn render_mathews_real_character_sheet() {
+    use crate::charsheet::{render_sheet, sheet_view};
+
+    let Some(root) = std::env::var_os("GBX_DATA_DIR") else {
+        eprintln!("SKIPPED: local tier needs GBX_DATA_DIR (render_mathews_real_character_sheet)");
+        return;
+    };
+    let root = std::path::Path::new(&root);
+    let data = load_dir(root).expect("GBX_DATA_DIR must be readable");
+
+    // GOG's bundled save lives under SAVE/ (FD-23).
+    let save_dir = root.join("SAVE");
+    let saves = load_dir(&save_dir).expect("GBX_DATA_DIR/SAVE must be readable");
+    let master_bytes = saves
+        .raw_file("SAVGAMA.DAT")
+        .expect("GBX_DATA_DIR/SAVE/SAVGAMA.DAT must exist");
+    let set =
+        gbx_formats::save_orig::load_from_lookup(master_bytes, 'A', |name| saves.raw_file(name))
+            .expect("the bundled slot-A save set must parse");
+
+    let engine = crate::import::import_original(&set, data, 0x5A1E_5A1E)
+        .expect("importing the bundled save succeeds");
+
+    let mathew = &engine.party().members[0];
+    let view = sheet_view(mathew);
+    eprintln!("MATHEW sheet: {view:#?}");
+
+    // The reference-capture acceptance values (charsheet-mathew-slotA.png).
+    assert_eq!(view.name, "MATHEW");
+    assert_eq!(view.identity, "Male Human Age 20");
+    assert_eq!(view.alignment, "Lawful Good");
+    assert_eq!(view.class, "Paladin");
+    assert_eq!(view.stats[0].value, "18");
+    assert_eq!(view.stats[0].exceptional.as_deref(), Some("(00)"));
+    assert_eq!(view.level, "5");
+    assert_eq!(view.exp, 25000);
+    assert_eq!(view.hp_current, 49);
+    assert_eq!(view.ac, 7);
+    assert_eq!(view.thac0, 13);
+    assert_eq!(view.encumbrance, 300);
+    assert_eq!(view.movement, 12);
+    assert_eq!(view.status, "Okay");
+    assert_eq!(view.damage, "1d2+6");
+    assert_eq!(
+        view.money,
+        vec![crate::charsheet::CoinRow {
+            name: "Platinum".into(),
+            amount: 300
+        }]
+    );
+
+    // Render it through the real font/symbol pipeline and dump the frame.
+    let mut fb = Framebuffer::new();
+    render_sheet(&mut fb, engine.font(), engine.symbol_sets(), &view);
+    let out = std::env::var_os("RESTRIKE_M2_WALK_DEMO_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("restrike-charsheet-mathew.ppm");
+    write_ppm(&fb, &out);
+    eprintln!("MATHEW character sheet rendered to {}", out.display());
+}
+
 /// M2 step 5's task deliverable 5: dumps the Tilverton spawn square's real
 /// 3D corridor viewport at all four facings (turning right after each
 /// capture), through the real `EclMachine`, `LoadWalldef`-loaded wallsets,
