@@ -10,7 +10,7 @@
 //! only in where the state comes from (a decoded `SaveState` vs. a decoded
 //! original save).
 
-use crate::engine::{AssembledEngine, Engine, GAME_AREA};
+use crate::engine::{AssembledEngine, Engine, DEFAULT_GEO_BLOCK, GAME_AREA, INITIAL_ECL_BLOCK};
 use crate::movement::{Facing, GameClock};
 use crate::party::{character_from_record, Party};
 use crate::rng::EngineRng;
@@ -46,6 +46,20 @@ impl From<LoadEclError> for ImportError {
 impl From<LoadGeoError> for ImportError {
     fn from(e: LoadGeoError) -> Self {
         ImportError::Geo(e)
+    }
+}
+
+/// The §1.6 "unset → area default" sentinel: `LastEclBlockId` /
+/// `current_3DMap_block_id` are `0` in a never-chained save (FD-23 — GOG's
+/// bundled slot-A save carries `0` for both), which the walk loop reads as
+/// "use the area's boot block" (`engine.rs`'s `LastEclBlockId == 0 ->
+/// EclBlockId = 1` note). A nonzero id (a chained/visited save) is used
+/// verbatim.
+fn resolve_block(stored: u8, default: u8) -> u8 {
+    if stored == 0 {
+        default
+    } else {
+        stored
     }
 }
 
@@ -102,7 +116,10 @@ fn windows_from_master(master: &gbx_formats::save_orig::MasterSave) -> WindowsSn
         raw_bytes: BTreeMap::new(),
         raw_strings: BTreeMap::new(),
         assets: ResidentAssets {
-            map_3d_block: Some(master.current_3d_map_block_id()),
+            map_3d_block: Some(resolve_block(
+                master.current_3d_map_block_id(),
+                DEFAULT_GEO_BLOCK,
+            )),
             walldefs,
             bigpic_block: None,
         },
@@ -168,7 +185,7 @@ pub fn import_original(
 ) -> Result<Engine, ImportError> {
     let master = &set.master;
 
-    let ecl_block_id = master.last_ecl_block_id() as u8;
+    let ecl_block_id = resolve_block(master.last_ecl_block_id() as u8, INITIAL_ECL_BLOCK);
     let ecl_bytes = load_ecl_block(&data, GAME_AREA, ecl_block_id)?;
     let mut machine =
         EclMachine::load_block(ecl_bytes, &COTAB).unwrap_or_else(|never| match never {});
@@ -179,7 +196,8 @@ pub fn import_original(
     let mut vm_memory = VmMemoryState::new();
     vm_memory.restore_windows(windows_from_master(master));
 
-    let geo = load_geo_block(&data, GAME_AREA, master.current_3d_map_block_id())?;
+    let geo_block_id = resolve_block(master.current_3d_map_block_id(), DEFAULT_GEO_BLOCK);
+    let geo = load_geo_block(&data, GAME_AREA, geo_block_id)?;
 
     let boot_assets = crate::boot::boot(&data).map_err(|e| ImportError::Boot(format!("{e:?}")))?;
     let mut symbol_sets = boot_assets.symbol_sets;
@@ -234,6 +252,15 @@ mod tests {
     }
 
     #[test]
+    fn resolve_block_maps_the_zero_sentinel_to_the_area_default() {
+        // FD-23: a never-chained save stores 0 ("use the area boot block").
+        assert_eq!(resolve_block(0, INITIAL_ECL_BLOCK), INITIAL_ECL_BLOCK);
+        assert_eq!(resolve_block(0, DEFAULT_GEO_BLOCK), DEFAULT_GEO_BLOCK);
+        // A visited/chained save's nonzero id is used verbatim.
+        assert_eq!(resolve_block(7, INITIAL_ECL_BLOCK), 7);
+    }
+
+    #[test]
     fn windows_from_master_places_area_words_at_the_live_dispatch_addresses() {
         let mut bytes = vec![0u8; gbx_formats::save_orig::SAVGAM_SIZE];
         // area_ptr starts right after the 1-byte game_area section.
@@ -256,6 +283,62 @@ mod tests {
         assert_eq!(state.pos, (7, 3));
         // 255 % 4 == 3 -> Facing::from_raw(6) == West.
         assert_eq!(state.facing, Facing::West);
+    }
+
+    /// Local-tier (D10): the full validated pipeline against GOG's bundled
+    /// slot-A save, which ships under `$GBX_DATA_DIR/SAVE/` (the GOG layout —
+    /// FD-23's "Also found" note; `save-formats.md` §1.1 assumed the game
+    /// root). The save bytes never enter the repo; only the asserted facts
+    /// (already committed to the docket under FD-23) appear here. Loud-skips
+    /// when `GBX_DATA_DIR` is unset. Run with
+    /// `GBX_DATA_DIR=~/goldbox-data/cotab cargo test -p gbx-engine`.
+    #[test]
+    fn imports_gogs_bundled_slot_a_save_from_the_save_subdir() {
+        let Some(root) = std::env::var_os("GBX_DATA_DIR") else {
+            eprintln!(
+                "SKIPPED: local tier needs GBX_DATA_DIR \
+                 (import::imports_gogs_bundled_slot_a_save_from_the_save_subdir)"
+            );
+            return;
+        };
+        let root = std::path::Path::new(&root);
+        let data = gbx_formats::game_data::load_dir(root).expect("GBX_DATA_DIR must be readable");
+
+        // GOG reads/writes saves in a `SAVE/` subdirectory of the game dir,
+        // not the root (FD-23) — look there, not in `root` itself.
+        let save_dir = root.join("SAVE");
+        let saves = gbx_formats::game_data::load_dir(&save_dir)
+            .expect("GBX_DATA_DIR/SAVE must be readable (GOG's bundled save lives here)");
+
+        let master_bytes = saves
+            .raw_file("SAVGAMA.DAT")
+            .expect("GBX_DATA_DIR/SAVE/SAVGAMA.DAT (GOG's bundled slot-A save) must exist");
+        let set = gbx_formats::save_orig::load_from_lookup(master_bytes, 'A', |name| {
+            saves.raw_file(name)
+        })
+        .expect("the bundled slot-A save set must parse");
+
+        // Facts pinned in docs/fidelity-docket.md FD-23 (D10-clean asserted
+        // numbers, not save content): Tilverton (area 2), a party of six.
+        assert_eq!(
+            set.master.game_area, 2,
+            "bundled save is Tilverton (area 2)"
+        );
+        assert_eq!(set.master.party_count, 6, "MATHEW's party of six");
+
+        let engine =
+            import_original(&set, data, 0x5A1E_5A1E).expect("importing the bundled save succeeds");
+
+        assert_eq!(engine.state().pos, (7, 13), "party stands at (7,13)");
+        assert_eq!(engine.party().members.len(), 6);
+
+        // MATHEW (slot A1) is an 18/00 paladin: exceptional strength decodes
+        // to 100 unclamped (FD-23 item 5 — coab's `Math.Min(_, 25)` would
+        // read 25). This save has no stat-drained character, so current ==
+        // original throughout.
+        let mathew = &engine.party().members[0];
+        assert_eq!(mathew.stats.str_exceptional.current, 100);
+        assert_eq!(mathew.stats.str_exceptional.original, 100);
     }
 
     #[test]
