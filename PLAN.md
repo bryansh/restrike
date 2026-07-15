@@ -268,13 +268,16 @@ Walk around Tilverton, looking right.
   `GBX_DATA_DIR=~/goldbox-data/cotab cargo test -p gbx-engine -- --nocapture m3_exit_gate`.
 
 ### M4 — First blood (4–8 weekends) — the bulk
-- **H3 first:** bit-exact PRNG + seed control on both sides. *(Core recovered 2026-07-15,
-  Fable: coab's RNG is a `System.Random` stand-in (not the spec); the binary's `RandNext` is
-  the Borland TP LCG `state*0x08088405+1`, state dword `DS:0x47F0`, `Randomize` = DOS clock —
-  recovered via our own exepack decoder, hash-pinned. Design door: `docs/design/oracle-rig.md`
-  (v1, review pending) — D-OR1 `gbx-prng`, D-OR2 DOSBox-X tier-1 oracle, D-OR3 `.gbxtrace`
-  format, D-OR4 H3 acceptance. New docket: FD-26 (scaled `Random(N)` vs coab modulo), FD-27
-  (seed lifecycle).)*
+- **H3 first:** bit-exact PRNG + seed control on both sides. *(Recovered 2026-07-15 and
+  adversarially re-derived: the binary's `RandNext` is the Borland TP LCG `state*0x08088405+1`,
+  state dword `DS:0x47F0`, integer `Random(N)` = `hi16 mod N` (TP 5.x — the review refuted a
+  scaled-high-word v1 claim), `Randomize` = DOS clock, called once at boot; no overlay RNG
+  copies (29+5 call sites, 1:1 with coab's). Door: `docs/design/oracle-rig.md` **v2** — D-OR1
+  `gbx-prng` + draw-parity contract + `.rsav` v2 bump, D-OR2 pinned dosbox-staging trace-hook
+  branch as tier-1 oracle (neither stock debugger is scriptable), D-OR3 canonical `.gbxtrace`
+  in `gbx-oracle`, D-OR4 unicorn-emulated acceptance + one live session, D-OR5 H4 = rng-stream
+  + endstate equality (supersedes §3 H4's per-action-oracle wording). Docket FD-26/27 updated,
+  FD-28 filed.)*
 - Combat map generation from encounter data; combatant placement.
 - Initiative, action economy, movement costs, facing/rear attacks; THAC0 melee + ranged with
   range brackets; damage; attacks-per-round.

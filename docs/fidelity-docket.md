@@ -638,47 +638,68 @@ stays the one place showing the complete open-hypothesis picture.
 - **Cross-reference:** `crates/gbx-engine/src/screens.rs` (camp Rest/Magic),
   PLAN.md M5.
 
-### FD-26: Integer `Random(N)` — TP scaled-high-word, not coab's modulo
+### FD-26: Integer `Random(N)` — modulo over the TP LCG (v1's "scaled" claim refuted in review)
 
-- **Status:** narrowed (algorithm recovered from the binary 2026-07-15;
-  return-path confirmation pending the H3 acceptance run)
-- **Question:** The original's `RandNext` (START.EXE decompressed image
-  `0xa5a9`, recovered via `gbx_formats::exepack`) is the Borland Turbo
-  Pascal LCG — `state = state * 0x08088405 + 1` (mod 2^32), state dword at
-  `DS:0x47F0`. TP's *integer* `Random(N)` returns
-  `(hi16(new_state) * N) >> 16` (scaled high word). coab replaces the whole
-  RNG with C# `System.Random` and computes `Next() % N`
-  (`seg051.cs:33-51`) — different distribution AND different bit
-  consumption. Is the scaled-high-word return path what the game's integer
-  call sites actually use (vs. some SSI-local wrapper)?
-- **Evidence so far:** the multiply/seed/store core is verified by hand
-  disassembly and hash-pinned (`docs/design/oracle-rig.md` §1 — SHA-256 of
-  the routine ranges). The `Random(N)` wrapper's register/return convention
-  is inferred from the TP runtime idiom, not yet read/confirmed. coab call
-  sites (`roll_dice` etc.) remain *structurally* trustworthy only —
-  seventh confirmed-class coab divergence.
-- **Settled by:** the D-OR4 H3 acceptance test (`docs/design/oracle-rig.md`)
-  — predict a seeded DOSBox-X session's full draw stream from `gbx-prng`;
-  plus a caller-census read of the integer wrapper.
-- **Cross-reference:** `docs/design/oracle-rig.md` §1/D-OR1/D-OR4; PLAN.md
-  M4 "H3 first".
+- **Status:** narrowed (semantics settled statically 2026-07-15 by the
+  oracle-rig adversarial round; executable confirmation = D-OR4 A/B)
+- **Question → answer:** The original's RNG is the Borland TP LCG
+  (`RandNext`, image `0xa5a9`, cs `0x8F7:0x1639`): `state = state*0x08088405
+  + 1`, state dword `DS:0x47F0`. The integer wrapper (image `0xa55a`,
+  `0x8F7:0x15EA`) computes **`hi16(new_state) DIV N` and returns the
+  remainder** — TP 5.x modulo, NOT TP6+'s scaled high word (the door's v1
+  claim, refuted by wrapper disassembly: `div bx`). Draw consumption:
+  `Random(0)` calls `RandNext` **before** the N==0 test — a draw is consumed
+  and 0 returned; coab short-circuits without drawing (`seg051.cs:35-38`) —
+  a one-draw desync hazard for any transcribed call site that can pass 0.
+  coab's `% N` reduction *shape* was faithful; its generator and
+  short-circuit are not.
+- **Evidence:** adversarial re-derivation (capstone decode + 200k-state
+  instruction-semantics simulation, 0 mismatches vs the LCG formula); caller
+  census — 29 GAME.OVR + 5 START.EXE far calls to the wrapper, matching
+  coab's 29 `seg051.Random(` sites 1:1; hash pin `[0xa55a,0xa5ee)` in
+  `docs/design/oracle-rig.md` §1.
+- **Settled by:** D-OR4 part A (unicorn-engine execution of the pinned
+  routine vs `gbx-prng`, 10k (K,N) pairs) + part B (one live staging-hook
+  session with chain-continuity checks).
+- **Cross-reference:** `docs/design/oracle-rig.md` §1/D-OR1/D-OR4.
 
-### FD-27: Seed lifecycle — when does the game call `Randomize`?
+### FD-27: Seed lifecycle — answered statically: one boot-time `Randomize`, no overlay RNG copies
+
+- **Status:** narrowed (static census complete 2026-07-15; dynamic
+  single-writer confirmation = D-OR4 part B)
+- **Answer:** `Randomize` (image `0xa5e1`; seeds `DS:0x47F0` from DOS wall
+  clock, low word ← CX hour:min, high ← DX sec:centisec — the dword is
+  DX:CX) has **exactly one call site**: GAME.OVR `0xf5f6` = coab
+  `seg001.InitFirst` — boot only, never per battle. GAME.OVR contains **no
+  local copy** of any RNG routine (full-body + distinctive-subsequence
+  scans: zero hits); all overlay randomness far-calls the resident cluster
+  (segment word `0x08F7` in all 34 far calls). Float `Random`: 4 sites =
+  coab `ovr019.cs`'s `Random__Real` calls. Poke-once seed control is
+  statically sound.
+- **Settled by:** D-OR4 part B's chain-continuity verification (detects any
+  mid-session reseed or foreign write to `DS:0x47F0` rather than assuming).
+- **Cross-reference:** `docs/design/oracle-rig.md` §1/D-OR2/D-OR4.
+
+### FD-28: Does the original's fade dither draw from the game RNG?
 
 - **Status:** open
-- **Question:** `Randomize` (image `0xa5e1`) seeds `DS:0x47F0` from the DOS
-  wall clock (`int 21h/AH=2Ch`, CX:DX packed h:m:s:cs). Where is it called —
-  once at boot, before encounters, never? And do the GAME.OVR overlays carry
-  their *own* RNG copies, or does all combat call back into START.EXE's
-  resident `RandNext`? (Both determine how the oracle rig pins and pokes
-  seed state; a combat-overlay-local RNG would need its own pin.)
-- **Evidence so far:** routine recovered and hash-pinned; callers not yet
-  enumerated. coab is silent (its `Randomize` is `System.Random` + ticks,
-  `seg051.cs:59-62`).
-- **Settled by:** M4 step 1's caller census (scan `call` rel16 targets to
-  `RandNext`/`Randomize` across the decompressed START.EXE image and
-  GAME.OVR), confirmed live by the D-OR4 rig (breakpoint hit pattern).
-- **Cross-reference:** `docs/design/oracle-rig.md` §1/D-OR2/§4 step 1.
+- **Question:** Our fade dither currently draws `roll_uniform(3)` per
+  changed pixel from the one engine PRNG (`crates/gbx-engine/src/draw.rs`,
+  `apply_recolor_dithered`) — a framebuffer-content-dependent draw count
+  that would desync any traced window if the original's dither does NOT
+  consume `DS:0x47F0` draws (coab uses a separate time-seeded RNG for it,
+  `docs/design/renderer-ui-shell.md` §D-UI4 region — unfaithful either
+  way). Which stream does the real binary's dither use, if any?
+- **Evidence so far:** none from the binary; both references disagree with
+  each other by construction.
+- **Interim posture (D-OR1 draw-parity contract):** our dither moves OFF
+  `gbx-prng` to a deterministic position-hash pattern (dither pixels are
+  already declared non-comparable by the renderer doc), so the traced draw
+  stream is dither-free regardless of the answer.
+- **Settled by:** a tier-1 staging-hook trace captured across a
+  fade/recolor transition — if RandNext fires per pixel, revisit; if not,
+  the position-hash divergence is documented and permanent.
+- **Cross-reference:** `docs/design/oracle-rig.md` D-OR1(c)/§5.
 
 ## 5. How new entries get added
 
