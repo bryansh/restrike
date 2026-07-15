@@ -710,6 +710,40 @@ pub fn item_readied(record: &[u8]) -> bool {
     record.get(0x34).is_some_and(|&b| b != 0)
 }
 
+/// One item record's buy/sell `_value` (`Item.cs:35`: `short _value` on-disk
+/// at offset `0x3A`) — the base price a shop scales by its price class. `0`
+/// for a short/malformed record. (Read from the *user's* runtime data; never
+/// embedded in the repo, D10.)
+pub fn item_value(record: &[u8]) -> i16 {
+    record
+        .get(0x3A..0x3C)
+        .map(|b| i16::from_le_bytes([b[0], b[1]]))
+        .unwrap_or(0)
+}
+
+/// One item record's `weight` (`Item.cs:33`: `short weight` at offset `0x37`)
+/// — the encumbrance a bought item adds. `0` for a short/malformed record.
+pub fn item_weight(record: &[u8]) -> i16 {
+    record
+        .get(0x37..0x39)
+        .map(|b| i16::from_le_bytes([b[0], b[1]]))
+        .unwrap_or(0)
+}
+
+/// One item record's display name (`Item.cs:124`: `ArrayToString(data,
+/// offset, 0x2A)` — a fixed 0x2A-byte field at offset `0x00`, NUL-terminated).
+/// Printable-ASCII, trimmed. (Runtime user data, not repo content, D10.)
+pub fn item_name(record: &[u8]) -> String {
+    let raw = record.get(0x00..0x2A).unwrap_or(&[]);
+    let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+    String::from_utf8_lossy(&raw[..end])
+        .chars()
+        .filter(|c| c.is_ascii_graphic() || *c == ' ')
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
 fn read_fixed_records(bytes: &[u8], record_size: usize) -> Result<Vec<Vec<u8>>, SaveParseError> {
     if !bytes.len().is_multiple_of(record_size) {
         return Err(SaveParseError::TruncatedBlobFile {

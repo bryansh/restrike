@@ -1874,6 +1874,47 @@ mod tests {
     }
 
     #[test]
+    fn shop_screen_buys_an_item_and_updates_money_and_weight() {
+        use crate::screens::{Screen, Shop as ShopScreen};
+        use crate::shop::{Shop, ShopItem};
+
+        let mut h = Harness::new();
+        let mut buyer = test_char("Rich");
+        buyer.money.gold = 100;
+        buyer.combat.weight = 0;
+        h.roster.members = vec![buyer];
+        h.state.selected_player = 0;
+
+        let mut shell = Shell::boot(&mut h.machine, &mut h.state);
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::WorldMenu { .. })
+        });
+
+        let shop = Shop::new(vec![ShopItem::synthetic("Dagger", 2, 10)], 0x00);
+        shell = Shell::Screen(Screen::Shop(ShopScreen::new(shop)));
+
+        // Buy → enter the item list.
+        h.input.push_all(&[char_key(b'b')]);
+        for _ in 0..3 {
+            let mut ctx = h.ctx();
+            shell.tick(&mut ctx);
+        }
+        // Select the first (highlighted) item.
+        h.input.push_all(&[crate::input::InputEvent::Enter]);
+        for _ in 0..3 {
+            let mut ctx = h.ctx();
+            shell.tick(&mut ctx);
+        }
+        assert_eq!(h.roster.members[0].items.len(), 1, "item bought");
+        assert_eq!(h.roster.members[0].combat.weight, 10, "encumbrance updated");
+        assert_eq!(
+            crate::money::gold_worth(&h.roster.members[0].money, &h.rules),
+            98,
+            "paid 2 gp"
+        );
+    }
+
+    #[test]
     fn party_view_scrolls_between_members() {
         let (mut shell, mut h) = boot_with_party();
         h.input.push_all(&[char_key(b'v')]);

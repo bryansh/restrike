@@ -379,6 +379,16 @@ impl Engine {
         ));
     }
 
+    /// Opens a shop screen over the given stock (M3 step 6 deliverable 5) —
+    /// the entry point for stepping onto a town shop tile (the ECL
+    /// `EnterShop`-flag + `TREASURE`-stock flow that populates it is M6).
+    /// Returns to the walk-loop world menu on exit.
+    pub fn enter_shop(&mut self, shop: crate::shop::Shop) {
+        self.shell = Shell::Screen(crate::screens::Screen::Shop(crate::screens::Shop::new(
+            shop,
+        )));
+    }
+
     /// Takes the save/load screen's pending action, if any — the host calls
     /// this after each tick and fulfills it (write/restore/import) via
     /// `saveload_fs`. Clears the request so it fires exactly once.

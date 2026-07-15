@@ -33,6 +33,7 @@ pub mod saveload;
 pub mod saveload_fs;
 pub mod screens;
 pub mod shell;
+pub mod shop;
 pub mod symbols;
 pub mod text;
 pub mod training;
