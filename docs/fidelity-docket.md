@@ -638,6 +638,48 @@ stays the one place showing the complete open-hypothesis picture.
 - **Cross-reference:** `crates/gbx-engine/src/screens.rs` (camp Rest/Magic),
   PLAN.md M5.
 
+### FD-26: Integer `Random(N)` — TP scaled-high-word, not coab's modulo
+
+- **Status:** narrowed (algorithm recovered from the binary 2026-07-15;
+  return-path confirmation pending the H3 acceptance run)
+- **Question:** The original's `RandNext` (START.EXE decompressed image
+  `0xa5a9`, recovered via `gbx_formats::exepack`) is the Borland Turbo
+  Pascal LCG — `state = state * 0x08088405 + 1` (mod 2^32), state dword at
+  `DS:0x47F0`. TP's *integer* `Random(N)` returns
+  `(hi16(new_state) * N) >> 16` (scaled high word). coab replaces the whole
+  RNG with C# `System.Random` and computes `Next() % N`
+  (`seg051.cs:33-51`) — different distribution AND different bit
+  consumption. Is the scaled-high-word return path what the game's integer
+  call sites actually use (vs. some SSI-local wrapper)?
+- **Evidence so far:** the multiply/seed/store core is verified by hand
+  disassembly and hash-pinned (`docs/design/oracle-rig.md` §1 — SHA-256 of
+  the routine ranges). The `Random(N)` wrapper's register/return convention
+  is inferred from the TP runtime idiom, not yet read/confirmed. coab call
+  sites (`roll_dice` etc.) remain *structurally* trustworthy only —
+  seventh confirmed-class coab divergence.
+- **Settled by:** the D-OR4 H3 acceptance test (`docs/design/oracle-rig.md`)
+  — predict a seeded DOSBox-X session's full draw stream from `gbx-prng`;
+  plus a caller-census read of the integer wrapper.
+- **Cross-reference:** `docs/design/oracle-rig.md` §1/D-OR1/D-OR4; PLAN.md
+  M4 "H3 first".
+
+### FD-27: Seed lifecycle — when does the game call `Randomize`?
+
+- **Status:** open
+- **Question:** `Randomize` (image `0xa5e1`) seeds `DS:0x47F0` from the DOS
+  wall clock (`int 21h/AH=2Ch`, CX:DX packed h:m:s:cs). Where is it called —
+  once at boot, before encounters, never? And do the GAME.OVR overlays carry
+  their *own* RNG copies, or does all combat call back into START.EXE's
+  resident `RandNext`? (Both determine how the oracle rig pins and pokes
+  seed state; a combat-overlay-local RNG would need its own pin.)
+- **Evidence so far:** routine recovered and hash-pinned; callers not yet
+  enumerated. coab is silent (its `Randomize` is `System.Random` + ticks,
+  `seg051.cs:59-62`).
+- **Settled by:** M4 step 1's caller census (scan `call` rel16 targets to
+  `RandNext`/`Randomize` across the decompressed START.EXE image and
+  GAME.OVR), confirmed live by the D-OR4 rig (breakpoint hit pattern).
+- **Cross-reference:** `docs/design/oracle-rig.md` §1/D-OR2/§4 step 1.
+
 ## 5. How new entries get added
 
 Any session that surfaces a behavioral hypothesis not derivable purely from

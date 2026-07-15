@@ -268,7 +268,13 @@ Walk around Tilverton, looking right.
   `GBX_DATA_DIR=~/goldbox-data/cotab cargo test -p gbx-engine -- --nocapture m3_exit_gate`.
 
 ### M4 — First blood (4–8 weekends) — the bulk
-- **H3 first:** bit-exact PRNG + seed control on both sides.
+- **H3 first:** bit-exact PRNG + seed control on both sides. *(Core recovered 2026-07-15,
+  Fable: coab's RNG is a `System.Random` stand-in (not the spec); the binary's `RandNext` is
+  the Borland TP LCG `state*0x08088405+1`, state dword `DS:0x47F0`, `Randomize` = DOS clock —
+  recovered via our own exepack decoder, hash-pinned. Design door: `docs/design/oracle-rig.md`
+  (v1, review pending) — D-OR1 `gbx-prng`, D-OR2 DOSBox-X tier-1 oracle, D-OR3 `.gbxtrace`
+  format, D-OR4 H3 acceptance. New docket: FD-26 (scaled `Random(N)` vs coab modulo), FD-27
+  (seed lifecycle).)*
 - Combat map generation from encounter data; combatant placement.
 - Initiative, action economy, movement costs, facing/rear attacks; THAC0 melee + ranged with
   range brackets; damage; attacks-per-round.
