@@ -11,8 +11,9 @@
 > feasibility against coab). Every folded finding was re-verified against coab
 > directly before editing. v2's changes: chain checkpoints gained
 > resume-after-chain semantics (the boot and Look sites resume their flow, they
-> don't abandon it); the input model adopted the original's drain-to-last read
-> semantics (docketed for DOSBox confirmation); `party_killed` and the
+> don't abandon it); the input model buffers type-ahead FIFO (FD-17 RESOLVED
+> — coab's drain-to-newest was disproved against the running game);
+> `party_killed` and the
 > persistent `chained` flag became explicit engine state with transcribed
 > guard/commit sites; per-char pacing became a fractional accumulator; script
 > menus gained their party-scroll-while-parked and valid-keys-re-prompt
@@ -219,12 +220,14 @@ blocking loop in the original and a parked state for us:
 - **List menu** (`sl_select_item`, `ovr027.cs:532-673`): a vertical list
   (highlight, headings skipped, in-page and page scrolling) combined with a
   Hotbar whose text grows ` Next`/` Prev`/` Exit` as applicable. Scroll keys,
-  per coab: Home/End ctrl-codes `'G'`/`'O'` move the highlight, PgUp/PgDn
-  `'I'`/`'Q'` page, and the plain letters `'P'`/`'N'` also page
+  per coab: Home/End ctrl-codes `'G'`/`'O'` move the highlight *one step*
+  within the visible page, wrapping (`menu_scroll_in_page`, `ovr027.cs:497`),
+  PgUp/PgDn `'I'`/`'Q'` page, and the plain letters `'P'`/`'N'` also page
   (`ovr027.cs:617-653`) — **Up/Down arrows (`'H'`/`'P'` ctrl-codes) are
-  ignored by the special-key switch entirely**, which contradicts common
-  memory of the game; docketed (§4 item 9) for a DOSBox check before the key
-  map is pinned. Esc/`'E'`/`'\0'` exit with no selection; anything else
+  ignored by the special-key switch entirely** (FD-18 RESOLVED — confirmed
+  correct against the running game: arrows do nothing, numpad 7/1 = Home/End
+  drive the highlight; the key map binds Home/End + numpad 7/1, never the
+  arrows). Esc/`'E'`/`'\0'` exit with no selection; anything else
   returns (selected item, key). VERTICAL MENU and every roster/shop screen
   build on it — and VERTICAL MENU's list geometry is *coupled to the text
   cursor*: the list starts at `textYCol + 1` after the header text has
@@ -240,16 +243,15 @@ blocking loop in the original and a parked state for us:
   one key.
 - **Yes/No** (`ovr027.yes_no`, `:676-689`): a Hotbar restricted to
   `"Yes No"`.
-- Keyboard: extended keys arrive as `0x00` + scancode-byte. **`GetInputKey`
-  is not a plain queue pop**: after reading any nonzero key it drains the
-  entire buffer, keeping the *newest* key (`seg043.cs:55-62`) — so mashing
-  forward five times during a slow redraw yields **one** step, and type-ahead
-  is largely discarded (the `0x00` extended prefix skips the drain; the
-  scancode byte read then drains). `clear_keyboard` (`seg043.cs:88-94`) is
-  an explicit full drain layered on top, called after asset loads and after
-  the pagination keypress. Whether drain-to-last is the original binary's
-  behavior or a coab transliteration artifact is docketed (§4 item 8) with a
-  DOSBox type-ahead test; we ship coab's semantics until that settles.
+- Keyboard: extended keys arrive as `0x00` + scancode-byte. **The read is a
+  plain FIFO pop** (FD-17 RESOLVED): the original *buffers* type-ahead, so
+  mashing forward five times during a slow redraw commits **five** queued
+  steps, one per widget read. coab's `GetInputKey` drain-to-newest
+  (`seg043.cs:55-62`) is a transliteration/anti-key-repeat artifact,
+  disproved by a live DOSBox mash test. `clear_keyboard` (`seg043.cs:88-94`)
+  is an explicit full drain layered on top — a *specific sourced* behavior
+  (e.g. the pagination-release clear, `seg041.cs:211`), distinct from the
+  rejected general drain policy, so it stays.
 - Script menus that route through `sub_317AA` (HORIZONTAL MENU,
   `ovr003.cs:748`; ENCOUNTER MENU, `:1362`; PARLAY, `:1550`) are **not inert
   while parked**: the loop consumes extended keys as
@@ -557,13 +559,15 @@ delay (`ovr015.cs:322`), DAMAGE's fixed 3000 ms party-wipe pause
    either way.
 9. **coab's `GetInputKey` drains the keyboard buffer to the newest key**
    on every nonzero read (`seg043.cs:55-62`) — type-ahead is discarded.
-   Original behavior or transliteration artifact? DOSBox test: mash forward
-   during a slow redraw; count committed steps. The input-queue read
-   contract (D-UI1) ships coab's semantics pending this.
+   **RESOLVED (FD-17): transliteration artifact.** A live DOSBox mash test
+   showed the original buffers type-ahead FIFO (multiple queued steps
+   commit); the input-queue read (D-UI1) is a plain FIFO pop.
 10. **coab's list menus ignore Up/Down arrows** (`sl_select_item`'s
     special-key switch handles only `'G'/'O'/'I'/'Q'` — Home/End/PgUp/PgDn,
-    `ovr027.cs:617-640`), contradicting common memory of the game. DOSBox
-    check before D-UI6's key map is pinned.
+    `ovr027.cs:617-640`), contradicting common memory of the game.
+    **RESOLVED (FD-18): coab is correct.** Confirmed against the running
+    game — arrows do nothing; numpad 7/1 (Home/End) drive the highlight.
+    D-UI6's key map binds Home/End + numpad 7/1, never the arrows.
 
 ## 2. Decisions
 
@@ -606,11 +610,10 @@ impl Engine {
 - **Input model.** Two-level, mirroring the original keyboard stream
   (printables vs 0-prefixed extended codes, §1.5). The frontend pushes the
   events it collected since the last tick, in order; the engine appends them
-  to its own small queue. **Reads replicate the original's semantics, which
-  are not plain pops**: a widget key-read consumes the whole queue and takes
-  the newest event (`GetInputKey`'s drain-to-last, §1.5 — docketed for
-  DOSBox confirmation, §4 item 8), and `clear_keyboard` call sites become
-  queue-clears at the same points. Both are deterministic functions of
+  to its own small queue. **Reads are plain FIFO pops** (FD-17 RESOLVED —
+  the original buffers type-ahead; §1.5), and `clear_keyboard` call sites
+  become queue-clears at the same points (a specific sourced drain, not a
+  general read policy). Both are deterministic functions of
   engine state, so replays are unaffected. A session's input trace is
   `[(tick_index, InputEvent)]` (H5); replaying it against the same
   `(data fingerprint, seed)` reproduces every frame hash.
@@ -1031,12 +1034,14 @@ commitments.
    (3 ticks) and whether DOSBox shows it distinctly from redraw cost.
 7. FD-16 seam behavior (area-map window spilling across packed logical
    maps): capture the Tilverton City/Guild seam in DOSBox and match.
-8. **Input read semantics** (§1.11 item 9): is drain-to-last the original
-   binary's behavior or a coab artifact? DOSBox type-ahead test (mash
-   forward during a slow redraw, count steps). D-UI1 ships coab's
-   semantics; the queue read is one function to swap if this falsifies.
-9. **List-menu arrow keys** (§1.11 item 10): coab ignores Up/Down in
-   `sl_select_item`; verify against DOSBox before pinning D-UI6's map.
+8. **Input read semantics** (§1.11 item 9): ~~is drain-to-last the original
+   binary's behavior or a coab artifact?~~ **RESOLVED — FD-17: coab artifact.**
+   The DOSBox mash test committed multiple queued steps; D-UI1's queue read
+   is now a plain FIFO pop (`input.rs`).
+9. **List-menu arrow keys** (§1.11 item 10): ~~coab ignores Up/Down in
+   `sl_select_item`; verify against DOSBox.~~ **RESOLVED — FD-18: coab is
+   correct.** Arrows do nothing; numpad 7/1 = Home/End drive the highlight.
+   D-UI6's map binds Home/End + numpad 7/1, never the arrows.
 10. **Fade-recolor dynamics** (§1.8): the original mutates the cached image
     in place per wait-loop iteration, so convergence rate is loop-frequency
     dependent; our mapping is one recolor pass per tick while a fade is
@@ -1191,8 +1196,8 @@ commitments.
       Worked around locally in the demo (flush + detect + correct); not
       fixed at the engine level this session, since it's an input-queue
       lifecycle question orthogonal to the renderer itself — docketed
-      alongside §1.11 item 9's existing drain-to-last uncertainty (both
-      settle together at a DOSBox type-ahead check).
+      alongside §1.11 item 9's drain-to-last question (since RESOLVED as
+      FD-17).
       **Root cause found and fixed at the engine level (post-session
       audit):** §1.4/D-UI3 named the original's `clear_keyboard`-after-the-
       pagination-keypress (`seg041.cs:211`) as the release caller's
@@ -1201,7 +1206,9 @@ commitments.
       queue-clear now lives at the release site in `shell.rs`; the walk
       demo's blind Enter-spam was also replaced with quiet-screen-gated key
       feeding. The faithful-semantics question (drain-to-last itself, §1.11
-      item 9 / FD-17) remains open for the DOSBox check.
+      item 9 / FD-17) is now RESOLVED: the original buffers type-ahead FIFO,
+      so `read_key` is a plain FIFO pop and this pagination-release clear is
+      the one specific sourced drain that remains.
     - **The two sky-color-index cells (`area_ptr.indoor_sky_colour`/
       `outdoor_sky_colour`, `Area1.cs` `DataOffset` `0x1FC`/`0x1FA`) are a
       documented hypothesis, not a confirmed `ScriptMemory` address**: this

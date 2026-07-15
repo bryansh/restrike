@@ -11,8 +11,8 @@
 //! - coab `engine/ovr027.cs` `BuildInputKeys` (`:59-86`) — [`build_words`]'s
 //!   maximal-run-of-`[0-9A-Z]` word scan.
 //! - coab `engine/ovr027.cs` `sl_select_item` (`:532-673`) — [`ListMenu`]'s
-//!   highlight/paging semantics, incl. the documented Up/Down-ignored
-//!   contradiction (§1.11 item 10, design doc §4 item 9 docket).
+//!   highlight/paging semantics, incl. Up/Down being ignored (FD-18 RESOLVED
+//!   — confirmed correct against the running game; §1.11 item 10).
 //! - coab `engine/ovr008.cs` `sub_317AA`'s callers (HORIZONTAL MENU,
 //!   ENCOUNTER MENU, PARLAY, `:1176-1190`) — the `ext_scrolls_party`/
 //!   `valid_keys` re-prompt behavior: Esc does not exit these menus, and any
@@ -268,72 +268,164 @@ pub enum ListItem {
     Entry(String),
 }
 
+impl ListItem {
+    fn is_heading(&self) -> bool {
+        matches!(self, ListItem::Heading(_))
+    }
+}
+
 /// `sl_select_item` (`ovr027.cs:532-673`): a vertical list combined with a
 /// Hotbar whose text grows `" Next"`/`" Prev"`/`" Exit"` (the growth itself
-/// is presentation, not modeled here — this struct owns selection/paging
-/// state only).
+/// is presentation, not modeled here — this struct owns selection/scroll
+/// state only). Movement is transcribed directly from coab's own routines
+/// (`menu_scroll_in_page` `:497`, `menu_scroll_page` `:464`, `skipHeadings`
+/// `:sub_6CC08`), so it inherits their exact heading-inclusive,
+/// page-relative-wrapping behavior — see [`ListMenu::tick`].
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ListMenu {
     pub items: Vec<ListItem>,
-    /// Indices into `items` that are selectable (headings excluded).
-    selectable: Vec<usize>,
-    /// Index into `selectable` — which selectable item is highlighted.
-    pub highlight: usize,
-    /// The first visible row, bound from the text cursor at open time
-    /// (§1.5's `textYCol + 1` coupling) — a caller concern, stored verbatim.
-    pub top_row: usize,
+    /// Heading-inclusive cursor into `items` (coab `index_ptr`) — the
+    /// currently highlighted row.
+    index: usize,
+    /// Which `items` row sits at the top of the visible window (coab
+    /// `gbl.menuScreenIndex`) — the scroll position, in list coordinates.
+    screen_index: usize,
+    /// Visible row count (coab `listDisplayHeight` = `endY − startY + 1`).
+    /// The list's *screen* origin (§1.5's `textYCol + 1` coupling) is a
+    /// presentation concern owned by the consuming screen, not tracked here.
     pub page_size: usize,
 }
 
 impl ListMenu {
-    pub fn new(items: Vec<ListItem>, top_row: usize, page_size: usize) -> Self {
-        let selectable: Vec<usize> = items
-            .iter()
-            .enumerate()
-            .filter_map(|(i, it)| matches!(it, ListItem::Entry(_)).then_some(i))
-            .collect();
-        ListMenu {
+    /// `page_size` is the visible row count. The cursor initializes on the
+    /// first selectable entry (coab's `index_ptr++; scroll_in_page(false)`
+    /// normalization off any leading heading); the view starts at row 0.
+    pub fn new(items: Vec<ListItem>, page_size: usize) -> Self {
+        let mut m = ListMenu {
             items,
-            selectable,
-            highlight: 0,
-            top_row,
+            index: 0,
+            screen_index: 0,
             page_size: page_size.max(1),
+        };
+        if m.items.iter().any(|it| !it.is_heading()) {
+            m.index = m.scroll_in_page(false, 1);
         }
+        m
     }
 
     /// The `items` index currently highlighted (heading-inclusive
-    /// coordinates), or `None` if there are no selectable entries.
+    /// coordinates), or `None` if the cursor isn't on a selectable entry
+    /// (an all-heading/empty list).
     pub fn selected_index(&self) -> Option<usize> {
-        self.selectable.get(self.highlight).copied()
-    }
-
-    fn set_highlight(&mut self, i: usize) {
-        if !self.selectable.is_empty() {
-            self.highlight = i.min(self.selectable.len() - 1);
+        match self.items.get(self.index) {
+            Some(ListItem::Entry(_)) => Some(self.index),
+            _ => None,
         }
     }
 
-    fn page(&mut self, dir: i32) {
-        if self.selectable.is_empty() {
-            return;
+    /// `menu_scroll_in_page` (`ovr027.cs:497`, `sub_6CDCA`): single-step
+    /// highlight movement that wraps *within the current visible page* and
+    /// skips headings — never scrolls the window. `backwards_step` follows
+    /// coab's own polarity: `false` moves toward row 0 (up, the `'G'`/Home
+    /// case), `true` moves toward the end (down, the `'O'`/End case).
+    fn scroll_in_page(&self, backwards_step: bool, start: i64) -> usize {
+        let count = self.items.len() as i64;
+        let page = self.page_size as i64;
+        let screen = self.screen_index as i64;
+        let mut index = start;
+        if backwards_step {
+            index += 1;
+            if screen + page - 1 < index {
+                index = screen;
+            }
+            if count - 1 < index {
+                index = screen;
+            }
+        } else {
+            index -= 1;
+            if index < screen {
+                index = screen + page - 1;
+            }
+            if count - 1 < index {
+                index = count - 1;
+            }
         }
-        let n = self.selectable.len() as i32;
-        let next = (self.highlight as i32 + dir * self.page_size as i32).clamp(0, n - 1);
-        self.set_highlight(next as usize);
-        if self.highlight < self.top_row {
-            self.top_row = self.highlight;
-        } else if self.highlight >= self.top_row + self.page_size {
-            self.top_row = self.highlight + 1 - self.page_size;
+        self.skip_headings(backwards_step, index)
+    }
+
+    /// `skipHeadings` (`sub_6CC08`): steps past heading rows in `step`'s
+    /// direction, with the same page-relative wrap `scroll_in_page` uses, and
+    /// gives up after a full page of headings (matching coab's `var_2 <
+    /// listDisplayHeight` bound). Returns a clamped, in-bounds index.
+    fn skip_headings(&self, backwards_step: bool, start: i64) -> usize {
+        let count = self.items.len() as i64;
+        let page = self.page_size as i64;
+        let screen = self.screen_index as i64;
+        let mut index = start;
+        let mut guard = 0;
+        while guard < page
+            && (0..count).contains(&index)
+            && self.items[index as usize].is_heading()
+        {
+            guard += 1;
+            if backwards_step {
+                index += 1;
+                if screen + page - 1 < index {
+                    index = screen;
+                }
+                if count - 1 < index {
+                    index = screen;
+                }
+            } else {
+                index -= 1;
+                if index < screen {
+                    index = screen + page - 1;
+                }
+                if count - 1 < index {
+                    index = count - 1;
+                }
+            }
         }
+        index.clamp(0, (count - 1).max(0)) as usize
+    }
+
+    /// `menu_scroll_page` (`ovr027.cs:464`, `sub_6CD38`): scrolls the visible
+    /// window by a full page, preserving the cursor's offset within the page,
+    /// then skips headings. `backwards_step` matches coab: `false` pages up
+    /// (`'I'`/PgUp, `'P'`), `true` pages down (`'Q'`/PgDn, `'N'`).
+    fn scroll_page(&mut self, backwards_step: bool) {
+        let count = self.items.len() as i64;
+        let page = self.page_size as i64;
+        let screen_offset = self.index as i64 - self.screen_index as i64;
+        let mut screen = self.screen_index as i64;
+        if backwards_step {
+            screen += page;
+            if count - page < screen {
+                screen = count - page;
+            }
+        } else {
+            screen -= page;
+        }
+        // Defensive clamp (coab can momentarily go negative here for a list
+        // that fits in one page — an unreachable-in-practice 'P'/'N' edge):
+        // keep the window origin in-bounds.
+        if screen < 0 {
+            screen = 0;
+        }
+        self.screen_index = screen as usize;
+        let index = (screen + screen_offset).clamp(0, (count - 1).max(0));
+        self.index = self.skip_headings(backwards_step, index);
     }
 
     /// Advances by one tick, consuming at most one queued key.
     ///
-    /// Per coab's own special-key switch (`ovr027.cs:617-653`, design doc
-    /// §1.11 item 10 / §4 docket item 9): Home/End (`'G'`/`'O'`) jump the
-    /// highlight, PgUp/PgDn (`'I'`/`'Q'`) and the plain letters `'P'`/`'N'`
-    /// page, and **Up/Down are deliberately ignored** — not a bug here,
-    /// transcribed contradiction of common memory, pending a DOSBox check.
+    /// Per coab's special-key switch (`ovr027.cs:617-653`) and **FD-18
+    /// (RESOLVED)**: Home/End (`'G'`/`'O'`, and numpad 7/1) move the highlight
+    /// one step within the page (`menu_scroll_in_page`), PgUp/PgDn
+    /// (`'I'`/`'Q'`) and the plain letters `'P'`/`'N'` page, and **Up/Down
+    /// arrows are ignored** — confirmed correct against the running game
+    /// (arrows do nothing; numpad 1/7 drive the highlight), not a bug or a
+    /// pending question.
     pub fn tick(&mut self, queue: &mut InputQueue) -> WidgetOutcome {
         let Some(key) = queue.read_key() else {
             return WidgetOutcome::Pending;
@@ -341,17 +433,10 @@ impl ListMenu {
 
         if let InputEvent::Ext(ext) = key {
             match ext.ctrl_code() {
-                b'G' => {
-                    self.set_highlight(0);
-                    self.top_row = 0;
-                }
-                b'O' => {
-                    let last = self.selectable.len().saturating_sub(1);
-                    self.set_highlight(last);
-                    self.top_row = last.saturating_sub(self.page_size - 1);
-                }
-                b'I' => self.page(-1),
-                b'Q' => self.page(1),
+                b'G' => self.index = self.scroll_in_page(false, self.index as i64),
+                b'O' => self.index = self.scroll_in_page(true, self.index as i64),
+                b'I' => self.scroll_page(false),
+                b'Q' => self.scroll_page(true),
                 // Up ('H')/Down ('P') and any other extended key: ignored.
                 _ => {}
             }
@@ -363,11 +448,11 @@ impl ListMenu {
             InputEvent::Char(c) => match c.to_ascii_uppercase() {
                 b'E' => WidgetOutcome::ListCancelled,
                 b'P' => {
-                    self.page(-1);
+                    self.scroll_page(false);
                     WidgetOutcome::Pending
                 }
                 b'N' => {
-                    self.page(1);
+                    self.scroll_page(true);
                     WidgetOutcome::Pending
                 }
                 up => match self.selected_index() {
@@ -670,8 +755,19 @@ mod tests {
                 ListItem::Entry("Fireball".into()),
                 ListItem::Entry("Lightning Bolt".into()),
             ],
-            0,
             2,
+        )
+    }
+
+    /// `n` selectable entries, no headings, all visible in one page — the
+    /// clean fixture for single-step/wrap movement (a heading inside a small
+    /// page collapses movement, which the heading-specific tests cover).
+    fn flat_list(n: usize, page: usize) -> ListMenu {
+        ListMenu::new(
+            (0..n)
+                .map(|i| ListItem::Entry(format!("E{i}")))
+                .collect::<Vec<_>>(),
+            page,
         )
     }
 
@@ -693,28 +789,78 @@ mod tests {
     }
 
     #[test]
-    fn list_menu_home_end_jump() {
-        let mut list = sample_list();
+    fn list_menu_home_end_step_one_within_the_page() {
+        // FD-18: End (numpad 1) moves down one, Home (numpad 7) up one —
+        // `menu_scroll_in_page`, not a jump to the ends.
+        let mut list = flat_list(5, 5); // cursor starts on entry 0
         let mut q = queue_of(&[InputEvent::Ext(ExtKey::End)]);
         list.tick(&mut q);
-        assert_eq!(list.selected_index(), Some(4)); // "Lightning Bolt"
+        assert_eq!(list.selected_index(), Some(1));
+        let mut q = queue_of(&[InputEvent::Ext(ExtKey::End)]);
+        list.tick(&mut q);
+        assert_eq!(list.selected_index(), Some(2));
         let mut q = queue_of(&[InputEvent::Ext(ExtKey::Home)]);
         list.tick(&mut q);
         assert_eq!(list.selected_index(), Some(1));
     }
 
     #[test]
-    fn list_menu_pgdn_pgup_and_letters_page() {
-        let mut list = sample_list(); // page_size = 2, 4 selectable entries
+    fn list_menu_end_wraps_at_the_bottom_of_the_page() {
+        let mut list = flat_list(5, 5); // one page holds every row
+        for _ in 0..4 {
+            let mut q = queue_of(&[InputEvent::Ext(ExtKey::End)]);
+            list.tick(&mut q);
+        }
+        assert_eq!(list.selected_index(), Some(4), "stepped to the last row");
+        let mut q = queue_of(&[InputEvent::Ext(ExtKey::End)]);
+        list.tick(&mut q);
+        assert_eq!(
+            list.selected_index(),
+            Some(0),
+            "one more End wraps within the page to the top, not off the end"
+        );
+    }
+
+    #[test]
+    fn list_menu_home_wraps_at_the_top_of_the_page() {
+        let mut list = flat_list(5, 5); // cursor at the top row
+        let mut q = queue_of(&[InputEvent::Ext(ExtKey::Home)]);
+        list.tick(&mut q);
+        assert_eq!(list.selected_index(), Some(4), "Home from the top wraps down");
+    }
+
+    #[test]
+    fn list_menu_step_skips_headings() {
+        let mut list = ListMenu::new(
+            vec![
+                ListItem::Entry("A".into()),
+                ListItem::Heading("---".into()),
+                ListItem::Entry("B".into()),
+            ],
+            3,
+        );
+        assert_eq!(list.selected_index(), Some(0)); // "A"
+        let mut q = queue_of(&[InputEvent::Ext(ExtKey::End)]);
+        list.tick(&mut q);
+        assert_eq!(list.selected_index(), Some(2), "End steps over the heading to B");
+    }
+
+    #[test]
+    fn list_menu_page_keys_scroll_by_a_page() {
+        // 6 entries, 2 visible per page: PgDn/'N' page forward, PgUp/'P' back.
+        let mut list = flat_list(6, 2);
         let mut q = queue_of(&[InputEvent::Ext(ExtKey::PgDn)]);
         list.tick(&mut q);
-        assert_eq!(list.highlight, 2); // moved 2 rows forward
-        let mut q = queue_of(&[InputEvent::Char(b'p')]); // letter 'P' also pages (up)
+        assert_eq!(list.selected_index(), Some(2));
+        let mut q = queue_of(&[InputEvent::Char(b'n')]);
         list.tick(&mut q);
-        assert_eq!(list.highlight, 0);
-        let mut q = queue_of(&[InputEvent::Char(b'n')]); // letter 'N' also pages (down)
+        assert_eq!(list.selected_index(), Some(4));
+        let mut q = queue_of(&[InputEvent::Char(b'p')]);
         list.tick(&mut q);
-        assert_eq!(list.highlight, 2);
+        assert_eq!(list.selected_index(), Some(2));
+        let mut q = queue_of(&[InputEvent::Ext(ExtKey::PgUp)]);
+        list.tick(&mut q);
+        assert_eq!(list.selected_index(), Some(0));
     }
 
     #[test]
@@ -741,9 +887,9 @@ mod tests {
     }
 
     #[test]
-    fn list_menu_top_row_is_bound_at_construction() {
-        let list = ListMenu::new(vec![ListItem::Entry("x".into())], 7, 3);
-        assert_eq!(list.top_row, 7);
+    fn list_menu_all_heading_list_has_no_selection() {
+        let list = ListMenu::new(vec![ListItem::Heading("only".into())], 3);
+        assert_eq!(list.selected_index(), None);
     }
 
     #[test]
@@ -758,17 +904,21 @@ mod tests {
     }
 
     #[test]
-    fn text_entry_backspace_edits() {
+    fn text_entry_reads_one_key_per_tick_fifo() {
         let mut t = TextEntry::new("Name?", 10, false);
         let mut q = queue_of(&[
             InputEvent::Char(b'A'),
             InputEvent::Backspace,
             InputEvent::Char(b'B'),
         ]);
-        // Only one key is read per tick (drain-to-last semantics apply at
-        // the queue level) — push events across separate ticks instead.
-        let _ = t.tick(&mut q);
-        assert_eq!(t.buf, vec![b'B']); // drained-to-last already consumed A/backspace
+        // FD-17 FIFO: one key consumed per tick, oldest first — every queued
+        // key is honored across ticks, not drained to the newest.
+        t.tick(&mut q);
+        assert_eq!(t.buf, vec![b'A']);
+        t.tick(&mut q);
+        assert!(t.buf.is_empty(), "backspace read next");
+        t.tick(&mut q);
+        assert_eq!(t.buf, vec![b'B']);
     }
 
     #[test]

@@ -1480,7 +1480,6 @@ mod tests {
             Widget::Hotbar(Hotbar::new("Yes No")),
             Widget::ListMenu(crate::widgets::ListMenu::new(
                 vec![crate::widgets::ListItem::Entry("x".into())],
-                0,
                 3,
             )),
             Widget::TextEntry(crate::widgets::TextEntry::new("Name?", 10, false)),

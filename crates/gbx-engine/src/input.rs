@@ -3,15 +3,21 @@
 //! semantics.
 //!
 //! Derived by reading coab for behavior (D11, never copied):
-//! - coab `engine/seg043.cs` `GetInputKey` (`:55-62`) — after reading any
-//!   nonzero key, the *entire* buffer is drained, keeping only the newest
-//!   key (docketed for a DOSBox type-ahead confirmation, design doc §4 item
-//!   8 — we ship coab's semantics pending that). Our model reads whole
+//! - coab `engine/seg043.cs` `GetInputKey` (`:55-62`) drains the whole
+//!   buffer after reading any nonzero key, keeping only the newest — but
+//!   **FD-17 (RESOLVED, docket) confirmed that is a coab transliteration
+//!   artifact, not original behavior**: Bryan's live DOSBox mash test showed
+//!   the original *buffers type-ahead FIFO* (multiple queued forward steps
+//!   commit, not one). So [`InputQueue::read_key`] is a plain FIFO pop, per
+//!   the design doc's "the queue read is one function." Our model reads whole
 //!   logical [`InputEvent`]s (never raw two-byte extended-key pairs), so the
 //!   original's "the `0x00` prefix byte itself doesn't drain" detail has no
 //!   analogue here — every queued event is a real keypress.
 //! - coab `engine/seg043.cs` `clear_keyboard` (`:88-94`) — an explicit full
-//!   drain, layered on top at specific call sites ([`InputQueue::clear`]).
+//!   drain, layered on top at specific sourced call sites
+//!   ([`InputQueue::clear`], e.g. the pagination-release clear at
+//!   `seg041.cs:211`). FD-17 keeps this: it is a specific documented behavior,
+//!   distinct from the (rejected) general drain-to-newest read policy.
 //! - coab `engine/ovr027.cs:124,297-311` (`keypad_ctrl_codes`) — the
 //!   9-entry table [`ExtKey::ctrl_code`] transcribes; arrow keys alias their
 //!   numpad-direction equivalent (design doc D-UI6).
@@ -84,8 +90,8 @@ impl ExtKey {
 }
 
 /// The engine-owned input queue (D-UI1): a frontend pushes the events it
-/// collected since the last tick, in order; widgets read from it with the
-/// original's `GetInputKey` drain-to-newest semantics, not a plain pop.
+/// collected since the last tick, in order; widgets read from it in FIFO
+/// order (FD-17 — the original buffers type-ahead, confirmed against DOSBox).
 #[derive(Debug, Clone, Default)]
 pub struct InputQueue {
     events: VecDeque<InputEvent>,
@@ -102,15 +108,16 @@ impl InputQueue {
         self.events.extend(events.iter().copied());
     }
 
-    /// `GetInputKey` (`seg043.cs:55-62`): drains the whole queue, returning
-    /// only the newest (last-pushed) event — `None` if the queue was empty.
-    /// Mashing forward five times during a slow redraw yields one step, and
-    /// type-ahead behind it is discarded, exactly as documented (design doc
-    /// §1.5, §4 item 8).
+    /// Reads the oldest queued event (FIFO), `None` if the queue was empty.
+    /// FD-17 (RESOLVED): the original *buffers* type-ahead — mashing forward
+    /// five times during a slow redraw commits five queued steps, one per
+    /// widget read, not one. coab's `GetInputKey` drain-to-newest
+    /// (`seg043.cs:55-62`) is a transliteration/anti-key-repeat artifact,
+    /// disproved by Bryan's live DOSBox mash test. The sourced pagination-
+    /// release drain still applies, but through [`InputQueue::clear`], not
+    /// here.
     pub fn read_key(&mut self) -> Option<InputEvent> {
-        let newest = self.events.pop_back();
-        self.events.clear();
-        newest
+        self.events.pop_front()
     }
 
     /// `clear_keyboard` (`seg043.cs:88-94`): an explicit full drain, called
@@ -137,15 +144,19 @@ mod tests {
     }
 
     #[test]
-    fn read_key_drains_to_the_newest_event() {
+    fn read_key_pops_events_oldest_first_fifo() {
+        // FD-17: the original buffers type-ahead — every queued key is read,
+        // in order, one per call (mashing forward commits every queued step).
         let mut q = InputQueue::new();
         q.push_all(&[
             InputEvent::Char(b'A'),
             InputEvent::Char(b'B'),
             InputEvent::Char(b'C'),
         ]);
+        assert_eq!(q.read_key(), Some(InputEvent::Char(b'A')));
+        assert_eq!(q.read_key(), Some(InputEvent::Char(b'B')));
         assert_eq!(q.read_key(), Some(InputEvent::Char(b'C')));
-        assert!(q.is_empty(), "the whole queue must have drained");
+        assert!(q.is_empty(), "every queued key must have been readable");
         assert_eq!(q.read_key(), None);
     }
 
@@ -154,6 +165,8 @@ mod tests {
         let mut q = InputQueue::new();
         q.push_all(&[InputEvent::Char(b'A')]);
         q.push_all(&[InputEvent::Char(b'B')]);
+        // FIFO across ticks: the first-pushed event reads back first.
+        assert_eq!(q.read_key(), Some(InputEvent::Char(b'A')));
         assert_eq!(q.read_key(), Some(InputEvent::Char(b'B')));
     }
 
