@@ -498,7 +498,35 @@ stays the one place showing the complete open-hypothesis picture.
 
 ### FD-23: The three pinned original-save record cells
 
-- **Status:** narrowed (code-decided defaults, real-data pinning still open)
+- **Status:** narrowed → item 5 PINNED, item 2 corroborated, item 1 still open
+  (2026-07-14 Fable audit, against GOG's bundled save)
+- **BREAKTHROUGH (2026-07-14):** GOG's Collection Two ships a **complete
+  bundled save** at `GBX_DATA_DIR/SAVE/SAVGAMA.DAT` (+ `CHRDATA{1..6}.SAV`/
+  `.FX`), present since install — 13149 + 422-byte files, exactly the design
+  doc's predicted sizes. Our real importer (`load_from_lookup` +
+  `import_original`) parsed it clean on the first try: a 6-char party
+  (MATHEW/MARK/TRAVIS/LEDERA/SHARA/PHILIPPE) at pos (7,13) area 2 (Tilverton).
+  - **Item 5 (Str00 range) PINNED to `0..=100`:** MATHEW decodes to
+    exceptional strength **100** (18/00); coab's `Math.Min(_,25)` clamp would
+    read 25. Our un-clamped decode is correct — confirms the design doc's
+    call and coab bug. Real-data proof, not a code guess.
+  - **Item 2 (spell stride) corroborated:** all 6 records decode fully and
+    sanely at stride 5; combined with the GBC-editor cross-check, effectively
+    settled (a memorized-spell golden would fully close it).
+  - **Item 1 (stat byte order) STILL OPEN:** the bundled party has no
+    stat-*drained* character (every stat shows current==original), so `cur`
+    vs `full` ordering is not disambiguated by this save. Needs a save with a
+    drained stat (current≠max) — a self-made DOSBox save, or an in-game
+    stat-drain, is the remaining pin.
+- **Also found:** the GOG build reads/writes saves in a **`SAVE/`
+  subdirectory** of the game dir, not the root — the local-tier import test
+  and any save-locating code must look in `GBX_DATA_DIR/SAVE/` (design-doc
+  §1.1 assumed the game root; correct at implementation).
+- **Question:** §1.7 items 1/2/5 — is coab's `stats2` byte order (`cur`,
+  `full`) or GBC-doc's (`original`, `current`) correct for the on-disk
+  `CHRDAT` record? Is `spellCastCount`'s row stride really 5 (GBC-doc), not
+  coab's transliterated `i*i` bug? Does exceptional-strength `Str00` really
+  need `0..=100` unclamped, against coab's own buggy `Math.Min(_, 25)` read?
 - **Question:** §1.7 items 1/2/5 — is coab's `stats2` byte order (`cur`,
   `full`) or GBC-doc's (`original`, `current`) correct for the on-disk
   `CHRDAT` record? Is `spellCastCount`'s row stride really 5 (GBC-doc), not
