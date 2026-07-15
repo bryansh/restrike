@@ -356,16 +356,30 @@ source document (§5 "New docket candidates").
 
 ### FD-18: Do Up/Down arrows move list-menu highlights?
 
-- **Status:** open
+- **Status:** RESOLVED (2026-07-14, live DOSBox check by Bryan during CotAB
+  character creation — the race-selection list, `sl_select_item` via
+  `ovr018.cs:368`)
 - **Question:** coab's `sl_select_item` special-key switch handles only the
   Home/End/PgUp/PgDn ctrl-codes (`'G'/'O'/'I'/'Q'`) and ignores Up/Down
   arrows entirely (`~/src/goldbox-refs/coab/engine/ovr027.cs:617-640`),
   which contradicts common memory of navigating Gold Box menus with the
   arrow keys. Which is right?
-- **Evidence so far:** coab source only (same review round;
-  `docs/design/renderer-ui-shell.md` §1.5, §1.11 item 10).
-- **Settled by:** DOSBox check on any vertical menu (shop/training lists in
-  the M2 capture sessions) before the design doc's D-UI6 key map is pinned.
+- **Resolution: coab is right — arrow keys do NOT move the highlight.**
+  Bryan confirmed on the real game: arrows did nothing on the race list;
+  the numpad **`1` key (End, `0x4F`→`'O'`) moves the highlight DOWN**, and
+  by symmetry **`7` (Home, `0x47`→`'G'`) moves UP** —
+  `menu_scroll_in_page(true/false)`, `ovr027.cs:620-627`. The ctrl-code
+  letter is just the ASCII of the extended scancode byte (Home `0x47`=`G`,
+  End `0x4F`=`O`, Up `0x48`=`H`, Down `0x50`=`P`); Up/Down (`H`/`P`) are
+  absent from the special-key switch, so they are ignored. (Note the
+  collision: the *letter* `P` typed non-special pages down, but the Down
+  *arrow* — special `P` — does nothing.)
+- **Consequence for D-UI6:** the desktop/web key map must route Home/End
+  (and numpad 7/1) to list-highlight up/down, and must NOT bind Up/Down
+  arrows to list movement (faithful default). A QoL toggle could add arrow
+  support later per D4, default-off.
+- **Cross-reference:** `docs/design/renderer-ui-shell.md` §1.5, §1.11
+  item 10 (both can drop the "contradicts common memory / verify" caveat).
 
 ### FD-19: The (7,12)-North door is a real area transition, not a plain locked door
 
