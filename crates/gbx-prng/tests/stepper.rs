@@ -1252,14 +1252,6 @@ fn acceptance_ten_thousand_pairs_match_gbx_prng() {
 // refuted *empirically*, by execution, for the first time in the project.
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// A local reference LCG step, used only to derive the post-draw state the
-/// mutants need. This duplicates the recovered algebra deliberately — it is the
-/// mutants' scaffold, not the thing under test, and the teeth test's job is to
-/// show the *real bytes* diverge from the *mutant results*, not from this.
-fn ref_step(state: u32) -> u32 {
-    state.wrapping_mul(0x0808_8405).wrapping_add(1)
-}
-
 #[test]
 fn teeth_real_bytes_refute_the_v1_scaled_semantics() {
     let Some(image) = load_image("teeth_real_bytes_refute_the_v1_scaled_semantics") else {
@@ -1281,9 +1273,17 @@ fn teeth_real_bytes_refute_the_v1_scaled_semantics() {
         if n < 2 {
             continue; // scaled and modulo agree trivially at n<2 (both 0)
         }
-        let (ax_real, _) = rig.call_wrapper(k, n).expect("stepper");
-        let new_state = ref_step(k);
-        let mutant = scaled(new_state, n);
+        // Feed the mutant the state the BINARY ITSELF computed (`state2`), not a
+        // locally re-derived one. v1's claim was about the *reduction* — "the
+        // wrapper scales the high word" — so the refutation must hold the draw
+        // fixed and vary only the reduction: given the very state these bytes
+        // produced, v1 would have returned `mutant`; the bytes returned
+        // `ax_real`. Re-deriving the state here would silently import a second
+        // claim (that our LCG algebra is right) into a test that needs only one,
+        // and a drifting scaffold could make this pass for the wrong reason.
+        // All three teeth tests are scaffold-free for this reason.
+        let (ax_real, state2) = rig.call_wrapper(k, n).expect("stepper");
+        let mutant = scaled(state2, n);
         if ax_real != mutant {
             disagreements += 1;
             first.get_or_insert((k, n, ax_real, mutant));
