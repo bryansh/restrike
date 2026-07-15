@@ -116,6 +116,11 @@ pub struct Engine {
     /// `restrike verify` CLI subcommand, and the inspector). Advisory only
     /// — never blocks or fails boot, never serialized into saves.
     verify_report: VerifyReport,
+    /// The loaded rules pack (M3 step 6): the flavor's tables, kept resident
+    /// so the party-facing screens (training XP thresholds, spell slots,
+    /// prices, derived numbers) can read them each tick without re-parsing.
+    /// Not serialized — reloaded from the embedded packs on restore/import.
+    rules: RuleSet,
 }
 
 /// A trivial single-item `ImageBlock` fixture — [`Engine::new_fixture`]'s
@@ -225,8 +230,10 @@ impl Engine {
         // D-RP4: runs immediately after asset loads, never blocks or fails
         // boot -- RuleSet::load() panics only on a malformed *embedded*
         // pack (a shipped bug the D-RP7 CI suite already catches), and
-        // verify() itself always returns a report, never an error.
-        let verify_report = RuleSet::load().verify(&data);
+        // verify() itself always returns a report, never an error. The
+        // RuleSet is kept resident (M3 step 6) rather than dropped.
+        let rules = RuleSet::load();
+        let verify_report = rules.verify(&data);
 
         Engine {
             fb,
@@ -251,6 +258,7 @@ impl Engine {
             symbol_sets,
             sky,
             verify_report,
+            rules,
         }
     }
 
@@ -287,6 +295,8 @@ impl Engine {
             symbol_sets: a.symbol_sets,
             sky: a.sky,
             verify_report: a.verify_report,
+            // Reloaded from the embedded packs (not carried in the save/import).
+            rules: RuleSet::load(),
         }
     }
 
@@ -414,6 +424,8 @@ impl Engine {
                 state: &mut self.state,
                 geo: &self.geo,
                 party: &mut self.party_predicates,
+                roster: &mut self.party,
+                rules: &self.rules,
                 rng: &mut self.rng,
                 fb: &mut self.fb,
                 font: &self.font,

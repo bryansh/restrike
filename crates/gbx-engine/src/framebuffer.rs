@@ -49,6 +49,15 @@ impl Framebuffer {
         }
     }
 
+    /// Fills the whole canvas with one palette index (`0..=15`) — the
+    /// full-screen clear the party-facing menu screens (M3 step 6) paint
+    /// over before laying out their own text. Higher values are clamped out
+    /// (matching [`Self::set_pixel`]'s guard).
+    pub fn clear(&mut self, value: u8) {
+        let v = if value < 16 { value } else { 0 };
+        self.pixels.fill(v);
+    }
+
     /// Writes one pixel, replicating `SetPixel3`'s guard: only values
     /// `0..=15` are ever stored; `16`/`17`/anything higher, and any
     /// out-of-canvas coordinate, are silently ignored — never a panic.

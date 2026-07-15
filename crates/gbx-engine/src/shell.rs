@@ -119,6 +119,13 @@ pub struct FlowCtx<'a> {
     pub state: &'a mut EngineState,
     pub geo: &'a GeoBlock,
     pub party: &'a mut dyn PartyPredicates,
+    /// The real party roster (M3 step 6): the party-facing screens
+    /// (character sheet, camp, training, shops) read and mutate it. Distinct
+    /// from [`Self::party`], which is the M2 combat/door-predicate abstraction.
+    pub roster: &'a mut crate::party::Party,
+    /// The loaded rules pack (M3 step 6): derived numbers, training XP
+    /// thresholds, spell slots, prices — the flavor's tables.
+    pub rules: &'a gbx_rules::pack::RuleSet,
     pub rng: &'a mut EngineRng,
     pub fb: &'a mut Framebuffer,
     pub font: &'a Font,
@@ -963,10 +970,16 @@ impl StepFlow {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Shell {
     Boot(BootFlow),
-    WorldMenu { menu: Widget },
+    WorldMenu {
+        menu: Widget,
+    },
     Look(LookFlow),
     Step(StepFlow),
     GameOver,
+    /// The M3 step-6 party-facing menu screens (character sheet, camp,
+    /// save/load, training, shops) — additive, no VM vector runs here; each
+    /// is a parked-widget screen (`crate::screens`).
+    Screen(crate::screens::Screen),
 }
 
 impl Shell {
@@ -1012,6 +1025,9 @@ impl Shell {
             Shell::Look(l) => run_gated(&l.run) || chain_gated(&l.chain),
             Shell::Step(s) => s.door_widget.is_some() || run_gated(&s.run) || chain_gated(&s.chain),
             Shell::GameOver => false,
+            // A screen always has a parked widget (its command bar/list); no
+            // VM vector ever runs while one is open.
+            Shell::Screen(_) => true,
         }
     }
 
@@ -1053,6 +1069,14 @@ impl Shell {
                 }
             }
             Shell::GameOver => {}
+            Shell::Screen(screen) => {
+                use crate::screens::ScreenTransition;
+                match screen.tick(ctx) {
+                    ScreenTransition::Stay => {}
+                    ScreenTransition::Exit => *self = Self::enter_world_menu(ctx),
+                    ScreenTransition::To(next) => *self = Shell::Screen(next),
+                }
+            }
         }
     }
 
@@ -1071,9 +1095,21 @@ impl Shell {
                     menu: Widget::Delay(Delay::new(24)),
                 };
             }
-            Cast | View | Encamp => {
-                // M3 stub: status text only, stays in the menu (task scope
-                // cut — TryEncamp's vector 3/4 dance is M3 party/camp UI).
+            View => {
+                // The character sheet / party view (`ovr020.viewPlayer`),
+                // returning to the walk loop on Exit (M3 step 6 deliverable 1).
+                *self = Shell::Screen(crate::screens::Screen::PartyView(
+                    crate::screens::PartyView::new(ctx, crate::screens::ReturnTo::World),
+                ));
+            }
+            Encamp => {
+                // The camp menu (`ovr016.MakeCamp`) — M3 step 6 deliverable 2.
+                // (TryEncamp's vector 3/4 area-script dance is out of scope;
+                // this enters the menu directly.)
+                *self = Shell::Screen(crate::screens::Screen::Camp(crate::screens::Camp::new(ctx)));
+            }
+            Cast => {
+                // M3 stub: casting is M5. Status text only, stays in the menu.
                 *self = Self::enter_world_menu(ctx);
             }
             ToggleSearch => {
@@ -1160,6 +1196,8 @@ mod tests {
         state: EngineState,
         geo: GeoBlock,
         party: DefaultPartyPredicates,
+        roster: crate::party::Party,
+        rules: gbx_rules::pack::RuleSet,
         rng: EngineRng,
         fb: Framebuffer,
         font: Font,
@@ -1186,6 +1224,8 @@ mod tests {
                 state: EngineState::new(),
                 geo: open_geo(),
                 party: DefaultPartyPredicates::default(),
+                roster: crate::party::Party::default(),
+                rules: gbx_rules::pack::RuleSet::load(),
                 rng: EngineRng::new(1),
                 fb: Framebuffer::new(),
                 font: marker_font(),
@@ -1212,6 +1252,8 @@ mod tests {
                 state: &mut self.state,
                 geo: &self.geo,
                 party: &mut self.party,
+                roster: &mut self.roster,
+                rules: &self.rules,
                 rng: &mut self.rng,
                 fb: &mut self.fb,
                 font: &self.font,
@@ -1607,5 +1649,136 @@ mod tests {
             h.state.search_flags, 0,
             "search_flags restore must still run after the chain resolves (resume-after-chain)"
         );
+    }
+
+    // --- M3 step 6: party-facing menu screens (View/Camp/Magic) ---
+
+    use crate::screens::Screen;
+
+    fn test_char(name: &str) -> crate::party::Character {
+        use gbx_formats::save_orig::{decode_char_record, CHAR_RECORD_SIZE};
+        let mut bytes = vec![0u8; CHAR_RECORD_SIZE];
+        bytes[0] = name.len() as u8;
+        bytes[1..1 + name.len()].copy_from_slice(name.as_bytes());
+        let rec = decode_char_record(&bytes).unwrap();
+        crate::party::character_from_record(&rec, vec![], vec![])
+    }
+
+    fn char_key(c: u8) -> crate::input::InputEvent {
+        crate::input::InputEvent::Char(c)
+    }
+
+    /// Boots to the world menu with a two-member roster.
+    fn boot_with_party() -> (Shell, Harness) {
+        let mut h = Harness::new();
+        h.roster.members = vec![test_char("Aran"), test_char("Bink")];
+        let mut shell = Shell::boot(&mut h.machine, &mut h.state);
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::WorldMenu { .. })
+        });
+        (shell, h)
+    }
+
+    #[test]
+    fn world_menu_view_opens_the_party_view_and_exit_returns() {
+        let (mut shell, mut h) = boot_with_party();
+        h.input.push_all(&[char_key(b'v')]);
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::PartyView(_)))
+        });
+        // The command bar for a no-money character is just "Exit"; 'E' resolves
+        // it and returns to the walk-loop world menu.
+        h.input.push_all(&[char_key(b'e')]);
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::WorldMenu { .. })
+        });
+    }
+
+    #[test]
+    fn world_menu_encamp_opens_camp_and_exit_returns() {
+        let (mut shell, mut h) = boot_with_party();
+        h.input.push_all(&[char_key(b'e')]); // Encamp
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::Camp(_)))
+        });
+        h.input.push_all(&[char_key(b'e')]); // camp Exit ("Exit" is the sole 'E' word)
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::WorldMenu { .. })
+        });
+    }
+
+    #[test]
+    fn camp_view_returns_to_camp_not_the_world_menu() {
+        let (mut shell, mut h) = boot_with_party();
+        h.input.push_all(&[char_key(b'e')]);
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::Camp(_)))
+        });
+        h.input.push_all(&[char_key(b'v')]); // camp View
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::PartyView(_)))
+        });
+        // Escape leaves the sheet — but back to camp, not the world menu.
+        h.input.push_all(&[crate::input::InputEvent::Escape]);
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::Camp(_)))
+        });
+    }
+
+    #[test]
+    fn camp_magic_opens_the_magic_submenu_and_returns() {
+        let (mut shell, mut h) = boot_with_party();
+        h.input.push_all(&[char_key(b'e')]);
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::Camp(_)))
+        });
+        h.input.push_all(&[char_key(b'm')]); // Magic
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::Magic(_)))
+        });
+        h.input.push_all(&[char_key(b'e')]); // Magic Exit → camp
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::Camp(_)))
+        });
+    }
+
+    #[test]
+    fn camp_rest_stays_in_camp_and_does_not_touch_spell_state() {
+        // FD-25: rest reports without mutating spell state this milestone.
+        let (mut shell, mut h) = boot_with_party();
+        h.input.push_all(&[char_key(b'e')]);
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::Camp(_)))
+        });
+        let before = h.roster.members[0].magic.clone();
+        h.input.push_all(&[char_key(b'r')]); // Rest
+                                             // Rest stays in camp (a status line, no transition).
+        for _ in 0..5 {
+            let mut ctx = h.ctx();
+            shell.tick(&mut ctx);
+        }
+        assert!(matches!(shell, Shell::Screen(Screen::Camp(_))));
+        assert_eq!(
+            h.roster.members[0].magic, before,
+            "rest must not fake a spell-slot restoration (FD-25)"
+        );
+    }
+
+    #[test]
+    fn party_view_scrolls_between_members() {
+        let (mut shell, mut h) = boot_with_party();
+        h.input.push_all(&[char_key(b'v')]);
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::PartyView(_)))
+        });
+        assert_eq!(h.state.selected_player, 0);
+        // Down (ctrl 'P') advances to the next member.
+        h.input
+            .push_all(&[crate::input::InputEvent::Ext(crate::input::ExtKey::Down)]);
+        for _ in 0..3 {
+            let mut ctx = h.ctx();
+            shell.tick(&mut ctx);
+        }
+        assert_eq!(h.state.selected_player, 1);
     }
 }

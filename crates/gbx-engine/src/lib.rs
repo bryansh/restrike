@@ -25,6 +25,7 @@ pub mod movement;
 pub mod party;
 pub mod rng;
 pub mod save;
+pub mod screens;
 pub mod shell;
 pub mod symbols;
 pub mod text;

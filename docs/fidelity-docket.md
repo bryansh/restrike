@@ -599,6 +599,45 @@ stays the one place showing the complete open-hypothesis picture.
   back correctly.
 - **Cross-reference:** `docs/design/save-formats.md` §1.4, §5 item 8.
 
+### FD-25: Rest does not "restore spell slots" — it commits a staged pending list
+
+- **Status:** narrowed (coab read; game-oracle confirmation deferred to M5).
+- **Question:** The M3 step-6 task framed camp/Rest as "spell-slot
+  restoration through `MagicState` + `flavor.spell_slots`" — the common
+  tabletop mental model of "rest → spells back to full." A coab read
+  (`ovr016.cs:274` `rest_menu`, `ovr021.cs:516` `resting`, `:393`
+  `rest_memorize`) shows the original does **not** work that way:
+  `spellCastCount[3,5]` (`Player.cs:536`) is a **fixed per-level capacity**
+  written only at creation/level-up/item-effects, *never* reset by rest.
+  Memorized spells live in a two-list `SpellList` (`Classes/SpellList.cs`):
+  each `SpellItem` carries a `Learning` flag; `LearntList()` (castable) vs
+  `LearningList()` (pending). Magic ▸ Memorize *stages* a spell
+  (`spellList.AddLearn`, `Learning=true`); casting removes it
+  (`ClearSpell`); **Rest merely commits** pending → memorized
+  (`spellList.MarkLearnt`, `ovr021.cs:403`, flips `Learning=false`). There
+  is no "everything back to full" shortcut anywhere.
+- **Impact on M3:** restrike's `party::MagicState` carries `spell_list` (the
+  84-byte `spellList`) and `cast_count` (`spellCastCount`) **raw/undecoded**
+  by deliberate design (party.rs: "Slot→spell interpretation is a rules
+  concern"). The `SpellItem` Learning-flag encoding inside those 84 bytes is
+  not decoded, and staging (Magic ▸ Memorize) is Vancian-memorization work
+  the PLAN explicitly schedules for **M5** ("Vancian memorization/slots/
+  scribing"). So M3's camp Rest cannot faithfully mutate spell state: with
+  no staging path, the pending list is always empty and a faithful
+  `MarkLearnt`-all-pending commits zero — which is *correct* for the bundled
+  save (it carries no staged memorizations). M3's camp Rest therefore wires
+  the menu action and documents this, deferring the real commit + the
+  time/healing halves (per PLAN's "minus time effects") to M5/M4.
+- **Evidence so far:** coab `ovr016.cs:274-298`, `ovr021.cs:393-413/516-606`,
+  `Classes/SpellList.cs:54-86`, `Classes/Player.cs:536`. No game-oracle run
+  yet.
+- **Settled by:** M5's Vancian memorization work — decode the `SpellList`
+  Learning-flag layout, implement Magic ▸ Memorize staging + Rest commit,
+  and confirm against a DOSBox rest that a staged spell becomes castable
+  only after resting.
+- **Cross-reference:** `crates/gbx-engine/src/screens.rs` (camp Rest/Magic),
+  PLAN.md M5.
+
 ## 5. How new entries get added
 
 Any session that surfaces a behavioral hypothesis not derivable purely from
