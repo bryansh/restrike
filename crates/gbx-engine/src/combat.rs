@@ -1679,6 +1679,328 @@ pub fn is_adjacent(a: GridPos, b: GridPos) -> bool {
 /// caller, not by name.)
 pub const CAN_SEE_TARGET_A_IS_INVISIBILITY_NOT_LOS: () = ();
 
+// ===========================================================================
+// The wall-respecting range — the Bresenham reach ray (M4 combat #4; study
+// §4.1.3; deliverable 2, deferred from slice 3)
+// ===========================================================================
+//
+// **This is a straight-line reach RAY, not a BFS flood.** Both the slice-3 study
+// and the AI-slice brief describe the engine's combat range as a "wall-respecting
+// flood-fill"; the coab read (`ovr032.cs` `canReachTargetCalc:92`,
+// `Classes/SteppingPath.cs`) shows it is a **Bresenham line march** from attacker
+// to target. It accumulates a step cost of **2 per orthogonal step, +1 more for a
+// diagonal** (`SteppingPath.Step:38-89`) and — unless walls are ignored — blocks
+// if any tile on the line presents a wall taller than the *attacker's* tile
+// height (`BackGroundTiles[tile].field_2 > attackerTile.field_1`,
+// `canReachTargetCalc:124`). `getTargetRange` = `steps / 2` (`ovr025.cs:1305-1316`,
+// with `ignoreWalls=true` so it is pure geometry); `BuildNearTargets` = the
+// opposite-team members reachable within `max_range`, sorted nearest-first
+// (`ovr025.cs:1290`, `ovr032.cs` `Rebuild_SortedCombatantList:221`). **Draw-free**
+// (both `ovr025` and `ovr032` contain zero `Random` calls — verified by read).
+//
+// This corrects the slice-3 `grid_distance` note: the authoritative combat range
+// is this ray's `steps/2`, which on open ground is the move-cost of the straight
+// path (diagonals discounted), *not* the Chebyshev king-move `grid_distance`.
+//
+// **Faithful-but-degenerate quirk (transliterated as coab wrote it):** the height
+// "budget" path (`var_31`, `canReachTargetCalc:103-116`) is built flat — both its
+// endpoints take the *attacker* tile's `field_1` — so the wall test reduces to the
+// constant `tile.field_2 > attackerTile.field_1`. Whether coab's flat `var_31` is
+// the real binary behavior or a decompiler artifact is unverifiable statically; on
+// the uniform-height terrain this slice's fights use (`field_1` is 1 for every
+// floor tile) the test never fires anyway, so it is inert for the parity artifact.
+
+/// `BackGroundTiles[tile].field_1` (`Struct_189B4.field_1`, `Gbl.cs:193-268`) —
+/// the tile's "floor height", the attacker-tile value the reach ray uses as its
+/// wall-clearance budget. 74 entries, parallel to [`BACKGROUND_MOVE_COST`].
+pub const TILE_HEIGHT: [u8; 74] = [
+    0, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 0..9
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 10..19
+    1, 1, 1, 1, 1, 1, 2, 1, 1, 1, // 20..29
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 30..39
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 40..49
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 50..59
+    0, 0, 0, 0, 1, 1, 0, 0xFF, 0, 0xFF, // 60..69
+    0, 0xFF, 0, 1, // 70..73
+];
+
+/// `BackGroundTiles[tile].field_2` (`Struct_189B4.field_2`, `Gbl.cs:193-268`) —
+/// the tile's "wall height". The reach ray blocks on a tile whose `field_2`
+/// exceeds the attacker tile's [`TILE_HEIGHT`] (`canReachTargetCalc:124`). Walls
+/// (`move_cost 0xFF`) carry `field_2 = 2` (> the floor height 1); the void
+/// sentinels carry `0xFF`. 74 entries.
+pub const TILE_WALL_HEIGHT: [u8; 74] = [
+    0xFF, 2, 2, 2, 2, 0, 2, 2, 2, 0, // 0..9
+    2, 0, 2, 0, 2, 0, 2, 0, 2, 2, // 10..19
+    2, 2, 2, 0, 0, 2, 0, 0, 0, 0, // 20..29
+    0, 0, 2, 2, 2, 2, 2, 0, 0, 0, // 30..39
+    0, 0, 2, 2, 0, 0, 0, 0, 0, 0, // 40..49
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 50..59
+    0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 0, 0xFF, // 60..69
+    1, 0xFF, 1, 1, // 70..73
+];
+
+/// The result of one reach ray (`MapReach`, `ovr032.cs:9`): whether the line was
+/// unobstructed, and the accumulated `steps` (2·orthogonal + 3·diagonal, i.e.
+/// `2·max(|dx|,|dy|) + min(|dx|,|dy|)`). Range in half-steps; `steps / 2` is the
+/// tile range (`getTargetRange`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReachRay {
+    pub reach: bool,
+    pub steps: u16,
+}
+
+/// `canReachTargetCalc` (`ovr032.cs:92`, `sub_733F1`): march the Bresenham line
+/// from `attacker` to `target`, accumulating [`ReachRay::steps`], returning early
+/// (`reach = false`) at the first tile whose wall height exceeds the attacker
+/// tile's height (skipped when `ignore_walls`). The `steps > 511` guard is dead on
+/// a 50×25 map (coab's own comment, `:129`) and omitted. `steps` never wraps here
+/// (max ≈ 147 < 256) though coab stores it in a byte.
+///
+/// The line stepping is `SteppingPath.Step` (`SteppingPath.cs:38`) verbatim: along
+/// the dominant axis, each major step adds 2, and a Bresenham minor step adds a
+/// further 1 (the diagonal). Draw-free.
+pub fn reach_ray(
+    map: &CombatMap,
+    attacker: GridPos,
+    target: GridPos,
+    ignore_walls: bool,
+) -> ReachRay {
+    let attacker_height = TILE_HEIGHT
+        .get(map.ground_tile(attacker) as usize)
+        .copied()
+        .unwrap_or(0);
+
+    let diff_x = (target.x - attacker.x).abs();
+    let diff_y = (target.y - attacker.y).abs();
+    let sign_x = (target.x - attacker.x).signum();
+    let sign_y = (target.y - attacker.y).signum();
+
+    let mut cur = attacker;
+    let mut steps: u16 = 0;
+    let mut delta_count: i32 = 0;
+
+    loop {
+        // Wall test on the current cell (attacker cell first, target cell last).
+        if !ignore_walls {
+            let gt = map.ground_tile(cur);
+            let wall = TILE_WALL_HEIGHT.get(gt as usize).copied().unwrap_or(0xFF);
+            if wall > attacker_height {
+                return ReachRay {
+                    reach: false,
+                    steps,
+                };
+            }
+        }
+
+        // SteppingPath.Step (ovr032/SteppingPath.cs:38-89).
+        let made = if diff_x >= diff_y {
+            if cur.x != target.x {
+                cur.x += sign_x;
+                delta_count += diff_y * 2;
+                steps += 2;
+                if delta_count >= diff_x {
+                    cur.y += sign_y;
+                    delta_count -= diff_x * 2;
+                    steps += 1;
+                }
+                true
+            } else {
+                false
+            }
+        } else if cur.y != target.y {
+            cur.y += sign_y;
+            delta_count += diff_x * 2;
+            steps += 2;
+            if delta_count >= diff_y {
+                cur.x += sign_x;
+                delta_count -= diff_y * 2;
+                steps += 1;
+            }
+            true
+        } else {
+            false
+        };
+
+        if !made {
+            return ReachRay { reach: true, steps };
+        }
+    }
+}
+
+/// `canReachTarget(ref range, target, attacker)` (`ovr032.cs:77`): the reach test
+/// with a `range_budget` (in tiles). Returns `Some(steps)` iff the line is
+/// unobstructed **and** `steps <= range_budget·2 + 1`; `None` otherwise. Mirrors
+/// coab's `if (mr.range > range*2+1) return false; else return mr.reach;` — note
+/// the `+1` slack lets a diagonal-adjacent (steps 3) satisfy a `range_budget` of 1.
+pub fn can_reach(
+    map: &CombatMap,
+    attacker: GridPos,
+    target: GridPos,
+    range_budget: i32,
+    ignore_walls: bool,
+) -> Option<u16> {
+    let ray = reach_ray(map, attacker, target, ignore_walls);
+    if ray.steps as i32 > range_budget * 2 + 1 {
+        return None;
+    }
+    if ray.reach {
+        Some(ray.steps)
+    } else {
+        None
+    }
+}
+
+/// `getTargetRange(target, attacker)` (`ovr025.cs:1305`): the tile range from
+/// `attacker` to `target` — `steps / 2` of the wall-**ignoring** ray (coab sets
+/// `ignoreWalls = true`, `:1307`, so this is pure geometry). Adjacent = 1 (an
+/// orthogonal neighbour is steps 2, a diagonal 3, both `/2 = 1`). coab returns
+/// `0xFF` when the target isn't in the combatant list; that case doesn't arise for
+/// a real live target, so the geometric value is returned directly.
+pub fn get_target_range(map: &CombatMap, target: GridPos, attacker: GridPos) -> u16 {
+    reach_ray(map, attacker, target, true).steps / 2
+}
+
+/// `CanSeeCombatant(direction, playerA, playerB)` (`ovr032.cs:145`, `sub_7354A`):
+/// whether `playerB`, facing iso `direction`, can see `playerA` — an octant
+/// half-plane test (NOT the same as `CanSeeTargetA`, which is the invisibility
+/// affect). Pure geometry, draw-free. Used only as the [`build_near_targets`]
+/// sort tiebreak via [`find_combatant_direction`]; transliterated for fidelity.
+pub fn can_see_combatant(direction: u8, player_a: GridPos, player_b: GridPos) -> bool {
+    if !player_a.in_bounds() || !player_b.in_bounds() {
+        return false;
+    }
+    if direction == 0xFF || direction == 8 {
+        return true;
+    }
+    let facing_x = player_b.x + MAP_DIR_X_DELTA[direction as usize];
+    let facing_y = player_b.y + MAP_DIR_Y_DELTA[direction as usize];
+    if player_b == player_a || (facing_x == player_a.x && facing_y == player_a.y) {
+        return true;
+    }
+    let (ax, ay) = (player_a.x, player_a.y);
+    let (fx, fy) = (facing_x, facing_y);
+    match direction {
+        0 => (ax >= fx && ay <= (fx - ax) + fy) || (ax <= fx && ay <= (ax - fx) + fy),
+        1 => (ax >= fx && ay <= (fx - ax) + fy) || (ax >= (fx - fy) + ay && ay <= fy),
+        2 => (ax >= (fx + fy - ay) && ay <= fy) || (ax >= (fx + ay - fy) && ay >= fy),
+        3 => (ax >= (fx + ay) - fy && ay >= fy) || (ax >= fx && ay >= (ax - fx) + fy),
+        4 => (ax >= fx && ay >= (ax - fx) + fy) || (ax <= fx && ay >= (fx - ax) + fy),
+        5 => (ax <= fx && ay >= (fx - ax) + fy) || (ax <= (fx + fy) - ay && ay >= fy),
+        6 => (ax <= (fx + fy) - ay && ay >= fy) || (ax <= (fx + ay) - fy && ay <= fy),
+        _ => (ax <= (fx + ay) - fy && ay <= fy) || (ax <= fx && ay <= (ax - fx) + fy), // 7
+    }
+}
+
+/// `FindCombatantDirection(target, attacker)` (`ovr032.cs:283`): the first iso
+/// direction 0..=8 in which `attacker` can see `target` ([`can_see_combatant`]).
+/// The [`build_near_targets`] sort's secondary key.
+pub fn find_combatant_direction(target: GridPos, attacker: GridPos) -> u8 {
+    let mut dir: u8 = 0;
+    while dir < 8 && !can_see_combatant(dir, target, attacker) {
+        dir += 1;
+    }
+    dir
+}
+
+/// A combatant as the range layer sees it: its footprint origin, footprint size
+/// (`field_DE & 7`), and team. The full record isn't needed — reach only reads
+/// positions and the team filter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RangeCombatant {
+    pub pos: GridPos,
+    /// Footprint size (`CombatMap[i].size`); `0` = downed/absent (skipped, matching
+    /// coab's `combatantMap.size > 0` gate).
+    pub size: u8,
+    pub team: Team,
+}
+
+/// One entry of a near-target list (`CombatPlayerIndex` + `SortedCombatant.steps`):
+/// the roster index, cell, and the reach `steps` coab stored for the sort.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NearTarget {
+    /// Roster index into the `combatants` slice given to [`build_near_targets`].
+    pub idx: usize,
+    pub pos: GridPos,
+    /// `SortedCombatant.steps` — half-steps, floored at `max_range` (see below).
+    pub steps: u16,
+}
+
+/// `BuildNearTargets(max_range, player)` → `Rebuild_SortedCombatantList`
+/// (`ovr025.cs:1290`, `ovr032.cs:221-280`): the opposite-team combatants reachable
+/// from `attacker_idx` within `max_range` tiles, **sorted nearest-first** (the
+/// `SortedCombatant.CompareTo` order: `steps` asc, then `direction` asc). Draw-free.
+///
+/// **Faithful `found_range` floor (`ovr032.cs:243-262`):** `found_range` starts at
+/// `max_range` and is only lowered when a pair's `steps < found_range`. Because the
+/// minimum possible `steps` is 2 (one orthogonal step), a small `max_range` (e.g.
+/// `BuildNearTargets(1)`) leaves every reachable target's stored `steps == max_range`
+/// — the AI only reads `.Count` and picks a random index there, so the floored
+/// value is immaterial; a large `max_range` (`0xff`, used by `find_target`) records
+/// the true min steps and yields a genuine nearest-first order.
+///
+/// **Tie order:** `SortedCombatant.CompareTo` returns 0 for equal `(steps,
+/// direction)` and coab's `List.Sort` is unstable, so the live order of exact ties
+/// is statically unspecified; this uses a stable sort (roster order on ties) — a
+/// documented micro-divergence that only a binary trace could pin.
+pub fn build_near_targets(
+    map: &CombatMap,
+    combatants: &[RangeCombatant],
+    attacker_idx: usize,
+    max_range: i32,
+    ignore_walls: bool,
+) -> Vec<NearTarget> {
+    let attacker = combatants[attacker_idx];
+    let attacker_map = size_footprint(attacker.size, attacker.pos);
+
+    let mut out: Vec<(NearTarget, u8)> = Vec::new();
+
+    for (i, c) in combatants.iter().enumerate() {
+        // combatantMap.size > 0 && filter(p.combat_team != attacker.combat_team).
+        if c.size == 0 || c.team == attacker.team {
+            continue;
+        }
+        let target_map = size_footprint(c.size, c.pos);
+
+        let mut found = false;
+        let mut found_range: i32 = max_range;
+        let mut found_target = GridPos::new(0, 0);
+        let mut found_attacker = GridPos::new(0, 0);
+
+        for &tp in &target_map {
+            for &ap in &attacker_map {
+                if let Some(steps) = can_reach(map, ap, tp, max_range, ignore_walls) {
+                    found = true;
+                    if (steps as i32) < found_range {
+                        found_range = steps as i32;
+                        found_target = tp;
+                        found_attacker = ap;
+                    }
+                }
+            }
+        }
+
+        if found {
+            let dir = find_combatant_direction(found_target, found_attacker);
+            out.push((
+                NearTarget {
+                    idx: i,
+                    pos: c.pos,
+                    steps: found_range as u16,
+                },
+                dir,
+            ));
+        }
+    }
+
+    // SortedCombatant.CompareTo: steps asc, then direction asc (the `direction%2`
+    // tertiary key is 0 whenever directions are equal). Stable → roster order on
+    // full ties.
+    out.sort_by(|a, b| a.0.steps.cmp(&b.0.steps).then(a.1.cmp(&b.1)));
+
+    out.into_iter().map(|(nt, _)| nt).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2671,6 +2993,149 @@ mod tests {
 
         assert_eq!(log.len(), 0, "the setup path draws nothing (D9)");
         // (The rng binding exists only to hold the sink; silence unused warnings.)
+        let _ = &mut rng;
+    }
+
+    // === wall-respecting range — the Bresenham reach ray (M4 combat #4) =====
+
+    fn rc(team: Team, x: i32, y: i32) -> RangeCombatant {
+        RangeCombatant {
+            pos: GridPos::new(x, y),
+            size: 1,
+            team,
+        }
+    }
+
+    #[test]
+    fn reach_ray_open_ground_step_counts() {
+        let map = CombatMap::uniform(FLOOR);
+        let o = GridPos::new(20, 12);
+        // Orthogonal neighbour: 1 step ×2 = 2.
+        assert_eq!(reach_ray(&map, o, GridPos::new(21, 12), false).steps, 2);
+        // Diagonal neighbour: 2 + 1 = 3.
+        assert_eq!(reach_ray(&map, o, GridPos::new(21, 13), false).steps, 3);
+        // Distance-2 orthogonal: 4.
+        assert_eq!(reach_ray(&map, o, GridPos::new(22, 12), false).steps, 4);
+        // 2·max + min: (dx=3,dy=1) → 6+1 = 7.
+        assert_eq!(reach_ray(&map, o, GridPos::new(23, 13), false).steps, 7);
+        // Symmetric in endpoint order (abs deltas).
+        assert_eq!(
+            reach_ray(&map, GridPos::new(23, 13), o, false).steps,
+            reach_ray(&map, o, GridPos::new(23, 13), false).steps
+        );
+        // Self: zero steps, reachable.
+        let r = reach_ray(&map, o, o, false);
+        assert!(r.reach && r.steps == 0);
+    }
+
+    #[test]
+    fn get_target_range_halves_steps_for_adjacency() {
+        let map = CombatMap::uniform(FLOOR);
+        let o = GridPos::new(20, 12);
+        assert_eq!(
+            get_target_range(&map, GridPos::new(21, 12), o),
+            1,
+            "ortho adj"
+        );
+        assert_eq!(
+            get_target_range(&map, GridPos::new(21, 13), o),
+            1,
+            "diag adj"
+        );
+        assert_eq!(get_target_range(&map, GridPos::new(22, 12), o), 2, "dist 2");
+        assert_eq!(get_target_range(&map, GridPos::new(24, 12), o), 4, "dist 4");
+    }
+
+    #[test]
+    fn reach_ray_blocks_on_a_taller_wall_but_ignore_walls_passes() {
+        let mut map = CombatMap::uniform(FLOOR); // floor height 1
+                                                 // A wall tile (field_2 == 2 > floor height 1) mid-line blocks.
+        map.set_tile(GridPos::new(12, 10), WALL_TILE);
+        let a = GridPos::new(10, 10);
+        let t = GridPos::new(14, 10);
+        let blocked = reach_ray(&map, a, t, false);
+        assert!(!blocked.reach, "the wall blocks the ray");
+        assert_eq!(
+            blocked.steps, 4,
+            "blocked after reaching the wall cell (2 ortho steps)"
+        );
+        // Ignoring walls, the full line is traversed: 4 ortho steps ×2 = 8.
+        let ignored = reach_ray(&map, a, t, true);
+        assert!(ignored.reach);
+        assert_eq!(ignored.steps, 8);
+        // getTargetRange ignores walls, so it still measures the geometric range.
+        assert_eq!(get_target_range(&map, t, a), 4);
+        // can_reach reflects the block within budget.
+        assert_eq!(can_reach(&map, a, t, 0xff, false), None, "blocked");
+        assert_eq!(can_reach(&map, a, t, 0xff, true), Some(8), "wall ignored");
+    }
+
+    #[test]
+    fn tile_height_tables_are_74_and_match_move_cost_walls() {
+        assert_eq!(TILE_HEIGHT.len(), 74);
+        assert_eq!(TILE_WALL_HEIGHT.len(), 74);
+        // Every impassable wall tile presents a wall taller than the floor height 1.
+        for t in 0..74u8 {
+            if BACKGROUND_MOVE_COST[t as usize] == 0xFF && TILE_HEIGHT[t as usize] == 1 {
+                assert!(
+                    TILE_WALL_HEIGHT[t as usize] > 1,
+                    "wall tile {t} should block a height-1 attacker"
+                );
+            }
+        }
+        // A floor tile (0x17) never blocks a height-1 attacker.
+        assert!(TILE_WALL_HEIGHT[0x17] <= TILE_HEIGHT[0x17]);
+    }
+
+    #[test]
+    fn build_near_targets_filters_team_and_sorts_nearest_first() {
+        let map = CombatMap::uniform(FLOOR);
+        let combatants = [
+            rc(Team::Party, 25, 12),   // 0 = attacker (same team → excluded)
+            rc(Team::Monster, 26, 12), // 1 = adjacent (steps 2)
+            rc(Team::Monster, 28, 12), // 2 = dist 3 (steps 6)
+            rc(Team::Monster, 25, 16), // 3 = dist 4 (steps 8)
+            rc(Team::Party, 24, 12),   // 4 = ally (excluded by team filter)
+        ];
+        let near = build_near_targets(&map, &combatants, 0, 0xff, false);
+        let idxs: Vec<usize> = near.iter().map(|n| n.idx).collect();
+        assert_eq!(idxs, vec![1, 2, 3], "opposite team only, nearest-first");
+        assert_eq!(near[0].steps, 2, "true min steps at large max_range");
+        assert_eq!(near[1].steps, 6);
+        assert_eq!(near[2].steps, 8);
+    }
+
+    #[test]
+    fn build_near_targets_range_1_is_melee_adjacency() {
+        let map = CombatMap::uniform(FLOOR);
+        let combatants = [
+            rc(Team::Party, 25, 12),   // attacker
+            rc(Team::Monster, 26, 13), // diagonal-adjacent (steps 3 ≤ 1·2+1)
+            rc(Team::Monster, 28, 12), // dist 3 (steps 6 > 3) — excluded at range 1
+        ];
+        let near = build_near_targets(&map, &combatants, 0, 1, false);
+        assert_eq!(near.len(), 1, "only the adjacent enemy is near at range 1");
+        assert_eq!(near[0].idx, 1);
+        // found_range is floored at max_range (1) — the AI reads only .len()/index.
+        assert_eq!(near[0].steps, 1);
+    }
+
+    #[test]
+    fn range_layer_is_draw_free() {
+        let log = DrawLog::default();
+        let mut rng = EngineRng::new(SEED);
+        rng.attach_sink(log.sink());
+        let map = CombatMap::uniform(FLOOR);
+        let combatants = [
+            rc(Team::Party, 25, 12),
+            rc(Team::Monster, 26, 12),
+            rc(Team::Monster, 30, 15),
+        ];
+        let _ = reach_ray(&map, combatants[0].pos, combatants[1].pos, false);
+        let _ = get_target_range(&map, combatants[1].pos, combatants[0].pos);
+        let _ = build_near_targets(&map, &combatants, 0, 0xff, false);
+        let _ = find_combatant_direction(combatants[1].pos, combatants[0].pos);
+        assert_eq!(log.len(), 0, "the range layer draws nothing (D9)");
         let _ = &mut rng;
     }
 }
