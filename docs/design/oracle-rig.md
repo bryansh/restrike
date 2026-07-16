@@ -218,7 +218,13 @@ no naturally trainable member.)*
   assumed away (this also makes part B independent of FD-27's answer while
   confirming it). Our side replays the same window via `gbx-prng` and must
   predict the full stream and results.
-- H3 closes on A + B together.
+- H3 closes on A + B together. *(CLOSED 2026-07-16: part A — 10k pairs
+  bit-exact, 2026-07-15; part B — live staging-hook capture, seed
+  `0xFAB1E001` poked at first draw, 2,096 draws chained LCG-exact with zero
+  post-poke Randomize firings; smoke capture separately fingerprinted the
+  copy-protection prompt's Random(26)/(22)/(3)/(6) sequence with the
+  wrapper's N recovered from `ss_sp_words[3]`. Rig branch:
+  `~/src/goldbox-refs/dosbox-staging` `restrike-hook` @ e7138cb.)*
 
 ### D-OR5 — What H4 "traces match" means (v3: reweighted after round 2 broke (b)'s premise)
 

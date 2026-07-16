@@ -283,7 +283,7 @@ Walk around Tilverton, looking right.
   `GBX_DATA_DIR=~/goldbox-data/cotab cargo test -p gbx-engine -- --nocapture m3_exit_gate`.
 
 ### M4 — First blood (4–8 weekends) — the bulk
-- **H3 first:** bit-exact PRNG + seed control on both sides. *(Recovered 2026-07-15 and
+- **H3 first:** bit-exact PRNG + seed control on both sides. **H3 CLOSED 2026-07-16.** *(Recovered 2026-07-15 and
   adversarially re-derived: the binary's `RandNext` is the Borland TP LCG `state*0x08088405+1`,
   state dword `DS:0x47F0`, integer `Random(N)` = `hi16 mod N` (TP 5.x — the review refuted a
   scaled-high-word v1 claim), `Randomize` = DOS clock, called once at boot; no overlay RNG

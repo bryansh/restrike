@@ -678,8 +678,11 @@ stays the one place showing the complete open-hypothesis picture.
 
 ### FD-27: Seed lifecycle — answered statically: one boot-time `Randomize`, no overlay RNG copies
 
-- **Status:** narrowed (static census complete 2026-07-15; dynamic
-  single-writer confirmation = D-OR4 part B)
+- **Status:** RESOLVED (2026-07-16 — dynamic half confirmed by D-OR4 part B:
+  across a 2,096-draw live session, **zero** post-poke `Randomize` firings and
+  zero foreign writes to `DS:0x47F0` (chain continuity held on every link);
+  the boot capture separately showed the one `InitFirst` seeding firing before
+  the first draw, exactly as the static census predicted)
 - **Answer:** `Randomize` (image `0xa5e1`; seeds `DS:0x47F0` from DOS wall
   clock, low word ← CX hour:min, high ← DX sec:centisec — the dword is
   DX:CX) has **exactly one call site**: GAME.OVR `0xf5f6` = coab
