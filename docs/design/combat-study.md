@@ -49,6 +49,17 @@ The rest of this document expands each box.
 
 ## 1. The round loop and its state (feeds D-OR5(b)'s structure-walk prerequisites)
 
+> **PARTIALLY IMPLEMENTED — initiative slice (2026-07-16).** The round skeleton
+> (`count → initiative → turns → BattleRoundChecks`) is realized as a tick-based
+> `CombatState` in `gbx-engine`'s `combat` module (D8: `step()` returns control,
+> no blocking loop). Only the draw-bearing parts land this slice: initiative
+> (§2), the `combat_round` counter + stalemate-cap termination, and the
+> surprise-mask clear (`ovr009.cs:44`). The turn body, `step_game_time`, affect
+> ticks, bleed/bandage, death/counts, and the map are stubs/out of scope. State
+> variables in §1.1 that this slice touches: `TeamList` (roster order),
+> `combat_round` (`byte_1D8B7`), `combat_round_no_action_limit` (=15),
+> `area2_ptr.field_596` (surprise mask).
+
 `MainCombatLoop` (`ovr009.cs:22`) is a `while (end_combat == false)` loop. Each
 iteration is one **combat round**:
 
@@ -140,6 +151,16 @@ side can finish the other. `step_game_time` is a **non-RNG** clock advance.
 ---
 
 ## 2. Initiative — the draw-order signature (settles FD-2 via D-OR5(a))
+
+> **IMPLEMENTED — initiative slice (2026-07-16, D-OR5(a) Phase 1, first slice).**
+> Both routines below are transliterated in `gbx-engine`'s `combat` module
+> (`CalculateInitiative` → `calculate_initiative`, `FindNextCombatant` →
+> `select_or_end` + the pure `select_combatant`), with synthetic draw-sequence
+> tests. The coab re-read for this slice **matched §2.1/§2.2 exactly** (the
+> clamp-then-`-6` ordering, the two-`if` tie-break with its `>`-only `max_roll`
+> reset, and the `(A+1)·K` d100 count). Not yet parity-verified against a live
+> trace — that closes FD-2. Turn resolution beyond initiative (the actual turn)
+> is a later slice; here the turn slot is a zero-draw stub.
 
 Two functions produce the round's turn order. Their combined RNG-stream shape is
 what a Phase-0 trace matches.
@@ -524,20 +545,21 @@ session, M5-adjacent).
 
 ---
 
-## 9. PROPOSED action-profile event vocabulary (NOT pinned — D-OR3)
+## 9. Action-profile event vocabulary (`init`/`pick` pinned; rest PROPOSED — D-OR3)
 
-> **PROPOSED ONLY.** D-OR3 leaves the `action`-profile *vocabulary* for the combat
-> sessions; its *mechanism* (profile tag, canonical field order, same-tick
-> emission order) already exists in `gbx-oracle`. These fields are a strawman for
-> the Phase-1 implementer to pin when each system lands — they are **not** a
-> format commitment, and equality over them is not yet a gate. All values are
-> integers (D-OR3 canonical encoding); `combatant_id` is a stable per-encounter
-> index into the roster.
+> **MOSTLY PROPOSED — `init`/`pick` now PINNED (2026-07-16, initiative slice).**
+> D-OR3 leaves the `action`-profile *vocabulary* for the combat sessions to pin
+> as each system lands; its *mechanism* (profile tag, canonical field order,
+> same-tick emission order) already exists in `gbx-oracle`. The remaining rows
+> are still a strawman. All values are integers (D-OR3 canonical encoding —
+> `surprise` is `0`/`1`, not a bool); `combatant_id` is a stable per-encounter
+> index into the roster. Equality over action events is **not** yet a gate, even
+> for the pinned rows — pinning fixes the field names/order, not a comparison.
 
-| `e` | Proposed fields | Emitted when | Draws it should bracket |
+| `e` | Fields | Emitted when | Draws it brackets |
 |---|---|---|---|
-| `init` | `combatant_id, delay, dex_adj, surprise` | per combatant in `CalculateInitiative` | the one `random(6)` |
-| `pick` | `pass, combatant_id, delay, roll` | per member per `FindNextCombatant` pass | one `random(100)` |
+| `init` **✓ pinned** | `combatant_id, delay, dex_adj, surprise` (canonical order) | per combatant in `CalculateInitiative` | the one `random(6)` |
+| `pick` **✓ pinned** | `pass, combatant_id, delay, roll` (canonical order) | **per `FindNextCombatant` selection** (one per yielded combatant, not per member) | brackets a whole pass's `random(100)`s |
 | `move` | `combatant_id, from{x,y}, to{x,y}, cost` | each step in the AI/menu move | none (movement is RNG-free) |
 | `attack` | `attacker_id, target_id, attack_idx, roll, bonus, target_ac, hit` | each `CanHit`/`PC_CanHit` | one `random(20)` |
 | `dmg` | `attacker_id, target_id, dice_count, dice_size, bonus, backstab_mult, total` | each `sub_3E192` | `dice_count` × `random(dice_size)` |

@@ -76,6 +76,16 @@
   per-round draw-stream shape: `docs/design/combat-study.md` §2.
 - **Settled by:** H4 (M4) — Phase-0 QuickFight capture + Phase-1 replay matching
   draw order for ≥10 seeds (`oracle-rig.md` D-OR5(a)).
+- **Progress (2026-07-16, D-OR5(a) Phase 1 first slice):** the formula is now
+  **implemented** in `gbx-engine`'s `combat` module — `CalculateInitiative`
+  (one d6 + `Flavor::dex_reaction_bonus`, clamp-to-1, team `-6`, out-of-range →
+  0, the clamp-then-subtract ordering transliterated) and `FindNextCombatant`
+  (one d100 per roster member per pass, the two-`if` tie-break, `max_delay==0`
+  termination), with synthetic draw-sequence tests. This does **not** settle the
+  docket: settlement still requires the live Phase-0 capture replayed to
+  draw-order parity for ≥10 seeds. The `init`/`pick` action-profile events are
+  now pinned (`combat-study.md` §9; `gbx-oracle` `InitEvent`/`PickEvent`) to
+  bracket those draws for the parity check.
 
 ### FD-3: Attacks-per-round schedule
 
