@@ -331,6 +331,15 @@ PlayerQuickFight(player):
 
 ## 4.1 The melee AI turn — the complete draw-sequence map (M4 combat #4)
 
+> **Implementation status (2026-07-16):** deliverable 2 (the wall-respecting
+> range ray, §4.1.3's `getTargetRange`/`BuildNearTargets`) is **landed** in
+> `gbx-engine`'s `combat` module (`reach_ray`/`can_reach`/`get_target_range`/
+> `build_near_targets`, tested, draw-free). The **`field_15` mode-gate** (§4.1.2)
+> is **landed** as `field_15_mode_gate` (the short-circuit + gate-distribution
+> tests). The behavior-guard d7s (sites C/F), `find_target` picks, and the
+> `sub_35DB1` move-attack loop (§4.1.4-6) — plus wiring into `CombatState::step`
+> and the all-AI parity artifact — are the remaining pieces.
+
 > **THIS IS THE PARITY SPEC.** The full melee call chain was read leaf-to-leaf
 > for the AI slice (2026-07-16). Every `roll_dice`/`Random` site a melee
 > combatant's `PlayerQuickFight` turn can reach is listed below **in the exact

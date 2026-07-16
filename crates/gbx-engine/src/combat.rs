@@ -2001,6 +2001,54 @@ pub fn build_near_targets(
     out.into_iter().map(|(nt, _)| nt).collect()
 }
 
+// ===========================================================================
+// The melee QuickFight AI (M4 combat #4; study §4.1, D-OR5(a) Phase 1)
+// ===========================================================================
+//
+// **In progress — deliverable 3.** This section transliterates the draw-bearing
+// pieces of `PlayerQuickFight` (`ovr010.cs:8`) in draw order per the §4.1 map. The
+// `field_15` mode-gate lands first — the turn's *first* draw site and the study's
+// #1 landmine (the `||` short-circuit). The behavior-guard d7s, `find_target`
+// picks, and the `sub_35DB1` move-attack loop (with the per-step monster d100 and
+// the opportunity attacks) are the remaining pieces; see the handoff. Every draw
+// flows through the one `EngineRng`/`roll_dice` seam (D9).
+
+/// The QuickFight `field_15` **target-mode gate** (`ovr010.cs:20-36`; study
+/// §4.1.2) — the very first draws of a melee AI turn, run before any target
+/// selection. Given the combatant's persistent `field_15` (`Action@0x15`, which
+/// `CalculateInitiative` does **not** reset), returns its new value and draws
+/// faithfully.
+///
+/// ```text
+/// if (field_15 == 0 || field_15 == 4 || roll_dice(4,1) == 1) {  // d4 GATE (short-circuits)
+///     v = roll_dice(8,1);                                       // d8
+///     v = (v == 8) ? roll_dice(4,1) : roll_dice(2,1) + 4;       // d4 (→1..4) or d2 (→5..6)
+/// }
+/// ```
+///
+/// **The `||` short-circuit is the landmine (D9):** when `field_15` is 0 or 4 the
+/// `roll_dice(4,1)` gate is **not evaluated** — that turn draws only the body's
+/// **2** dice (d8 then d2|d4), not 3. Since `field_15` starts at 0, *every
+/// combatant's first turn* takes this 2-draw path. When `field_15 ∉ {0,4}`: one d4
+/// gate draw always; then the 2-draw body only if the gate rolled 1 (so 1 or 3
+/// draws). The result is always in `1..=6` (never 0/7/8), so it never re-triggers
+/// the `==0` short-circuit but can land on 4 (re-triggering `==4`).
+pub fn field_15_mode_gate(rng: &mut EngineRng, field_15: u8) -> u8 {
+    let mut v = field_15 as u16;
+    // ovr010.cs:22 — the `||` short-circuits, so roll_dice(4,1) is skipped for
+    // field_15 ∈ {0,4}. Rust `||` short-circuits identically.
+    let enter = v == 0 || v == 4 || roll_dice(rng, 4, 1) == 1;
+    if enter {
+        v = roll_dice(rng, 8, 1); // ovr010.cs:24
+        if v != 8 {
+            v = roll_dice(rng, 2, 1) + 4; // ovr010.cs:28 → 5..6
+        } else {
+            v = roll_dice(rng, 4, 1); // ovr010.cs:32 → 1..4
+        }
+    }
+    v as u8
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3137,5 +3185,76 @@ mod tests {
         let _ = find_combatant_direction(combatants[1].pos, combatants[0].pos);
         assert_eq!(log.len(), 0, "the range layer draws nothing (D9)");
         let _ = &mut rng;
+    }
+
+    // === the field_15 mode-gate (M4 combat #4, deliverable 3 start) =========
+
+    #[test]
+    fn field_15_gate_short_circuits_on_0_and_4() {
+        // field_15 ∈ {0,4}: the d4 gate is skipped (||-short-circuit), so exactly
+        // TWO draws — d8 then (d2 or d4) — never three.
+        for start in [0u8, 4u8] {
+            let log = DrawLog::default();
+            let mut rng = EngineRng::new(SEED);
+            rng.attach_sink(log.sink());
+            let out = field_15_mode_gate(&mut rng, start);
+            let ns = log.ns();
+            assert_eq!(ns.len(), 2, "field_15={start}: no d4 gate, just d8 + tail");
+            assert_eq!(ns[0], 8, "first body draw is the d8");
+            assert!(ns[1] == 2 || ns[1] == 4, "tail is d2 (→5..6) or d4 (→1..4)");
+            assert!((1..=6).contains(&out), "result in 1..=6, got {out}");
+        }
+    }
+
+    #[test]
+    fn field_15_gate_draws_the_d4_when_not_0_or_4() {
+        // field_15 ∉ {0,4}: one d4 gate draw always. If the gate rolls 1 → the
+        // 2-draw body follows (3 total); else just the gate (1 draw, value kept).
+        let mut oracle = Replay::new(SEED);
+        let gate = oracle.roll(4); // the first draw the gate will make
+
+        let log = DrawLog::default();
+        let mut rng = EngineRng::new(SEED);
+        rng.attach_sink(log.sink());
+        let out = field_15_mode_gate(&mut rng, 3);
+        let ns = log.ns();
+        assert_eq!(ns[0], 4, "the gate's d4 is the first draw");
+        if gate == 1 {
+            assert_eq!(ns.len(), 3, "gate==1 → body follows");
+            assert_eq!(ns[1], 8);
+            assert!((1..=6).contains(&out));
+        } else {
+            assert_eq!(ns.len(), 1, "gate!=1 → only the gate draws");
+            assert_eq!(out, 3, "field_15 unchanged when the gate doesn't fire");
+        }
+    }
+
+    #[test]
+    fn field_15_gate_distribution_stays_in_range_and_respects_the_branch() {
+        // Over many entries via the persistent field_15, every produced value is
+        // 1..=6 and honors the d8==8→d4(1..4) / else→d2+4(5..6) branch. Re-derive
+        // each gate with an independent replay to check the branch, not just range.
+        let mut rng = EngineRng::new(SEED);
+        let mut oracle = Replay::new(SEED);
+        let mut field_15 = 0u8;
+        for _ in 0..500 {
+            let entered = field_15 == 0 || field_15 == 4 || {
+                let g = oracle.roll(4);
+                g == 1
+            };
+            let expected = if entered {
+                let d8 = oracle.roll(8);
+                if d8 != 8 {
+                    oracle.roll(2) + 4
+                } else {
+                    oracle.roll(4)
+                }
+            } else {
+                field_15 as u16
+            };
+            field_15 = field_15_mode_gate(&mut rng, field_15);
+            assert_eq!(field_15 as u16, expected, "matches an independent replay");
+            assert!((1..=6).contains(&field_15) || !entered);
+        }
     }
 }
