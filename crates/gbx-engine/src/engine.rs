@@ -342,6 +342,25 @@ impl Engine {
         crate::save::rebuild_engine(&header, state, data)
     }
 
+    /// Attaches a PRNG trace observer to the live engine (D-OR3, task
+    /// deliverable 3) — the differential-capture seam. `gbx-oracle` provides
+    /// the `.gbxtrace`-writing [`crate::rng::RngSink`] implementation; the
+    /// engine core never depends on it. Inert by default: with no sink
+    /// attached, the tick loop's draws pay nothing, and `save`/`restore` and
+    /// the `.rsav` golden are unaffected (the sink is never serialized).
+    /// Returns any previously attached sink.
+    pub fn attach_rng_sink(
+        &mut self,
+        sink: Box<dyn crate::rng::RngSink>,
+    ) -> Option<Box<dyn crate::rng::RngSink>> {
+        self.rng.attach_sink(sink)
+    }
+
+    /// Detaches and returns the PRNG trace observer, if any (end of capture).
+    pub fn take_rng_sink(&mut self) -> Option<Box<dyn crate::rng::RngSink>> {
+        self.rng.take_sink()
+    }
+
     /// Test/demo seam (the M3 party-predicate seam, task deliverable 4):
     /// mutable access to the party-predicate stand-in (bash/pick/knock
     /// availability and rolls) so a scripted trace can exercise every door

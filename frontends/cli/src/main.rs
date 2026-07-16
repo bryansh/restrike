@@ -6,6 +6,7 @@ mod dump_image;
 mod extract_table;
 mod map;
 mod run_script;
+mod trace_compare;
 mod verify;
 
 use gbx_formats::detect::{self, Detection};
@@ -27,6 +28,7 @@ fn main() -> ExitCode {
         Some("dump-image") => dump_image::cmd_dump_image(args.collect()),
         Some("walk") => walk::cmd_walk(args.collect()),
         Some("compare") => compare::cmd_compare(args.collect()),
+        Some("trace-compare") => trace_compare::cmd_trace_compare(args.collect()),
         Some("verify") => verify::cmd_verify(args.collect()),
         Some("extract-table") => extract_table::cmd_extract_table(args.collect()),
         Some(other) => {
@@ -59,6 +61,7 @@ fn print_usage() {
          [--seed N] [--transcript <PATH>]"
     );
     eprintln!("       restrike compare <ours.ppm> <capture.png|capture.ppm> [--diff-out <path>]");
+    eprintln!("       restrike trace-compare <A.gbxtrace> [B.gbxtrace] [--chain]");
     eprintln!("       restrike verify [DIR]");
     eprintln!("       restrike extract-table [DIR] --table <id>");
     eprintln!();
