@@ -329,6 +329,252 @@ PlayerQuickFight(player):
 
 ---
 
+## 4.1 The melee AI turn — the complete draw-sequence map (M4 combat #4)
+
+> **THIS IS THE PARITY SPEC.** The full melee call chain was read leaf-to-leaf
+> for the AI slice (2026-07-16). Every `roll_dice`/`Random` site a melee
+> combatant's `PlayerQuickFight` turn can reach is listed below **in the exact
+> order the original draws them**, each with its `file:line` and the guard that
+> gates it. The audit re-derives one turn's draw sequence by hand against this
+> table; the implementation is checked against it. Draw ORDER is the whole game
+> (D9) — one mis-ordered/missing/extra draw diverges the fight.
+>
+> **Scope of "the canonical melee combatant"** used to classify each site:
+> **non-cleric, spell-less, item-less-but-weapon-equipped**, in a **normal area**
+> (spells allowed), **not fleeing**, **passing morale**. Sites a *pure fighter*
+> never reaches are marked **guarded-off (proof: …)**; sites it *does* reach are
+> **reached — reproduce**. Spell/wand/turn-undead **effects** are stubbed for the
+> slice, but any **draw** the fighter reaches on the way to those guards is
+> faithful.
+>
+> **Draw-free helpers (verified by read, so they never appear below):** `ovr025`
+> and `ovr032` contain **zero** `roll_dice`/`Random`/`Randomize` calls — so
+> `BuildNearTargets`, `getTargetRange`, `canReachTarget`, `CanSeeCombatant`,
+> `Rebuild_SortedCombatantList`, `bandage`, `reclac_player_values`,
+> `is_weapon_ranged*`, `GetCurrentAttackItem` are all draw-free. Also draw-free by
+> read: `reclac_attacks`/`ThisRoundActionCount` (`ovr014.cs:462/519`),
+> `CalcMoves` (`:58`), `MaxOppositionMoves` (`:1699`), `CanBackStabTarget`
+> (`:1433`), `RecalcAttacksReceived` (`:887`), `getTargetDirection` (`:1460`),
+> `RemoveAttackersAffects` (`ovr024.cs:694`), `AI_items_selection`
+> (`ovr010.cs:875` — no `roll_dice`; `CalcItemPowerRating` is table math),
+> `process_input_in_monsters_turn` (`ovr010.cs:705` — keyboard only; headless =
+> draw-free), `CanSeeTargetA` (`ovr014.cs:571` — invisibility affect check).
+> `CheckAffectsEffect` is draw-free **only when the combatant has no draw-bearing
+> affect** — true for the affect-less synthetic rosters this slice uses; monster
+> innate affects (`MON*SPC`) may add draws inside `CheckAffectsEffect`, which is
+> M5 affect-system territory (deferred, flagged at each call site).
+
+### 4.1.1 The turn, top to bottom (`PlayerQuickFight`, `ovr010.cs:8`)
+
+| # | Site | coab | Draw(s) | Guard / when |
+|---|---|---|---|---|
+| A | **`field_15` mode-gate** | `ovr010.cs:20-36` | **see §4.1.2** | reached — reproduce |
+| B | **`FleeCheck_001`** | `ovr010.cs:40`→`:760` | **0** (normal) | morale is draw-free here; the d100/d2 live in the *flee-move* path (§4.1.4) |
+| C | **`sub_354AA`** (wand scan) | `ovr010.cs:54`→`:183`; d7 at **`:192`** | **1 × d7** | reached — reproduce. Fires iff `can_use && oppTeamCount>0 && area.can_cast_spells==false`; in a normal area `can_cast_spells==false` (see note), `can_use=true` (set by `CalculateInitiative`, `ovr014.cs:14`) ⇒ **fires**. Item scan is draw-free for a weapon-only combatant (no readied spell-item). |
+| D | queued-spell cast | `ovr010.cs:60` | 0 | guarded-off (`spell_id==0` for a fighter) |
+| E | **`turn_undead`** | `ovr010.cs:68`→`:99` | **0** | guarded-off (proof: `cleric_lvl==0 && !(cleric_old_lvl>multiclassLevel)` short-circuits **before** `FindLowestE9Target`, `ovr010.cs:103-105`) |
+| F | **`sub_3560B`** (memorized spell) | `ovr010.cs:74`→`:232`; d7 at **`:248`** | **1 × d7** | reached — reproduce. The `var_5B = roll_dice(7,1)` at `:248` is **UNCONDITIONAL** — computed before the `if (spells_count>0 && …)` guard. The inner `roll_dice(spells_count,1)` at `:261` is guarded-off (proof: `spells_count==0` ⇒ the `while` never runs). |
+| G | `AI_items_selection` | `ovr010.cs:79`→`:875` | 0 | reached — draw-free |
+| H | `process_input` | `ovr010.cs:80` | 0 | headless — draw-free |
+| I | **`find_target(false,1,0xff)`** | `ovr010.cs:84`→`ovr014.cs:2238` | **0 or ≥1 × d(nearCount)** | reached — see §4.1.3 |
+| J | **`sub_35DB1`** (move+attack) | `ovr010.cs:88`→`:511` | **many** | reached — see §4.1.4 |
+| K | `TryGuarding` | `ovr010.cs:93`→`:685` | 0 | fallback when `find_target` fails — draw-free |
+
+> **`can_cast_spells` polarity (caller read — the field is inverted vs its name):**
+> the "Cast" combat-menu option is shown when `area_ptr.can_cast_spells == false`
+> (`ovr009.cs:331-333`), and area init sets it to `false` (`ovr008.cs:113`). So
+> **`false` = casting ALLOWED (the normal state)**, `true` = a silence/anti-magic
+> zone. Therefore in a normal fight site C's guard **passes** and the d7 fires.
+> (Same subtlety as slice 2's `PC_CanHitTarget` mislabel: verify by caller, not by
+> name.) The strawman map in the session brief called site C's d7 area-blocked;
+> the read shows the opposite — it fires in ordinary combat.
+
+### 4.1.2 The `field_15` mode-gate — the C# short-circuit correction (LANDMINE)
+
+```csharp
+int var_1 = player.actions.field_15;                       // persistent per-combatant
+if (var_1 == 0 || var_1 == 4 || roll_dice(4,1) == 1) {     // ovr010.cs:22
+    var_1 = roll_dice(8,1);                                 // ovr010.cs:24
+    if (var_1 != 8) var_1 = roll_dice(2,1) + 4;             // ovr010.cs:28  → 5..6
+    else            var_1 = roll_dice(4,1);                 // ovr010.cs:32  → 1..4
+}
+player.actions.field_15 = var_1;
+```
+
+The `||` **short-circuits**, so the d4 gate at `:22` is **not always drawn**:
+
+| `field_15` on entry | d4 gate (`:22`)? | body (`:24-32`)? | **draws** |
+|---|---|---|---|
+| **0 or 4** | **skipped** (short-circuit) | yes | **2** (d8, then d4 if d8==8 else d2) |
+| ∉{0,4}, gate==1 | 1 × d4 | yes | **3** (d4, d8, then d4|d2) |
+| ∉{0,4}, gate≠1 | 1 × d4 | no | **1** (d4 only) |
+
+**`field_15` starts at 0** (the `Action` default; `CalculateInitiative` resets
+`spell_id`/`can_cast`/`can_use`/`attackIdx` but **not** `field_15`,
+`ovr014.cs:12-16`). So **every combatant's first turn takes the 2-draw path, not
+3** — the brief's "1 draw always (the d4 gate)" is wrong for `field_15∈{0,4}`.
+After a reroll `field_15∈{1..6}`; it can land on 4, re-triggering the
+short-circuit next turn. `field_15` is only otherwise written in the flee path
+(`ovr010.cs:400,443`). The value is later used as a **row index into `data_2B8`**
+(`ovr010.cs:290`, the approach-direction table) — never re-clamped, so it must be
+reproduced exactly.
+
+### 4.1.3 `find_target(clear_target, arg_2, max_range, player)` (`ovr014.cs:2238`)
+
+```
+if (clear_target || existing target is same-team / not-in-combat / invisible)  → target = null
+if (target != null)  → target_found = true               // 0 DRAWS (keeps a still-valid target)
+while (!target_found && !var_5):                          // pass 0, then pass 1 (ignoreWalls)
+    nearTargets = BuildNearTargets(max_range, player)     // draw-free
+    tryCount = 20
+    while (tryCount>0 && !target_found && nearTargets.Count>0):
+        tryCount--
+        roll = roll_dice(nearTargets.Count, 1)            // ovr014.cs:2275 — ONE d(count) PER RETRY
+        target = nearTargets[roll-1].player
+        if ((arg_2 && ignoreWalls) || CanSeeTargetA(target,player))  → target_found  // draw-free test
+        else  nearTargets.Remove(target)                  // and retry
+```
+
+Draw cost: **0** if `player.actions.target` is still a valid enemy (very common
+on turns after the first — the target persists across turns until cleared);
+otherwise **1 × d(nearTargets.Count)** to pick a *visible* target on the first
+try (`CanSeeTargetA` = not-invisible, true for ordinary enemies). Only invisible
+picks force extra retries (each a fresh `d(count)`, count shrinking as candidates
+are removed). Two passes exist (the second sets `ignoreWalls=true`); the second
+runs only if pass 0 found nothing. Called with `max_range=0xff` from the top loop.
+
+### 4.1.4 `sub_35DB1(player)` — the move-then-attack loop (`ovr010.cs:511`)
+
+```
+CheckAffectsEffect(Type_14)                               // draw-free (no affects)
+if (combat_team==Ours && bandage(true)) delay=0           // party only; bandage draw-free
+delayed = (delay != 0)
+while (!stop && delayed):
+  if (moral_failure): while(move>0 && 0<delay<20) moralFailureEscape(player)   // FLEE path, §below
+  if (delay==0 || delay==20) delayed=false
+  if (!stop && delayed):
+    counter++; if (counter>20){ stop; TryGuarding }        // 20-iteration safety cap
+    range = (primaryWeapon ? ItemDataTable[weapon].range-1 : 1); clamp 0/0xff/-1 → 1
+    target = actions.target
+    // (1) reachability probe — DRAW-FREE:
+    if (target valid && CanSeeTargetA) and canReachTarget(steps,…) and steps/2<=range → byte_1D90E=true
+    // (2) if not yet reachable:
+    if (!byte_1D90E):
+        nearTargets = BuildNearTargets(range, player)       // draw-free
+        if (count==0):                                       // no adjacent target → approach
+            if (find_target(false,0,0xff,player)) moralFailureEscape(player)   // move a step (§)
+            else { stop; TryGuarding }
+        else:
+            roll = roll_dice(nearTargets.Count,1)            // ovr010.cs:618 — ONE d(count)
+            target = nearTargets[roll-1].player              //   (re-pick among adjacent)
+            if (ranged && !ranged_melee && BuildNearTargets(1).Count>0){ AI_items_selection; stop } // draw-free
+            else if (getTargetRange(target)==1 || CanSeeTargetA) byte_1D90E=true
+    // (3) attack if in range:
+    if (byte_1D90E):
+        if (TrySweepAttack(target,player)) { stop; clear_actions }   // draw-free unless target.HitDice==0 (§)
+        else:
+            RecalcAttacksReceived(target,player)             // draw-free
+            (ranged item selection — draw-free)
+            stop = AttackTarget(item,0,target,player)         // §4.1.5 — the d20s + damage
+```
+
+**The `roll_dice(nearTargets.Count,1)` at `:618`** fires only when the
+reachability probe (1) failed **and** an adjacent target exists (count>0) — i.e.
+a re-pick among in-range foes when the primary target wasn't directly reachable.
+In the clean "target already adjacent/reachable" case, (1) sets `byte_1D90E`
+and `:618` is **skipped**.
+
+**Approach movement — `moralFailureEscape` (`sub_359D1`, `ovr010.cs:369`)** (also
+the normal step-toward-target routine despite the name):
+
+```
+if (move/2>0 && delay>0):
+  if ( control_morale<NPC_Base                                   // A: player-controlled
+     || (control_morale>=NPC_Base && enemyHealthPercentage <= roll_dice(100,1)+monster_morale)  // B&C — ovr010.cs:387
+     || combat_team==Enemy ):                                    // D
+    if (moral_failure==false)  dir = getTargetDirection(target,player)   // draw-free
+    else { field_15 = roll_dice(2,1);  … }                       // ovr010.cs:400 — FLEE only
+    while (dirStep<6 && !var_5 && !CanMove(dir,dirStep,player)):  // CanMove draw-free unless in a cloud (§)
+        …
+    move_step_away_attack(direction,player)                       // §4.1.6 opportunity attacks
+    if (move>0) sub_3E748(direction,player)                       // §4.1.6 opportunity attacks
+    in_poison_cloud(1,player)                                     // draw-free (no cloud)
+  else TryGuarding
+```
+
+**The per-step morale-advance d100 (`ovr010.cs:387`) is asymmetric by control:**
+by C# `||` short-circuit, operand **A** (`control_morale < NPC_Base`) is true for
+a **player-controlled** combatant ⇒ the d100 is **not drawn**; for an
+**NPC/monster** (A false, B true) operand **C** is evaluated ⇒ **1 × d100 per
+approach step**. So **each monster approach step draws a d100; each PC approach
+step draws none.** (This is the §6.2 "second morale gate" — it lives here in the
+move path, *not* in `FleeCheck_001`.)
+
+### 4.1.5 `AttackTarget → AttackTarget01` (`ovr014.cs:904/724`) — the swings
+
+Reached via `sub_35DB1` (in-range) or the opportunity-attack sites. Per swing, in
+the `for(attackIdx = actions.attackIdx; attackIdx>=1; attackIdx--)` /
+`while(AttacksLeft(attackIdx)>0)` loop (`ovr014.cs:811-847`):
+
+- **1 × d20** to-hit — `PC_CanHitTarget` (`:821`); this is slice 2's `>=` weapon
+  path (already implemented).
+- **on a hit only:** `sub_3E192` (`:828`) → `roll_dice_save(diceSize,diceCount)` =
+  **`diceCount × random(diceSize)`** damage draws + bonus, byte-truncated
+  (slice 2's `roll_damage`).
+
+So the attack draws **N_attacks × d20**, plus damage dice on each hit, where
+`N_attacks = attack1_AttacksLeft (+ attack2_AttacksLeft)` — a **data-driven,
+non-RNG** count from `reclac_attacks`/`ThisRoundActionCount` (round-parity 3/2
+rule, §3.1). The held-target *slay* branch (`:740`) and backstab AC/mult are
+affect/positioning-gated (deferred). `TrySweepAttack` (`ovr014.cs:530`) is
+**draw-free unless `target.HitDice==0`** (0-HD sweep victims), in which case it
+issues `AttackTarget(null,0,…)` per swept target (extra d20s+damage) — deferred
+with 0-HD monsters flagged.
+
+### 4.1.6 Opportunity attacks — movement is NOT unconditionally draw-free
+
+Two sites make *movement* draw-bearing once combatants are adjacent:
+
+- **`move_step_away_attack` (`ovr014.cs:326`, from `moralFailureEscape:477`):**
+  every enemy the mover **leaves** melee adjacency with gets a free
+  `AttackTarget(null,1,player,attacker)` (`:407`) — the classic
+  attack-of-opportunity. **Not** guard-gated. Draw cost = one full attack
+  (§4.1.5) per departed adjacent enemy.
+- **`move_step_into_attack` (`ovr014.cs:226`, from `sub_3E748:316`):** every
+  adjacent **guarding** enemy (`actions.guarding==true`) attacks the mover
+  entering its reach (`AttackTarget(null,0,…)`, `:245`). Guard-gated.
+
+Early in a fight (teams `encounter_distance` apart, no one adjacent, no one
+guarding) both lists are empty ⇒ approach steps are draw-free apart from the
+monster d100. They become draw-bearing only once melee is joined. **These are the
+subtlest draw sites in the whole turn** — they depend on live positions and the
+`guarding` flag, so the implementation models both and the parity test exercises
+a fight that reaches adjacency.
+
+### 4.1.7 One-turn worked example (the audit's hand-check target)
+
+A **monster** melee fighter, its **first** turn, target not yet adjacent, one
+approach step to reach the target, then a single-attack swing that hits — normal
+area, no clouds, no guards, no affects:
+
+| order | draws | site |
+|---|---|---|
+| 1 | d8, then (d2 or d4) | field_15 gate, `field_15==0` path (§4.1.2) |
+| 2 | d7 | `sub_354AA:192` (wand scan; normal area) |
+| 3 | d7 | `sub_3560B:248` (unconditional) |
+| 4 | d(nearCount) | `find_target:2275` (first target pick) |
+| 5 | d100 | `moralFailureEscape:387` (monster approach step) |
+| 6 | d20 | `AttackTarget01:821` (to-hit) |
+| 7 | diceCount × d(diceSize) | `sub_3E192:86` (damage, on the hit) |
+
+= for that turn: `{d8, d2|d4, d7, d7, d(n), d100, d20, dmg…}`. A **PC** fighter's
+same turn drops the d100 at step 5 (operand A short-circuit). A turn where the
+target is already adjacent drops steps 5 (no approach) and, if the reachability
+probe succeeds, keeps step 4 only if the target wasn't already set. This is the
+sequence the audit re-derives against the implementation.
+
+---
+
 ## 5. To-hit, damage, saves (feeds FD-1 / FD-4)
 
 > **IMPLEMENTED — attack slice (2026-07-16, D-OR5(a) Phase 1, second slice).**
@@ -849,7 +1095,23 @@ for ≥10 seeds (D-OR5(a)). AI-decision parity closes there; only then does Phas
 5. **The QuickFight `field_15` target-mode is itself RNG-gated** (`ovr010.cs:22`)
    — a d4 gate, then d8→(d4|d2) — *before* any target selection, so the AI turn's
    first draws are mode-selection, not the attack. Easy to miss when counting
-   draws.
+   draws. **AI-slice correction:** the d4 gate `||`-**short-circuits** when
+   `field_15∈{0,4}` (which includes every combatant's *first* turn, since
+   `field_15` starts 0) — so that turn draws **d8+(d2|d4) = 2**, not 3
+   (§4.1.2). And two *unconditional-in-a-normal-area* d7s precede target
+   selection that the strawman map missed: `sub_354AA:192` (the wand-scan
+   priority roll — fires because `area.can_cast_spells==false` means casting is
+   *allowed*, §4.1.1) and `sub_3560B:248` (the memorized-spell priority roll,
+   drawn *before* the `spells_count>0` guard). A spell-less item-less fighter
+   still draws **both**. See §4.1 for the full ordered map.
+
+7. **Movement is not unconditionally draw-free.** Each **monster** approach step
+   draws a d100 (the `moralFailureEscape:387` morale-advance gate; PCs
+   short-circuit it), and once melee is joined, stepping away from / into
+   adjacency triggers opportunity attacks (`move_step_away_attack` /
+   `move_step_into_attack`, each a full attack's worth of draws) — §4.1.4/§4.1.6.
+   The slice-3 claim that "movement geometry is draw-free" holds only for the
+   *geometry primitives*, not the AI move path.
 6. **XP is computed at end-of-combat, not per kill** (`calc_battle_exp`,
    `ovr006.cs:251`) — the `award` event fires once, not incrementally.
 
