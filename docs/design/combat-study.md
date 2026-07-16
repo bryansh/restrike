@@ -770,3 +770,42 @@ for ≥10 seeds (D-OR5(a)). AI-decision parity closes there; only then does Phas
 `gbx-formats/src/save_orig.rs` (the shared 0x1A6 record decoder),
 `gbx-oracle` (trace mechanism), `docs/design/oracle-rig.md` (D-OR3/D-OR5),
 `docs/fidelity-docket.md` (FD-1..4/20/29). See `SOURCES.md`.*
+
+## 15. Live confirmation — first Phase-0 combat capture (2026-07-16)
+
+First combat draw-stream captured from the real game (a Tilverton brawl, all-AI
+via Quick; armed rig, seed `0x0C0FFEE0`; 3,577 draws, chain-continuity OK, zero
+post-poke reseed; trace archived local-only per D10, sha256 `388347e2…`). Each
+draw's operand `N` was recovered from the hook's `ss_sp_words[3]` diagnostic
+(the wrapper reads `N` at `ss:[bx+4]`), so the operand histogram is directly
+readable. Two behavioral claims from this study are now empirically confirmed
+against the running original, *before* any combat code exists:
+
+- **§4 initiative loop — CONFIRMED.** `N=100` dominates at **2,503 draws**,
+  and run-length encoding the consecutive-`N=100` bursts gives **152 bursts of
+  length exactly 16** (of 168 total). That is `FindNextCombatant` rolling one
+  d100 **per roster member, every selection pass**, over a stable
+  **16-combatant** roster — the `(picks+1)×roster` blow-up §14's landmine
+  predicted from `ovr009.cs:59-99`, seen in the wild. The handful of short
+  bursts (len 1–12) are other d100 consumers (morale/flee/percentage checks) or
+  round-boundary passes, not the initiative loop. A combat implementation that
+  rolls initiative any other way desyncs on round 1.
+
+- **The `N=101` draws are the ECL `RANDOM` opcode — CONFIRMED, and it
+  corroborates the step-1 off-by-one fix.** All 96 `N=101` draws sit **outside**
+  the combat region (a tight pre-combat cluster, boot/exploration), and cluster
+  next to each other. `RANDOM` (`CMD_Random`, `ovr003.cs:132-151`)
+  pre-increments its operand (`rand_max++` unless `0xFF`) before calling
+  `seg051.Random`, so a script `RANDOM x,100` becomes `Random(101)` — exactly
+  the increment `machine.rs` `op_random` implements and the §6 migration ledger
+  (rows 1/2) fixed. So the RANDOM-opcode operand handling is now validated on
+  real data too, not just against coab.
+
+**Caveat (why this is first-light, not the canonical Phase-0 golden):** the
+brawl's roster/config is not a known fixed encounter, and full *replay* parity
+needs the combat entry state (RNG state at combat start — recoverable from the
+trace — **plus** the combatant roster + delays, which need the D-OR5(b)
+structure walk). This capture validates the initiative *shape* and the RANDOM
+operand, and is a real target for the first combat session's synthetic parity
+tests; a canonical fixed-encounter capture (known roster) is still wanted before
+a full-fight replay golden is locked.
