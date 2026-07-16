@@ -38,12 +38,19 @@ use gbx_rules::flavor::Flavor;
 /// `roll_dice`) exactly — same formula, same `EngineRng` — rather than opening a
 /// second RNG path (D9/D-OR1). `size == 0` still draws (`random(0)` advances then
 /// returns 0 → die value 1), the faithful binary behavior.
+///
+/// **Byte truncation (`(byte)roll_total`, `ovr024.cs:595`):** the original sums
+/// as an `int` then truncates the total to a byte. Observable only when
+/// `count * size > 255` (FD-29 — the data-driven clause). For d6/d100 initiative
+/// the sum never reaches 256, so the truncation is a no-op there; it matters for
+/// weapon/monster damage dice, so it is applied here faithfully. The `u32`
+/// accumulator avoids intermediate overflow before the truncation.
 fn roll_dice(rng: &mut EngineRng, size: u16, count: u16) -> u16 {
-    let mut total = 0u16;
+    let mut total = 0u32;
     for _ in 0..count {
-        total += 1 + rng.random(size);
+        total += 1 + rng.random(size) as u32;
     }
-    total
+    (total as u8) as u16 // (byte)roll_total — ovr024.cs:595
 }
 
 /// The stalemate cap: `combat_round_no_action_value` (`Classes/Gbl.cs:384`),
@@ -140,6 +147,37 @@ pub enum ActionEvent {
         combatant_id: usize,
         delay: i8,
         roll: u16,
+    },
+    /// Per to-hit resolution ([`resolve_attack`] → `PC_CanHitTarget`,
+    /// `ovr024.cs:515`), bracketing the one `random(20)`. `roll` is the **raw
+    /// d20 (1..=20, before the natural-20 promotion to 100)** — the honest
+    /// observable die, from which nat-1 (auto-miss) and nat-20 (auto-hit) are
+    /// both visible; `hit` is the resolved outcome.
+    Attack {
+        attacker_id: usize,
+        target_id: usize,
+        roll: u8,
+        hit: bool,
+    },
+    /// Per damage roll ([`roll_damage`] → `sub_3E192`, `ovr014.cs:84`), emitted
+    /// only on a hit (the original rolls damage only inside the hit branch).
+    /// `amount` is the final damage (dice + bonus, clamped `>= 0`, times the
+    /// backstab multiplier); `backstab` whether that multiplier was applied. It
+    /// brackets the `dice_count` `random(dice_size)` draws.
+    Dmg {
+        attacker_id: usize,
+        target_id: usize,
+        amount: i32,
+        backstab: bool,
+    },
+    /// Per saving throw ([`roll_saving_throw`] → `RollSavingThrow`,
+    /// `ovr024.cs:554`), bracketing its one `random(20)`. `roll` is the raw d20
+    /// (1..=20); `save_type` the `SaveVerseType` index; `made` the outcome.
+    Save {
+        combatant_id: usize,
+        save_type: u8,
+        roll: u8,
+        made: bool,
     },
 }
 
@@ -455,6 +493,288 @@ pub fn select_combatant(delays: &[i8], rolls: &[u16]) -> Option<(usize, u16)> {
         return None;
     }
     output
+}
+
+// ===========================================================================
+// Attack resolution — to-hit + damage (M4 combat #2; study §5, D-OR5(a) Phase 1)
+// ===========================================================================
+//
+// Draw discipline (D9/D-OR1): every roll flows through `roll_dice` (the single
+// `EngineRng` seam). One `random(20)` per to-hit; `dice_count` `random(dice_size)`
+// per damage roll; one `random(20)` per saving throw. `roll_dice`'s `1+random(n)`
+// shape and byte truncation are already the faithful `ovr024.cs:586-598` roller.
+
+/// The result of one to-hit roll. `d20` is the **raw** die (1..=20, *before* the
+/// natural-20 promotion to 100) — the value the `attack` event records; `hit` is
+/// the resolved outcome (nat-1 auto-miss, nat-20 auto-hit, else the AC compare).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToHit {
+    /// The raw d20, 1..=20.
+    pub d20: u8,
+    /// Whether the attack connected.
+    pub hit: bool,
+}
+
+/// `CanHitTarget(bonus, target)` (`ovr024.cs:487`, `sub_641DD`) — the strict-`>`
+/// to-hit path.
+///
+/// **This is NOT the weapon-attack path.** Its only live caller is `CMD_Damage`
+/// (the ECL `DAMAGE` opcode, `ovr003.cs:1673`): a scripted/area effect rolling to
+/// hit a *random* party member (`rnd_player_id = roll_dice(party_size,1)`), with
+/// a script-supplied `bonus`. Per-combatant weapon swings use
+/// [`pc_can_hit_target`] (the `>=` path) instead. (Study §5.2 labels this
+/// "monster/generic" — the caller read shows the real split is scripted-effect vs
+/// weapon-attack, not monster vs PC. Flagged; the study is annotated.)
+///
+/// One d20; natural 1 auto-misses (the `attack_roll > 1` gate); natural 20
+/// promotes to 100 (auto-hit); hit iff `(effective_roll + bonus) > target_ac`
+/// (**strict `>`**). `target_ac` is the raw on-disk AC (`Player.ac@0x19a`;
+/// display AC = `0x3C - ac`).
+pub fn can_hit_target(rng: &mut EngineRng, bonus: i32, target_ac: u8) -> ToHit {
+    let d20 = roll_dice(rng, 20, 1) as u8; // 1..=20
+    let mut hit = false;
+    if d20 > 1 {
+        // natural 20 → 100 (beats any AC); else the raw die.
+        let effective = if d20 == 20 { 100 } else { d20 as i32 };
+        // The original's `attack_roll >= 0` guard is always true here
+        // (effective ∈ {2..=19, 100}); the AC compare is strict `>`.
+        hit = (effective + bonus) > target_ac as i32;
+    }
+    ToHit { d20, hit }
+}
+
+/// `PC_CanHitTarget(target_ac, target, attacker)` (`ovr024.cs:515`, `sub_64245`)
+/// — the `>=` to-hit path, and **the standard weapon-attack path for ANY
+/// combatant** (both PCs and monsters).
+///
+/// Confirmed by the caller read: its only live caller is `AttackTarget01`
+/// (`ovr014.cs:821`, `sub_3F4EB`), the per-turn weapon-attack body reached from
+/// the QuickFight AI / combat menu for whichever combatant is acting — so monster
+/// and PC melee both resolve through this `>=` path. (`DoSpellCastingWork`,
+/// `ovr023.cs:602`, also uses it for spell attacks.)
+///
+/// One d20; natural 1 auto-misses; natural 20 promotes to 100; hit iff
+/// `(effective_roll + hit_bonus + team_bonus) >= target_ac` (**`>=`**).
+///
+/// - `hit_bonus` = `attacker.hitBonus@0x199` — a THAC0-derived to-hit number
+///   (higher = better; `hitBonus = thac0 + DexReactionAdj + strengthHitBonus`,
+///   `ovr025.cs:16-29`).
+/// - `team_bonus` = the caller-selected team modifier: `area2.field_6E2` when the
+///   attacker is on `Ours`, else `area2.field_6E0` (`ovr024.cs:533-540`). Passed
+///   in because the combat-area team-bonus fields are not modeled this slice
+///   (default 0).
+///
+/// `remove_invisibility` (`ovr024.cs:519`) and both `CheckAffectsEffect` calls in
+/// the original are **draw-free** (verified by read, slice-1 discipline:
+/// `remove_invisibility` only walks the affect list removing invisibility
+/// affects — `ovr024.cs:650-658` — no `Random`), so this is exactly one d20.
+pub fn pc_can_hit_target(
+    rng: &mut EngineRng,
+    target_ac: u8,
+    hit_bonus: i32,
+    team_bonus: i32,
+) -> ToHit {
+    let d20 = roll_dice(rng, 20, 1) as u8; // 1..=20
+    let mut hit = false;
+    if d20 > 1 {
+        let effective = if d20 == 20 { 100 } else { d20 as i32 };
+        hit = (effective + hit_bonus + team_bonus) >= target_ac as i32;
+    }
+    ToHit { d20, hit }
+}
+
+/// The result of one damage roll (`sub_3E192`, `ovr014.cs:84`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Damage {
+    /// Final damage: byte-truncated dice total + bonus, clamped `>= 0`, times the
+    /// backstab multiplier when backstabbing.
+    pub amount: i32,
+    /// Whether the backstab multiplier was applied.
+    pub backstab: bool,
+}
+
+/// The backstab damage multiplier (`sub_3E192`, `ovr014.cs:96`):
+/// `((thiefSkillLevel - 1) / 4) + 2`, C-style truncating integer division. A real
+/// backstab requires `SkillLevel(Thief) > 0` (`CanBackStabTarget`,
+/// `ovr014.cs:1435`), so the argument is `>= 1` and the division has no
+/// negative-operand ambiguity. Level 1-4 → ×2, 5-8 → ×3, 9-12 → ×4, …
+pub fn backstab_multiplier(thief_level: i32) -> i32 {
+    ((thief_level - 1) / 4) + 2
+}
+
+/// `sub_3E192` (`ovr014.cs:84`) reduced to its draw-bearing damage core:
+/// `roll_dice_save(dice_size, dice_count)` + damage bonus, clamped `>= 0`, then
+/// the backstab multiplier.
+///
+/// `roll_dice_save` (`ovr024.cs:601`) is just `roll_dice` after recording
+/// `gbl.dice_count` (a scratch global we don't model) — so the **draw cost is
+/// exactly `dice_count` `random(dice_size)` draws**, byte-truncated as a total
+/// ([`roll_dice`]). The dice come from the readied attack profile
+/// (`attackDiceSize/Count(idx)` = `@0x1a0/0x19e` for profile 1, `@0x1a1/0x19f`
+/// for profile 2).
+///
+/// `damage_bonus` is `attackDamageBonus(idx)`. **Faithful quirk:** profile 1's
+/// on-disk bonus is an `sbyte@0x1a2` but the accessor reinterprets it as a
+/// **byte** (`(byte)attack1_DamageBonus`, `Player.cs:690`), so a *negative*
+/// attack1 bonus reads as `256 + bonus` (e.g. -1 → 255); profile 2's is already a
+/// byte. Callers pass the byte the accessor yields, preserving that (H4 should
+/// confirm the `(byte)` cast is real 8086 behavior, not a coab artifact — the
+/// `if (damage < 0)` clamp below hints the original expected it could go
+/// negative, but with a byte bonus it never does).
+///
+/// **Backstab detection is DEFERRED** — `backstab` carries the resolved
+/// multiplier or `None`. `CanBackStabTarget` (`ovr014.cs:1433`) needs facing
+/// (`getTargetDirection` over map positions), `AttacksReceived`, `field_DE`, and
+/// the target's `direction` — the positioning/facing system, not modeled until a
+/// later slice. The multiplier math itself is faithful ([`backstab_multiplier`]).
+pub fn roll_damage(
+    rng: &mut EngineRng,
+    dice_size: u8,
+    dice_count: u8,
+    damage_bonus: u8,
+    backstab: Option<i32>,
+) -> Damage {
+    // roll_dice_save == roll_dice (byte-truncated dice total), ovr024.cs:601.
+    let dice = roll_dice(rng, dice_size as u16, dice_count as u16) as i32;
+    let mut amount = dice + damage_bonus as i32;
+    // if (gbl.damage < 0) gbl.damage = 0;  — faithful; unreachable with a byte
+    // bonus (both terms >= 0), kept for transliteration fidelity.
+    if amount < 0 {
+        amount = 0;
+    }
+    let applied = match backstab {
+        Some(mult) => {
+            amount *= mult;
+            true
+        }
+        None => false,
+    };
+    Damage {
+        amount,
+        backstab: applied,
+    }
+}
+
+/// The result of one saving throw (`RollSavingThrow`, `ovr024.cs:554`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SavingThrow {
+    /// The raw d20, 1..=20.
+    pub d20: u8,
+    /// Whether the save was made.
+    pub made: bool,
+}
+
+/// `RollSavingThrow(saveBonus, saveType, player)` (`ovr024.cs:554`). One d20:
+/// natural 1 always fails, natural 20 always succeeds; otherwise
+/// `roll += save_bonus + field_186` and the save is **made iff
+/// `roll >= save_target`**.
+///
+/// `save_target` is `player.saveVerse[saveType]@0xdf` — a per-record 5-entry table
+/// read directly off the character/monster record (NOT a class/level rules-pack
+/// computation), so the roll + comparison is a clean read and `save_target` /
+/// `field_186` (`@0x186`, a signed per-record save bonus) are provided by the
+/// caller. `CheckAffectsEffect(player, SavingThrow)` (affect-based save modifiers)
+/// is draw-free and not modeled (no affects yet). The `Cheats.player_always_saves`
+/// branch (`ovr024.cs:559`) is a coab dev cheat, omitted (not original behavior).
+pub fn roll_saving_throw(
+    rng: &mut EngineRng,
+    save_bonus: i32,
+    field_186: i32,
+    save_target: i32,
+) -> SavingThrow {
+    let d20 = roll_dice(rng, 20, 1) as u8; // 1..=20
+    let made = if d20 == 1 {
+        false
+    } else if d20 == 20 {
+        true
+    } else {
+        (d20 as i32 + save_bonus + field_186) >= save_target
+    };
+    SavingThrow { d20, made }
+}
+
+/// The inputs of one weapon swing — the readied attack profile plus the target's
+/// raw AC and the roster ids for the emitted events. Mirrors what `AttackTarget01`
+/// (`ovr014.cs:724`) feeds `PC_CanHitTarget` + `sub_3E192` for a single attack.
+#[derive(Debug, Clone, Copy)]
+pub struct AttackProfile {
+    /// Attacker roster id (the `attack`/`dmg` event `attacker_id`).
+    pub attacker_id: usize,
+    /// Target roster id.
+    pub target_id: usize,
+    /// The target's raw on-disk AC (`Player.ac@0x19a`; display AC = `0x3C - ac`).
+    pub target_ac: u8,
+    /// `attacker.hitBonus@0x199` (THAC0-derived to-hit number).
+    pub hit_bonus: i32,
+    /// Team to-hit modifier (`area2.field_6E2`/`field_6E0`); 0 when unmodeled.
+    pub team_bonus: i32,
+    /// Damage dice size (`attackDiceSize(idx)`).
+    pub dice_size: u8,
+    /// Damage dice count (`attackDiceCount(idx)`).
+    pub dice_count: u8,
+    /// Damage bonus (`attackDamageBonus(idx)`, the byte the accessor yields —
+    /// see [`roll_damage`]'s quirk note).
+    pub damage_bonus: u8,
+    /// The backstab multiplier to apply on a hit, or `None` for no backstab
+    /// (detection deferred — see [`roll_damage`]).
+    pub backstab: Option<i32>,
+}
+
+/// What one [`resolve_attack`] produced: the to-hit result, and the damage on a
+/// hit (`None` on a miss).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AttackOutcome {
+    pub to_hit: ToHit,
+    /// `Some` iff the attack hit.
+    pub damage: Option<Damage>,
+}
+
+/// One faithful weapon attack — `AttackTarget01`'s per-swing body
+/// (`ovr014.cs:811-829`): roll to hit via the `>=` path ([`pc_can_hit_target`]);
+/// **on a hit only**, roll damage ([`roll_damage`]). Emits the `attack` event
+/// (always) then, on a hit, the `dmg` event — in resolution order (D-OR3
+/// same-tick contract).
+///
+/// **Draw-faithful:** exactly one d20, plus `dice_count` `random(dice_size)`
+/// draws *only on a hit* (the original calls `sub_3E192` only inside the hit
+/// branch, `ovr014.cs:821-828`; a miss draws nothing further).
+///
+/// The `|| target.IsHeld()` auto-hit (`ovr014.cs:821`) and the held-slay path
+/// (`ovr014.cs:740`) are affect-gated and not modeled here (no affects yet); this
+/// is the un-held single-swing core. `sink` is the optional action-trace
+/// observer (D-OR3) — pass `None` in plain play; the events are draw-free
+/// bookkeeping either way.
+pub fn resolve_attack(
+    rng: &mut EngineRng,
+    p: AttackProfile,
+    mut sink: Option<&mut dyn ActionSink>,
+) -> AttackOutcome {
+    let to_hit = pc_can_hit_target(rng, p.target_ac, p.hit_bonus, p.team_bonus);
+    if let Some(s) = sink.as_mut() {
+        s.on_action(ActionEvent::Attack {
+            attacker_id: p.attacker_id,
+            target_id: p.target_id,
+            roll: to_hit.d20,
+            hit: to_hit.hit,
+        });
+    }
+
+    let damage = if to_hit.hit {
+        let dmg = roll_damage(rng, p.dice_size, p.dice_count, p.damage_bonus, p.backstab);
+        if let Some(s) = sink.as_mut() {
+            s.on_action(ActionEvent::Dmg {
+                attacker_id: p.attacker_id,
+                target_id: p.target_id,
+                amount: dmg.amount,
+                backstab: dmg.backstab,
+            });
+        }
+        Some(dmg)
+    } else {
+        None
+    };
+
+    AttackOutcome { to_hit, damage }
 }
 
 #[cfg(test)]
@@ -826,5 +1146,318 @@ mod tests {
         let mut state = CombatState::new(vec![party(0, 0), party(1, 0)]);
         assert_eq!(state.step(&mut rng), CombatStep::Ended);
         assert_eq!(log.len(), 0, "the emptiness guard draws nothing");
+    }
+
+    // --- roll_dice byte truncation (FD-29) ---------------------------------
+
+    #[test]
+    fn roll_dice_truncates_the_total_to_a_byte() {
+        // 100 dice of d100: the untruncated total blows past 255, so the
+        // (byte)roll_total truncation (ovr024.cs:595) is observable — the
+        // data-driven FD-29 clause. Our roll_dice must wrap mod 256.
+        let mut rng = EngineRng::new(SEED);
+        let got = roll_dice(&mut rng, 100, 100);
+
+        let mut o = Replay::new(SEED);
+        let mut full = 0u32;
+        for _ in 0..100 {
+            full += o.roll(100) as u32;
+        }
+        assert!(full > 255, "the untruncated total must exceed a byte");
+        assert_eq!(got, (full as u8) as u16, "roll_dice truncates to a byte");
+        // A total under 256 is unaffected (the initiative d6/d100 case).
+        let mut rng = EngineRng::new(SEED);
+        let small = roll_dice(&mut rng, 6, 3); // max 18
+        let mut o = Replay::new(SEED);
+        assert_eq!(small, o.roll(6) + o.roll(6) + o.roll(6));
+    }
+
+    // --- to-hit: both paths, the auto-rules, and the >/>= boundary ---------
+
+    #[test]
+    fn to_hit_natural_1_misses_and_natural_20_hits_via_the_100_promotion() {
+        // AC 50 with 0 bonus: a plain roll (effective ≤ 19) can never reach it,
+        // but a nat-20 promotes to 100 and clears it. A nat-1 misses (the gate).
+        let mut rng = EngineRng::new(SEED);
+        let (mut saw1, mut saw20, mut saw_plain) = (false, false, false);
+        for _ in 0..2000 {
+            let r = pc_can_hit_target(&mut rng, 50, 0, 0);
+            match r.d20 {
+                1 => {
+                    assert!(!r.hit, "nat-1 auto-miss");
+                    saw1 = true;
+                }
+                20 => {
+                    assert!(r.hit, "nat-20 → 100 beats AC 50");
+                    saw20 = true;
+                }
+                d => {
+                    assert!((2..=19).contains(&d));
+                    assert!(!r.hit, "a plain d20 can't reach AC 50 with 0 bonus");
+                    saw_plain = true;
+                }
+            }
+            if saw1 && saw20 && saw_plain {
+                break;
+            }
+        }
+        assert!(
+            saw1 && saw20 && saw_plain,
+            "expected a nat-1, a nat-20, and a plain roll within budget"
+        );
+    }
+
+    #[test]
+    fn natural_1_misses_even_when_it_would_otherwise_certainly_hit() {
+        // AC 0, 0 bonus: every non-1 roll hits (>= path, effective ≥ 2 ≥ 0);
+        // only the nat-1 gate produces a miss.
+        let mut rng = EngineRng::new(SEED);
+        let mut saw1 = false;
+        for _ in 0..2000 {
+            let r = pc_can_hit_target(&mut rng, 0, 0, 0);
+            if r.d20 == 1 {
+                assert!(!r.hit, "nat-1 overrides an otherwise-certain hit");
+                saw1 = true;
+                break;
+            }
+            assert!(r.hit, "any non-1 vs raw AC 0 hits under >=");
+        }
+        assert!(saw1, "expected a nat-1 within budget");
+    }
+
+    #[test]
+    fn gt_path_and_ge_path_disagree_at_the_equality_point() {
+        // The single load-bearing asymmetry (study §14.4): at the exact equality
+        // point, the weapon path (PC_CanHitTarget, >=) HITS while the scripted
+        // path (CanHitTarget, >) MISSES — for the *same* d20.
+        let d20 = Replay::new(SEED).roll(20);
+        assert!(
+            (2..=19).contains(&d20),
+            "this boundary test needs the seed's first d20 to be a plain roll (got {d20})"
+        );
+        // effective(=d20) + bonus(0) == target_ac exactly.
+        let target_ac = d20 as u8;
+
+        let mut rng = EngineRng::new(SEED);
+        let ge = pc_can_hit_target(&mut rng, target_ac, 0, 0);
+        assert_eq!(ge.d20 as u16, d20);
+        assert!(ge.hit, "PC_CanHitTarget uses >=, so equality hits");
+
+        let mut rng = EngineRng::new(SEED);
+        let gt = can_hit_target(&mut rng, 0, target_ac);
+        assert_eq!(gt.d20 as u16, d20);
+        assert!(!gt.hit, "CanHitTarget uses strict >, so equality misses");
+    }
+
+    #[test]
+    fn to_hit_draws_exactly_one_d20() {
+        let log = DrawLog::default();
+        let mut rng = EngineRng::new(SEED);
+        rng.attach_sink(log.sink());
+        pc_can_hit_target(&mut rng, 40, 5, 1);
+        can_hit_target(&mut rng, 3, 40);
+        assert_eq!(log.ns(), vec![20, 20], "one d20 per to-hit, no more");
+    }
+
+    // --- damage: dice + bonus, clamp, backstab, exact draw count -----------
+
+    #[test]
+    fn damage_is_dice_plus_bonus_with_exact_draw_count() {
+        let log = DrawLog::default();
+        let mut rng = EngineRng::new(SEED);
+        rng.attach_sink(log.sink());
+
+        let dmg = roll_damage(&mut rng, 8, 3, 2, None); // 3d8+2
+        assert_eq!(log.ns(), vec![8, 8, 8], "exactly dice_count draws");
+
+        let mut o = Replay::new(SEED);
+        let base = o.roll(8) + o.roll(8) + o.roll(8) + 2;
+        assert_eq!(dmg.amount, base as i32);
+        assert!(!dmg.backstab);
+    }
+
+    #[test]
+    fn damage_applies_the_backstab_multiplier() {
+        let mut rng = EngineRng::new(SEED);
+        let dmg = roll_damage(&mut rng, 4, 2, 1, Some(3)); // (2d4+1) × 3
+        let mut o = Replay::new(SEED);
+        let base = o.roll(4) + o.roll(4) + 1;
+        assert_eq!(dmg.amount, base as i32 * 3);
+        assert!(dmg.backstab);
+    }
+
+    #[test]
+    fn backstab_multiplier_matches_the_thief_level_bands() {
+        // ((level - 1) / 4) + 2, truncating.
+        assert_eq!(backstab_multiplier(1), 2);
+        assert_eq!(backstab_multiplier(4), 2);
+        assert_eq!(backstab_multiplier(5), 3);
+        assert_eq!(backstab_multiplier(8), 3);
+        assert_eq!(backstab_multiplier(9), 4);
+        assert_eq!(backstab_multiplier(13), 5);
+    }
+
+    #[test]
+    fn damage_clamp_and_byte_bonus_quirk() {
+        // The sbyte→byte reinterpret of attack1's bonus (Player.cs:690): a
+        // "negative" bonus passed as the byte the accessor yields (e.g. -1 → 255)
+        // is added as 255, never clamped — the faithful quirk. Damage stays >= 0.
+        let mut rng = EngineRng::new(SEED);
+        let dmg = roll_damage(&mut rng, 1, 1, 255, None); // d1 (=1) + 255
+        assert_eq!(dmg.amount, 1 + 255);
+    }
+
+    // --- saving throws ------------------------------------------------------
+
+    #[test]
+    fn saving_throw_nat1_fails_nat20_succeeds_else_compares() {
+        let mut rng = EngineRng::new(SEED);
+        let (mut saw1, mut saw20, mut saw_plain) = (false, false, false);
+        for _ in 0..2000 {
+            let s = roll_saving_throw(&mut rng, 0, 0, 11); // target 11, no bonus
+            match s.d20 {
+                1 => {
+                    assert!(!s.made, "nat-1 always fails");
+                    saw1 = true;
+                }
+                20 => {
+                    assert!(s.made, "nat-20 always succeeds");
+                    saw20 = true;
+                }
+                d => {
+                    assert_eq!(s.made, d as i32 >= 11, "plain roll compares vs target");
+                    saw_plain = true;
+                }
+            }
+            if saw1 && saw20 && saw_plain {
+                break;
+            }
+        }
+        assert!(saw1 && saw20 && saw_plain);
+    }
+
+    #[test]
+    fn saving_throw_applies_bonus_and_field_186() {
+        let mut rng = EngineRng::new(SEED);
+        for _ in 0..200 {
+            let s = roll_saving_throw(&mut rng, 3, -1, 15);
+            if (2..=19).contains(&s.d20) {
+                assert_eq!(s.made, (s.d20 as i32 + 3 - 1) >= 15);
+            }
+        }
+    }
+
+    // --- resolve_attack: the full to-hit → damage tie, draw-faithful -------
+
+    #[test]
+    fn resolve_attack_hit_draws_d20_then_damage_and_emits_both_events() {
+        assert!(
+            Replay::new(SEED).roll(20) > 1,
+            "the hit case needs the seed's first d20 to not be a nat-1"
+        );
+
+        let log = DrawLog::default();
+        let mut rng = EngineRng::new(SEED);
+        rng.attach_sink(log.sink());
+        let actions = ActionLog::default();
+        let mut sink = actions.sink();
+
+        // AC 0 + hitBonus 40: the first roll (>1) certainly hits.
+        let p = AttackProfile {
+            attacker_id: 2,
+            target_id: 7,
+            target_ac: 0,
+            hit_bonus: 40,
+            team_bonus: 0,
+            dice_size: 6,
+            dice_count: 2,
+            damage_bonus: 1,
+            backstab: None,
+        };
+        let out = resolve_attack(&mut rng, p, Some(&mut *sink));
+        assert!(out.to_hit.hit);
+
+        // Exactly: one d20, then two d6 (damage) — the hit-branch draw shape.
+        assert_eq!(log.ns(), vec![20, 6, 6]);
+
+        let mut o = Replay::new(SEED);
+        let d20 = o.roll(20);
+        let dmg = o.roll(6) + o.roll(6) + 1;
+        assert_eq!(out.to_hit.d20 as u16, d20);
+        assert_eq!(out.damage.unwrap().amount, dmg as i32);
+
+        let ev = actions.events();
+        assert_eq!(ev.len(), 2, "Attack then Dmg");
+        assert!(matches!(
+            ev[0],
+            ActionEvent::Attack {
+                attacker_id: 2,
+                target_id: 7,
+                hit: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            ev[1],
+            ActionEvent::Dmg {
+                attacker_id: 2,
+                target_id: 7,
+                backstab: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn resolve_attack_miss_draws_only_the_d20_and_emits_no_dmg() {
+        let log = DrawLog::default();
+        let mut rng = EngineRng::new(SEED);
+        rng.attach_sink(log.sink());
+        let actions = ActionLog::default();
+        let mut sink = actions.sink();
+
+        // AC 200 is unreachable even by a nat-20 (→100), so every roll misses.
+        let p = AttackProfile {
+            attacker_id: 0,
+            target_id: 1,
+            target_ac: 200,
+            hit_bonus: 0,
+            team_bonus: 0,
+            dice_size: 8,
+            dice_count: 3,
+            damage_bonus: 5,
+            backstab: None,
+        };
+        let out = resolve_attack(&mut rng, p, Some(&mut *sink));
+        assert!(!out.to_hit.hit);
+        assert!(out.damage.is_none());
+        assert_eq!(log.ns(), vec![20], "a miss draws no damage dice");
+
+        let ev = actions.events();
+        assert_eq!(ev.len(), 1);
+        assert!(matches!(ev[0], ActionEvent::Attack { hit: false, .. }));
+    }
+
+    #[test]
+    fn resolve_attack_works_without_a_sink() {
+        let mut rng = EngineRng::new(SEED);
+        let p = AttackProfile {
+            attacker_id: 0,
+            target_id: 1,
+            target_ac: 0,
+            hit_bonus: 40,
+            team_bonus: 0,
+            dice_size: 4,
+            dice_count: 1,
+            damage_bonus: 0,
+            backstab: Some(backstab_multiplier(5)), // ×3
+        };
+        let out = resolve_attack(&mut rng, p, None);
+        assert!(out.to_hit.hit);
+        let mut o = Replay::new(SEED);
+        let _d20 = o.roll(20);
+        let dice = o.roll(4);
+        assert_eq!(out.damage.unwrap().amount, dice as i32 * 3);
+        assert!(out.damage.unwrap().backstab);
     }
 }

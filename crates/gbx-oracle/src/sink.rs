@@ -27,7 +27,10 @@ use std::rc::Rc;
 use gbx_engine::combat::{ActionEvent, ActionSink};
 use gbx_engine::rng::{RngDraw, RngSink};
 
-use crate::format::{InitEvent, PickEvent, RngEvent, Trace, TraceEvent, TraceHeader};
+use crate::format::{
+    AttackEvent, DmgEvent, InitEvent, PickEvent, RngEvent, SaveEvent, Trace, TraceEvent,
+    TraceHeader,
+};
 
 /// A shared draw buffer. Cheap to clone (an `Rc` bump); every clone — including
 /// the boxed sink handed to the engine — appends to the same `Vec`, in draw
@@ -137,6 +140,39 @@ impl ActionSink for CollectorActionSink {
                 combatant_id: combatant_id as u32,
                 delay: delay as i16,
                 roll,
+            }),
+            ActionEvent::Attack {
+                attacker_id,
+                target_id,
+                roll,
+                hit,
+            } => TraceEvent::Attack(AttackEvent {
+                attacker_id: attacker_id as u32,
+                target_id: target_id as u32,
+                roll,
+                hit: hit as u8,
+            }),
+            ActionEvent::Dmg {
+                attacker_id,
+                target_id,
+                amount,
+                backstab,
+            } => TraceEvent::Dmg(DmgEvent {
+                attacker_id: attacker_id as u32,
+                target_id: target_id as u32,
+                amount,
+                backstab: backstab as u8,
+            }),
+            ActionEvent::Save {
+                combatant_id,
+                save_type,
+                roll,
+                made,
+            } => TraceEvent::Save(SaveEvent {
+                combatant_id: combatant_id as u32,
+                save_type,
+                roll,
+                made: made as u8,
             }),
         };
         self.events.borrow_mut().push(translated);
@@ -267,6 +303,59 @@ mod tests {
             first_pick.unwrap() > last_init.unwrap(),
             "all inits precede any pick"
         );
+    }
+
+    /// The action sink also carries the attack-slice vocabulary: driving
+    /// `resolve_attack` through the same collector interleaves the `attack`/`dmg`
+    /// events with the to-hit d20 and damage-dice draws in emission order, and
+    /// the prng chain still checks over the draw subset.
+    #[test]
+    fn action_sink_captures_attack_and_dmg_interleaved_with_draws() {
+        use gbx_engine::combat::{resolve_attack, AttackProfile};
+
+        let seed = 0x0c0f_fee0u32;
+        let collector = TraceCollector::new();
+        let mut rng = EngineRng::new(seed);
+        rng.attach_sink(collector.sink());
+        let mut action_sink = collector.action_sink();
+
+        // AC 0 + big hitBonus ⇒ a guaranteed hit (first d20 > 1 for this seed):
+        // one d20 to-hit, then the damage dice.
+        let p = AttackProfile {
+            attacker_id: 0,
+            target_id: 1,
+            target_ac: 0,
+            hit_bonus: 40,
+            team_bonus: 0,
+            dice_size: 6,
+            dice_count: 2,
+            damage_bonus: 0,
+            backstab: None,
+        };
+        let out = resolve_attack(&mut rng, p, Some(&mut *action_sink));
+        assert!(out.to_hit.hit);
+
+        let events = collector.events();
+        // Emission order: rng(d20), attack, rng(d6), rng(d6), dmg.
+        assert!(matches!(
+            events[0],
+            TraceEvent::Rng(RngEvent { n: Some(20), .. })
+        ));
+        assert!(matches!(events[1], TraceEvent::Attack(_)));
+        assert!(matches!(
+            events[2],
+            TraceEvent::Rng(RngEvent { n: Some(6), .. })
+        ));
+        assert!(matches!(
+            events[3],
+            TraceEvent::Rng(RngEvent { n: Some(6), .. })
+        ));
+        assert!(matches!(events[4], TraceEvent::Dmg(_)));
+
+        // The prng subset (draws only) still forms a continuous chain.
+        let trace = collector.into_trace(header(seed));
+        assert_eq!(check_chain(&trace), Ok(()));
+        assert_eq!(trace.rng_event_count(), 3, "one d20 + two d6");
     }
 
     #[test]

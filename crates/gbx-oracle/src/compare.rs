@@ -166,6 +166,9 @@ fn kind(e: &TraceEvent) -> &'static str {
         TraceEvent::Randomize => "randomize",
         TraceEvent::Init(_) => "init",
         TraceEvent::Pick(_) => "pick",
+        TraceEvent::Attack(_) => "attack",
+        TraceEvent::Dmg(_) => "dmg",
+        TraceEvent::Save(_) => "save",
     }
 }
 
@@ -300,9 +303,13 @@ pub fn check_chain(trace: &Trace) -> Result<(), ChainBreak> {
                 return Err(ChainBreak::Randomize { index: event_index });
             }
             // Action-profile events carry no PRNG state — skip them (a mixed
-            // combined-order trace can interleave `init`/`pick` with draws; the
-            // chain links only consecutive `rng` draws).
-            TraceEvent::Init(_) | TraceEvent::Pick(_) => {}
+            // combined-order trace can interleave `init`/`pick`/`attack`/`dmg`/
+            // `save` with draws; the chain links only consecutive `rng` draws).
+            TraceEvent::Init(_)
+            | TraceEvent::Pick(_)
+            | TraceEvent::Attack(_)
+            | TraceEvent::Dmg(_)
+            | TraceEvent::Save(_) => {}
             TraceEvent::Rng(r) => {
                 // Link: this draw's `before` must equal the previous `after`.
                 if let Some(prev) = prev_after {

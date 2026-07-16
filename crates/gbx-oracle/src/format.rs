@@ -70,12 +70,13 @@ pub struct TraceHeader {
 /// Two profiles' event types live here. The `prng`-profile types are
 /// [`RngEvent`] and the bare `randomize` marker. The `action` profile's
 /// vocabulary is pinned as combat systems land (D-OR3, step 5): the **initiative
-/// slice** pins [`InitEvent`] and [`PickEvent`] (`init`/`pick`); the remaining
-/// action types (`attack`/`dmg`/`move`/`ai`/`status`/`award`) are still absent
-/// and their sessions add them. An unknown `e` value is rejected loudly by the
-/// reader (a foreign event type), distinct from tolerating unknown *fields*,
-/// which it does — so pinning a vocabulary means adding a variant here, moving it
-/// out of "unknown".
+/// slice** pinned [`InitEvent`] and [`PickEvent`] (`init`/`pick`); the **attack
+/// slice** pins [`AttackEvent`], [`DmgEvent`], and [`SaveEvent`]
+/// (`attack`/`dmg`/`save`); the remaining action types
+/// (`move`/`ai`/`status`/`morale`/`award`) are still absent and their sessions
+/// add them. An unknown `e` value is rejected loudly by the reader (a foreign
+/// event type), distinct from tolerating unknown *fields*, which it does — so
+/// pinning a vocabulary means adding a variant here, moving it out of "unknown".
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "e", rename_all = "snake_case")]
 pub enum TraceEvent {
@@ -91,6 +92,14 @@ pub enum TraceEvent {
     Init(InitEvent),
     /// `pick` (`action` profile) — one per `FindNextCombatant` selection.
     Pick(PickEvent),
+    /// `attack` (`action` profile) — one per to-hit resolution, bracketing its
+    /// one d20.
+    Attack(AttackEvent),
+    /// `dmg` (`action` profile) — one per damage roll (emitted only on a hit),
+    /// bracketing its `dice_count` damage dice.
+    Dmg(DmgEvent),
+    /// `save` (`action` profile) — one per saving throw, bracketing its one d20.
+    Save(SaveEvent),
 }
 
 /// A `prng`-profile draw event (D-OR3): `{"e":"rng","before":u32,"after":u32}`
@@ -157,6 +166,60 @@ pub struct PickEvent {
     pub combatant_id: u32,
     pub delay: i16,
     pub roll: u16,
+}
+
+/// An `action`-profile `attack` event (D-OR3; `combat-study.md` §9, pinned by the
+/// attack slice — `gbx-engine`'s `combat::resolve_attack` → `PC_CanHitTarget`).
+/// Emitted per to-hit resolution, bracketing its one `random(20)`.
+///
+/// Field order **is** the canonical on-disk order: `attacker_id`, `target_id`,
+/// `roll`, `hit`. All integers (`hit` is `0`/`1`, not a JSON bool). `attacker_id`
+/// / `target_id` are stable per-encounter roster indices; `roll` is the **raw d20
+/// (1..=20, before the natural-20 promotion to 100)** — the honest observable
+/// die, from which nat-1/nat-20 are visible; `hit` the resolved outcome. (The §9
+/// strawman also listed `attack_idx`/`bonus`/`target_ac`; the session brief trims
+/// the pinned event to the observable roll + outcome, as it did for `dmg`.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AttackEvent {
+    pub attacker_id: u32,
+    pub target_id: u32,
+    pub roll: u8,
+    pub hit: u8,
+}
+
+/// An `action`-profile `dmg` event (D-OR3; `combat-study.md` §9, pinned by the
+/// attack slice — `gbx-engine`'s `combat::roll_damage` → `sub_3E192`). Emitted
+/// per damage roll (**only on a hit**), bracketing its `dice_count` damage dice.
+///
+/// Field order **is** the canonical on-disk order: `attacker_id`, `target_id`,
+/// `amount`, `backstab`. All integers (`backstab` is `0`/`1`). `amount` is the
+/// final damage (dice + bonus, clamped `>= 0`, times the backstab multiplier);
+/// `backstab` whether that multiplier was applied. (Trimmed from the §9 strawman's
+/// `dice_count`/`dice_size`/`bonus`/`backstab_mult`/`total` to the resolved
+/// amount + flag, per the session brief.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DmgEvent {
+    pub attacker_id: u32,
+    pub target_id: u32,
+    pub amount: i32,
+    pub backstab: u8,
+}
+
+/// An `action`-profile `save` event (D-OR3; `combat-study.md` §9, pinned by the
+/// attack slice — `gbx-engine`'s `combat::roll_saving_throw` → `RollSavingThrow`).
+/// Emitted per saving throw, bracketing its one `random(20)`.
+///
+/// Field order **is** the canonical on-disk order: `combatant_id`, `save_type`,
+/// `roll`, `made`. All integers (`made` is `0`/`1`). `save_type` is the
+/// `SaveVerseType` index (`0..=4`); `roll` the raw d20 (1..=20); `made` the
+/// outcome. (Trimmed from the §9 strawman's `bonus`/`target`, which are non-drawn
+/// inputs, not observables.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SaveEvent {
+    pub combatant_id: u32,
+    pub save_type: u8,
+    pub roll: u8,
+    pub made: u8,
 }
 
 /// A fully parsed trace: its header plus its events in file (draw) order.
@@ -254,7 +317,12 @@ impl Trace {
     pub fn rng_events(&self) -> impl Iterator<Item = &RngEvent> {
         self.events.iter().filter_map(|e| match e {
             TraceEvent::Rng(r) => Some(r),
-            TraceEvent::Randomize | TraceEvent::Init(_) | TraceEvent::Pick(_) => None,
+            TraceEvent::Randomize
+            | TraceEvent::Init(_)
+            | TraceEvent::Pick(_)
+            | TraceEvent::Attack(_)
+            | TraceEvent::Dmg(_)
+            | TraceEvent::Save(_) => None,
         })
     }
 
@@ -340,6 +408,65 @@ mod tests {
             serde_json::to_string(&pick).unwrap(),
             r#"{"e":"pick","pass":0,"combatant_id":3,"delay":5,"roll":87}"#
         );
+    }
+
+    #[test]
+    fn attack_dmg_save_events_are_canonical_and_tag_first() {
+        let attack = TraceEvent::Attack(AttackEvent {
+            attacker_id: 2,
+            target_id: 7,
+            roll: 14,
+            hit: 1,
+        });
+        assert_eq!(
+            serde_json::to_string(&attack).unwrap(),
+            r#"{"e":"attack","attacker_id":2,"target_id":7,"roll":14,"hit":1}"#
+        );
+
+        let dmg = TraceEvent::Dmg(DmgEvent {
+            attacker_id: 2,
+            target_id: 7,
+            amount: 11,
+            backstab: 0,
+        });
+        assert_eq!(
+            serde_json::to_string(&dmg).unwrap(),
+            r#"{"e":"dmg","attacker_id":2,"target_id":7,"amount":11,"backstab":0}"#
+        );
+
+        let save = TraceEvent::Save(SaveEvent {
+            combatant_id: 3,
+            save_type: 4,
+            roll: 9,
+            made: 0,
+        });
+        assert_eq!(
+            serde_json::to_string(&save).unwrap(),
+            r#"{"e":"save","combatant_id":3,"save_type":4,"roll":9,"made":0}"#
+        );
+    }
+
+    #[test]
+    fn attack_dmg_save_are_accepted_by_the_reader_and_are_not_draws() {
+        let header = serde_json::to_string(&TraceHeader {
+            profile: Profile::Action,
+            encounter: "attack-slice".to_string(),
+            ..sample_header()
+        })
+        .unwrap();
+        let text = format!(
+            "{header}\n{}\n{}\n{}\n",
+            r#"{"e":"attack","attacker_id":2,"target_id":7,"roll":14,"hit":1}"#,
+            r#"{"e":"dmg","attacker_id":2,"target_id":7,"amount":11,"backstab":0}"#,
+            r#"{"e":"save","combatant_id":3,"save_type":4,"roll":9,"made":0}"#,
+        );
+        let trace = Trace::parse(&text).expect("attack/dmg/save are accepted event types");
+        assert_eq!(trace.events.len(), 3);
+        assert!(matches!(trace.events[0], TraceEvent::Attack(_)));
+        assert!(matches!(trace.events[1], TraceEvent::Dmg(_)));
+        assert!(matches!(trace.events[2], TraceEvent::Save(_)));
+        assert_eq!(trace.rng_event_count(), 0, "action events are not draws");
+        assert_eq!(Trace::parse(&trace.to_canonical_string()).unwrap(), trace);
     }
 
     #[test]
