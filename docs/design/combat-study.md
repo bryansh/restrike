@@ -331,6 +331,25 @@ PlayerQuickFight(player):
 
 ## 5. To-hit, damage, saves (feeds FD-1 / FD-4)
 
+> **IMPLEMENTED — attack slice (2026-07-16, D-OR5(a) Phase 1, second slice).**
+> §5.2/§5.3/§5.4 are transliterated in `gbx-engine`'s `combat` module
+> (`can_hit_target`/`pc_can_hit_target`, `roll_damage`+`backstab_multiplier`,
+> `roll_saving_throw`, tied together by `resolve_attack`), draw-faithful through
+> the one `EngineRng` seam, with synthetic draw-sequence tests vs an independent
+> `gbx-prng` replay. **One correction from the caller read (coab wins over this
+> study's §5.2 labels):** §5.2 below calls `CanHitTarget` "monster/generic" and
+> `PC_CanHitTarget` "PC" — the caller read shows the real split is
+> **weapon-attack vs scripted-effect**, not monster vs PC. `PC_CanHitTarget`
+> (the `>=` path) is the **standard weapon-attack path for _any_ combatant**
+> (both PCs and monsters): its only live caller is `AttackTarget01`
+> (`ovr014.cs:821`, `sub_3F4EB`), the per-turn weapon body reached from the
+> QuickFight AI / combat menu. `CanHitTarget` (the `>` path) is the scripted
+> `DAMAGE`-opcode / area-effect path: its live caller is `CMD_Damage`
+> (`ovr003.cs:1673`), rolling to hit a random party member. Backstab **detection**
+> is deferred (needs facing/positioning); the multiplier math is faithful. Saves
+> were implemented (clean read — the save target is on the record, not a rules
+> pack). Not yet live-parity-verified — that closes FD-1/FD-4 at H4.
+
 ### 5.1 Attack profiles
 
 Each `Player`/monster carries **two** attack profiles (`Player.cs:646-703`):
@@ -547,23 +566,32 @@ session, M5-adjacent).
 
 ## 9. Action-profile event vocabulary (`init`/`pick` pinned; rest PROPOSED — D-OR3)
 
-> **MOSTLY PROPOSED — `init`/`pick` now PINNED (2026-07-16, initiative slice).**
-> D-OR3 leaves the `action`-profile *vocabulary* for the combat sessions to pin
-> as each system lands; its *mechanism* (profile tag, canonical field order,
-> same-tick emission order) already exists in `gbx-oracle`. The remaining rows
+> **`init`/`pick` PINNED (2026-07-16, initiative slice); `attack`/`dmg`/`save`
+> PINNED (2026-07-16, attack slice).** D-OR3 leaves the `action`-profile
+> *vocabulary* for the combat sessions to pin as each system lands; its
+> *mechanism* (profile tag, canonical field order, same-tick emission order)
+> already exists in `gbx-oracle`. The `move`/`ai`/`status`/`morale`/`award` rows
 > are still a strawman. All values are integers (D-OR3 canonical encoding —
-> `surprise` is `0`/`1`, not a bool); `combatant_id` is a stable per-encounter
-> index into the roster. Equality over action events is **not** yet a gate, even
-> for the pinned rows — pinning fixes the field names/order, not a comparison.
+> `surprise`/`hit`/`backstab`/`made` are `0`/`1`, not bools); `combatant_id` is a
+> stable per-encounter index into the roster. Equality over action events is
+> **not** yet a gate, even for the pinned rows — pinning fixes the field
+> names/order, not a comparison. **The pinned `attack`/`dmg`/`save` field sets
+> were trimmed from the strawman below** (per the attack-slice brief) to the
+> observable roll + outcome — the pinned canonical forms are: `attack` =
+> `{attacker_id, target_id, roll, hit}` (`roll` is the raw d20, 1..=20, *before*
+> the nat-20→100 promotion), `dmg` = `{attacker_id, target_id, amount, backstab}`,
+> `save` = `{combatant_id, save_type, roll, made}`. The strawman rows kept below
+> record the fuller field ideas for reference; `gbx-oracle`'s
+> `AttackEvent`/`DmgEvent`/`SaveEvent` are the canonical pinned forms.
 
 | `e` | Fields | Emitted when | Draws it brackets |
 |---|---|---|---|
 | `init` **✓ pinned** | `combatant_id, delay, dex_adj, surprise` (canonical order) | per combatant in `CalculateInitiative` | the one `random(6)` |
 | `pick` **✓ pinned** | `pass, combatant_id, delay, roll` (canonical order) | **per `FindNextCombatant` selection** (one per yielded combatant, not per member) | brackets a whole pass's `random(100)`s |
 | `move` | `combatant_id, from{x,y}, to{x,y}, cost` | each step in the AI/menu move | none (movement is RNG-free) |
-| `attack` | `attacker_id, target_id, attack_idx, roll, bonus, target_ac, hit` | each `CanHit`/`PC_CanHit` | one `random(20)` |
-| `dmg` | `attacker_id, target_id, dice_count, dice_size, bonus, backstab_mult, total` | each `sub_3E192` | `dice_count` × `random(dice_size)` |
-| `save` | `combatant_id, save_type, roll, bonus, target, made` | each `RollSavingThrow` | one `random(20)` |
+| `attack` **✓ pinned** | pinned: `attacker_id, target_id, roll, hit` (strawman: `+attack_idx, bonus, target_ac`) | each `PC_CanHitTarget` (weapon) / `CanHitTarget` (effect) | one `random(20)` |
+| `dmg` **✓ pinned** | pinned: `attacker_id, target_id, amount, backstab` (strawman: `dice_count, dice_size, bonus, backstab_mult, total`) | each `sub_3E192`, on a hit | `dice_count` × `random(dice_size)` |
+| `save` **✓ pinned** | pinned: `combatant_id, save_type, roll, made` (strawman: `+bonus, target`) | each `RollSavingThrow` | one `random(20)` |
 | `ai` | `combatant_id, branch, spell_id?, item?` | each QuickFight branch taken | branch-dependent |
 | `status` | `combatant_id, from, to` | each `health_status` transition | none |
 | `morale` | `combatant_id, monster_morale, enemy_hp_pct, roll, failed` | each `FleeCheck`/advance gate | 0 or 1 `random(100)` |
@@ -643,7 +671,7 @@ is what this study pins.
 
 | FD | Question | coab evidence (this study) | Status | Settles via |
 |---|---|---|---|---|
-| **FD-1** | nat-20 auto-hit / nat-1 auto-miss? | **Both exist.** `CanHitTarget` `ovr024.cs:487-508` + `PC_CanHitTarget` `:515-548`: `attack_roll > 1` gate (nat-1 miss), `==20 → 100` (nat-20 hit). Saves too (`RollSavingThrow` `:564-571`). | narrowed → coab settled | H4 edge-roll traces |
+| **FD-1** | nat-20 auto-hit / nat-1 auto-miss? | **Both exist.** `CanHitTarget` `ovr024.cs:487-508` + `PC_CanHitTarget` `:515-548`: `attack_roll > 1` gate (nat-1 miss), `==20 → 100` (nat-20 hit). Saves too (`RollSavingThrow` `:564-571`). **Implemented** (attack slice); caller read confirms the `>=` path is the weapon path (`AttackTarget01`), the `>` path the scripted-effect path (`CMD_Damage`). | narrowed → coab settled → **implemented** | H4 edge-roll traces |
 | **FD-2** | initiative formula | `d6 + DexReactionAdj`, clamp[1,20], `-6` team surprise (`CalculateInitiative` `ovr014.cs:31-47`); draw-order = per-pass d100 (`FindNextCombatant` `ovr009.cs:72`). Consumed, never persisted. | narrowed → **settles by draw-order parity (D-OR5(a))** | Phase-0/1 draw stream |
 | **FD-3** | attacks-per-round | `ThisRoundActionCount` `ovr014.cs:519-527` = `(halfActions + oddRound)/2` (3/2 mechanic); ranged from item `numberAttacks` (`:473-480`); two attack profiles. | narrowed | H4 round-count + `attacks_left` checkpoint |
 | **FD-4** | sleep/held auto-kill | Affect-gated (`CheckType.Type_16` in `CanHitTarget` `ovr024.cs:500`); `TrySweepAttack` vs `HitDice==0` (`ovr014.cs:530-534`). Exact auto-kill leaf not yet read. | narrowed | melee-leaf read + curated 1v1 H4 |
@@ -774,8 +802,14 @@ for ≥10 seeds (D-OR5(a)). AI-decision parity closes there; only then does Phas
    parity test** (`ovr014.cs:521`), so attack counts depend on round number — a
    replay that resets round parity will diverge on multi-attack combatants.
 4. **`CanHitTarget` uses `>` but `PC_CanHitTarget` uses `>=`** (`ovr024.cs:504`
-   vs `:544`) — the monster and PC hit tests are not symmetric; an off-by-one here
-   is invisible until an exact-AC edge case in H4.
+   vs `:544`) — the two hit tests are not symmetric; an off-by-one here is
+   invisible until an exact-AC edge case in H4. **Which is which (caller read,
+   attack slice):** the `>=` path (`PC_CanHitTarget`) is the **weapon-attack path
+   for both teams** (`AttackTarget01`, `ovr014.cs:821`); the `>` path
+   (`CanHitTarget`) is the scripted `DAMAGE`-opcode / area-effect path
+   (`CMD_Damage`, `ovr003.cs:1673`). So a normal melee/ranged swing is `>=`; the
+   strict `>` only bites on scripted damage effects. (Supersedes §5.2's
+   "monster/generic vs PC" framing.)
 5. **The QuickFight `field_15` target-mode is itself RNG-gated** (`ovr010.cs:22`)
    — a d4 gate, then d8→(d4|d2) — *before* any target selection, so the AI turn's
    first draws are mode-selection, not the attack. Easy to miss when counting

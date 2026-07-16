@@ -47,6 +47,20 @@
   also flags two H4-relevant asymmetries: `CanHitTarget` compares with strict
   `>` while `PC_CanHitTarget` uses `>=`, and the two combine the AC/bonus terms
   differently. H4 (M4) confirms against oracle traces on edge rolls.
+- **Implemented + caller-confirmed (2026-07-16, M4 combat #2):** both auto-rules
+  are now transliterated in `gbx-engine`'s `combat` module
+  (`can_hit_target`/`pc_can_hit_target`) with the nat-1 gate and the nat-20→100
+  promotion, and the `>`/`>=` asymmetry is exercised at the equality point
+  (`gt_path_and_ge_path_disagree_at_the_equality_point`). **The caller read
+  resolved which path is which** (the study §5.2 "monster/generic vs PC" labels
+  were imprecise): the `>=` path (`PC_CanHitTarget`) is the STANDARD weapon-attack
+  path for **any** combatant — its only live caller is `AttackTarget01`
+  (`ovr014.cs:821`, `sub_3F4EB`), the per-turn weapon body both PCs and monsters
+  reach via the AI/menu; the `>` path (`CanHitTarget`) is the scripted
+  DAMAGE-opcode / area-effect path (`CMD_Damage`, `ovr003.cs:1673`, hitting a
+  random party member), not a weapon swing. Status stays *narrowed* — the coab
+  read + implementation settle the mechanism; H4 curated edge-roll traces settle
+  it fully.
 - **Evidence so far:** None gathered yet from this project's own reading;
   the disagreement is inherited from the brief vs. Jzatopa's corpus (treat
   the latter as unverified candidate data per PLAN.md D11/§6 rule 4).
@@ -820,11 +834,27 @@ stays the one place showing the complete open-hypothesis picture.
   engine currently has (monster damage now *proven* so, not merely likely).
   Changing the signature to `u8` would churn the `VmHost` trait and all impls
   for no behavioral gain yet.
+- **Progress (2026-07-16, M4 combat #2 — the truncation is now implemented in the
+  combat damage path):** the attack slice's `roll_dice`
+  (`crates/gbx-engine/src/combat.rs`) — the roller used by `roll_damage`
+  (`sub_3E192`) and the to-hit/initiative draws — **now faithfully truncates its
+  total to a byte** (`(total as u8) as u16`, the `(byte)roll_total`
+  `ovr024.cs:595`), matching coab exactly regardless of `count · size`. So combat
+  damage rolls are byte-truncation-faithful today (with a synthetic
+  `roll_dice_truncates_the_total_to_a_byte` test exercising `count · size > 255`).
+  This does **not** close the docket: the `VmHost`/CLI `roll_dice` (`vmhost.rs`,
+  `run_script.rs`) — the ECL-opcode roller — still returns `u16` without
+  truncating; its sites remain inert (census above), so the signature churn is
+  still deferred. The open **weapon** clause is unchanged: `attackDiceSize/Count`
+  for a PC's readied weapon come from the `ItemData` table (`Classes/ItemData.cs`
+  `diceCountLarge/Normal`), which is **not decoded yet** (the item-table session,
+  M5-adjacent) — so real weapon-dice extents still can't be censused here. coab
+  wins where read: monster damage is inert (max 45), weapon extents TBD by data.
 - **Settled by:** the remaining data-driven sites — the item session (weapon
   damage dice, `ItemData`) and character creation (class hit-die table). Check
   their real data extents against `count * size > 255` and decide then whether to
-  narrow the return to a byte. The **monster** clause is closed: inert
-  (`docs/design/combat-study.md` §8.3).
+  narrow the `VmHost`/CLI return to a byte (the combat roller already truncates).
+  The **monster** clause is closed: inert (`docs/design/combat-study.md` §8.3).
 - **Cross-reference:** `docs/design/oracle-rig.md` §6 (migration ledger),
   `crates/gbx-engine/src/vmhost.rs` `roll_dice`.
 
