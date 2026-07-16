@@ -8,12 +8,17 @@
 //! buffer, so after a capture the caller reads the events back **without**
 //! downcasting or file I/O — then stamps a header on with [`TraceCollector::into_trace`].
 //!
-//! Usage:
-//! ```ignore
+//! Usage — `no_run` rather than `ignore` so the example is **compile-checked**
+//! against the real API (an `ignore`d example is never built, so it rots
+//! silently; building an `Engine` needs game data, so it must not *run* in CI):
+//! ```no_run
+//! # use gbx_oracle::{TraceCollector, TraceHeader};
+//! # fn capture(engine: &mut gbx_engine::engine::Engine, header: TraceHeader) {
 //! let collector = TraceCollector::new();
 //! engine.attach_rng_sink(collector.sink());
 //! // … drive the engine (ticks, a curated encounter) …
 //! let trace = collector.into_trace(header);          // ready to compare/write
+//! # }
 //! ```
 
 use std::cell::RefCell;
