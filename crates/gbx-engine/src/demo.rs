@@ -996,3 +996,360 @@ fn watch_a_fight() {
         "the fight resolved to one side standing"
     );
 }
+
+// --- M4 combat #3 deliverable 4: the watchable BATTLEFIELD demo ---
+
+/// A demo combatant that stands on the tactical map — the [`watch_a_fight`]
+/// fighter plus a grid `pos` and a `movement` budget. All stats are hand-built,
+/// D10-clean (not real CotAB numbers).
+#[cfg(test)]
+struct DemoBattler {
+    id: usize,
+    glyph: char,
+    name: &'static str,
+    team: crate::combat::Team,
+    hp: i32,
+    ac: u8,
+    hit_bonus: i32,
+    dice_size: u8,
+    dice_count: u8,
+    damage_bonus: u8,
+    reaction_adj: i8,
+    /// Base movement (`player.movement`); `calc_moves` turns it into the round's
+    /// half-move budget.
+    movement: i32,
+    /// The map cell this battler stands on (`CombatMap[id].pos`).
+    pos: crate::combat::GridPos,
+    alive: bool,
+}
+
+/// The watchable **battlefield** demo (local-tier, `GBX_DATA_DIR`-gated; uses no
+/// game data — only synthetic D10-clean stats and a synthetic terrain grid).
+///
+/// This exercises the M4 combat #3 tactical subsystem end to end: the **combat
+/// map** with per-tile passability, deterministic **placement** (`place_combatants`
+/// fan-out), and the **movement/facing/adjacency** primitives — then renders a
+/// text battlefield each round so the fight is *visible*. The round loop
+/// (`CombatState`, slice 1) and attack resolution (`resolve_attack`, slice 2) are
+/// reused unchanged.
+///
+/// **Two demo-only, draw-free behaviours make this a demonstration, not a parity
+/// artifact.** First, the target picker is still slice 2's placeholder "first
+/// living enemy". Second, each actor greedily steps toward its target using the
+/// *real* `target_direction` + `step_cost` primitives (draw-free geometry) until
+/// adjacent or out of movement, so the battlefield visibly changes. Real AI
+/// target-selection + pathing (which consume draws) is the next slice; the
+/// engine's turn slot stays a zero-draw stub. Attack draws still flow through the
+/// one `EngineRng` (D9).
+///
+/// Run: `GBX_DATA_DIR=~/goldbox-data/cotab cargo test -p gbx-engine \
+///   -- --nocapture watch_a_battlefield`
+#[test]
+fn watch_a_battlefield() {
+    use crate::combat::{
+        calc_moves, deduct_move, grid_distance, is_adjacent, place_combatants, resolve_attack,
+        step_cost, target_direction, AttackProfile, CombatMap, CombatState, CombatStep, Combatant,
+        GridPos, PlacementInput, Team, TilePassability,
+    };
+    use crate::rng::EngineRng;
+
+    if std::env::var_os("GBX_DATA_DIR").is_none() {
+        eprintln!(
+            "SKIPPED: battlefield demo runs in the local tier (GBX_DATA_DIR) — watch_a_battlefield"
+        );
+        return;
+    }
+
+    const FLOOR: u8 = 0x17; // passable floor (move_cost 1)
+    const ROCK: u8 = 1; // move_cost 0xFF → wall
+
+    // Three heroes vs four goblins. Ids are the roster index (TeamList order).
+    let mut battlers = vec![
+        DemoBattler {
+            id: 0,
+            glyph: 'K',
+            name: "Kethra",
+            team: Team::Party,
+            hp: 26,
+            ac: 54,
+            hit_bonus: 45,
+            dice_size: 8,
+            dice_count: 1,
+            damage_bonus: 2,
+            reaction_adj: 2,
+            movement: 12,
+            pos: GridPos::new(0, 0),
+            alive: true,
+        },
+        DemoBattler {
+            id: 1,
+            glyph: 'D',
+            name: "Dolan",
+            team: Team::Party,
+            hp: 22,
+            ac: 52,
+            hit_bonus: 44,
+            dice_size: 10,
+            dice_count: 1,
+            damage_bonus: 1,
+            reaction_adj: 0,
+            movement: 9,
+            pos: GridPos::new(0, 0),
+            alive: true,
+        },
+        DemoBattler {
+            id: 2,
+            glyph: 'S',
+            name: "Sable",
+            team: Team::Party,
+            hp: 18,
+            ac: 50,
+            hit_bonus: 43,
+            dice_size: 6,
+            dice_count: 1,
+            damage_bonus: 3,
+            reaction_adj: 3,
+            movement: 12,
+            pos: GridPos::new(0, 0),
+            alive: true,
+        },
+    ];
+    for i in 0..4 {
+        battlers.push(DemoBattler {
+            id: 3 + i,
+            glyph: ['a', 'b', 'c', 'd'][i],
+            name: ["Snik", "Grub", "Yark", "Mool"][i],
+            team: Team::Monster,
+            hp: 7,
+            ac: 48,
+            hit_bonus: 41,
+            dice_size: 6,
+            dice_count: 1,
+            damage_bonus: 0,
+            reaction_adj: 0,
+            movement: 9,
+            pos: GridPos::new(0, 0),
+            alive: true,
+        });
+    }
+
+    // Build a synthetic battlefield and place everyone (party facing north, foes
+    // one tile ahead). A short rock outcrop sits behind the party (south) as
+    // terrain texture — scenery, deliberately not a barrier between the lines
+    // (routing around walls is the AI slice's wall-aware pathfinder, not this
+    // geometry slice).
+    let mut map = CombatMap::uniform(FLOOR);
+    for x in 25..=27 {
+        map.set_tile(GridPos::new(x, 16), ROCK);
+    }
+    let roster_inputs: Vec<PlacementInput> = battlers
+        .iter()
+        .map(|b| PlacementInput {
+            team: b.team,
+            size: 1,
+            in_combat: true,
+        })
+        .collect();
+    let placements = place_combatants(&mut map, &roster_inputs, 0, 1, GridPos::new(0, 0), None);
+    for (b, p) in battlers.iter_mut().zip(&placements) {
+        assert!(p.placed, "everyone finds a cell on the open field");
+        b.pos = p.pos;
+    }
+
+    // The ASCII renderer: crop to the live combatants' bounding box (+margin) and
+    // draw terrain + glyphs.
+    fn render(battlers: &[DemoBattler], map: &CombatMap) {
+        let live: Vec<&DemoBattler> = battlers.iter().filter(|b| b.alive).collect();
+        if live.is_empty() {
+            return;
+        }
+        let (mut min_x, mut min_y, mut max_x, mut max_y) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+        for b in &live {
+            min_x = min_x.min(b.pos.x);
+            min_y = min_y.min(b.pos.y);
+            max_x = max_x.max(b.pos.x);
+            max_y = max_y.max(b.pos.y);
+        }
+        let (min_x, min_y) = ((min_x - 2).max(0), (min_y - 2).max(0));
+        let (max_x, max_y) = ((max_x + 2).min(49), (max_y + 2).min(24));
+        for y in min_y..=max_y {
+            let mut row = String::from("      ");
+            for x in min_x..=max_x {
+                let here = GridPos::new(x, y);
+                if let Some(b) = live.iter().find(|b| b.pos == here) {
+                    row.push(b.glyph);
+                } else {
+                    row.push(match map.passability(here) {
+                        TilePassability::Passable { .. } => '.',
+                        TilePassability::Wall => '#',
+                        TilePassability::Void => ' ',
+                    });
+                }
+                row.push(' ');
+            }
+            eprintln!("{row}");
+        }
+    }
+
+    let seed = 0x0C0F_FEE0u32;
+    let mut rng = EngineRng::new(seed);
+    let roster: Vec<Combatant> = battlers
+        .iter()
+        .map(|b| Combatant::new(b.id, b.team, b.reaction_adj, true))
+        .collect();
+    let mut state = CombatState::new(roster);
+
+    eprintln!("== A BATTLEFIELD ==  (seed {seed:#010x}; synthetic map + roster, D10-clean)");
+    eprintln!("Party: K Kethra  D Dolan  S Sable   Goblins: a Snik  b Grub  c Yark  d Mool");
+    eprintln!("Legend: '.' floor  '#' rock (impassable)  ' ' off-field\n");
+    eprintln!("Initial deployment (place_combatants, party facing north):");
+    render(&battlers, &map);
+
+    fn first_living_enemy(battlers: &[DemoBattler], team: Team) -> Option<usize> {
+        battlers.iter().position(|b| b.team != team && b.alive)
+    }
+    fn side_alive(battlers: &[DemoBattler], team: Team) -> bool {
+        battlers.iter().any(|b| b.team == team && b.alive)
+    }
+    fn occupied(battlers: &[DemoBattler], p: GridPos, ignore: usize) -> bool {
+        battlers
+            .iter()
+            .enumerate()
+            .any(|(i, b)| i != ignore && b.alive && b.pos == p)
+    }
+
+    let victor = loop {
+        match state.step(&mut rng) {
+            CombatStep::RoundStarted { round } => {
+                eprintln!("\n── Round {} ──", round + 1);
+            }
+            CombatStep::Turn { combatant_id } => {
+                let a = combatant_id;
+                if !battlers[a].alive {
+                    continue;
+                }
+                let team = battlers[a].team;
+                let Some(t) = first_living_enemy(&battlers, team) else {
+                    continue;
+                };
+
+                // Draw-free approach: step toward the target using the real facing
+                // + step-cost primitives until adjacent or out of movement. The
+                // ideal heading is `target_direction`; if that step is blocked
+                // (wall / occupied / off-map) the mover tries the two flanking
+                // directions and takes the first affordable step that gets closer
+                // — a tiny demo-only obstacle-avoidance so the rock wall is routed
+                // around rather than stalling the fight. (Real wall-aware pathing is
+                // the AI slice; this is pure geometry, still zero draws.)
+                let mut half_moves = calc_moves(battlers[a].movement);
+                let mut steps = 0u32;
+                while !is_adjacent(battlers[a].pos, battlers[t].pos) && half_moves > 0 {
+                    let ideal = target_direction(battlers[a].pos, battlers[t].pos);
+                    let here = battlers[a].pos;
+                    let dist_now = grid_distance(here, battlers[t].pos);
+                    let mut moved = false;
+                    for dir in [ideal, (ideal + 7) % 8, (ideal + 1) % 8] {
+                        let Some((dest, cost)) = step_cost(&map, here, dir) else {
+                            continue;
+                        };
+                        let blocked = matches!(map.passability(dest), TilePassability::Wall)
+                            || occupied(&battlers, dest, a);
+                        if blocked
+                            || cost > half_moves
+                            || grid_distance(dest, battlers[t].pos) >= dist_now
+                        {
+                            continue;
+                        }
+                        half_moves = deduct_move(half_moves, cost);
+                        battlers[a].pos = dest;
+                        steps += 1;
+                        moved = true;
+                        break;
+                    }
+                    if !moved {
+                        break;
+                    }
+                }
+                if steps > 0 {
+                    eprintln!(
+                        "   {} advances {} tile(s) → ({},{})",
+                        battlers[a].name, steps, battlers[a].pos.x, battlers[a].pos.y
+                    );
+                }
+
+                // Attack only if we reached melee reach.
+                if !is_adjacent(battlers[a].pos, battlers[t].pos) {
+                    eprintln!("   {} can't reach {}", battlers[a].name, battlers[t].name);
+                    continue;
+                }
+                let prof = AttackProfile {
+                    attacker_id: battlers[a].id,
+                    target_id: battlers[t].id,
+                    target_ac: battlers[t].ac,
+                    hit_bonus: battlers[a].hit_bonus,
+                    team_bonus: 0,
+                    dice_size: battlers[a].dice_size,
+                    dice_count: battlers[a].dice_count,
+                    damage_bonus: battlers[a].damage_bonus,
+                    backstab: None,
+                };
+                let (aname, tname) = (battlers[a].name, battlers[t].name);
+                let out = resolve_attack(&mut rng, prof, None);
+                if let Some(dmg) = out.damage {
+                    battlers[t].hp -= dmg.amount;
+                    let dead = battlers[t].hp <= 0;
+                    if dead {
+                        battlers[t].alive = false;
+                    }
+                    eprintln!(
+                        "   {aname} strikes {tname}: d20 {:>2}  HIT {:>2}{}",
+                        out.to_hit.d20,
+                        dmg.amount,
+                        if dead { "  ✝ DOWN" } else { "" }
+                    );
+                } else {
+                    eprintln!(
+                        "   {aname} strikes {tname}: d20 {:>2}  miss",
+                        out.to_hit.d20
+                    );
+                }
+
+                if !side_alive(&battlers, Team::Party) {
+                    break Team::Monster;
+                }
+                if !side_alive(&battlers, Team::Monster) {
+                    break Team::Party;
+                }
+            }
+            CombatStep::RoundEnded { battle_over, .. } => {
+                render(&battlers, &map);
+                if battle_over {
+                    break if side_alive(&battlers, Team::Party) {
+                        Team::Party
+                    } else {
+                        Team::Monster
+                    };
+                }
+            }
+            CombatStep::Ended => {
+                break if side_alive(&battlers, Team::Party) {
+                    Team::Party
+                } else {
+                    Team::Monster
+                };
+            }
+        }
+    };
+
+    eprintln!(
+        "\n== VICTOR: {} ==",
+        match victor {
+            Team::Party => "the party",
+            Team::Monster => "the goblins",
+        }
+    );
+    assert!(
+        !side_alive(&battlers, Team::Party) || !side_alive(&battlers, Team::Monster),
+        "the battlefield fight resolved to one side standing"
+    );
+}
