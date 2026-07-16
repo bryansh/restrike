@@ -777,6 +777,908 @@ pub fn resolve_attack(
     AttackOutcome { to_hit, damage }
 }
 
+// ===========================================================================
+// The tactical battlefield — map, placement, movement (M4 combat #3; study §11,
+// D-OR5(a) Phase 1, third slice)
+// ===========================================================================
+//
+// **This whole subsystem is draw-free.** The coab read confirms
+// `SetupGroundTiles` → `PlaceCombatants` (`ovr011.cs:757-1166`) and `CalcMoves`
+// / the step primitives (`ovr014.cs:58-83`, `ovr014.cs:252`) make **zero**
+// `Random` calls — it is pure, deterministic geometry. So nothing here touches
+// `EngineRng`/`gbx-prng`; correctness is measured against coab's layout math, not
+// a draw stream (D9: no draws added). Every routine is transliterated
+// read-for-behavior from coab (D11), cited by `file:line`.
+//
+// What the original models and this slice mirrors:
+//   - a 50×25 grid of ground-tile indices (`mapToBackGroundTile`,
+//     `Struct_1D1BC` — 1250 cells, `pos.y*50 + pos.x`), each tile's passability
+//     read through the `BackGroundTiles` `move_cost` table (`Gbl.cs:193`);
+//   - a parallel 50×25 occupancy grid (`mapToPlayerIndex`, `ovr033.cs:111`)
+//     rebuilt after each placement;
+//   - per-combatant `{pos, size}` cells (`CombatMap[]`, `CombatantMap.cs`);
+//   - the deterministic fan-out that assigns each roster member a cell
+//     (`PlaceCombatants`/`place_combatant`/`try_place_combatant`).
+//
+// **Deferred real-area hook (documented, not wired):** the original *derives* the
+// battlefield terrain from the area the party stood in — `SetupGroundTiles`
+// (`ovr011.cs:757`) calls `SetupDungeonFloor`/`SetupWildernessFloor`, which paint
+// the combat diamond via `build_background_tiles_*` (`ovr011.cs:149-...`) reading
+// the source area's wall topology through `get_dir_flags` (`ovr011.cs:136`). That
+// wiring — like the `COMBAT`-opcode → `BattleSetup` roster assembly — belongs to
+// the later encounter-trigger slice; here the map is built from a **provided
+// terrain descriptor** (synthetic in tests), and the *derivation algorithm* (grid
+// dimensions, tile → passability, the placement geometry) is what this slice
+// implements and tests. The area→wall-flags input is surfaced as a caller
+// `dir_flags` hook that defaults to "no walls" (the wilderness / open-ground
+// path).
+
+/// Combat-map width in cells (`Point.MapMaxX`, `Gbl.cs:111`). The playable
+/// isometric diamond sits inside this 50×25 field.
+pub const MAP_W: i32 = 50;
+/// Combat-map height in cells (`Point.MapMaxY`, `Gbl.cs:112`).
+pub const MAP_H: i32 = 25;
+
+/// A cell in the 50×25 combat map (coab's `Point`, `Gbl.cs:106`). `y` increases
+/// **downward** (screen space), which the facing/octant math below depends on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GridPos {
+    pub x: i32,
+    pub y: i32,
+}
+
+impl GridPos {
+    pub fn new(x: i32, y: i32) -> Self {
+        GridPos { x, y }
+    }
+
+    /// `Point.MapInBounds()` (`Gbl.cs:170`): inside the 50×25 field.
+    pub fn in_bounds(self) -> bool {
+        self.x >= 0 && self.x < MAP_W && self.y >= 0 && self.y < MAP_H
+    }
+
+    /// This cell stepped one tile in iso `direction` (`+ MapDirectionDelta[dir]`).
+    pub fn stepped(self, direction: u8) -> GridPos {
+        let (dx, dy) = map_dir_delta(direction);
+        GridPos {
+            x: self.x + dx,
+            y: self.y + dy,
+        }
+    }
+}
+
+/// The 8 iso movement directions plus index 8 = "no move" (`(0,0)`), matching
+/// coab's `MapDirectionDelta` (`Gbl.cs:690`). Index = iso direction: 0=N, 1=NE,
+/// 2=E, 3=SE, 4=S, 5=SW, 6=W, 7=NW, 8=none. Odd indices are the diagonals.
+pub const MAP_DIRECTION_DELTA: [(i32, i32); 9] = [
+    (0, -1),
+    (1, -1),
+    (1, 0),
+    (1, 1),
+    (0, 1),
+    (-1, 1),
+    (-1, 0),
+    (-1, -1),
+    (0, 0),
+];
+
+/// `MapDirectionDelta[dir]` (`Gbl.cs:690`) — the (dx, dy) step for an iso
+/// direction 0..=8. Panics only on an out-of-range index (a program bug).
+pub fn map_dir_delta(direction: u8) -> (i32, i32) {
+    MAP_DIRECTION_DELTA[direction as usize]
+}
+
+/// `Point.MapInBounds()` for a raw (x, y) — the guard `sub_3E748` applies before
+/// costing a step (`ovr014.cs:260`).
+pub fn map_in_bounds(p: GridPos) -> bool {
+    p.in_bounds()
+}
+
+// --- ground tiles & passability -------------------------------------------
+
+/// `BackGroundTiles[tile].move_cost` (`Struct_189B4.field_0`, the `Gbl.cs:193`
+/// `unk_189B4` table, 74 entries transliterated). `0xFF` = impassable (wall);
+/// `0` = a degenerate/sentinel tile; `1` = normal floor; `2`/`4` = heavier
+/// terrain. This is engine-constant behavior data (like the other combat tables
+/// in this module), not game *content* — D10/D11 clean.
+pub const BACKGROUND_MOVE_COST: [u8; 74] = [
+    1, 255, 255, 255, 255, 1, 255, 255, 255, 1, // 0..9
+    255, 1, 255, 1, 255, 1, 255, 1, 255, 255, // 10..19
+    255, 255, 255, 1, 1, 255, 2, 1, 1, 1, // 20..29
+    1, 1, 255, 255, 255, 255, 255, 1, 1, 1, // 30..39
+    1, 1, 255, 255, 1, 1, 1, 1, 2, 2, // 40..49
+    2, 2, 2, 2, 1, 1, 1, 1, 2, 2, // 50..59
+    4, 4, 4, 4, 1, 1, 0, 255, 0, 255, // 60..69
+    0, 255, 0, 0, // 70..73
+];
+
+/// The three placement/movement-relevant states of a combat-map cell. The
+/// original doesn't name an enum — it reads `move_cost` and treats groundTile 0
+/// specially (`getGroundInformation`, `ovr033.cs:433`; `AtMapXY`,
+/// `ovr033.cs:191`) — but this trichotomy is the faithful decode:
+/// - **`Void`**: tile index 0. `AtMapXY` returns 0 for out-of-bounds, and
+///   `getGroundInformation` short-circuits the whole footprint to `groundTile = 0`
+///   on any 0 cell (`ovr033.cs:460`), which fails the `groundTile > 0` placement
+///   gate. Unpainted map cells default to 0 (`Struct_1D1BC` `new int[1250]`).
+/// - **`Wall`**: `move_cost == 0xFF`. Blocks placement (the `move_cost < 0xFF`
+///   gate, `ovr011.cs:865`) and makes a step cost `0xFF·{2,3}` ≫ any budget.
+/// - **`Passable`**: `move_cost` in `1..=0xFE` — walkable, at that cost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TilePassability {
+    Passable { move_cost: u8 },
+    Wall,
+    Void,
+}
+
+/// Decode a ground-tile index to its passability (see [`TilePassability`]). Tile
+/// index 0 is the void sentinel *regardless* of `BACKGROUND_MOVE_COST[0]`, because
+/// the engine special-cases groundTile 0 upstream of the table lookup.
+pub fn tile_passability(tile: u8) -> TilePassability {
+    if tile == 0 {
+        return TilePassability::Void;
+    }
+    match BACKGROUND_MOVE_COST.get(tile as usize).copied() {
+        Some(0xFF) | None => TilePassability::Wall,
+        Some(mc) => TilePassability::Passable { move_cost: mc },
+    }
+}
+
+/// The combat battlefield: the 50×25 ground-tile grid (`mapToBackGroundTile`) plus
+/// the parallel occupancy grid (`mapToPlayerIndex`, `ovr033.cs:111`). Combatant
+/// `{pos, size}` cells live in [`Battlefield`] alongside this.
+///
+/// Built from a provided terrain descriptor (a `MAP_W*MAP_H` tile-index buffer,
+/// row-major `y*50 + x`); the real "derive tiles from the area GEO block the party
+/// stood on" wiring is the deferred hook documented at the top of this section.
+#[derive(Debug, Clone)]
+pub struct CombatMap {
+    /// `mapToBackGroundTile.field_7` (`Struct_1D1BC`): ground-tile index per cell,
+    /// row-major `y*MAP_W + x`, length `MAP_W*MAP_H`.
+    ground: Vec<u8>,
+    /// `mapToPlayerIndex` (`ovr033.cs`): 1-based combatant index occupying each
+    /// cell, 0 = empty. Rebuilt by [`CombatMap::rebuild_occupancy`].
+    occupancy: Vec<u16>,
+}
+
+impl CombatMap {
+    /// A map with every cell set to `tile` (and empty occupancy). `tile = 0`
+    /// yields an all-void map; a passable floor tile (e.g. `0x17`) yields open
+    /// ground. Panics never — the buffers are always `MAP_W*MAP_H`.
+    pub fn uniform(tile: u8) -> Self {
+        let n = (MAP_W * MAP_H) as usize;
+        CombatMap {
+            ground: vec![tile; n],
+            occupancy: vec![0; n],
+        }
+    }
+
+    /// A map from an explicit ground-tile buffer (row-major `y*MAP_W + x`). The
+    /// buffer must be exactly `MAP_W*MAP_H` long.
+    pub fn from_ground(ground: Vec<u8>) -> Self {
+        let n = (MAP_W * MAP_H) as usize;
+        assert_eq!(ground.len(), n, "ground buffer must be {n} cells");
+        CombatMap {
+            ground,
+            occupancy: vec![0; n],
+        }
+    }
+
+    fn index(p: GridPos) -> usize {
+        (p.y * MAP_W + p.x) as usize
+    }
+
+    /// Set one cell's ground tile (a terrain-descriptor builder for tests /
+    /// synthetic maps). Out-of-bounds is ignored.
+    pub fn set_tile(&mut self, p: GridPos, tile: u8) {
+        if p.in_bounds() {
+            let i = Self::index(p);
+            self.ground[i] = tile;
+        }
+    }
+
+    /// The ground-tile index at `p`; 0 (void) for out-of-bounds — matching
+    /// `AtMapXY` returning `groundTile = 0` outside the field (`ovr033.cs:191`).
+    pub fn ground_tile(&self, p: GridPos) -> u8 {
+        if p.in_bounds() {
+            self.ground[Self::index(p)]
+        } else {
+            0
+        }
+    }
+
+    /// Passability of the cell at `p` ([`tile_passability`] of its ground tile;
+    /// out-of-bounds → `Void`).
+    pub fn passability(&self, p: GridPos) -> TilePassability {
+        tile_passability(self.ground_tile(p))
+    }
+
+    /// `BackGroundTiles[mapToBackGroundTile[p]].move_cost` — the raw movement cost
+    /// the step primitive multiplies (`ovr014.cs:269-273`). Out-of-bounds → `0xFF`
+    /// (a step there is guarded out by `MapInBounds` first). Note the faithful
+    /// quirk: an in-bounds void tile (index 0) costs `move_cost 1` here (the table
+    /// value), even though placement treats it as `Void` — the engine's two paths
+    /// read tile 0 differently, and both are mirrored.
+    pub fn move_cost(&self, p: GridPos) -> u8 {
+        if !p.in_bounds() {
+            return 0xFF;
+        }
+        let tile = self.ground[Self::index(p)];
+        BACKGROUND_MOVE_COST
+            .get(tile as usize)
+            .copied()
+            .unwrap_or(0xFF)
+    }
+
+    /// The 1-based combatant index occupying cell `p`, or 0 (`PlayerIndexAtMapXY`,
+    /// `ovr033.cs:139`; out-of-bounds → 0).
+    pub fn occupant(&self, p: GridPos) -> u16 {
+        if p.in_bounds() {
+            self.occupancy[Self::index(p)]
+        } else {
+            0
+        }
+    }
+
+    /// `setup_mapToPlayerIndex_and_playerScreen` (`ovr033.cs:111`): clear the
+    /// occupancy grid, then paint each placed combatant's footprint
+    /// (`BuildSizeMap(size, pos)`, `ovr033.cs:23`) with its 1-based index. Only
+    /// `size > 0` combatants are painted (`ovr033.cs:123`). Indices are 1-based to
+    /// match `player_array`/`CombatMap` (0 = empty).
+    fn rebuild_occupancy(&mut self, placements: &[Placement]) {
+        for c in self.occupancy.iter_mut() {
+            *c = 0;
+        }
+        for (i, pl) in placements.iter().enumerate() {
+            if !pl.placed || pl.size == 0 {
+                continue;
+            }
+            let index = (i + 1) as u16;
+            for cell in size_footprint(pl.size, pl.pos) {
+                if cell.in_bounds() {
+                    let idx = Self::index(cell);
+                    self.occupancy[idx] = index;
+                }
+            }
+        }
+    }
+}
+
+/// `Steps[size]` (`ovr033.cs:10`) — the footprint deltas for a combatant of the
+/// given size (`field_DE & 7`). Size 0 has an **empty** footprint (occupies no
+/// map cell); size 1 is a single cell; 2/3 are 1×2 / 2×1; 4 is 2×2 (large
+/// monsters). `BuildSizeMap(size, pos)` = these deltas offset by `pos`
+/// (`ovr033.cs:23`).
+pub fn size_footprint(size: u8, pos: GridPos) -> Vec<GridPos> {
+    const STEPS: [&[(i32, i32)]; 5] = [
+        &[],                               // 0: no footprint
+        &[(0, 0)],                         // 1: single cell
+        &[(0, 0), (0, 1)],                 // 2: 1×2 (tall)
+        &[(0, 0), (1, 0)],                 // 3: 2×1 (wide)
+        &[(0, 0), (1, 0), (0, 1), (1, 1)], // 4: 2×2
+    ];
+    STEPS
+        .get(size as usize)
+        .copied()
+        .unwrap_or(&[])
+        .iter()
+        .map(|&(dx, dy)| GridPos::new(pos.x + dx, pos.y + dy))
+        .collect()
+}
+
+// --- placement (PlaceCombatants) ------------------------------------------
+
+/// The per-combatant inputs `PlaceCombatants` reads (`ovr011.cs:1110-1118`): which
+/// team, the footprint size (`field_DE & 7`), and whether it is a live combatant.
+/// The full `Player`/monster record is *not* needed for placement geometry — only
+/// these three fields drive the fan-out.
+#[derive(Debug, Clone, Copy)]
+pub struct PlacementInput {
+    pub team: Team,
+    /// `player.field_DE & 7` — footprint size for [`size_footprint`]. Normal
+    /// single-cell combatants are size 1; large monsters 2/3/4.
+    pub size: u8,
+    /// `player.in_combat` — a downed member still consumes a slot but gets
+    /// `size = 0` (`ovr011.cs:1122-1124`).
+    pub in_combat: bool,
+}
+
+/// One placed combatant's cell (`CombatMap[i]`, `CombatantMap.cs`): its map
+/// position, footprint size, and whether the fan-out found it a spot. `placed ==
+/// false` means the walk exhausted the team's region (`place_combatant` returned
+/// `var_4 == true`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Placement {
+    pub pos: GridPos,
+    pub size: u8,
+    pub placed: bool,
+}
+
+/// The battlefield state: the terrain/occupancy map plus every combatant's placed
+/// cell, indexed 0-based in roster order (roster index `i` ↔ coab's 1-based
+/// `player_array[i+1]`). Produced by [`place_combatants`].
+#[derive(Debug, Clone)]
+pub struct Battlefield {
+    pub map: CombatMap,
+    pub placements: Vec<Placement>,
+}
+
+impl Battlefield {
+    /// The placed cell of roster member `id`, or `None` if it wasn't placed.
+    pub fn position(&self, id: usize) -> Option<GridPos> {
+        self.placements.get(id).filter(|p| p.placed).map(|p| p.pos)
+    }
+}
+
+// Placement tables (all `seg600:*` constants from `ovr011.cs`, transliterated).
+
+/// `unk_16620[dir][row][{minCol,maxCol}]` (`ovr011.cs:885`) — per-direction,
+/// per-row inclusive column range of the valid-cell mask. A row `[min,max]` with
+/// `min > max` (e.g. `[1,0]`) is an empty row.
+const UNK_16620: [[[u8; 2]; 6]; 5] = [
+    [[1, 0], [1, 0], [1, 0], [2, 9], [3, 10], [4, 10]],
+    [[0, 2], [0, 3], [1, 4], [2, 5], [3, 6], [4, 7]],
+    [[0, 6], [0, 7], [1, 8], [1, 0], [1, 0], [1, 0]],
+    [[3, 6], [4, 7], [5, 8], [6, 9], [7, 10], [8, 10]],
+    [[0, 6], [0, 7], [1, 8], [2, 9], [3, 10], [4, 10]],
+];
+/// `unk_165EC[team_dir][k]` (`ovr011.cs:877`) — the direction-retry probe order.
+const DIRECTION_165EC: [[i32; 4]; 4] = [[8, 4, 6, 2], [8, 6, 4, 0], [8, 0, 6, 2], [8, 2, 0, 4]];
+/// `unk_165FC[team_dir][var_14]` (`ovr011.cs:878`) — the half-direction the fan-out
+/// walk uses for retry index `var_14`.
+const DIRECTION_165FC: [[i32; 4]; 4] = [[0, 0, 2, 6], [2, 2, 0, 4], [4, 4, 2, 6], [6, 6, 4, 0]];
+/// `HalfDirToIso` / `unk_1660C` (`ovr011.cs:880`) — half-direction (0..3) → iso
+/// direction.
+const HALF_DIR_TO_ISO: [i32; 4] = [7, 2, 3, 6];
+/// `unk_16610` (`ovr011.cs:882`) — the row-0 base column per `(var_14>0?4:0)+half_dir`.
+const UNK_16610: [i32; 8] = [5, 4, 5, 6, 3, 8, 7, 2];
+/// `unk_16618` (`ovr011.cs:883`) — the row-0 base row per `(var_14>0?4:0)+half_dir`.
+const UNK_16618: [i32; 8] = [3, 2, 2, 3, 0, 2, 5, 3];
+
+/// `MapDirectionXDelta` / `MapDirectionYDelta` (`Gbl.cs:691-692`) — the signed
+/// per-axis deltas the placement math uses directly (kept separate from
+/// [`MAP_DIRECTION_DELTA`] because coab indexes them independently).
+const MAP_DIR_X_DELTA: [i32; 9] = [0, 1, 1, 1, 0, -1, -1, -1, 0];
+const MAP_DIR_Y_DELTA: [i32; 9] = [-1, -1, 0, 1, 1, 1, 0, -1, 0];
+
+/// Per-team fan-out scratch, mirroring the `gbl.team_*` / `unk_1AB1C` globals
+/// `place_combatant` reads (`ovr011.cs:900-1050`). Rebuilt once per battle by
+/// [`place_combatants`].
+struct PlaceCtx {
+    /// `team_start_x/y[team]` (`Gbl.cs:297-298`).
+    team_start: [GridPos; 2],
+    /// `team_direction[team]` (`Gbl.cs`), a half-direction 0..3.
+    team_direction: [i32; 2],
+    /// `half_team_count[team]` (`Gbl.cs:299`).
+    half_team_count: [i32; 2],
+    /// `unk_1AB1C[team][var_14][row][col]` — the valid-cell mask, consumed as
+    /// combatants take cells.
+    valid: [[[[u8; 11]; 6]; 4]; 2],
+    /// `gbl.mapPosX/mapPosY` — the party's world cell, only read by the deferred
+    /// `dir_flags` branches.
+    map_pos: GridPos,
+    /// The current team being placed (`gbl.currentTeam`).
+    current_team: usize,
+}
+
+/// The deferred area-wall hook: `get_dir_flags(dir, mapX, mapY)` (`ovr011.cs:136`),
+/// which reads the *source area's* wall topology. Placement calls it in two retry
+/// branches; the default "open ground" impl returns `0` (no wall), which makes the
+/// `get_dir_flags(...) != 1` guards behave exactly like the wilderness path
+/// (`game_state == WildernessMap`). The real area-derived flags land with the
+/// encounter-trigger wiring slice.
+pub type DirFlags<'a> = dyn Fn(i32, i32, i32) -> i32 + 'a;
+
+fn open_ground_dir_flags(_dir: i32, _map_x: i32, _map_y: i32) -> i32 {
+    0
+}
+
+/// `PlaceCombatants` (`ovr011.cs:1053`): assign each roster member a battlefield
+/// cell, deterministically, in `TeamList` order. Draw-free.
+///
+/// The geometry, step by step:
+/// - **Team origins** (`ovr011.cs:1063-1069`): the party (`Team::Party`, coab team
+///   0) starts at `(0,0)`; the monsters (team 1) start `encounter_distance` tiles
+///   ahead along the party's facing —
+///   `encounter_distance · MapDirectionDelta[map_direction]`. Each team's
+///   half-direction is `map_direction/2` (party) / `((map_direction+4)%8)/2`
+///   (facing back at the party).
+/// - **Half-team counts** (`ovr011.cs:1071-1072`): `(count+1)/2`, the row the
+///   fan-out fills before spilling to the next.
+/// - **Valid-cell mask** (`ovr011.cs:1074-1104`): built per team from
+///   [`UNK_16620`]'s per-row column ranges.
+/// - **Per member** (`ovr011.cs:1110-1160`): [`place_combatant`] walks a
+///   left/right tri-state fan-out from the team origin to the first cell that is
+///   (a) mask-valid, (b) on passable ground (`move_cost < 0xFF`, non-void), and
+///   (c) unoccupied. On success the cell's map position is the iso transform
+///   `pos.x = cur_x + team_x·6 + team_y·5 + 22`, `pos.y = cur_y + team_y·5 + 10`
+///   (`ovr011.cs:856-857`). Occupancy is rebuilt after each placement.
+///
+/// `map_direction` is the party's iso facing (0..7); `encounter_distance` is the
+/// approach range (`area2.encounter_distance`); `map_pos` is the party's world
+/// cell (only the deferred `dir_flags` branch reads it). `dir_flags` defaults to
+/// open ground when `None`.
+pub fn place_combatants(
+    map: &mut CombatMap,
+    roster: &[PlacementInput],
+    map_direction: u8,
+    encounter_distance: i32,
+    map_pos: GridPos,
+    dir_flags: Option<&DirFlags<'_>>,
+) -> Vec<Placement> {
+    let default_flags = open_ground_dir_flags;
+    let dir_flags: &DirFlags<'_> = dir_flags.unwrap_or(&default_flags);
+
+    let friends = roster.iter().filter(|r| r.team == Team::Party).count() as i32;
+    let foes = roster.iter().filter(|r| r.team == Team::Monster).count() as i32;
+
+    // Team origins + directions (ovr011.cs:1063-1069).
+    let (edx, edy) = map_dir_delta(map_direction);
+    let mut ctx = PlaceCtx {
+        team_start: [
+            GridPos::new(0, 0),
+            GridPos::new(encounter_distance * edx, encounter_distance * edy),
+        ],
+        team_direction: [
+            (map_direction as i32) / 2,
+            (((map_direction as i32) + 4) % 8) / 2,
+        ],
+        half_team_count: [(friends + 1) / 2, (foes + 1) / 2],
+        valid: [[[[0u8; 11]; 6]; 4]; 2],
+        map_pos,
+        current_team: 0,
+    };
+
+    // Build the valid-cell mask per team (ovr011.cs:1074-1104). Indexed loops
+    // mirror coab's nested `for (var_C; var_2; var_1)` exactly.
+    #[allow(clippy::needless_range_loop)]
+    for team in 0..2usize {
+        for var_c in 0..4usize {
+            let direction = if var_c == 1 {
+                4usize
+            } else {
+                ctx.team_direction[team] as usize
+            };
+            for row in 0..6usize {
+                for col in 0..11usize {
+                    let lo = UNK_16620[direction][row][0] as usize;
+                    let hi = UNK_16620[direction][row][1] as usize;
+                    ctx.valid[team][var_c][row][col] = if lo > col || hi < col { 0 } else { 1 };
+                }
+            }
+        }
+    }
+
+    // Per-member fan-out, in roster (TeamList) order. `placements[i]` ↔ coab's
+    // 1-based `player_array[i+1]`.
+    let mut placements: Vec<Placement> = roster
+        .iter()
+        .map(|r| Placement {
+            pos: GridPos::new(0, 0),
+            size: r.size & 7,
+            placed: false,
+        })
+        .collect();
+
+    for i in 0..roster.len() {
+        ctx.current_team = match roster[i].team {
+            Team::Party => 0,
+            Team::Monster => 1,
+        };
+        // CombatMap[i].size = field_DE & 7 (ovr011.cs:1118).
+        placements[i].size = roster[i].size & 7;
+
+        let ok = place_combatant(&mut ctx, map, &mut placements, i, dir_flags);
+        placements[i].placed = ok;
+
+        if ok && !roster[i].in_combat {
+            // A downed member keeps its cell but drops to size 0 (ovr011.cs:1122).
+            placements[i].size = 0;
+        }
+        // setup_mapToPlayerIndex_and_playerScreen after each placement
+        // (ovr011.cs:1143) so later members see this one's footprint.
+        map.rebuild_occupancy(&placements);
+    }
+
+    placements
+}
+
+/// `row_column_both_out_of_range` (`ovr011.cs:832`): true only when the cell is
+/// outside **both** the column band `[0,10]` and the row band `[0,5]`.
+fn row_column_both_out_of_range(row: i32, column: i32) -> bool {
+    !((0..=10).contains(&column) || (0..=5).contains(&row))
+}
+
+/// `try_place_combatant` (`ovr011.cs:846`): if cell `(cur_x, cur_y)` is mask-valid
+/// for `(team, var_14)`, tentatively write its iso map position, then accept iff
+/// the footprint is on passable, unoccupied ground. On accept the mask cell is
+/// consumed. Returns whether the cell was taken.
+#[allow(clippy::too_many_arguments)]
+fn try_place_combatant(
+    ctx: &mut PlaceCtx,
+    map: &CombatMap,
+    placements: &mut [Placement],
+    var_14: usize,
+    team_y: i32,
+    team_x: i32,
+    cur_y: i32,
+    cur_x: i32,
+    player_index: usize,
+) -> bool {
+    if !(0..=10).contains(&cur_x)
+        || !(0..=5).contains(&cur_y)
+        || ctx.valid[ctx.current_team][var_14][cur_y as usize][cur_x as usize] == 0
+    {
+        return false;
+    }
+
+    // The iso transform (ovr011.cs:856-857).
+    let pos = GridPos::new(
+        cur_x + (team_x * 6) + (team_y * 5) + 22,
+        cur_y + (team_y * 5) + 10,
+    );
+    placements[player_index].pos = pos;
+
+    // getGroundInformation(...,8,player): scan the footprint at the just-written
+    // position for the "worst" ground tile and any occupant (ovr033.cs:433).
+    let (ground_tile, occupant) = ground_information(map, placements, player_index);
+
+    if occupant == 0 && ground_tile > 0 && ground_tile_move_cost(ground_tile) < 0xFF {
+        ctx.valid[ctx.current_team][var_14][cur_y as usize][cur_x as usize] = 0;
+        true
+    } else {
+        false
+    }
+}
+
+/// `BackGroundTiles[tile].move_cost` for a ground-tile index already known to be
+/// in-range (the placement gate reads it straight, `ovr011.cs:865`).
+fn ground_tile_move_cost(tile: i32) -> u8 {
+    BACKGROUND_MOVE_COST
+        .get(tile as usize)
+        .copied()
+        .unwrap_or(0xFF)
+}
+
+/// `getGroundInformation(out groundTile, out playerIndex, 8, player)`
+/// (`ovr033.cs:433`) reduced to what placement needs: over the combatant's
+/// footprint (`BuildSizeMap(size, pos)`), return the highest-move_cost ground tile
+/// (or 0 if any cell is void) and the index of any *other* occupant. Direction 8's
+/// delta is `(0,0)`, so it scans the footprint in place.
+fn ground_information(
+    map: &CombatMap,
+    placements: &[Placement],
+    player_index: usize,
+) -> (i32, u16) {
+    let current = (player_index + 1) as u16;
+    let pl = &placements[player_index];
+
+    let mut ground_tile: i32 = 0x17; // default (ovr033.cs:436)
+    let mut player_out: u16 = 0;
+    let mut max_move_cost: u8 = 1;
+
+    for cell in size_footprint(pl.size, pl.pos) {
+        // AtMapXY: out-of-bounds → (0, 0) (ovr033.cs:191).
+        let (at_ground, at_player) = if cell.in_bounds() {
+            (map.ground_tile(cell) as i32, map.occupant(cell))
+        } else {
+            (0, 0)
+        };
+        let at_player = if at_player == current { 0 } else { at_player };
+        if at_player > 0 {
+            player_out = at_player;
+        }
+        if at_ground == 0 {
+            ground_tile = 0;
+        } else if ground_tile != 0 {
+            let mc = ground_tile_move_cost(at_ground);
+            if mc >= max_move_cost {
+                max_move_cost = mc;
+                ground_tile = at_ground;
+            }
+        }
+    }
+    (ground_tile, player_out)
+}
+
+/// `place_combatant` (`ovr011.cs:900`): the left/right tri-state fan-out that walks
+/// outward from the team origin, one candidate cell per iteration, until
+/// [`try_place_combatant`] takes one or the team's region is exhausted. Returns
+/// `true` on placement (coab's `var_4 == false`).
+///
+/// Transliterated literally — the two direction tables ([`DIRECTION_165FC`] /
+/// [`DIRECTION_165EC`]), the `row_scale`/`col_scale` outward growth, the
+/// `var_13`/`half_team_count` row-fill limits, and the `var_14` direction-retry
+/// that shifts the team origin when a whole direction is blocked. The two
+/// `dir_flags`-gated branches are the deferred area-wall hook (open-ground default
+/// makes them behave as the wilderness path).
+fn place_combatant(
+    ctx: &mut PlaceCtx,
+    map: &CombatMap,
+    placements: &mut [Placement],
+    player_index: usize,
+    dir_flags: &DirFlags<'_>,
+) -> bool {
+    let team = ctx.current_team;
+
+    let mut cur_x: i32;
+    let mut cur_y: i32;
+    let mut base_x: i32 = 0;
+    let mut base_y: i32 = 0;
+    let mut var_13: i32 = 0;
+
+    let mut placed = false;
+    let mut first_row = true;
+    let mut var_4 = false;
+
+    // tri_state: 1 = start, 2 = right, 3 = left (ovr011.cs:893).
+    let mut state: i32 = 1;
+    let mut row_scale: i32 = 0;
+    let mut col_scale: i32 = 0;
+    let mut var_14: usize = 0;
+
+    let mut team_x = ctx.team_start[team].x;
+    let mut team_y = ctx.team_start[team].y;
+
+    loop {
+        let half_dir = (DIRECTION_165FC[ctx.team_direction[team] as usize][var_14] / 2) as usize;
+
+        match state {
+            1 => {
+                // start
+                let iso_dir = HALF_DIR_TO_ISO[(half_dir + 2) % 4] as usize;
+                let delta_x = MAP_DIR_X_DELTA[iso_dir];
+                let delta_y = MAP_DIR_Y_DELTA[iso_dir];
+                let base_idx = (if var_14 > 0 { 4 } else { 0 }) + half_dir;
+                base_x = UNK_16610[base_idx] + (row_scale * delta_x);
+                base_y = UNK_16618[base_idx] + (row_scale * delta_y);
+                cur_x = base_x;
+                cur_y = base_y;
+                col_scale = 1;
+                state = 2; // right
+                var_13 = 1;
+            }
+            2 => {
+                // right
+                let iso = HALF_DIR_TO_ISO[(half_dir + 1) % 4] as usize;
+                let delta_x = MAP_DIR_X_DELTA[iso];
+                let delta_y = MAP_DIR_Y_DELTA[iso];
+                cur_x = base_x + (delta_x * col_scale);
+                cur_y = base_y + (delta_y * col_scale);
+                state = 3; // left
+                var_13 += 1;
+            }
+            _ => {
+                // left (3)
+                let iso = HALF_DIR_TO_ISO[(half_dir + 3) % 4] as usize;
+                let delta_x = MAP_DIR_X_DELTA[iso];
+                let delta_y = MAP_DIR_Y_DELTA[iso];
+                cur_x = base_x + (delta_x * col_scale);
+                cur_y = base_y + (delta_y * col_scale);
+                state = 2; // right
+                col_scale += 1;
+                var_13 += 1;
+            }
+        }
+
+        let any_cur_invalid = cur_x < 0 || cur_y < 0 || cur_x > 10 || cur_y > 5;
+
+        // coab nests `if (state > start) { if (row-full) {…} }`; kept nested to
+        // mirror the transliteration source.
+        #[allow(clippy::collapsible_if)]
+        if state > 1 {
+            if (any_cur_invalid && !row_column_both_out_of_range(cur_y, cur_x))
+                || (first_row && var_13 >= ctx.half_team_count[team])
+                || (!first_row && var_13 > 11)
+            {
+                row_scale += 1;
+
+                // Deferred dir_flags branch (ovr011.cs:979-1003): party team, odd
+                // half-direction, first retry — peek 3 probe directions and bump
+                // row_scale again if the source area is open there.
+                if team == 0 && (ctx.team_direction[0] & 1) == 1 && var_14 == 0 && row_scale == 1 {
+                    let tmp_x = ctx.team_start[team].x + ctx.map_pos.x;
+                    let tmp_y = ctx.team_start[team].y + ctx.map_pos.y;
+                    let mut found = false;
+                    #[allow(clippy::needless_range_loop)] // faithful `for (var_A=1; var_A<=3)`
+                    for var_a in 1..=3usize {
+                        let tmp_dir = DIRECTION_165EC[ctx.team_direction[team] as usize][var_a];
+                        // game_state == WildernessMap || get_dir_flags(...) != 1.
+                        // Open-ground default returns 0 → != 1 → found.
+                        if dir_flags(tmp_dir, tmp_y, tmp_x) != 1 {
+                            found = true;
+                        }
+                    }
+                    if found {
+                        row_scale += 1;
+                    }
+                }
+                state = 1; // start
+                first_row = false;
+            }
+        }
+
+        if any_cur_invalid && row_column_both_out_of_range(cur_y, cur_x) {
+            placed = false;
+            state = 0;
+
+            // var_14 direction-retry (ovr011.cs:1016-1034): advance to the next
+            // probe direction that the source area leaves open, shifting the team
+            // origin one tile that way and resetting the walk.
+            while var_14 < 3 && state != 1 {
+                var_14 += 1;
+                let tmp_x = ctx.team_start[team].x + ctx.map_pos.x;
+                let tmp_y = ctx.team_start[team].y + ctx.map_pos.y;
+                let tmp_dir = DIRECTION_165EC[ctx.team_direction[team] as usize][var_14];
+                if dir_flags(tmp_dir, tmp_y, tmp_x) != 1 {
+                    team_x = ctx.team_start[team].x + MAP_DIR_X_DELTA[tmp_dir as usize];
+                    team_y = ctx.team_start[team].y + MAP_DIR_Y_DELTA[tmp_dir as usize];
+                    row_scale = 0;
+                    state = 1; // start
+                }
+            }
+
+            if state != 1 {
+                var_4 = true;
+            }
+        }
+
+        if !any_cur_invalid {
+            placed = try_place_combatant(
+                ctx,
+                map,
+                placements,
+                var_14,
+                team_y,
+                team_x,
+                cur_y,
+                cur_x,
+                player_index,
+            );
+        }
+
+        if placed || var_4 {
+            break;
+        }
+    }
+
+    !var_4
+}
+
+// --- movement, facing, adjacency, distance --------------------------------
+
+/// `CalcMoves(player)` (`ovr014.cs:58`), in-combat core: clamp the base movement
+/// to `[1, 96]` — note the faithful quirk that a value **> 96 also collapses to 1**
+/// (the `moves < 1 || moves > 96` test, `ovr014.cs:67`), not to 96 — then double
+/// into half-move granularity (`halfActionsLeft = moves * 2`, `:72`). The returned
+/// value is the round's half-move budget (`action.move`, `Action@0x06`).
+///
+/// The out-of-combat wilderness bonus (`+ area2.field_6E4`, `:64`) and the
+/// `CheckAffectsEffect(Movement)` pass (`:76`, draw-free, no affects modeled) are
+/// omitted — this is the in-combat, no-affects budget.
+pub fn calc_moves(movement: i32) -> i32 {
+    let moves = if !(1..=96).contains(&movement) {
+        1
+    } else {
+        movement
+    };
+    moves * 2
+}
+
+/// The cost of stepping one tile in iso `direction` from `pos`, per `sub_3E748`
+/// (`ovr014.cs:252`): `None` if the destination is off the map (the `MapInBounds`
+/// guard, `:260`); otherwise `(destination, cost)` where cost is the destination
+/// tile's `move_cost` times **3 for a diagonal** (odd direction) or **2 for an
+/// orthogonal** step (`:266-273`). Draw-free.
+///
+/// The move accounting `sub_3E748` then does — `if cost > move { move = 0 } else {
+/// move -= cost }` (`:276-283`) — is [`deduct_move`]; the rest of `sub_3E748`
+/// (redraw, sound, `move_step_into_attack`) is UI / a later slice.
+pub fn step_cost(map: &CombatMap, pos: GridPos, direction: u8) -> Option<(GridPos, i32)> {
+    let dest = pos.stepped(direction);
+    if !dest.in_bounds() {
+        return None;
+    }
+    let base = map.move_cost(dest) as i32;
+    let cost = if direction & 1 != 0 {
+        base * 3
+    } else {
+        base * 2
+    };
+    Some((dest, cost))
+}
+
+/// The move-point deduction of `sub_3E748` (`ovr014.cs:276-283`): spending more
+/// than is left zeroes the budget (you can't half-finish a step), otherwise it
+/// subtracts. Returns the remaining half-moves.
+pub fn deduct_move(remaining: i32, cost: i32) -> i32 {
+    if cost > remaining {
+        0
+    } else {
+        remaining - cost
+    }
+}
+
+/// `getTargetDirection(playerB, playerA)` (`ovr014.cs:1460`, `sub_409BC`): the iso
+/// heading (0..7) **from `from` toward `to`**, an octant classifier over the cell
+/// vector. Pure geometry, draw-free.
+///
+/// The original scans directions 0,1,2,… returning the first whose octant test
+/// passes. Even directions (N/E/S/W) test one axis dominance; odd (diagonals) test
+/// both. The slope thresholds are fixed-point tangents: `0x26A/256 ≈ 2.414`
+/// (tan 67.5°) and `0x6A/256 ≈ 0.414` (tan 22.5°) — the 22.5°/67.5° octant
+/// boundaries. `diff_x`/`diff_y` are absolute; the sign tests disambiguate
+/// quadrant. Recall `y` grows downward, so "north" is `to.y < from.y`.
+pub fn target_direction(from: GridPos, to: GridPos) -> u8 {
+    // plyr_a = from, plyr_b = to.
+    let diff_x = (to.x - from.x).abs();
+    let diff_y = (to.y - from.y).abs();
+    let hi = |d: i32| (0x26A * d) / 0x100; // tan 67.5°
+    let lo = |d: i32| (0x6A * d) / 0x100; // tan 22.5°
+
+    let mut direction: u8 = 0;
+    loop {
+        let solved = match direction {
+            0 => !(to.y > from.y || hi(diff_x) > diff_y),
+            2 => !(to.x < from.x || lo(diff_x) < diff_y),
+            4 => !(to.y < from.y || hi(diff_x) > diff_y),
+            6 => !(to.x > from.x || lo(diff_x) < diff_y),
+            1 => !(to.y > from.y || to.x < from.x || hi(diff_x) < diff_y || lo(diff_x) > diff_y),
+            3 => !(to.y < from.y || to.x < from.x || hi(diff_x) < diff_y || lo(diff_x) > diff_y),
+            5 => !(to.y < from.y || to.x > from.x || hi(diff_x) < diff_y || lo(diff_x) > diff_y),
+            _ => !(to.y > from.y || to.x > from.x || hi(diff_x) < diff_y || lo(diff_x) > diff_y), // 7
+        };
+        if solved {
+            return direction;
+        }
+        direction += 1;
+        // One octant always solves; the guard keeps a pathological input bounded.
+        if direction > 7 {
+            return 0;
+        }
+    }
+}
+
+/// The open-ground king-move distance between two single-cell combatants:
+/// `max(|dx|, |dy|)` (Chebyshev), i.e. the number of iso steps with diagonals
+/// allowed. This is the **geometric** distance, exact on open ground.
+///
+/// **Not the engine's authoritative combat range.** The original measures range as
+/// a *wall-respecting* BFS step count — `Rebuild_SortedCombatantList`
+/// (`ovr032.cs:228`) fills a flood from the attacker and `getTargetRange`
+/// (`ovr025.cs:1309`) returns `steps / 2`. That flood is the core of target
+/// *selection* (the AI's `BuildNearTargets`, `ovr025.cs:1290`), which consumes the
+/// next slice; it is draw-free but out of this geometry slice's scope. Around
+/// walls this Chebyshev underestimates the real path length — callers needing the
+/// authoritative range must use the pathfinder the AI slice will add.
+pub fn grid_distance(a: GridPos, b: GridPos) -> i32 {
+    (a.x - b.x).abs().max((a.y - b.y).abs())
+}
+
+/// Melee reach for single-cell combatants: the two cells are king-adjacent
+/// (`grid_distance == 1`) — the geometric form of `BuildNearTargets(1, …)`
+/// (`ovr025.cs:1290`) on open ground. Same wall/size caveat as [`grid_distance`]:
+/// the engine's near-target list is the wall-respecting flood, and multi-cell
+/// (size > 0) footprints widen reach; those land with the AI slice. `false` for a
+/// cell against itself.
+pub fn is_adjacent(a: GridPos, b: GridPos) -> bool {
+    a != b && grid_distance(a, b) == 1
+}
+
+/// `CanSeeTargetA` is **not** geometric line-of-sight — it is an *invisibility*
+/// check. Documented here to prevent a future slice from wiring it as LoS.
+///
+/// The caller read (`ovr014.cs:571`, `sub_3F143`) shows it returns
+/// `!gbl.targetInvisible` after running `CheckAffectsEffect(Visibility)` on the
+/// target and `CheckType.None` on the seer — purely the affect system's
+/// invisible/see-invisible resolution, no cell geometry at all (it never reads a
+/// position). Geometric visibility in combat is instead handled by the
+/// wall-respecting flood's wall checks (`mapToBackGroundTile.ignoreWalls`,
+/// `ovr025.cs:1311`). Since affects aren't modeled yet, `CanSeeTargetA` has no
+/// analog this slice; when affects land it belongs with them, not with the map.
+/// (This mirrors the slice-2 `PC_CanHitTarget` mislabel correction — verify by
+/// caller, not by name.)
+pub const CAN_SEE_TARGET_A_IS_INVISIBILITY_NOT_LOS: () = ();
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1459,5 +2361,316 @@ mod tests {
         let dice = o.roll(4);
         assert_eq!(out.damage.unwrap().amount, dice as i32 * 3);
         assert!(out.damage.unwrap().backstab);
+    }
+
+    // === tactical battlefield (M4 combat #3) ==============================
+
+    const FLOOR: u8 = 0x17; // a passable floor tile (move_cost 1)
+    const WALL_TILE: u8 = 1; // BACKGROUND_MOVE_COST[1] == 0xFF
+
+    fn place_input(team: Team) -> PlacementInput {
+        PlacementInput {
+            team,
+            size: 1,
+            in_combat: true,
+        }
+    }
+
+    // --- map & passability -------------------------------------------------
+
+    #[test]
+    fn map_dimensions_are_50_by_25() {
+        assert_eq!((MAP_W, MAP_H), (50, 25));
+        assert_eq!(BACKGROUND_MOVE_COST.len(), 74);
+    }
+
+    #[test]
+    fn tile_passability_decodes_move_cost_and_the_void_sentinel() {
+        // Tile 0 is the void sentinel regardless of BACKGROUND_MOVE_COST[0].
+        assert_eq!(tile_passability(0), TilePassability::Void);
+        // Index 1 is move_cost 0xFF → wall.
+        assert_eq!(BACKGROUND_MOVE_COST[1], 0xFF);
+        assert_eq!(tile_passability(1), TilePassability::Wall);
+        // A normal floor (0x17), heavy terrain (0x1A=26 → mc 2, 0x3C=60 → mc 4).
+        assert_eq!(
+            tile_passability(0x17),
+            TilePassability::Passable { move_cost: 1 }
+        );
+        assert_eq!(
+            tile_passability(26),
+            TilePassability::Passable { move_cost: 2 }
+        );
+        assert_eq!(
+            tile_passability(60),
+            TilePassability::Passable { move_cost: 4 }
+        );
+        // Out-of-table index → wall (defensive).
+        assert_eq!(tile_passability(200), TilePassability::Wall);
+    }
+
+    #[test]
+    fn map_reads_are_bounds_safe() {
+        let mut map = CombatMap::uniform(FLOOR);
+        assert_eq!(
+            map.passability(GridPos::new(10, 10)),
+            TilePassability::Passable { move_cost: 1 }
+        );
+        // Out-of-bounds → void ground, 0xFF move cost, no occupant.
+        assert_eq!(map.ground_tile(GridPos::new(-1, 0)), 0);
+        assert_eq!(
+            map.passability(GridPos::new(MAP_W, 0)),
+            TilePassability::Void
+        );
+        assert_eq!(map.move_cost(GridPos::new(0, MAP_H)), 0xFF);
+        assert_eq!(map.occupant(GridPos::new(-5, -5)), 0);
+        // A stamped wall reads back as a wall.
+        map.set_tile(GridPos::new(3, 3), WALL_TILE);
+        assert_eq!(map.passability(GridPos::new(3, 3)), TilePassability::Wall);
+    }
+
+    #[test]
+    fn size_footprint_matches_the_steps_table() {
+        let p = GridPos::new(4, 7);
+        assert!(size_footprint(0, p).is_empty(), "size 0 occupies no cell");
+        assert_eq!(size_footprint(1, p), vec![GridPos::new(4, 7)]);
+        assert_eq!(
+            size_footprint(4, p),
+            vec![
+                GridPos::new(4, 7),
+                GridPos::new(5, 7),
+                GridPos::new(4, 8),
+                GridPos::new(5, 8),
+            ]
+        );
+    }
+
+    // --- placement: exact positions ---------------------------------------
+
+    /// The canonical layout: 3 party + 3 monsters, party facing north (dir 0),
+    /// enemies 1 tile ahead, on all-floor ground. The exact cells below are the
+    /// transliteration's output; member 0 is re-derived by hand in the doc comment
+    /// as the worked example.
+    ///
+    /// **Worked example — party member 0** (`place_combatant`, team 0,
+    /// `team_direction=0`, `team_start=(0,0)`):
+    /// - iteration 1, tri-state `start`: `half_dir = DIRECTION_165FC[0][0]/2 = 0`;
+    ///   `iso_dir = HALF_DIR_TO_ISO[2] = 3`, `delta=(1,1)`;
+    ///   `base = (UNK_16610[0], UNK_16618[0]) = (5,3)`, `row_scale=0` → `cur=(5,3)`.
+    /// - `cur=(5,3)` is in range; `valid[0][0][3][5]` is set (row 3 of `UNK_16620[0]`
+    ///   is `[2,9]`, so col 5 is valid); ground is floor, unoccupied → placed.
+    /// - iso transform: `pos.x = 5 + 0·6 + 0·5 + 22 = 27`,
+    ///   `pos.y = 3 + 0·5 + 10 = 13` → **(27, 13)**.
+    #[test]
+    fn placement_exact_positions_party_north() {
+        let mut map = CombatMap::uniform(FLOOR);
+        let roster: Vec<PlacementInput> = (0..3)
+            .map(|_| place_input(Team::Party))
+            .chain((0..3).map(|_| place_input(Team::Monster)))
+            .collect();
+        let p = place_combatants(&mut map, &roster, 0, 1, GridPos::new(0, 0), None);
+
+        let cells: Vec<(i32, i32)> = p.iter().map(|c| (c.pos.x, c.pos.y)).collect();
+        assert_eq!(
+            cells,
+            vec![
+                (27, 13), // party 0 — hand-derived above
+                (28, 13), // party 1
+                (28, 14), // party 2
+                (22, 7),  // monster 0
+                (21, 7),  // monster 1
+                (21, 6),  // monster 2
+            ]
+        );
+        assert!(p.iter().all(|c| c.placed), "all six find a cell");
+    }
+
+    #[test]
+    fn placement_offsets_monsters_along_the_facing_direction() {
+        // East (dir 2): monsters end up at larger x than the party; south (dir 4):
+        // larger y. The team origin shift is encounter_distance · facing.
+        let roster: Vec<PlacementInput> = (0..3)
+            .map(|_| place_input(Team::Party))
+            .chain((0..3).map(|_| place_input(Team::Monster)))
+            .collect();
+
+        for (dir, enc, axis) in [(2u8, 2i32, 'x'), (4, 1, 'y')] {
+            let mut map = CombatMap::uniform(FLOOR);
+            let p = place_combatants(&mut map, &roster, dir, enc, GridPos::new(0, 0), None);
+            assert!(p.iter().all(|c| c.placed), "dir {dir}: all placed");
+            let party_mean: i32 = (0..3)
+                .map(|i| if axis == 'x' { p[i].pos.x } else { p[i].pos.y })
+                .sum::<i32>()
+                / 3;
+            let mon_mean: i32 = (3..6)
+                .map(|i| if axis == 'x' { p[i].pos.x } else { p[i].pos.y })
+                .sum::<i32>()
+                / 3;
+            assert!(
+                mon_mean > party_mean,
+                "dir {dir}: monsters should be ahead along {axis} (party {party_mean}, mon {mon_mean})"
+            );
+        }
+    }
+
+    #[test]
+    fn placement_cells_are_distinct_and_on_passable_ground() {
+        let mut map = CombatMap::uniform(FLOOR);
+        let roster: Vec<PlacementInput> = (0..6)
+            .map(|_| place_input(Team::Party))
+            .chain((0..6).map(|_| place_input(Team::Monster)))
+            .collect();
+        let p = place_combatants(&mut map, &roster, 0, 1, GridPos::new(0, 0), None);
+
+        assert!(p.iter().all(|c| c.placed), "a 6v6 all fits");
+        let mut seen = std::collections::HashSet::new();
+        for c in &p {
+            assert!(
+                seen.insert((c.pos.x, c.pos.y)),
+                "no two combatants share a cell"
+            );
+            assert!(
+                matches!(map.passability(c.pos), TilePassability::Passable { .. }),
+                "every combatant stands on passable ground: {:?}",
+                c.pos
+            );
+        }
+    }
+
+    #[test]
+    fn placement_skips_a_walled_cell() {
+        // Wall off party member 0's natural cell (27,13); it must land elsewhere,
+        // still on passable ground, and the fan-out still places everyone.
+        let mut map = CombatMap::uniform(FLOOR);
+        map.set_tile(GridPos::new(27, 13), WALL_TILE);
+        let roster: Vec<PlacementInput> = (0..3)
+            .map(|_| place_input(Team::Party))
+            .chain((0..1).map(|_| place_input(Team::Monster)))
+            .collect();
+        let p = place_combatants(&mut map, &roster, 0, 1, GridPos::new(0, 0), None);
+
+        assert!(p.iter().all(|c| c.placed));
+        assert_ne!(
+            (p[0].pos.x, p[0].pos.y),
+            (27, 13),
+            "the walled cell is skipped"
+        );
+        assert!(matches!(
+            map.passability(p[0].pos),
+            TilePassability::Passable { .. }
+        ));
+    }
+
+    #[test]
+    fn placement_paints_occupancy_by_one_based_index() {
+        let mut map = CombatMap::uniform(FLOOR);
+        let roster: Vec<PlacementInput> = (0..3)
+            .map(|_| place_input(Team::Party))
+            .chain((0..3).map(|_| place_input(Team::Monster)))
+            .collect();
+        let p = place_combatants(&mut map, &roster, 0, 1, GridPos::new(0, 0), None);
+        for (i, c) in p.iter().enumerate() {
+            assert_eq!(
+                map.occupant(c.pos),
+                (i + 1) as u16,
+                "cell {:?} is owned by combatant {} (1-based)",
+                c.pos,
+                i + 1
+            );
+        }
+    }
+
+    // --- movement / facing / distance -------------------------------------
+
+    #[test]
+    fn calc_moves_clamps_then_doubles() {
+        assert_eq!(calc_moves(12), 24); // in range → ×2
+        assert_eq!(calc_moves(1), 2);
+        assert_eq!(calc_moves(96), 192);
+        assert_eq!(calc_moves(0), 2, "< 1 collapses to 1 → 2 half-moves");
+        assert_eq!(
+            calc_moves(97),
+            2,
+            "the faithful quirk: > 96 also collapses to 1"
+        );
+    }
+
+    #[test]
+    fn step_cost_diagonal_is_x3_orthogonal_x2_and_offmap_is_none() {
+        let map = CombatMap::uniform(FLOOR); // move_cost 1 everywhere
+        let from = GridPos::new(25, 12);
+        // East (dir 2, even → orthogonal): dest (26,12), cost 1·2.
+        assert_eq!(step_cost(&map, from, 2), Some((GridPos::new(26, 12), 2)));
+        // NE (dir 1, odd → diagonal): dest (26,11), cost 1·3.
+        assert_eq!(step_cost(&map, from, 1), Some((GridPos::new(26, 11), 3)));
+        // Off the top edge → None (the MapInBounds guard).
+        assert_eq!(step_cost(&map, GridPos::new(0, 0), 0), None);
+    }
+
+    #[test]
+    fn step_cost_into_a_wall_is_huge() {
+        let mut map = CombatMap::uniform(FLOOR);
+        map.set_tile(GridPos::new(26, 12), WALL_TILE); // move_cost 0xFF
+                                                       // Orthogonal into the wall: 0xFF · 2.
+        assert_eq!(
+            step_cost(&map, GridPos::new(25, 12), 2),
+            Some((GridPos::new(26, 12), 0xFF * 2))
+        );
+    }
+
+    #[test]
+    fn deduct_move_zeroes_on_overspend() {
+        assert_eq!(deduct_move(10, 3), 7);
+        assert_eq!(deduct_move(2, 3), 0, "can't half-finish a step");
+        assert_eq!(deduct_move(3, 3), 0);
+    }
+
+    #[test]
+    fn target_direction_classifies_the_eight_octants() {
+        let o = GridPos::new(10, 10);
+        // y grows downward, so "north" is a smaller y.
+        assert_eq!(target_direction(o, GridPos::new(10, 5)), 0, "N");
+        assert_eq!(target_direction(o, GridPos::new(15, 5)), 1, "NE");
+        assert_eq!(target_direction(o, GridPos::new(15, 10)), 2, "E");
+        assert_eq!(target_direction(o, GridPos::new(15, 15)), 3, "SE");
+        assert_eq!(target_direction(o, GridPos::new(10, 15)), 4, "S");
+        assert_eq!(target_direction(o, GridPos::new(5, 15)), 5, "SW");
+        assert_eq!(target_direction(o, GridPos::new(5, 10)), 6, "W");
+        assert_eq!(target_direction(o, GridPos::new(5, 5)), 7, "NW");
+    }
+
+    #[test]
+    fn distance_and_adjacency_are_king_moves() {
+        assert_eq!(grid_distance(GridPos::new(0, 0), GridPos::new(3, 1)), 3);
+        assert_eq!(grid_distance(GridPos::new(5, 5), GridPos::new(5, 5)), 0);
+        // Adjacency: the 8 neighbours, not self, not distance 2.
+        assert!(is_adjacent(GridPos::new(5, 5), GridPos::new(6, 6)));
+        assert!(is_adjacent(GridPos::new(5, 5), GridPos::new(5, 4)));
+        assert!(!is_adjacent(GridPos::new(5, 5), GridPos::new(5, 5)));
+        assert!(!is_adjacent(GridPos::new(5, 5), GridPos::new(5, 7)));
+    }
+
+    #[test]
+    fn setup_geometry_is_draw_free() {
+        // The whole tactical subsystem must not touch the PRNG (D9). Attach a sink
+        // to a shared EngineRng, run placement + movement + facing, assert zero
+        // draws.
+        let log = DrawLog::default();
+        let mut rng = EngineRng::new(SEED);
+        rng.attach_sink(log.sink());
+
+        let mut map = CombatMap::uniform(FLOOR);
+        let roster: Vec<PlacementInput> = (0..3)
+            .map(|_| place_input(Team::Party))
+            .chain((0..3).map(|_| place_input(Team::Monster)))
+            .collect();
+        let p = place_combatants(&mut map, &roster, 0, 1, GridPos::new(0, 0), None);
+        let _ = calc_moves(12);
+        let _ = step_cost(&map, p[0].pos, 2);
+        let _ = target_direction(p[0].pos, p[3].pos);
+        let _ = grid_distance(p[0].pos, p[3].pos);
+
+        assert_eq!(log.len(), 0, "the setup path draws nothing (D9)");
+        // (The rng binding exists only to hold the sink; silence unused warnings.)
+        let _ = &mut rng;
     }
 }
