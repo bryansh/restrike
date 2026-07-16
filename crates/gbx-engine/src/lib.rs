@@ -14,6 +14,7 @@
 
 pub mod boot;
 pub mod charsheet;
+pub mod combat;
 pub mod corridor;
 pub mod draw;
 pub mod engine;
