@@ -67,24 +67,30 @@ pub struct TraceHeader {
 /// One `.gbxtrace` event line, internally tagged by `"e"` (which serde emits
 /// **first**, matching the doc's `{"e":"rng",…}` shape).
 ///
-/// Only the `prng`-profile event types exist this session: [`RngEvent`] and the
-/// bare `randomize` marker. Action-profile event types (`init`/`attack`/`dmg`/
-/// `move`/`ai`/`status`/`award`) are intentionally absent — a combat session
-/// adds them with their pinned vocabularies (D-OR3, scope guardrail). An
-/// unknown `e` value in a `prng` trace is a genuine problem (a foreign event in
-/// a stream that should only hold draws), so the reader rejects it loudly
-/// rather than silently dropping it — distinct from tolerating unknown
-/// *fields*, which it does.
+/// Two profiles' event types live here. The `prng`-profile types are
+/// [`RngEvent`] and the bare `randomize` marker. The `action` profile's
+/// vocabulary is pinned as combat systems land (D-OR3, step 5): the **initiative
+/// slice** pins [`InitEvent`] and [`PickEvent`] (`init`/`pick`); the remaining
+/// action types (`attack`/`dmg`/`move`/`ai`/`status`/`award`) are still absent
+/// and their sessions add them. An unknown `e` value is rejected loudly by the
+/// reader (a foreign event type), distinct from tolerating unknown *fields*,
+/// which it does — so pinning a vocabulary means adding a variant here, moving it
+/// out of "unknown".
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "e", rename_all = "snake_case")]
 pub enum TraceEvent {
-    /// A single PRNG draw.
+    /// A single PRNG draw (`prng` profile).
     Rng(RngEvent),
     /// `{"e":"randomize"}` — the original's boot-time `Randomize` re-seed. In a
     /// post-boot capture this is a **loud finding**, not a curiosity (D-OR4
     /// part B): it means the seed dword was re-written mid-session. The
     /// chain-continuity check reports it.
     Randomize,
+    /// `init` (`action` profile) — one per combatant in `CalculateInitiative`,
+    /// bracketing its one d6.
+    Init(InitEvent),
+    /// `pick` (`action` profile) — one per `FindNextCombatant` selection.
+    Pick(PickEvent),
 }
 
 /// A `prng`-profile draw event (D-OR3): `{"e":"rng","before":u32,"after":u32}`
@@ -116,6 +122,41 @@ pub struct RngEvent {
     /// image-offset normalization used in diagnostics.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub caller: Option<serde_json::Value>,
+}
+
+/// An `action`-profile `init` event (D-OR3; `combat-study.md` §9, pinned by the
+/// initiative slice — `gbx-engine`'s `combat::CalculateInitiative`). Emitted per
+/// combatant, bracketing its one `random(6)`.
+///
+/// Field order **is** the canonical on-disk order: `combatant_id`, `delay`,
+/// `dex_adj`, `surprise`. All integers (D-OR3 canonical encoding): `surprise` is
+/// `0`/`1`, not a JSON bool. `combatant_id` is the stable per-encounter roster
+/// index; `delay` the final assigned initiative value (`0..=20`); `dex_adj` the
+/// DEX reaction adjustment added (`-4..=5`); `surprise` whether the team `-6`
+/// fired for this combatant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct InitEvent {
+    pub combatant_id: u32,
+    pub delay: i16,
+    pub dex_adj: i16,
+    pub surprise: u8,
+}
+
+/// An `action`-profile `pick` event (D-OR3; `combat-study.md` §9, pinned by the
+/// initiative slice — `gbx-engine`'s `combat::FindNextCombatant`). Emitted per
+/// selection (one per yielded combatant).
+///
+/// Field order **is** the canonical on-disk order: `pass`, `combatant_id`,
+/// `delay`, `roll`. All integers. `pass` is the 0-based selection-pass index
+/// within the round; `combatant_id` the chosen roster index; `delay` the winning
+/// combatant's delay at selection time; `roll` the winning `random(100)`+1
+/// (`1..=100`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PickEvent {
+    pub pass: u32,
+    pub combatant_id: u32,
+    pub delay: i16,
+    pub roll: u16,
 }
 
 /// A fully parsed trace: its header plus its events in file (draw) order.
@@ -213,7 +254,7 @@ impl Trace {
     pub fn rng_events(&self) -> impl Iterator<Item = &RngEvent> {
         self.events.iter().filter_map(|e| match e {
             TraceEvent::Rng(r) => Some(r),
-            TraceEvent::Randomize => None,
+            TraceEvent::Randomize | TraceEvent::Init(_) | TraceEvent::Pick(_) => None,
         })
     }
 
@@ -274,6 +315,56 @@ mod tests {
             serde_json::to_string(&e).unwrap(),
             r#"{"e":"rng","before":10,"after":20,"n":6,"result":4}"#
         );
+    }
+
+    #[test]
+    fn init_and_pick_events_are_canonical_and_tag_first() {
+        let init = TraceEvent::Init(InitEvent {
+            combatant_id: 3,
+            delay: 5,
+            dex_adj: -2,
+            surprise: 1,
+        });
+        assert_eq!(
+            serde_json::to_string(&init).unwrap(),
+            r#"{"e":"init","combatant_id":3,"delay":5,"dex_adj":-2,"surprise":1}"#
+        );
+
+        let pick = TraceEvent::Pick(PickEvent {
+            pass: 0,
+            combatant_id: 3,
+            delay: 5,
+            roll: 87,
+        });
+        assert_eq!(
+            serde_json::to_string(&pick).unwrap(),
+            r#"{"e":"pick","pass":0,"combatant_id":3,"delay":5,"roll":87}"#
+        );
+    }
+
+    #[test]
+    fn init_and_pick_are_no_longer_unknown_to_the_reader() {
+        // Previously an `init`/`pick` `e` value would be a loud parse error;
+        // pinning the vocabulary means the reader accepts them.
+        let header = serde_json::to_string(&TraceHeader {
+            profile: Profile::Action,
+            encounter: "init-slice".to_string(),
+            ..sample_header()
+        })
+        .unwrap();
+        let text = format!(
+            "{header}\n{}\n{}\n",
+            r#"{"e":"init","combatant_id":0,"delay":4,"dex_adj":0,"surprise":0}"#,
+            r#"{"e":"pick","pass":0,"combatant_id":0,"delay":4,"roll":51}"#,
+        );
+        let trace = Trace::parse(&text).expect("init/pick are accepted event types");
+        assert_eq!(trace.events.len(), 2);
+        assert!(matches!(trace.events[0], TraceEvent::Init(_)));
+        assert!(matches!(trace.events[1], TraceEvent::Pick(_)));
+        // They are not draws.
+        assert_eq!(trace.rng_event_count(), 0);
+        // Canonical round-trip is a fixed point.
+        assert_eq!(Trace::parse(&trace.to_canonical_string()).unwrap(), trace);
     }
 
     #[test]

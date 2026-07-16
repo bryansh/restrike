@@ -24,9 +24,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use gbx_engine::combat::{ActionEvent, ActionSink};
 use gbx_engine::rng::{RngDraw, RngSink};
 
-use crate::format::{RngEvent, Trace, TraceEvent, TraceHeader};
+use crate::format::{InitEvent, PickEvent, RngEvent, Trace, TraceEvent, TraceHeader};
 
 /// A shared draw buffer. Cheap to clone (an `Rc` bump); every clone — including
 /// the boxed sink handed to the engine — appends to the same `Vec`, in draw
@@ -45,6 +46,17 @@ impl TraceCollector {
     /// `Engine::attach_rng_sink` / `EngineRng::attach_sink`.
     pub fn sink(&self) -> Box<dyn RngSink> {
         Box::new(CollectorSink {
+            events: Rc::clone(&self.events),
+        })
+    }
+
+    /// A boxed **action** sink sharing this collector's buffer — pass to
+    /// `CombatState::attach_action_sink`. Feeding the same collector as
+    /// [`sink`](Self::sink) interleaves `init`/`pick` events with the draws in
+    /// emission order (D-OR3's same-tick contract), so a combined-order trace is
+    /// index-alignable across the two profiles.
+    pub fn action_sink(&self) -> Box<dyn ActionSink> {
+        Box::new(CollectorActionSink {
             events: Rc::clone(&self.events),
         })
     }
@@ -88,6 +100,46 @@ impl RngSink for CollectorSink {
             result: draw.result,
             caller: None,
         }));
+    }
+}
+
+/// The boxed action observer the combat state holds. Translates each engine
+/// [`ActionEvent`] into its canonical `.gbxtrace` form ([`InitEvent`] /
+/// [`PickEvent`], field order pinned in [`crate::format`]) — the engine emits
+/// engine-local plain data, this side owns the on-disk vocabulary, so
+/// `gbx-engine` never depends on `gbx-oracle`. `surprise` becomes the `0`/`1`
+/// integer the integers-only encoding requires.
+struct CollectorActionSink {
+    events: Rc<RefCell<Vec<TraceEvent>>>,
+}
+
+impl ActionSink for CollectorActionSink {
+    fn on_action(&mut self, event: ActionEvent) {
+        let translated = match event {
+            ActionEvent::Init {
+                combatant_id,
+                delay,
+                dex_adj,
+                surprise,
+            } => TraceEvent::Init(InitEvent {
+                combatant_id: combatant_id as u32,
+                delay: delay as i16,
+                dex_adj: dex_adj as i16,
+                surprise: surprise as u8,
+            }),
+            ActionEvent::Pick {
+                pass,
+                combatant_id,
+                delay,
+                roll,
+            } => TraceEvent::Pick(PickEvent {
+                pass,
+                combatant_id: combatant_id as u32,
+                delay: delay as i16,
+                roll,
+            }),
+        };
+        self.events.borrow_mut().push(translated);
     }
 }
 
@@ -144,6 +196,77 @@ mod tests {
             assert_eq!(ev.result, Some(result), "draw {i} result");
             assert_eq!(ev.result, Some(expected[i]), "draw {i} result vs engine");
         }
+    }
+
+    /// The action sink captures a real combat round's `init`/`pick` events, and
+    /// feeding the *same* collector as the RNG sink interleaves them with the
+    /// draws in emission order — the prng chain still checks over the draw subset
+    /// (init/pick are skipped), and every draw is a d6 (initiative) or d100
+    /// (selection).
+    #[test]
+    fn action_sink_captures_a_real_combat_round_interleaved_with_draws() {
+        use gbx_engine::combat::{CombatState, CombatStep, Combatant, Team};
+
+        let seed = 0x0c0f_fee0u32;
+        let collector = TraceCollector::new();
+        let mut rng = EngineRng::new(seed);
+        rng.attach_sink(collector.sink());
+
+        let roster = vec![
+            Combatant::new(0, Team::Party, 0, true),
+            Combatant::new(1, Team::Party, 0, true),
+            Combatant::new(2, Team::Monster, 0, true),
+        ];
+        let mut state = CombatState::new(roster);
+        state.attach_action_sink(collector.action_sink());
+
+        // Drive exactly one round.
+        loop {
+            match state.step(&mut rng) {
+                CombatStep::RoundEnded { .. } => break,
+                CombatStep::Ended => panic!("ended mid-round"),
+                _ => {}
+            }
+        }
+
+        let events = collector.events();
+        let inits = events
+            .iter()
+            .filter(|e| matches!(e, TraceEvent::Init(_)))
+            .count();
+        let picks = events
+            .iter()
+            .filter(|e| matches!(e, TraceEvent::Pick(_)))
+            .count();
+        assert_eq!(inits, 3, "one init per combatant");
+        assert_eq!(picks, 3, "one pick per selection (all three act)");
+
+        // The prng subset still forms a continuous chain (init/pick skipped).
+        let trace = collector.into_trace(header(seed));
+        assert_eq!(check_chain(&trace), Ok(()));
+
+        // Every draw is a d6 or a d100 — pure initiative, no other consumers.
+        for ev in trace.rng_events() {
+            assert!(matches!(ev.n, Some(6) | Some(100)), "n was {:?}", ev.n);
+        }
+
+        // Emission order: the very first event is the first combatant's d6 draw,
+        // immediately followed by its `init` (each init brackets its d6). The
+        // first `pick` only appears after every `init` (selection follows
+        // initiative).
+        assert!(matches!(
+            events[0],
+            TraceEvent::Rng(RngEvent { n: Some(6), .. })
+        ));
+        assert!(matches!(events[1], TraceEvent::Init(_)));
+        let first_pick = events.iter().position(|e| matches!(e, TraceEvent::Pick(_)));
+        let last_init = events
+            .iter()
+            .rposition(|e| matches!(e, TraceEvent::Init(_)));
+        assert!(
+            first_pick.unwrap() > last_init.unwrap(),
+            "all inits precede any pick"
+        );
     }
 
     #[test]

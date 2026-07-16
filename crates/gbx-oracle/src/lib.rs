@@ -16,16 +16,20 @@
 //! - [`sink`] — the [`gbx_engine::rng::RngSink`] implementation that turns live
 //!   engine draws into a trace.
 //!
-//! What this session leaves open (a combat session closes it): the `action`
-//! profile's event *vocabulary* (`init`/`attack`/`dmg`/`move`/`ai`/`status`/
-//! `award`). The profile, the versioning, and the same-tick emission-order
-//! contract exist ([`format::Profile::Action`]); the event fields are
-//! deliberately not invented ahead of the combat systems that pin them.
+//! Action-profile vocabulary lands incrementally as combat systems do (D-OR3,
+//! step 5). The **initiative slice** pins [`format::InitEvent`] /
+//! [`format::PickEvent`] (`init`/`pick`) and the [`sink::TraceCollector`] action
+//! sink that emits them; the remaining action types (`attack`/`dmg`/`move`/`ai`/
+//! `status`/`award`) are still open and their sessions add them. Equality over
+//! action events is not yet a gate (§9) — the profile, versioning, and same-tick
+//! emission-order contract are what exist.
 
 pub mod compare;
 pub mod format;
 pub mod sink;
 
 pub use compare::{check_chain, compare, ChainBreak, Comparison, Divergence, Incomparable};
-pub use format::{ParseError, Profile, RngEvent, Trace, TraceEvent, TraceHeader};
+pub use format::{
+    InitEvent, ParseError, PickEvent, Profile, RngEvent, Trace, TraceEvent, TraceHeader,
+};
 pub use sink::TraceCollector;
