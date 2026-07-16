@@ -22,6 +22,7 @@ pub mod frames;
 pub mod import;
 pub mod input;
 pub mod money;
+pub mod monster;
 pub mod movement;
 pub mod party;
 pub mod rng;

@@ -325,6 +325,18 @@ Walk around Tilverton, looking right.
   step 5. Remaining: D-OR4 part B (one live staging-hook session — Bryan +
   Fable, step 3) and the combat systems (step 5) before H4's rng-stream half
   closes.
+- **Step 5 opened 2026-07-16 (groundwork):** the combat **study**
+  (`docs/design/combat-study.md`) — a full coab read of the round loop,
+  initiative draw-order signature, action economy, QuickFight AI, to-hit/damage,
+  morale/status, XP/treasure, and combat-map generation, feeding the
+  implement-to-parity sessions (mechanics land next, in D-OR5(a)'s Phase-0-first
+  order) — and the **monster/encounter data layer** (`gbx-formats::monster` +
+  `gbx-engine::monster`): a monster is a full 0x1A6 `Player` record loaded from
+  `MON<area>{CHA,SPC,ITM}.DAX`, parsed by reusing the char-record decoder;
+  real-data census resolved **FD-20** (turn-undead `field_E9`=0 for all 81
+  shipped monsters — a runtime flag, out-of-range read unreachable) and closed
+  **FD-29**'s monster clause (max damage roll 45 ≪ 255, inert). No combat
+  mechanics implemented (they need the Phase-0 captures).
 - Combat map generation from encounter data; combatant placement.
 - Initiative, action economy, movement costs, facing/rear attacks; THAC0 melee + ranged with
   range brackets; damage; attacks-per-round.

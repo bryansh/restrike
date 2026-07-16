@@ -38,10 +38,15 @@
   always miss regardless of AC/THAC0? PLAN.md §1 notes the brief and
   Jzatopa's notes disagree — at least one is wrong.
 - **coab evidence:** both attack paths (`CanHitTarget` ovr024.cs:487–512,
-  `PC_CanHitTarget` :515–545) treat natural 1 as an automatic miss and
-  promote a natural 20 to a roll of 100 (guaranteeing the comparison) —
-  i.e. BOTH auto-rules exist in the engine. Jzatopa's contrary note is
-  presumptively wrong for CotAB. H4 (M4) confirms against oracle traces.
+  `PC_CanHitTarget` :515–545) treat natural 1 as an automatic miss (the
+  `attack_roll > 1` gate) and promote a natural 20 to a roll of 100
+  (guaranteeing the comparison) — i.e. BOTH auto-rules exist in the engine.
+  `RollSavingThrow` (:564–571) applies the same nat-1/nat-20 auto rules to
+  saves. Jzatopa's contrary note is presumptively wrong for CotAB. Re-read in
+  full 2026-07-16 (M4 step 5) — see `docs/design/combat-study.md` §5.2, which
+  also flags two H4-relevant asymmetries: `CanHitTarget` compares with strict
+  `>` while `PC_CanHitTarget` uses `>=`, and the two combine the AC/bonus terms
+  differently. H4 (M4) confirms against oracle traces on edge rolls.
 - **Evidence so far:** None gathered yet from this project's own reading;
   the disagreement is inherited from the brief vs. Jzatopa's corpus (treat
   the latter as unverified candidate data per PLAN.md D11/§6 rule 4).
@@ -53,39 +58,63 @@
 
 ### FD-2: Exact initiative formula
 
-- **Status:** open
+- **Status:** narrowed (coab read 2026-07-16, M4 step 5; settles by draw-order
+  parity per D-OR5(a))
 - **Question:** What determines turn order each combat round — a single
   d10 per side, per-combatant rolls, DEX modifiers, weapon speed factors,
   spell casting-time penalties?
-- **Evidence so far:** None gathered yet. `MainCombatLoop` (`ovr009.cs:22`)
-  was named but explicitly not traced during M1 step 0
-  (opcode-classification.md docket item 10 — "COMBAT's deep call chain was
-  not traced... out of scope for M1 step 0").
-- **Settled by:** H4 (M4) — read `MainCombatLoop` in full when M4 opens
-  combat work; cross-check against oracle traces for N seeds.
+- **coab evidence:** per-combatant, **not** per-side. `CalculateInitiative`
+  (`ovr014.cs:8`, `sub_3E000`): `action.delay = roll_dice(6,1) +
+  DexReactionAdj(player)`, clamped to `[1,20]`, with a `-6` team-surprise
+  adjustment when `area2.field_596` flags the team, out-of-range collapsing to 0
+  (`ovr014.cs:31-47`). Turn order is then resolved by `FindNextCombatant`
+  (`ovr009.cs:59`), which each pass rolls a fresh d100 for **every** `TeamList`
+  member and yields the highest-`delay` member, ties broken by the highest d100
+  (`ovr009.cs:70-87`). The order is **consumed and never persisted** — so per
+  D-OR5(a) draw-order parity settles this docket by itself (two orderings can
+  share an endstate; only the draw stream distinguishes them). Full read +
+  per-round draw-stream shape: `docs/design/combat-study.md` §2.
+- **Settled by:** H4 (M4) — Phase-0 QuickFight capture + Phase-1 replay matching
+  draw order for ≥10 seeds (`oracle-rig.md` D-OR5(a)).
 
 ### FD-3: Attacks-per-round schedule
 
-- **Status:** open
+- **Status:** narrowed (coab read 2026-07-16, M4 step 5)
 - **Question:** How does the engine grant multiple attacks per round (high-
   level fighters, specialization, monster multi-attacks, weapon speed)?
-- **Evidence so far:** None gathered yet; same `MainCombatLoop` scope note
-  as FD-2 applies.
-- **Settled by:** H4 (M4).
+- **coab evidence:** the 3/2-attacks rule is folded into a round-parity test:
+  `ThisRoundActionCount(halfActions)` (`ovr014.cs:519`, `sub_3EF0D`) =
+  `(halfActions + (combat_round & 1)) / 2` — a combatant with 3 half-actions
+  gets 2 attacks on odd rounds, 1 on even (3 per 2 rounds). `attack1_AttacksLeft`
+  (`@0x19c`) is set from `attacksCount` then reduced to this
+  (`reclac_attacks`, `ovr014.cs:462-514`); ranged weapons override the count from
+  the item's `numberAttacks` (min 2) and clamp to ammo. Two attack profiles per
+  combatant (attack1/attack2, `Player.cs:646-703`) carry monster multi-attacks.
+  Full read: `docs/design/combat-study.md` §3.1. **Landmine:** attack counts
+  depend on `combat_round` parity — a replay that resets round parity diverges on
+  multi-attack combatants.
+- **Settled by:** H4 (M4) — round-count + round-start `attacks_left` checkpoint
+  (D-OR5(b)).
 
 ### FD-4: Sleep/held auto-kill rules
 
-- **Status:** open
+- **Status:** narrowed (structure identified 2026-07-16, M4 step 5; leaf still
+  unread)
 - **Question:** Does a coup-de-grace against a sleeping or held target
   auto-hit, auto-crit, or auto-kill? What conditions gate it (melee only?
   any weapon? specific spell interactions?)
-- **Evidence so far:** None gathered yet. Status effects are explicitly M4
-  tier-1 scope (PLAN.md M4 bullet list: "Status effects tier 1 (sleep, held,
-  poison, unconscious/dying/dead)").
-- **Settled by:** H4 (M4) — read the relevant `CMD_Damage`/status-effect
-  interaction code (`DAMAGE`'s row in opcode-classification.md already
-  touches `sub_32200`/`damage_player`, `ovr008.cs:1401`, but the
-  sleep/held-specific auto-kill branch, if any, was not traced this session).
+- **coab evidence:** sleep/held are `Affect`s (§7 of the study), not a single
+  coup-de-grace branch — the to-hit path gates on them via
+  `CheckAffectsEffect(target, CheckType.Type_16)` inside `CanHitTarget`
+  (`ovr024.cs:500`). A distinct multi-target mechanism exists,
+  `TrySweepAttack` (`ovr014.cs:530`): a melee attacker with spare attacks vs a
+  **`HitDice == 0`** target. The exact auto-hit/auto-kill *condition* lives in the
+  `CheckAffectsEffect` handlers + the melee-attack leaf (`sub_35DB1`), not yet
+  read to the leaf. See `docs/design/combat-study.md` §5.5.
+- **Settled by:** H4 (M4) — the melee-leaf read + a **curated 1v1 encounter**
+  (one attacker, one sleeping/held target) so an HP delta or kill is attributable
+  to a specific draw (`oracle-rig.md` D-OR5 FD-1/FD-4 note; the M4 exit-gate
+  encounter set must include these).
 
 ### FD-5: Treasure-table behavior
 
@@ -426,8 +455,30 @@ source document (§5 "New docket candidates").
 
 ### FD-20: Turn-undead types 11-12 — does any shipped monster actually use them?
 
-- **Status:** narrowed (image extent settled 2026-07-14; real-monster-data
-  question still open)
+- **Status:** RESOLVED (2026-07-16, M4 step 5 — real `MON*CHA.DAX` census:
+  the out-of-range read is unreachable from shipped monster data)
+- **Resolution:** a census of all six real `MON{1..6}CHA.DAX` archives (81
+  monsters total; `gbx_formats::monster::parse_cha_archive`, decoding each block
+  as the 0x1A6 `Player` record — see below on why the monster record IS a
+  character record) found **`field_E9` (byte `@0xe9`) == 0 for every one of the
+  81 records** (max = 0; `crates/gbx-formats/src/monster.rs`
+  `local_tier_monster_census`, run under `GBX_DATA_DIR`). So `turns_undead`'s
+  index `unk_16679[field_E9 * 10 + band]` (`ovr014.cs:642`) never exceeds the
+  11-row (types 0..10) image table from shipped data — the behavioral risk is a
+  **non-issue**. Cross-check confirming the decode is real and not a stuck-zero
+  bug: across the same 81 records `monster_type` (`@0x11a`) ranges to 19 and
+  `hit_dice` (`@0xe5`) to 20 — the records vary; only `field_E9` is uniformly 0.
+  **Sub-finding (for the combat sessions):** `field_E9` is not a stored monster
+  attribute at all — it is a **runtime combat flag**. The only writers are
+  runtime: an Animate-Dead-style spell sets it to exactly 1 (`ovr023.cs:1550`),
+  it is reset to 0 (`ovr013.cs:439`), and `FindLowestE9Target` (`ovr014.cs:697`)
+  only considers combatants with `field_E9 > 0`. Shipped monster data leaves it
+  0; CotAB's inherently-undead monsters are keyed by `monster_type` (`@0x11a`,
+  the `MonsterType` enum — troll/animated_dead/etc. branches in `ovr013.cs`), not
+  by `field_E9`. (The docket's earlier "copied from monster data's `field_76`,
+  `ovr017.cs:286`" was the *PoolRad-import* conversion path
+  `player.field_E9 = poolRad.field_76`, a different source record — not the CotAB
+  monster read, which is `@0xe9` direct.)
 - **Question:** `turns_undead` (`ovr014.cs:642`) indexes `unk_16679` by
   `target.field_E9` (copied straight from monster data's `field_76`,
   `ovr017.cs:286`, an unclamped byte read) with no visible upper-bound
@@ -740,23 +791,30 @@ stays the one place showing the complete open-hypothesis picture.
     `roll_dice(8, 3)` = 24, and `roll_dice(6, 3)` = 18 (`ovr018.cs:675-683`,
     creation stats). Door bash uses `count == 1` (`ovr015.cs:180-215`).
     Nothing literal comes within 2× of 255.
-  - **Data-driven sites — bounded by data NOT yet enumerated** (so "inert" is
-    *likely* but **not proven** for these): `roll_dice(v5.dice_size,
-    v5.dice_count)` (weapon/monster damage dice), `roll_dice(unk_16B32[_class],
-    var_5)` (class hit die × count — a multi-level grant would raise `count`),
-    `roll_dice(unk_1A8C4[class_idx], unk_1A8C3[class_idx])` (monster hit dice),
-    `roll_dice(6, ovr025.spellMaxTargetCount(gbl.spell_id))`, and
-    `roll_dice(nearTargets.Count, 1)` / `roll_dice(gbl.area2_ptr.party_size, 1)`
-    (small by construction).
+  - **Data-driven sites — the MONSTER half now enumerated against real data
+    (2026-07-16, M4 step 5); provably inert.** `roll_dice(attackDiceSize(idx),
+    attackDiceCount(idx))` (monster damage dice, `ovr014.cs:86`) reads the live
+    attack run at `MON*CHA` record `@0x19e..0x1a1`. Census of all 81 shipped
+    monsters (`gbx_formats::monster`, `local_tier_monster_census`):
+    **max `count · size` = 45** — far under 255, so monster damage never
+    truncates. Monster HP is stored as a byte (`hit_point_max@0x78`), not rolled
+    at load, so no monster-HP `roll_dice`; observed monster `hit_dice@0xe5` maxes
+    at 20 (a hypothetical `roll_dice(8, 20)` = 160 is still inert). **Still not
+    enumerated (data not yet read):** *weapon* damage dice (the `ItemData` table,
+    an item-session read) and the class hit-die table `unk_16B32`/`unk_1A8C4`
+    (creation-time, a character-creation read). The other named data-driven sites
+    (`roll_dice(6, spellMaxTargetCount)`, `roll_dice(nearTargets.Count, 1)`,
+    `roll_dice(party_size, 1)`) are small by construction.
   So the `u16` return and coab's `(byte)` return are bit-identical for every
   input reachable *today*, and the divergence is inert at every call site our
-  engine currently has. Changing the signature to `u8` would churn the
-  `VmHost` trait and all impls for no behavioral gain yet.
-- **Settled by:** the M4/M5 sessions that land the data-driven sites — when
-  monster/weapon damage dice and HP dice are wired, check their real data
-  extents against `count * size > 255` (the `MON*` records are the same read
-  FD-20 needs) and decide then whether to narrow the return to a byte. Until
-  then the divergence is documented and inert-as-far-as-checked.
+  engine currently has (monster damage now *proven* so, not merely likely).
+  Changing the signature to `u8` would churn the `VmHost` trait and all impls
+  for no behavioral gain yet.
+- **Settled by:** the remaining data-driven sites — the item session (weapon
+  damage dice, `ItemData`) and character creation (class hit-die table). Check
+  their real data extents against `count * size > 255` and decide then whether to
+  narrow the return to a byte. The **monster** clause is closed: inert
+  (`docs/design/combat-study.md` §8.3).
 - **Cross-reference:** `docs/design/oracle-rig.md` §6 (migration ledger),
   `crates/gbx-engine/src/vmhost.rs` `roll_dice`.
 

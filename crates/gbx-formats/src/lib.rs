@@ -12,6 +12,7 @@ pub mod font;
 pub mod game_data;
 pub mod geo;
 pub mod image;
+pub mod monster;
 pub mod save_orig;
 pub mod walldef;
 
