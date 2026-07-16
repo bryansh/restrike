@@ -630,6 +630,33 @@ out of scope here and lands with the item/treasure session.
 
 ## 11. Combat-map generation (battlefield from where the party was)
 
+> **IMPLEMENTED — the tactical-battlefield slice (2026-07-16, D-OR5(a) Phase 1,
+> third slice; algorithm faithful, real-area wiring deferred).** The map,
+> placement, and movement geometry are transliterated in `gbx-engine`'s `combat`
+> module: a 50×25 `CombatMap` with per-tile `TilePassability`
+> (Passable/Wall/Void) from the `BackGroundTiles` `move_cost` table; the full
+> `PlaceCombatants`/`place_combatant`/`try_place_combatant` fan-out (team origins,
+> `half_team_count`, the `unk_16620` mask, the tri-state left/right walk, the iso
+> transform, occupancy rebuild) with **exact-position tests** (party member 0
+> hand-derives to (27,13)); and `CalcMoves`, the `sub_3E748` step-cost model
+> (diagonal ×3 / orthogonal ×2), `getTargetDirection` (the 8-octant classifier),
+> and `grid_distance`/`is_adjacent`. **The whole path is draw-free as this study
+> scoped it** — `SetupGroundTiles`/`PlaceCombatants`/`CalcMoves`/`sub_3E748` make
+> zero `Random` calls (a test asserts zero draws over setup, D9); no `gbx-prng`
+> call was added. **Two caller-read corrections (coab over names):**
+> `CanSeeTargetA` (`ovr014.cs:571`) is an **invisibility affect check, not
+> geometric LoS** (documented; no fake LoS added — it belongs with affects); and
+> the engine's authoritative combat *range* is the **wall-respecting flood**
+> `Rebuild_SortedCombatantList` (`ovr032.cs:228`, `getTargetRange`=`steps/2`),
+> which is target-selection's core and is **deferred to the AI slice** — this
+> slice exposes the open-ground king-move `grid_distance` as the geometric
+> primitive. **Deferred real-area hook (below):** the *derivation of the combat
+> floor from the source area's wall topology* (`SetupGroundTiles` →
+> `build_background_tiles_*` → `get_dir_flags`) and the `COMBAT`-opcode →
+> `BattleSetup` roster assembly are the later encounter-trigger slice; here the
+> map is built from a provided terrain descriptor and the area→wall-flags input is
+> a caller `dir_flags` hook defaulting to open ground.
+
 `BattleSetup` (`ovr011.cs:1169`, `battle_begins`) builds the battlefield:
 
 ```
@@ -660,10 +687,19 @@ calc_enemy_health_percentage()
   per cell — geometry, not combatant identity (D-OR5(b): the fixed-address combat
   array is grid geometry only).
 
-The full `SetupGroundTiles` / `PlaceCombatants` bodies (grid sampling, wall
-handling, mounted/large-monster sizing) are an implementation-session read; the
-**derivation** (position + facing + encounter_distance → team origins → fan-out)
-is what this study pins.
+The full `PlaceCombatants` body (the tri-state fan-out, the `unk_16620` mask, the
+iso transform, `size_footprint`/occupancy) is now **transliterated and tested**
+(see the §11 status banner); the **derivation** (position + facing +
+encounter_distance → team origins → fan-out) this study pinned held on the read.
+Two pieces remain a *later* read: the `SetupGroundTiles` wall-painting from the
+source area (`build_background_tiles_*` ← `get_dir_flags`), deferred with the
+`COMBAT`-opcode → `BattleSetup` real-area wiring; and mounted/large-monster sizing
+beyond the `field_DE & 7` footprint (`size_footprint` supports sizes 0–4 already,
+but the record fields that *set* a size > 1 are an item/mount-session read).
+Note `encounter_distance` is clamped to the forward line-of-sight ray
+(`sub_304B4`, `ovr003.cs:997-1002`), so the iso diamond fits the 50×25 field only
+for the small distances a real approach yields — large synthetic distances push a
+team off-map, which is expected, not a bug.
 
 ---
 
