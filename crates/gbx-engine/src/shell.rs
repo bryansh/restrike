@@ -197,8 +197,79 @@ fn describe_request(request: &Request) -> String {
             format!("menu: {text}")
         }
         Request::Delay => "delay".to_string(),
-        Request::Combat => "combat (stub)".to_string(),
+        // Reached only for the DEFERRED non-combat COMBAT branch (no monsters
+        // loaded → shop/temple/AfterCombat dispatch, `CMD_Combat` ovr003:974);
+        // the real-combat branch resolves in `tick_present` before a widget is
+        // ever built, so it never reaches here.
+        Request::Combat => "combat (non-combat branch: deferred)".to_string(),
     }
+}
+
+/// The party's world facing → coab's `mapDirection` (0/2/4/6 = N/E/S/W), the
+/// axis `place_combatants` offsets the monster team along and `sub_304B4`
+/// casts its LoS ray down.
+fn facing_to_map_dir(facing: crate::movement::Facing) -> u8 {
+    use crate::movement::Facing;
+    match facing {
+        Facing::North => 0,
+        Facing::East => 2,
+        Facing::South => 4,
+        Facing::West => 6,
+    }
+}
+
+/// The equipped-weapon damage die the party fights with until the `.swg`
+/// `ItemData` weapon records are decoded (FD-29's weapon clause, M5-adjacent):
+/// a documented 1d8 (a longsword). Flagged provisional — real per-member
+/// weapon dice replace this when items land.
+const DEFAULT_PARTY_WEAPON_DIE: (u8, u8, u8) = (1, 8, 0);
+
+/// Map the live party roster into the combat runner's team-0 inputs (M4 combat
+/// #6). Only living members (`hit_point_current > 0`) enter the fight. Each
+/// member's raw AC, THAC0 (as the to-hit bonus, matching the monster path),
+/// current HP, and movement come straight off the record; the weapon die is
+/// [`DEFAULT_PARTY_WEAPON_DIE`] pending item decode.
+fn party_combat_stats(members: &[crate::party::Character]) -> Vec<crate::combat::PartyCombatStats> {
+    members
+        .iter()
+        .filter(|c| c.hit_point_current > 0)
+        .map(|c| crate::combat::PartyCombatStats {
+            hp: c.hit_point_current as i32,
+            raw_ac: c.combat.ac as u8,
+            hit_bonus: c.combat.thac0_base as i32,
+            movement: c.combat.movement as i32,
+            dice: DEFAULT_PARTY_WEAPON_DIE,
+            npc: c.control_morale >= 0x80,
+        })
+        .collect()
+}
+
+/// Run the `COMBAT` opcode's real-combat branch (`CMD_Combat` else-branch,
+/// `ovr003.cs:1004` → `MainCombatLoop`) from the shell/tick path (M4 combat
+/// #6). Called only when monsters were loaded; assembles the roster (party
+/// team 0 + the script-loaded monsters team 1), derives the terrain +
+/// encounter distance from the current area (all draw-free — no draw is added
+/// before the fight's first initiative d6), runs the unified [`CombatState`]
+/// to a victor, then **consumes** the pending roster. A party wipe sets
+/// `party_killed` (the game-over signal). XP/treasure
+/// (`AfterCombatExpAndTreasure`) is deferred.
+///
+/// Runs entirely off `FlowCtx` — the `VmHost` borrow was already released when
+/// `step()` yielded `Request::Combat`, so this never blocks the VM host (D8).
+fn run_pending_combat(ctx: &mut FlowCtx) -> crate::combat::EncounterOutcome {
+    let party = party_combat_stats(&ctx.roster.members);
+    let monsters = std::mem::take(&mut ctx.state.pending_combat.monsters);
+    let map_dir = facing_to_map_dir(ctx.state.facing);
+    let in_dungeon = matches!(ctx.state.game_state, GameState::DungeonMap);
+    let (px, py) = (ctx.state.pos.0 as i32, ctx.state.pos.1 as i32);
+    let dist = crate::combat::encounter_distance(ctx.geo, map_dir, px, py, in_dungeon);
+    let map = crate::combat::provisional_combat_map(ctx.geo);
+    let result = crate::combat::run_encounter(&party, &monsters, map, map_dir, dist, ctx.rng);
+    ctx.state.pending_combat.clear();
+    if result.outcome == crate::combat::CombatOutcome::MonstersWin {
+        ctx.state.party_killed = true;
+    }
+    result
 }
 
 /// The inverse of [`widget_for_request`]'s `HorizontalMenu` case: maps a
@@ -399,6 +470,30 @@ impl VectorRun {
         {
             PendingOutcome::Exit(exit) => PresentTick::Done(exit),
             PendingOutcome::Request(request) => {
+                // COMBAT (0x24) real-combat branch (`CMD_Combat` else, monsters
+                // loaded): run the fight here in the shell/tick path — the
+                // `VmHost` borrow was released when `step()` yielded the
+                // request, so this never blocks it (D8) — then resume the
+                // script with its outcome. No player input is needed (the fight
+                // is all-AI this slice), so it bypasses the widget/gate
+                // entirely and pumps straight on this same tick.
+                if matches!(request, Request::Combat) && ctx.state.pending_combat.monsters_loaded {
+                    let result = run_pending_combat(ctx);
+                    let label = match result.outcome {
+                        crate::combat::CombatOutcome::PartyWins => "party wins",
+                        crate::combat::CombatOutcome::MonstersWin => "party wiped",
+                        crate::combat::CombatOutcome::Stalemate => "stalemate",
+                    };
+                    ctx.vm_memory
+                        .transcript
+                        .push(crate::vmhost::TranscriptEntry::Request(format!(
+                            "combat: {label} ({} round(s))",
+                            result.rounds
+                        )));
+                    self.pending_reply = Some(Reply::Combat);
+                    self.phase = VmPhase::Pump;
+                    return PresentTick::OpenedGate;
+                }
                 ctx.vm_memory
                     .transcript
                     .push(crate::vmhost::TranscriptEntry::Request(describe_request(

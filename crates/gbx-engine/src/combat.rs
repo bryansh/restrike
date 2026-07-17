@@ -29,6 +29,7 @@
 //! Combat is entered from a **caller-provided roster** ([`CombatState::new`]);
 //! wiring it to the ECL `COMBAT` opcode / `BattleSetup` is a later session.
 
+use crate::monster::LoadedMonster;
 use crate::rng::EngineRng;
 use gbx_formats::geo::GeoBlock;
 use gbx_rules::flavor::Flavor;
@@ -3355,6 +3356,183 @@ pub enum CombatOutcome {
     Stalemate,
 }
 
+// --- the ECL COMBAT-opcode encounter runner (D3) --------------------------
+
+/// One party member's combat-relevant stats, as team 0 of a script-triggered
+/// encounter (M4 combat #6). The engine maps a `crate::party::Character` into
+/// this at the `COMBAT` opcode; kept a plain struct so [`run_encounter`] is
+/// unit-testable without the full party model.
+///
+/// `dice` is the equipped-weapon damage die. Real weapon dice live in the
+/// `.swg` `ItemData` records, which are **not decoded yet** (FD-29's weapon
+/// clause, M5-adjacent) — the caller passes a documented default until then.
+/// DEX-reaction / strength folding into the initiative adjustment and to-hit
+/// bonus (`hitBonus@0x199`, a `BattleSetup` concern) is likewise deferred, so
+/// `reaction_adj` starts 0 here exactly as the accepted `watch_a_real_data_fight`
+/// demo has it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PartyCombatStats {
+    pub hp: i32,
+    /// Raw on-disk AC (`@0x19a`); displayed AC = `0x3C - ac`.
+    pub raw_ac: u8,
+    /// To-hit bonus in the raw-AC compare space (the record's stored THAC0,
+    /// matching the monster path).
+    pub hit_bonus: i32,
+    pub movement: i32,
+    /// `(dice_count, dice_size, damage_bonus)` for the equipped weapon.
+    pub dice: (u8, u8, u8),
+    pub npc: bool,
+}
+
+/// The result of a script-triggered encounter: the fight's [`CombatOutcome`]
+/// plus the rounds it ran (for transcripts/logging).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EncounterOutcome {
+    pub outcome: CombatOutcome,
+    pub rounds: u16,
+}
+
+/// `sub_304B4` (`ovr008.cs:157`): the forward line-of-sight distance that sets
+/// how far ahead the monster team deploys — **draw-free** (a wall ray, no
+/// `roll_dice`; verified by reading it, and the reason this slice's
+/// opcode→combat path adds no draw before the first initiative d6).
+///
+/// Wilderness/city (`inDungeon == 0`) is always 2. In a dungeon it casts a ray
+/// up to 2 cells forward along `map_dir` (0/2/4/6 = N/E/S/W), stepping while
+/// the wall in the facing direction is open (`getMap_wall_type == 0`) and
+/// stopping at the first wall. Out-of-grid steps stop the ray (treated as
+/// blocked). Note: coab also clamps this against `SETUP MONSTER`'s
+/// `max_encounter_distance` (`ovr003.cs:231`) and any prior value
+/// (`CMD_Combat`, `ovr003.cs:999`) — those upper clamps are deferred (we don't
+/// yet carry `area2_ptr.encounter_distance` across opcodes), so the raw ray
+/// result stands; realistically 1-2.
+pub fn encounter_distance(
+    geo: &GeoBlock,
+    map_dir: u8,
+    map_x: i32,
+    map_y: i32,
+    in_dungeon: bool,
+) -> u8 {
+    if !in_dungeon {
+        return 2;
+    }
+    let grid = gbx_formats::geo::GEO_GRID_SIZE as i32;
+    let (mut x, mut y) = (map_x, map_y);
+    let mut dist = 0u8;
+    for _ in 0..2 {
+        if !(0..grid).contains(&x) || !(0..grid).contains(&y) {
+            break;
+        }
+        let s = geo.square(x as usize, y as usize);
+        let wall = match map_dir {
+            0 => s.wall_north,
+            2 => s.wall_east,
+            4 => s.wall_south,
+            6 => s.wall_west,
+            _ => s.wall_north,
+        };
+        if wall != 0 {
+            break; // a wall blocks the ray
+        }
+        dist += 1;
+        match map_dir {
+            0 => y -= 1,
+            2 => x += 1,
+            4 => y += 1,
+            6 => x -= 1,
+            _ => {}
+        }
+    }
+    dist
+}
+
+/// Run the `COMBAT` opcode's **real-combat branch** — `CMD_Combat`'s `else`
+/// (monsters were loaded), `ovr003.cs:1004` → `MainCombatLoop` (M4 combat #6).
+/// The party is team 0, the script-loaded monsters are team 1, placed
+/// `encounter_distance` tiles ahead along `map_dir`; the whole all-AI melee
+/// fight then runs through the one unified tick engine
+/// ([`CombatState::run_combat`]) to a victor.
+///
+/// **Draw discipline:** everything before the first initiative d6 — placement
+/// ([`place_combatants`]), the [`provisional_combat_map`] terrain, and
+/// [`encounter_distance`] — is draw-free, so the returned fight's draw stream
+/// begins exactly with the §2 initiative fingerprint (asserted by combat #6's
+/// draw-parity test). `AfterCombatExpAndTreasure` (XP/treasure) and the
+/// non-combat (shop/temple) branch are **deferred** (handled by the caller /
+/// out of scope).
+pub fn run_encounter(
+    party: &[PartyCombatStats],
+    monsters: &[LoadedMonster],
+    mut map: CombatMap,
+    map_dir: u8,
+    encounter_distance: u8,
+    rng: &mut EngineRng,
+) -> EncounterOutcome {
+    let inputs: Vec<PlacementInput> = party
+        .iter()
+        .map(|_| PlacementInput {
+            team: Team::Party,
+            size: 1,
+            in_combat: true,
+        })
+        .chain(monsters.iter().map(|_| PlacementInput {
+            team: Team::Monster,
+            size: 1,
+            in_combat: true,
+        }))
+        .collect();
+    let placements = place_combatants(
+        &mut map,
+        &inputs,
+        map_dir,
+        encounter_distance as i32,
+        GridPos::new(0, 0),
+        None,
+    );
+
+    let mut fighters: Vec<Combatant> = Vec::with_capacity(party.len() + monsters.len());
+    for (i, p) in party.iter().enumerate() {
+        fighters.push(Combatant::new_melee(
+            i,
+            Team::Party,
+            p.npc,
+            placements[i].pos,
+            p.hp,
+            p.raw_ac,
+            p.hit_bonus,
+            p.movement,
+            p.dice,
+            0, // delay — CalculateInitiative sets it each round
+            1, // one swing/round
+        ));
+    }
+    for (k, m) in monsters.iter().enumerate() {
+        let a1 = m.attacks[0];
+        let id = party.len() + k;
+        fighters.push(Combatant::new_melee(
+            id,
+            Team::Monster,
+            m.is_npc(),
+            placements[id].pos,
+            m.hit_point_max as i32,
+            m.ac as u8,
+            m.thac0 as i32,
+            m.movement as i32,
+            (a1.dice_count, a1.dice_size, a1.damage_bonus as u8),
+            0,
+            1,
+        ));
+    }
+
+    let mut state = CombatState::new(map, fighters);
+    state.map_direction = map_dir;
+    let mut rounds = 0u16;
+    let outcome = state.run_combat_observed(rng, DEFAULT_NO_ACTION_LIMIT, |_, r| {
+        rounds = r + 1;
+    });
+    EncounterOutcome { outcome, rounds }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4230,6 +4408,78 @@ mod tests {
         let mut map = map;
         let p = place_combatants(&mut map, &roster, 0, 1, GridPos::new(0, 0), None);
         assert!(p.iter().all(|c| c.placed), "everyone finds a cell");
+    }
+
+    // --- encounter runner (D3) --------------------------------------------
+
+    fn weak_goblin() -> LoadedMonster {
+        use crate::monster::MonsterAttack;
+        LoadedMonster {
+            name: "GOB".to_string(),
+            hit_dice: 1,
+            hit_point_max: 3,
+            ac: 10,
+            thac0: 20,
+            turn_undead_type: 0,
+            monster_type: 3,
+            control_morale: 0x80,
+            movement: 6,
+            attacks: [
+                MonsterAttack {
+                    attacks: 1,
+                    dice_count: 1,
+                    dice_size: 2,
+                    damage_bonus: 0,
+                },
+                MonsterAttack {
+                    attacks: 0,
+                    dice_count: 0,
+                    dice_size: 0,
+                    damage_bonus: 0,
+                },
+            ],
+        }
+    }
+
+    fn strong_party_member() -> PartyCombatStats {
+        PartyCombatStats {
+            hp: 40,
+            raw_ac: 54, // displayed AC -18, near-untouchable
+            hit_bonus: 50,
+            movement: 12,
+            dice: (2, 8, 5),
+            npc: false,
+        }
+    }
+
+    #[test]
+    fn encounter_distance_wilderness_is_2() {
+        let geo = synthetic_geo_with_walled_squares(&[]);
+        assert_eq!(encounter_distance(&geo, 0, 5, 5, false), 2);
+    }
+
+    #[test]
+    fn encounter_distance_dungeon_ray_walks_open_cells_and_stops_at_a_wall() {
+        // Open everywhere: the ray walks its full 2 cells.
+        let open = synthetic_geo_with_walled_squares(&[]);
+        assert_eq!(encounter_distance(&open, 2, 5, 5, true), 2);
+        // A wall on the east edge of the party's own cell blocks immediately.
+        let mut data = vec![0u8; gbx_formats::geo::GEO_BLOCK_SIZE];
+        data[2 + (5 + 16 * 5)] = 0x03; // sq (5,5): E nibble = 3 (wall)
+        let walled = GeoBlock::parse(&data).unwrap();
+        assert_eq!(encounter_distance(&walled, 2, 5, 5, true), 0);
+    }
+
+    #[test]
+    fn run_encounter_party_beats_a_weak_monster() {
+        let geo = synthetic_geo_with_walled_squares(&[]);
+        let map = provisional_combat_map(&geo);
+        let party = vec![strong_party_member(), strong_party_member()];
+        let monsters = vec![weak_goblin()];
+        let mut rng = EngineRng::new(0x0C0F_FEE0);
+        let result = run_encounter(&party, &monsters, map, 0, 1, &mut rng);
+        assert_eq!(result.outcome, CombatOutcome::PartyWins);
+        assert!(result.rounds >= 1, "at least one round resolved");
     }
 
     /// Local-tier: the real Tilverton City block (`GEO2.DAX` block 1) derives
