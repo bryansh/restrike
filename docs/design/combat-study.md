@@ -49,16 +49,30 @@ The rest of this document expands each box.
 
 ## 1. The round loop and its state (feeds D-OR5(b)'s structure-walk prerequisites)
 
-> **PARTIALLY IMPLEMENTED — initiative slice (2026-07-16).** The round skeleton
-> (`count → initiative → turns → BattleRoundChecks`) is realized as a tick-based
-> `CombatState` in `gbx-engine`'s `combat` module (D8: `step()` returns control,
-> no blocking loop). Only the draw-bearing parts land this slice: initiative
-> (§2), the `combat_round` counter + stalemate-cap termination, and the
-> surprise-mask clear (`ovr009.cs:44`). The turn body, `step_game_time`, affect
-> ticks, bleed/bandage, death/counts, and the map are stubs/out of scope. State
-> variables in §1.1 that this slice touches: `TeamList` (roster order),
-> `combat_round` (`byte_1D8B7`), `combat_round_no_action_limit` (=15),
-> `area2_ptr.field_596` (surprise mask).
+> **IMPLEMENTED — one unified tick engine (2026-07-16, combat #5).** The round
+> loop (`count → initiative → turns → BattleRoundChecks`) is realized as the
+> single tick-based `CombatState` in `gbx-engine`'s `combat` module (D8: `step()`
+> returns control, no blocking loop). **This is now the whole combat engine —**
+> the model unification (combat #5) folded the once-separate melee-AI loop
+> (`CombatWorld`/`run_combat`, combat #4) and combatant record (`Fighter`, combat
+> #4) into this one `CombatState` and one `Combatant`; `CombatWorld`/`Fighter`
+> survive only as type aliases. The turn body (step 4) is dispatched by a
+> `TurnDriver`: the real `PlayerQuickFight` melee AI (§4) for a full fight, or a
+> zero-draw stub for the isolated initiative/selection harness
+> (`CombatState::initiative_only`, the cleanest parity target). `run_combat` is a
+> thin `while step() != Ended {}` driver over the tick machine. `begin_round`/
+> `battle_round_checks` count LIVE (in_combat) members — the real death model —
+> which reduces to the whole-roster count when the stub kills no one.
+>
+> **Still out of scope (the two H4-closing pieces, see the study foot):** the ECL
+> `COMBAT`-opcode → `BattleSetup` trigger (roster assembled by a *running script*,
+> not the caller) and the combat entry-state snapshot (D-OR5(b)) that would let a
+> captured original fight replay draw-for-draw. `step_game_time`, affect ticks,
+> bleed/bandage, and the graphical grid remain out of scope. The real-data payoff
+> (`watch_a_real_data_fight`, combat #5) runs this one engine over real
+> `MON2CHA.DAX` monster records on a `GEO2`-derived map. State variables in §1.1
+> the loop touches: `TeamList` (roster order), `combat_round` (`byte_1D8B7`),
+> `combat_round_no_action_limit` (=15), `area2_ptr.field_596` (surprise mask).
 
 `MainCombatLoop` (`ovr009.cs:22`) is a `while (end_combat == false)` loop. Each
 iteration is one **combat round**:
@@ -1195,3 +1209,55 @@ structure walk). This capture validates the initiative *shape* and the RANDOM
 operand, and is a real target for the first combat session's synthetic parity
 tests; a canonical fixed-encounter capture (known roster) is still wanted before
 a full-fight replay golden is locked.
+
+---
+
+## 16. Model unified — one tick engine (2026-07-16, combat #5)
+
+Combat #5 collapsed the two parallel representations combat had grown into ONE.
+Combat #4, to stay focused, had built a *separate* blocking melee-AI loop
+(`Fighter`/`CombatWorld`/`run_combat`) beside the audit-accepted tick-based
+initiative machine (`Combatant`/`CombatState`/`step`, combat #1). This slice
+merged them, behavior-preserving — **not one draw and not one outcome changed**:
+
+- **One combatant** — `Combatant` absorbed `Fighter`'s fields (the rich
+  superset). `Fighter` is now a type alias. `Combatant::new`/`from_dex` build the
+  initiative-harness form; `new_melee` the real fighter.
+- **One state** — `CombatState` absorbed `CombatWorld` (map, roster, area/morale
+  scalars, action sink) plus a `TurnDriver`. `CombatWorld` is a type alias.
+  `CombatState::new(map, fighters)` = the full fight; `initiative_only(roster)` =
+  the zero-draw initiative/selection harness.
+- **The AI runs through `step()`** — the `Turn` phase dispatches via `TurnDriver`
+  (`MeleeAi` runs `melee_ai_turn`; `Stub` zeroes `delay`). `run_combat` is a thin
+  `while step() != Ended {}` driver. The whole-fight draw order is identical to
+  combat #4's `run_combat` (proven by a driver-vs-raw-`step` draw-stream test and
+  by both demo transcripts staying byte-identical).
+
+This makes the tick machine (§1) the single combat engine, on real game data
+(`watch_a_real_data_fight`).
+
+### 16.1 What actually closes H4 (the two remaining pieces)
+
+The engine is now one coherent model on real data. Two pieces remain, and they
+are what close H4 — both are *encounter-trigger* wiring, not new combat mechanics:
+
+1. **The ECL `COMBAT`-opcode → `BattleSetup` trigger.** Today the roster is
+   assembled *by the caller* (the demo/test hands `CombatState::new` a `Vec<Combatant>`).
+   The real path is a *running ECL script* hitting the `COMBAT` opcode
+   (`CMD_Combat`, `ovr003.cs:971`) → `BattleSetup` (`ovr011.cs:1169`), which loads
+   the encounter's monsters (`load_mob`, §8.1), calls the real `SetupGroundTiles`
+   (the faithful iso-diamond terrain derivation `place_combatants`'s deferred
+   `dir_flags` hook stands in for, §11) and `PlaceCombatants`, and enters the loop
+   with `combat_round = 0`. Wiring that opcode into `gbx-vm`/`gbx-engine` so a
+   script assembles the roster is the encounter-trigger slice.
+
+2. **The combat entry-state snapshot (D-OR5(b)).** To replay a *captured original
+   fight* draw-for-draw we need the fight's entry state: the RNG state at combat
+   start (recoverable from a `.gbxtrace`) **plus** the combatant roster —
+   positions, `delay`s, `field_15`, teams — which needs the D-OR5(b) structure
+   walk (or an extended staging hook that dumps `gbl.TeamList` + each `Action` at
+   `MainCombatLoop` entry). §15's first-light capture validated the initiative
+   *shape*; a canonical fixed-encounter capture with a known roster is still
+   wanted before a full-fight replay golden is locked. Feeding that entry state
+   into this one `CombatState` and diffing its draw stream against the capture is
+   the parity close.
