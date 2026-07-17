@@ -91,6 +91,87 @@ impl LoadedMonster {
     }
 }
 
+/// The pending-combat monster roster the `LOAD MONSTER` / `SETUP MONSTER` /
+/// `CLEARMONSTERS` opcodes accumulate and the `COMBAT` opcode consumes — the
+/// engine-side mirror of coab's `gbl.TeamList` monster half plus the three
+/// scalars that gate it: `gbl.monstersLoaded`, `gbl.numLoadedMonsters`, and
+/// `gbl.monster_icon_id` (`Classes/Gbl.cs`, managed by `CMD_LoadMonster`
+/// `ovr003.cs:238` and `CMD_ClearMonsters` `ovr003.cs:758`).
+///
+/// This is combat-*setup* state: it exists only between a `LOAD MONSTER` and
+/// the `COMBAT` that consumes it, so it is deliberately **not** serialized
+/// (`#[serde(skip)]` on [`crate::shell::EngineState::pending_combat`]) — a
+/// save is never taken mid-encounter-setup, and the `.rsav` golden stays
+/// untouched by carrying it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingCombat {
+    /// Loaded monster records in `TeamList` add order — each entry is one
+    /// combatant. `num_copies` expands to repeated entries, mirroring coab's
+    /// per-copy `ShallowClone` (`ovr003.cs:268-291`).
+    pub monsters: Vec<LoadedMonster>,
+    /// `gbl.monstersLoaded` — set by `LOAD MONSTER`, cleared by
+    /// `CLEARMONSTERS`. This is the flag `CMD_Combat` (`ovr003.cs:974`) reads
+    /// to choose the real-combat branch over the non-combat (shop/temple)
+    /// dispatch.
+    pub monsters_loaded: bool,
+    /// `gbl.monster_icon_id` — starts at 8, incremented once per `LOAD
+    /// MONSTER` call (`ovr003.cs:293`), reset to 8 by `CLEARMONSTERS`
+    /// (`ovr003.cs:763`). Combat needs none of the icon plumbing; carried for
+    /// faithfulness of the bookkeeping only.
+    pub monster_icon_id: u8,
+}
+
+impl Default for PendingCombat {
+    fn default() -> Self {
+        // coab's `gbl.monster_icon_id` initializes to 8 (the first monster
+        // icon slot after the party's), matching `CMD_ClearMonsters`'s reset.
+        PendingCombat {
+            monsters: Vec::new(),
+            monsters_loaded: false,
+            monster_icon_id: 8,
+        }
+    }
+}
+
+impl PendingCombat {
+    /// coab's `TeamList` monster cap: `CMD_LoadMonster` only loads while
+    /// `numLoadedMonsters < 63` (`ovr003.cs:243`, `:268`).
+    pub const CAP: usize = 63;
+
+    /// One `LOAD MONSTER` (`CMD_LoadMonster`, `ovr003.cs:238`): appends the
+    /// decoded master `num_copies` times (coab adds the master once, then
+    /// `ShallowClone`s it up to `num_copies` total, `:263-291`), bumps
+    /// `monster_icon_id`, and sets `monstersLoaded`. `num_copies <= 0`
+    /// becomes 1 (`ovr003.cs:253`). The whole append is gated by the 63-cap:
+    /// once full, the call is a no-op (coab's `if (numLoadedMonsters < 63)`
+    /// wraps the entire body, `:243`), so a `monstersLoaded`/icon bump only
+    /// happens when at least one copy was added.
+    pub fn load(&mut self, monster: LoadedMonster, num_copies: u8) {
+        if self.monsters.len() >= Self::CAP {
+            return;
+        }
+        let copies = (num_copies.max(1)) as usize;
+        for _ in 0..copies {
+            if self.monsters.len() >= Self::CAP {
+                break;
+            }
+            self.monsters.push(monster.clone());
+        }
+        self.monster_icon_id = self.monster_icon_id.wrapping_add(1);
+        self.monsters_loaded = true;
+    }
+
+    /// `CLEARMONSTERS` (`CMD_ClearMonsters`, `ovr003.cs:758`): empties the
+    /// roster, clears `monstersLoaded`, and resets `monster_icon_id` to 8.
+    /// (coab also clears `pooled_money`/`items_pointer` here — treasure state,
+    /// out of this slice's scope.)
+    pub fn clear(&mut self) {
+        self.monsters.clear();
+        self.monsters_loaded = false;
+        self.monster_icon_id = 8;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,5 +246,62 @@ mod tests {
                 damage_bonus: 0
             }
         );
+    }
+
+    fn goblin() -> LoadedMonster {
+        let cha = synthetic_cha();
+        let entries = parse_cha_archive(&cha).unwrap();
+        LoadedMonster::from_record(&entries[0].monster)
+    }
+
+    #[test]
+    fn pending_combat_starts_empty_with_icon_id_8() {
+        let pc = PendingCombat::default();
+        assert!(pc.monsters.is_empty());
+        assert!(!pc.monsters_loaded);
+        assert_eq!(pc.monster_icon_id, 8, "gbl.monster_icon_id starts at 8");
+    }
+
+    #[test]
+    fn load_expands_num_copies_and_sets_flags() {
+        let mut pc = PendingCombat::default();
+        pc.load(goblin(), 3);
+        assert_eq!(pc.monsters.len(), 3, "3 copies added (master + 2 clones)");
+        assert!(pc.monsters_loaded);
+        assert_eq!(pc.monster_icon_id, 9, "one icon bump per LOAD MONSTER call");
+        // A second LOAD MONSTER call bumps the icon once more, not per copy.
+        pc.load(goblin(), 2);
+        assert_eq!(pc.monsters.len(), 5);
+        assert_eq!(pc.monster_icon_id, 10);
+    }
+
+    #[test]
+    fn zero_copies_becomes_one() {
+        let mut pc = PendingCombat::default();
+        pc.load(goblin(), 0); // coab: if (num_copies <= 0) num_copies = 1
+        assert_eq!(pc.monsters.len(), 1);
+    }
+
+    #[test]
+    fn load_is_capped_at_63() {
+        let mut pc = PendingCombat::default();
+        pc.load(goblin(), 200); // far past the cap
+        assert_eq!(pc.monsters.len(), PendingCombat::CAP);
+        // A full roster makes the next call a no-op (coab's `< 63` guard wraps
+        // the whole body, so no icon bump either).
+        let icon_before = pc.monster_icon_id;
+        pc.load(goblin(), 1);
+        assert_eq!(pc.monsters.len(), PendingCombat::CAP);
+        assert_eq!(pc.monster_icon_id, icon_before);
+    }
+
+    #[test]
+    fn clear_resets_to_defaults() {
+        let mut pc = PendingCombat::default();
+        pc.load(goblin(), 4);
+        pc.clear();
+        assert!(pc.monsters.is_empty());
+        assert!(!pc.monsters_loaded);
+        assert_eq!(pc.monster_icon_id, 8, "CLEARMONSTERS resets icon_id to 8");
     }
 }

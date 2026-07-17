@@ -782,6 +782,16 @@ impl gbx_vm::EngineServices for EngineVmHost<'_> {
         (0, 0)
     }
 
+    /// `CMD_LoadMonster` (`ovr003.cs:238`) → `load_mob` (`ovr017.cs:824`):
+    /// decode block `monster_id` of `MON{game_area}CHA.DAX` as a full 0x1A6
+    /// `Player` record (`new Player(data, 0)`) and accumulate it into the
+    /// pending-combat roster `num_copies` times (M4 combat #6). The SPC/ITM
+    /// companion files (`load_mob`'s innate affects + carried items) and the
+    /// CPIC `icon_block_id` are visual/effect state deferred past this slice —
+    /// recorded, not decoded. A missing/undecodable `.dax` is coab's hard
+    /// `print_and_exit` (`ovr017.cs:836`); we surface it as `MissingData` →
+    /// the interpreter's `VmError::MissingAsset` non-aborting analogue
+    /// (`machine.rs:92`).
     fn load_monster(
         &mut self,
         monster_id: u8,
@@ -793,6 +803,18 @@ impl gbx_vm::EngineServices for EngineVmHost<'_> {
             num_copies,
             icon_block_id,
         });
+        let file = gbx_formats::monster::monster_filename(
+            self.game_area,
+            gbx_formats::monster::MonsterFile::Cha,
+        );
+        let block = self
+            .data
+            .block(&file, monster_id)
+            .map_err(|_| MissingData)?;
+        let record = gbx_formats::monster::MonsterRecord::from_cha_block(monster_id, &block)
+            .map_err(|_| MissingData)?;
+        let monster = crate::monster::LoadedMonster::from_record(&record);
+        self.state.pending_combat.load(monster, num_copies);
         Ok(MonsterHandle(monster_id as u16))
     }
 
@@ -804,8 +826,11 @@ impl gbx_vm::EngineServices for EngineVmHost<'_> {
         });
     }
 
+    /// `CMD_ClearMonsters` (`ovr003.cs:758`): drop the pending-combat roster
+    /// and reset its flags (M4 combat #6).
     fn clear_monsters(&mut self) {
         self.vm.calls.push(RecordedCall::ClearMonsters);
+        self.state.pending_combat.clear();
     }
 
     fn add_npc(&mut self, monster_id: u8, morale: u8) {

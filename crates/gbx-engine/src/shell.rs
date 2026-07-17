@@ -591,6 +591,14 @@ pub struct EngineState {
     /// `vm_init_ecl`); M4/combat scope carries this even though M2 draws
     /// nothing from it yet.
     pub head_block_id: u8,
+    /// The pending-combat monster roster the `LOAD MONSTER`/`CLEARMONSTERS`
+    /// opcodes accumulate and `COMBAT` consumes (coab `gbl.TeamList` monster
+    /// half + `monstersLoaded`/`monster_icon_id`, M4 combat #6). Transient
+    /// combat-setup state — **not serialized** (`#[serde(skip)]`): a save is
+    /// never taken mid-setup, so the `.rsav` golden is unaffected (the field
+    /// deserializes back to [`crate::monster::PendingCombat::default`]).
+    #[serde(skip)]
+    pub pending_combat: crate::monster::PendingCombat,
 }
 
 /// `gbl.game_state`'s M2 slice (`Classes/Gbl.cs`'s `GameState` enum —
@@ -624,6 +632,7 @@ impl EngineState {
             game_state: GameState::DungeonMap,
             last_game_state: GameState::DungeonMap,
             head_block_id: 0xFF,
+            pending_combat: crate::monster::PendingCombat::default(),
         }
     }
 
