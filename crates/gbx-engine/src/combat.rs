@@ -3070,6 +3070,19 @@ impl CombatWorld {
     /// then d100 selection passes interleaved with each actor's turn draws (study
     /// §2's per-round fingerprint). Returns the [`CombatOutcome`].
     pub fn run_combat(&mut self, rng: &mut EngineRng, max_rounds: u16) -> CombatOutcome {
+        self.run_combat_observed(rng, max_rounds, |_, _| {})
+    }
+
+    /// [`run_combat`](Self::run_combat) with a per-round observer — `on_round(world,
+    /// round)` fires after each round's turns resolve (before the next round's
+    /// initiative), for transcripts/rendering. Observation never touches the draw
+    /// stream.
+    pub fn run_combat_observed<F: FnMut(&CombatWorld, u16)>(
+        &mut self,
+        rng: &mut EngineRng,
+        max_rounds: u16,
+        mut on_round: F,
+    ) -> CombatOutcome {
         let mut round = 0u16;
         loop {
             let (party, monsters) = self.live_counts();
@@ -3094,6 +3107,7 @@ impl CombatWorld {
                     self.clear_actions(i);
                 }
             }
+            on_round(self, round);
             round += 1;
         }
     }

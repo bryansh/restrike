@@ -701,71 +701,33 @@ fn m3_exit_gate() {
     eprintln!("== EXIT GATE PASSED ==");
 }
 
-// --- M4 combat #2 deliverable 6: the watchable fight demo ---
-
-/// A synthetic combatant for the fight demo. Carries the HP / AC / weapon the
-/// initiative-slice `Combatant` doesn't (initiative reads only `in_combat` +
-/// reaction adjustment); the demo owns the full record so it can resolve real
-/// attacks and track HP.
-///
-/// **All stats are hand-built, D10-clean — deliberately NOT real CotAB numbers**
-/// (a "goblin" here is invented, not a decoded `MON2CHA` record). `ac`/`hit_bonus`
-/// use the original's raw encoding: display AC = `0x3C - ac`, and `hit_bonus` is a
-/// THAC0-derived to-hit number (higher = better), so a hit needs
-/// `d20 + hit_bonus >= raw_ac` (the `>=` weapon path).
-#[cfg(test)]
-struct DemoFighter {
-    id: usize,
-    name: &'static str,
-    team: crate::combat::Team,
-    hp: i32,
-    max_hp: i32,
-    ac: u8,
-    hit_bonus: i32,
-    dice_size: u8,
-    dice_count: u8,
-    damage_bonus: u8,
-    reaction_adj: i8,
-}
-
-#[cfg(test)]
-impl DemoFighter {
-    fn alive(&self) -> bool {
-        self.hp > 0
-    }
-    /// Display AC (`0x3C - ac`), for the transcript.
-    fn display_ac(&self) -> i32 {
-        0x3C - self.ac as i32
-    }
-}
+// --- M4 combat #4: the watchable fight demo, now driven by the REAL melee AI ---
 
 /// The watchable fight demo (local-tier, `GBX_DATA_DIR`-gated like the other
 /// demos so it stays out of CI — it uses **no game data**, only synthetic
-/// D10-clean stats; the gate is purely to place it in the local run tier).
+/// D10-clean stats; a "goblin" here is invented, not a decoded `MON2CHA` record).
 ///
-/// A synthetic party-vs-goblins encounter run to completion through the **real**
-/// combat subsystem: `CombatState` drives the round loop + initiative + selection
-/// draw order (the slice-1 subsystem), and `resolve_attack` resolves each swing
-/// (the slice-2 to-hit + damage). The transcript prints the round, each
-/// combatant's initiative `delay`, every attack (who, the raw d20, hit/miss, the
-/// damage), HP dropping, deaths, and the victor.
+/// A synthetic party-vs-goblins encounter placed on an open floor and run to
+/// completion through the **real melee AI** ([`CombatWorld::run_combat`]):
+/// `CalculateInitiative`, `FindNextCombatant` selection, and each combatant's
+/// full `PlayerQuickFight` turn — the `field_15` mode-gate, the two behavior-guard
+/// d7s, `find_target`'s random pick, and the `sub_35DB1` approach-and-attack — all
+/// drawing from the one `EngineRng` stream (D9). Unlike the M4-combat-#2 version
+/// (a placeholder "first living enemy" picker), this **is** a faithful run: the AI
+/// picks and closes on its own targets, so the draw stream is the real one.
 ///
-/// **The target picker is an explicit demo-only placeholder** — "first living
-/// enemy", consuming ZERO draws. This is NOT faithful AI: real target selection
-/// (`find_target`, the next slice) consumes draws and would change the stream, so
-/// this demo is a *demonstration, not a parity artifact*. The engine's real turn
-/// slot stays a zero-draw stub (`CombatState` yields `Turn` and the demo composes
-/// `resolve_attack` + the placeholder picker itself). Because dead combatants stay
-/// in `CombatState`'s roster (no death model in the slice), they still get picked;
-/// the demo skips a downed actor's turn. Everything shares one `EngineRng` stream
-/// (D9), but the picker + dead-member handling make the interleaving non-faithful
-/// by construction — hence demo-only.
+/// The transcript prints the placed battlefield, the survivors' HP after each
+/// round, and the outcome. `ac`/`hit_bonus` use the original's raw encoding
+/// (display AC = `0x3C - ac`; a hit needs `d20 + hit_bonus >= raw_ac`).
 ///
 /// Run: `GBX_DATA_DIR=~/goldbox-data/cotab cargo test -p gbx-engine \
 ///   -- --nocapture watch_a_fight`
 #[test]
 fn watch_a_fight() {
-    use crate::combat::{resolve_attack, AttackProfile, CombatState, CombatStep, Combatant, Team};
+    use crate::combat::{
+        place_combatants, CombatMap, CombatOutcome, CombatWorld, Fighter, GridPos, PlacementInput,
+        Team, DEFAULT_NO_ACTION_LIMIT,
+    };
     use crate::rng::EngineRng;
 
     if std::env::var_os("GBX_DATA_DIR").is_none() {
@@ -773,227 +735,128 @@ fn watch_a_fight() {
         return;
     }
 
-    // A synthetic party of three vs five goblins. Raw AC / hit_bonus per the
-    // encoding note on DemoFighter; weapons are plain dice. Ids are the roster
-    // index (0..8), party first (TeamList order).
-    let mut fighters = vec![
-        DemoFighter {
-            id: 0,
-            name: "Kethra",
-            team: Team::Party,
-            hp: 26,
-            max_hp: 26,
-            ac: 54, // display AC 6
-            hit_bonus: 45,
-            dice_size: 8,
-            dice_count: 1,
-            damage_bonus: 2, // longsword 1d8+2
-            reaction_adj: 2,
-        },
-        DemoFighter {
-            id: 1,
-            name: "Dolan",
-            team: Team::Party,
-            hp: 22,
-            max_hp: 22,
-            ac: 52, // display AC 8
-            hit_bonus: 44,
-            dice_size: 10,
-            dice_count: 1,
-            damage_bonus: 1, // bastard sword 1d10+1
-            reaction_adj: 0,
-        },
-        DemoFighter {
-            id: 2,
-            name: "Sable",
-            team: Team::Party,
-            hp: 18,
-            max_hp: 18,
-            ac: 50, // display AC 10
-            hit_bonus: 43,
-            dice_size: 6,
-            dice_count: 1,
-            damage_bonus: 3, // short sword 1d6+3
-            reaction_adj: 3,
-        },
-    ];
-    for i in 0..5 {
-        fighters.push(DemoFighter {
-            id: 3 + i,
-            name: ["Snik", "Grub", "Yark", "Mool", "Zeth"][i],
-            team: Team::Monster,
-            hp: 7,
-            max_hp: 7,
-            ac: 48, // display AC 12
-            hit_bonus: 41,
-            dice_size: 6,
-            dice_count: 1,
-            damage_bonus: 0, // spear 1d6
-            reaction_adj: 0,
-        });
+    struct Stat {
+        name: &'static str,
+        team: Team,
+        hp: i32,
+        raw_ac: u8,
+        hit_bonus: i32,
+        movement: i32,
+        dice: (u8, u8, u8), // (count, size, bonus)
     }
+    let stat = |name, team, hp, raw_ac, hit_bonus, movement, dice| Stat {
+        name,
+        team,
+        hp,
+        raw_ac,
+        hit_bonus,
+        movement,
+        dice,
+    };
+    let stats = [
+        stat("Kethra", Team::Party, 26, 54, 45, 12, (1, 8, 2)), // longsword 1d8+2, disp AC 6
+        stat("Dolan", Team::Party, 22, 52, 44, 12, (1, 10, 1)), // bastard sword 1d10+1
+        stat("Sable", Team::Party, 18, 50, 43, 12, (1, 6, 3)),  // short sword 1d6+3
+        stat("Snik", Team::Monster, 7, 48, 41, 9, (1, 6, 0)),   // spear 1d6, disp AC 12
+        stat("Grub", Team::Monster, 7, 48, 41, 9, (1, 6, 0)),
+        stat("Yark", Team::Monster, 7, 48, 41, 9, (1, 6, 0)),
+        stat("Mool", Team::Monster, 7, 48, 41, 9, (1, 6, 0)),
+        stat("Zeth", Team::Monster, 7, 48, 41, 9, (1, 6, 0)),
+    ];
+    let names: Vec<&str> = stats.iter().map(|s| s.name).collect();
+
+    // Place both teams on open floor (party facing north, goblins one tile ahead —
+    // `encounter_distance` must stay small enough that the iso diamond fits the
+    // 50×25 field, §11; a larger value pushes a team off-map).
+    let mut map = CombatMap::uniform(0x17);
+    let placement_inputs: Vec<PlacementInput> = stats
+        .iter()
+        .map(|s| PlacementInput {
+            team: s.team,
+            size: 1,
+            in_combat: true,
+        })
+        .collect();
+    let placements = place_combatants(&mut map, &placement_inputs, 0, 1, GridPos::new(0, 0), None);
+
+    let fighters: Vec<Fighter> = stats
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            Fighter::new_melee(
+                i,
+                s.team,
+                s.team == Team::Monster, // NPC = monster (draws the morale d100)
+                placements[i].pos,
+                s.hp,
+                s.raw_ac,
+                s.hit_bonus,
+                s.movement,
+                s.dice,
+                0, // delay — CalculateInitiative sets it each round
+                1, // attack1_left — one swing/round
+            )
+        })
+        .collect();
+    let mut world = CombatWorld::new(map, fighters);
 
     let seed = 0x0C0F_FEE0u32;
     let mut rng = EngineRng::new(seed);
 
-    let roster: Vec<Combatant> = fighters
-        .iter()
-        .map(|f| Combatant::new(f.id, f.team, f.reaction_adj, true))
-        .collect();
-    let mut state = CombatState::new(roster);
-
-    eprintln!("== A FIGHT ==  (seed {seed:#010x}; synthetic, D10-clean)");
-    eprintln!("Party:");
-    for f in fighters.iter().filter(|f| f.team == Team::Party) {
+    eprintln!("== A FIGHT ==  (seed {seed:#010x}; synthetic, D10-clean; the REAL melee AI)");
+    for (i, s) in stats.iter().enumerate() {
+        let p = world.fighters[i].pos;
         eprintln!(
-            "  {:<7} AC {:>2}  HP {:>2}  THAC0-hit +{}  {}d{}+{}",
-            f.name,
-            f.display_ac(),
-            f.hp,
-            f.hit_bonus,
-            f.dice_count,
-            f.dice_size,
-            f.damage_bonus
+            "  {:<6} {:<7} AC {:>2}  HP {:>2}  @({:>2},{:>2})",
+            if s.team == Team::Party {
+                "party"
+            } else {
+                "goblin"
+            },
+            s.name,
+            0x3C - s.raw_ac as i32,
+            s.hp,
+            p.x,
+            p.y,
         );
     }
-    eprintln!("Goblins:");
-    for f in fighters.iter().filter(|f| f.team == Team::Monster) {
-        eprintln!("  {:<7} AC {:>2}  HP {:>2}", f.name, f.display_ac(), f.hp);
-    }
 
-    /// The DEMO-ONLY target picker — first living enemy of the opposite team,
-    /// zero draws. NOT faithful AI (see the fn doc).
-    fn first_living_enemy(fighters: &[DemoFighter], team: Team) -> Option<usize> {
-        fighters.iter().position(|f| f.team != team && f.alive())
-    }
-
-    fn side_alive(fighters: &[DemoFighter], team: Team) -> bool {
-        fighters.iter().any(|f| f.team == team && f.alive())
-    }
-
-    let victor = loop {
-        match state.step(&mut rng) {
-            CombatStep::RoundStarted { round } => {
-                eprintln!("\n── Round {} ──", round + 1);
-                // Initiative values this round (the slice-1 d6 + reaction, clamped).
-                let inits: Vec<String> = state
-                    .roster()
-                    .iter()
-                    .filter(|c| fighters[c.id].alive())
-                    .map(|c| format!("{}={}", fighters[c.id].name, c.delay))
-                    .collect();
-                eprintln!("   initiative: {}", inits.join("  "));
-            }
-            CombatStep::Turn { combatant_id } => {
-                let attacker_idx = combatant_id; // id == roster index
-                if !fighters[attacker_idx].alive() {
-                    continue; // a downed combatant still gets picked; skip its turn
-                }
-                let team = fighters[attacker_idx].team;
-                let Some(target_idx) = first_living_enemy(&fighters, team) else {
-                    continue; // no enemies left; the round-end check ends it
-                };
-
-                let (name, prof) = {
-                    let a = &fighters[attacker_idx];
-                    (
-                        a.name,
-                        AttackProfile {
-                            attacker_id: a.id,
-                            target_id: fighters[target_idx].id,
-                            target_ac: fighters[target_idx].ac,
-                            hit_bonus: a.hit_bonus,
-                            team_bonus: 0,
-                            dice_size: a.dice_size,
-                            dice_count: a.dice_count,
-                            damage_bonus: a.damage_bonus,
-                            backstab: None,
-                        },
-                    )
-                };
-                let target_name = fighters[target_idx].name;
-                let hp_before = fighters[target_idx].hp;
-
-                let out = resolve_attack(&mut rng, prof, None);
-
-                if let Some(dmg) = out.damage {
-                    fighters[target_idx].hp -= dmg.amount;
-                    let hp_after = fighters[target_idx].hp.max(0);
-                    let dead = fighters[target_idx].hp <= 0;
-                    eprintln!(
-                        "   {name} → {target_name}: d20 {:>2}  HIT for {:>2}  ({target_name} {hp_before}→{hp_after}){}",
-                        out.to_hit.d20,
-                        dmg.amount,
-                        if dead { "  ✝ DOWN" } else { "" }
-                    );
-                } else {
-                    eprintln!("   {name} → {target_name}: d20 {:>2}  miss", out.to_hit.d20);
-                }
-
-                if !side_alive(&fighters, Team::Party) {
-                    break Team::Monster;
-                }
-                if !side_alive(&fighters, Team::Monster) {
-                    break Team::Party;
-                }
-            }
-            CombatStep::RoundEnded { battle_over, .. } => {
-                let alive: Vec<&str> = fighters
-                    .iter()
-                    .filter(|f| f.team == Team::Party && f.alive())
-                    .map(|f| f.name)
-                    .collect();
-                let foes = fighters
-                    .iter()
-                    .filter(|f| f.team == Team::Monster && f.alive())
-                    .count();
-                eprintln!(
-                    "   end of round: party [{}], {foes} goblin(s) left",
-                    alive.join(", ")
-                );
-                if battle_over {
-                    // The stalemate cap (15 rounds) — neither side finished.
-                    break if side_alive(&fighters, Team::Party) {
-                        Team::Party
-                    } else {
-                        Team::Monster
-                    };
-                }
-            }
-            CombatStep::Ended => {
-                break if side_alive(&fighters, Team::Party) {
-                    Team::Party
-                } else {
-                    Team::Monster
-                };
-            }
-        }
-    };
+    let outcome = world.run_combat_observed(&mut rng, DEFAULT_NO_ACTION_LIMIT, |w, round| {
+        let living: Vec<String> = w
+            .fighters
+            .iter()
+            .filter(|f| f.in_combat)
+            .map(|f| format!("{} {}hp", names[f.id], f.hp_current))
+            .collect();
+        eprintln!("── after round {} ──  {}", round + 1, living.join("  "));
+    });
 
     eprintln!(
-        "\n== VICTOR: {} ==",
-        match victor {
-            Team::Party => "the party",
-            Team::Monster => "the goblins",
+        "\n== OUTCOME: {} ==",
+        match outcome {
+            CombatOutcome::PartyWins => "the party stands",
+            CombatOutcome::MonstersWin => "the goblins win",
+            CombatOutcome::Stalemate => "stalemate (round cap reached)",
         }
     );
-    for f in fighters.iter().filter(|f| f.team == Team::Party) {
+    for (i, s) in stats.iter().enumerate() {
+        let f = &world.fighters[i];
         eprintln!(
             "  {:<7} {}",
-            f.name,
-            if f.alive() {
-                format!("HP {}/{}", f.hp, f.max_hp)
+            s.name,
+            if f.in_combat {
+                format!("HP {}/{}", f.hp_current, f.hp_max)
             } else {
                 "DOWN".to_string()
             }
         );
     }
 
-    // The demo is a demonstration, not a parity artifact — the only invariant it
-    // asserts is that a fight runs to a decision.
+    // The only invariant: the real AI actually fought (someone took damage) — the
+    // outcome itself is the seed's to determine, not the demo's to assert.
     assert!(
-        !side_alive(&fighters, Team::Party) || !side_alive(&fighters, Team::Monster),
-        "the fight resolved to one side standing"
+        world.fighters.iter().any(|f| f.hp_current < f.hp_max),
+        "the melee AI closed and traded blows"
     );
 }
 
