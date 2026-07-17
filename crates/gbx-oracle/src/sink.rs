@@ -290,7 +290,7 @@ mod tests {
             Combatant::new(1, Team::Party, 0, true),
             Combatant::new(2, Team::Monster, 0, true),
         ];
-        let mut state = CombatState::new(roster);
+        let mut state = CombatState::initiative_only(roster);
         state.attach_action_sink(collector.action_sink());
 
         // Drive exactly one round.

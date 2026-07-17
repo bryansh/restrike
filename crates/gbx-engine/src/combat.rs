@@ -71,52 +71,215 @@ pub enum Team {
     Monster = 1,
 }
 
-/// One combatant in the round: a stable roster id, a team tag, the (precomputed)
-/// DEX reaction adjustment the initiative roll adds, whether it acts this combat,
-/// and its live `delay` — the `Action.delay` initiative key (`Action@0x03`).
+/// One combatant in a fight — **the single, unified combatant record** (M4
+/// combat #5, model unification). Carries everything any slice of the engine
+/// reads: the initiative inputs (`team`, `reaction_adj`, `in_combat`, `delay`),
+/// the tactical state (`pos`, `facing`/`direction`, footprint `size`), the
+/// combat stats (`hp`, `ac`, `hit_bonus`, the readied melee attack profile), and
+/// the persistent per-combatant `Action` scratch the QuickFight AI mutates
+/// (`field_15`, `target`, morale flags). Before this slice the engine carried
+/// *two* records — a lightweight initiative-only `Combatant` and a rich
+/// `Fighter` — which is why the fields split into an initiative core and an
+/// AI/tactical remainder; the merge folds them onto one struct so the one
+/// tick-based engine ([`CombatState`]) works over one type.
 ///
-/// This slice carries the *derived combat inputs* the initiative loop needs
-/// rather than a full decoded record: initiative reads only `in_combat`, the DEX
-/// reaction adjustment, `team`, and `delay` (`ovr014.cs:29-52`). Real
-/// construction from a party `Player` / a `LoadedMonster` lands with the
-/// `COMBAT`-opcode wiring; the caller assembling the roster owns the records.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// **The former `Fighter` name is preserved as [`Fighter`] (a type alias)** so
+/// every audit-accepted slice-4 test and both demos keep constructing it by that
+/// name, byte-for-byte unchanged — the unification changed the *type*, not the
+/// call sites.
+///
+/// The lightweight initiative harness ([`CombatState::initiative_only`]) builds
+/// these with [`Combatant::new`] / [`Combatant::from_dex`], leaving the tactical
+/// fields at inert defaults (it never runs a real turn); a real fight builds them
+/// with [`Combatant::new_melee`]. Real construction from a party `Player` / a
+/// `LoadedMonster` lands with the `COMBAT`-opcode wiring; the caller assembling
+/// the roster owns the records.
+///
+/// **Scope:** a single **melee** attack profile (profile 1). The second attack
+/// form (`attack2_*` dice) and the `ThisRoundActionCount` 3/2 derivation of
+/// `attack{1,2}_left` are the initiative/`BattleSetup` concern (§3.1, FD-3) — the
+/// turn faithfully consumes whatever `attack1_left`/`attack2_left` the combatant
+/// carries (`attack2_left` defaults 0, so the `AttackTarget01` loop makes exactly
+/// `attack1_left` swings with the profile-1 dice).
+#[derive(Debug, Clone)]
 pub struct Combatant {
     /// Stable per-encounter roster index (the D-OR3 `combatant_id`).
     pub id: usize,
     /// Party or monster (`Player.combat_team`, `@0x18b`-ish runtime cell).
     pub team: Team,
+    /// `control_morale >= Control.NPC_Base` — an NPC/monster. **Only NPCs draw the
+    /// per-step morale-advance d100** (`moralFailureEscape:387`); PCs short-circuit
+    /// it. Also gates the `FleeCheck_001` morale block.
+    pub npc: bool,
+    /// Footprint size (`field_DE & 7`); combat uses 1 for single-cell combatants.
+    pub size: u8,
+    pub pos: GridPos,
+    /// `player.in_combat` (`ovr014.cs:29`): a not-in-combat combatant gets
+    /// `delay = 0` and rolls **no** d6; a killed combatant flips this false and is
+    /// excluded from target lists / occupancy.
+    pub in_combat: bool,
+    pub hp_current: i32,
+    pub hp_max: i32,
+    /// Raw on-disk AC (`Player.ac@0x19a`; display AC = `0x3C - ac`).
+    pub ac: u8,
+    /// `attacker.hitBonus@0x199` (THAC0-derived to-hit number).
+    pub hit_bonus: i32,
+    /// `HitDice` — `TrySweepAttack` only sweeps `HitDice == 0` targets.
+    pub hit_dice: u8,
+    /// Base movement (`player.movement`) → [`calc_moves`] at initiative.
+    pub movement: i32,
     /// `DexReactionAdj(player)` (`ovr025.cs:537`) — a table lookup, no draw —
     /// precomputed via `gbx-rules`' `Flavor::dex_reaction_bonus`. Range `-4..=5`.
     pub reaction_adj: i8,
-    /// `player.in_combat` (`ovr014.cs:29`): a not-in-combat combatant gets
-    /// `delay = 0` and rolls **no** d6.
-    pub in_combat: bool,
-    /// `action.delay` (`Action@0x03`) — the initiative/turn-order key. Reset each
-    /// round by [`CombatState`]; zeroed when the combatant's turn completes.
+    /// Base attack half-actions (`attacksCount@0x11c`) — `reclac_attacks`/
+    /// `ThisRoundActionCount` fold this into `attack1_left` each round (the 3/2
+    /// rule, §3.1). `2` = one attack per round.
+    pub attacks_count: u8,
+    // --- readied melee attack profile 1 ---
+    pub dice_count: u8,
+    pub dice_size: u8,
+    pub damage_bonus: u8,
+    // --- Action scratch (per-round / persistent) ---
+    /// `action.delay@0x03` — the initiative/turn-order key. Reset each round by
+    /// [`CombatState`]; zeroed when the combatant's turn completes.
     pub delay: i8,
+    /// `action.move@0x06` — half-move budget this round ([`calc_moves`]).
+    pub move_left: i32,
+    /// `attack1_AttacksLeft@0x19c` — profile-1 swings left this round.
+    pub attack1_left: u8,
+    /// `attack2_AttacksLeft@0x19d` — profile-2 swings (0 for single-form melee).
+    pub attack2_left: u8,
+    /// `action.attackIdx@0x04` — starts 2 (`CalculateInitiative`), the profile the
+    /// `AttackTarget01` loop counts down from.
+    pub attack_idx: u8,
+    /// `action.field_15@0x15` — the **persistent** target-mode scratch
+    /// ([`field_15_mode_gate`]); `Action.Clear` does NOT reset it.
+    pub field_15: u8,
+    /// `action.target@0x0A` — the current target roster index; persists across
+    /// turns (`Action.Clear` doesn't reset it) until invalidated.
+    pub target: Option<usize>,
+    pub moral_failure: bool,
+    pub fleeing: bool,
+    /// `action.guarding@0x07` — set by `TryGuarding`; consumed by opportunity
+    /// attacks (`move_step_into_attack`).
+    pub guarding: bool,
+    /// `action.can_use@0x02` — may use an item this round (set true at initiative);
+    /// the `sub_354AA` wand-scan guard.
+    pub can_use: bool,
+    /// `action.direction@0x09` — facing; set to the move heading by each step.
+    pub direction: u8,
+    /// `action.AttacksReceived@0x0F` — attacks taken since the last move.
+    pub attacks_received: u8,
 }
 
 impl Combatant {
-    /// A combatant with a directly-supplied reaction adjustment (the primitive
-    /// used by tests with hand-built rosters). Starts with `delay = 0`.
+    /// An **initiative-harness** combatant with a directly-supplied reaction
+    /// adjustment (the primitive [`CombatState::initiative_only`] and the D-OR3
+    /// oracle tests use with hand-built rosters). Initiative reads only
+    /// `in_combat`, `reaction_adj`, `team`, and `delay`; the tactical/AI fields are
+    /// left at inert defaults (`pos (0,0)`, no hp, `field_15 = 0`, no target) since
+    /// this construction never drives a real turn. Starts with `delay = 0`.
     pub fn new(id: usize, team: Team, reaction_adj: i8, in_combat: bool) -> Self {
         Combatant {
             id,
             team,
-            reaction_adj,
+            npc: false,
+            size: 1,
+            pos: GridPos::new(0, 0),
             in_combat,
+            hp_current: 0,
+            hp_max: 0,
+            ac: 0,
+            hit_bonus: 0,
+            hit_dice: 0,
+            movement: 0,
+            reaction_adj,
+            attacks_count: 0,
+            dice_count: 0,
+            dice_size: 0,
+            damage_bonus: 0,
             delay: 0,
+            move_left: 0,
+            attack1_left: 0,
+            attack2_left: 0,
+            attack_idx: 2,
+            field_15: 0,
+            target: None,
+            moral_failure: false,
+            fleeing: false,
+            guarding: false,
+            can_use: true,
+            direction: 0,
+            attacks_received: 0,
         }
     }
 
-    /// A combatant whose reaction adjustment is derived from its Dexterity
-    /// through the rules flavor (`DexReactionAdj`, `ovr025.cs:537` — the mapping
-    /// lives in `gbx-rules`, not hardcoded here). coab reads `stats2.Dex.full`.
+    /// An initiative-harness combatant whose reaction adjustment is derived from
+    /// its Dexterity through the rules flavor (`DexReactionAdj`, `ovr025.cs:537` —
+    /// the mapping lives in `gbx-rules`, not hardcoded here). coab reads
+    /// `stats2.Dex.full`.
     pub fn from_dex(id: usize, team: Team, dex: u8, in_combat: bool, flavor: &dyn Flavor) -> Self {
         Combatant::new(id, team, flavor.dex_reaction_bonus(dex) as i8, in_combat)
     }
+
+    /// A single-cell **melee** combatant with a fresh turn state (`delay`/
+    /// `move_left`/`attack1_left` supplied by the caller — normally from
+    /// initiative). `field_15` starts 0, `attack_idx` 2, `can_use` true, no target —
+    /// the `CalculateInitiative` reset state. This is the constructor a real fight
+    /// (and both demos) uses; the former `Fighter::new_melee`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_melee(
+        id: usize,
+        team: Team,
+        npc: bool,
+        pos: GridPos,
+        hp: i32,
+        ac: u8,
+        hit_bonus: i32,
+        movement: i32,
+        dice: (u8, u8, u8),
+        delay: i8,
+        attack1_left: u8,
+    ) -> Self {
+        Combatant {
+            id,
+            team,
+            npc,
+            size: 1,
+            pos,
+            in_combat: true,
+            hp_current: hp,
+            hp_max: hp,
+            ac,
+            hit_bonus,
+            hit_dice: 1,
+            movement,
+            reaction_adj: 0,
+            attacks_count: 2,
+            dice_count: dice.0,
+            dice_size: dice.1,
+            damage_bonus: dice.2,
+            delay,
+            move_left: calc_moves(movement),
+            attack1_left,
+            attack2_left: 0,
+            attack_idx: 2,
+            field_15: 0,
+            target: None,
+            moral_failure: false,
+            fleeing: false,
+            guarding: false,
+            can_use: true,
+            direction: 0,
+            attacks_received: 0,
+        }
+    }
 }
+
+/// **`Fighter` is the former name of the now-unified [`Combatant`].** Kept as a
+/// type alias so the audit-accepted slice-4 tests and both demos construct the
+/// record by the name they always used, unchanged by the merge.
+pub type Fighter = Combatant;
 
 /// A combat-action-profile event (D-OR3 `action` profile; study §9, pinned this
 /// session for the initiative slice). Engine-local plain data emitted through
@@ -257,6 +420,26 @@ enum Phase {
     Ended,
 }
 
+/// How the `Turn` phase of [`CombatState::step`] resolves the acting combatant's
+/// turn — the faithful "turn dispatcher" `MainCombatLoop` runs (`ovr009.cs:59`):
+/// coab dispatches each picked combatant to a turn handler (the interactive
+/// player menu, `DoPlayerCombatTurn`, or the QuickFight AI). This engine models
+/// two of those:
+///
+/// - **`MeleeAi`** — the real `PlayerQuickFight` melee turn ([`CombatState::melee_ai_turn`]),
+///   drawing the turn's dice. A full fight ([`CombatState::new`]).
+/// - **`Stub`** — a zero-draw turn that just zeroes the picked combatant's `delay`
+///   so it isn't re-picked. This exposes the initiative/selection subsystem in
+///   isolation — the cleanest possible parity target (study §2/§14) — and is what
+///   [`CombatState::initiative_only`] configures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TurnDriver {
+    /// Zero-draw turn (initiative/selection harness).
+    Stub,
+    /// The `PlayerQuickFight` melee AI turn.
+    MeleeAi,
+}
+
 /// The round loop's state (`MainCombatLoop`, `ovr009.cs:22`): the roster (in
 /// `TeamList` order — draw order depends on iteration order, so this ordering is
 /// load-bearing), the round counter, the stalemate cap, and the per-round
@@ -264,8 +447,13 @@ enum Phase {
 /// tick-based skeleton.
 pub struct CombatState {
     /// `gbl.TeamList` (`Classes/Gbl.cs:496`) — party then monsters, iteration
-    /// order preserved.
-    roster: Vec<Combatant>,
+    /// order preserved. (The former `CombatWorld.fighters`; draw order depends on
+    /// this ordering, so it is load-bearing.)
+    pub fighters: Vec<Combatant>,
+    /// The combat battlefield: terrain + occupancy (`SetupGroundTiles` →
+    /// `PlaceCombatants`, §11). The [`initiative_only`](CombatState::initiative_only)
+    /// harness leaves this an all-void placeholder (initiative never reads it).
+    pub map: CombatMap,
     /// `gbl.combat_round` (`Classes/Gbl.cs:382` = `byte_1D8B7`); `++` in
     /// `BattleRoundChecks` (`ovr009.cs:366`). Held as `u16`; the byte never
     /// overflows because the fight ends at `no_action_limit` (15).
@@ -280,25 +468,75 @@ pub struct CombatState {
     surprise_mask: u8,
     /// The tick machine's position.
     phase: Phase,
+    /// How the `Turn` phase resolves — the QuickFight AI or the zero-draw stub.
+    turn: TurnDriver,
     /// 0-based `FindNextCombatant` pass index within the current round.
     pass: u32,
+    /// `area_ptr.can_cast_spells` — **`false` in a normal area = casting allowed**
+    /// (inverted-name field; §4.1.1). `false` ⇒ the `sub_354AA` wand-scan d7 fires.
+    pub area_can_cast_spells: bool,
+    /// `gbl.enemyHealthPercentage` — the morale/advance input (0..100).
+    pub enemy_health_pct: i32,
+    /// `gbl.monster_morale` scratch (set by `FleeCheck_001`).
+    pub monster_morale: i32,
+    /// `area2.field_58C` — a morale threshold (default 0).
+    pub area_field_58c: i32,
+    /// `gbl.mapDirection` — the party's world facing, read only by the flee-move
+    /// direction (`moralFailureEscape:401`).
+    pub map_direction: u8,
     /// The optional action-trace observer (D-OR3). `None` in normal play.
     sink: Option<Box<dyn ActionSink>>,
 }
 
 impl CombatState {
-    /// Enters combat with a caller-provided roster (party then monsters, in
-    /// `TeamList` order). `combat_round` starts at 0 (`BattleSetup`,
-    /// `ovr011.cs:1170`); the stalemate cap defaults to
-    /// [`DEFAULT_NO_ACTION_LIMIT`].
-    pub fn new(roster: Vec<Combatant>) -> Self {
-        CombatState {
-            roster,
+    /// Enters a **full fight** over a battlefield (`map`) and a caller-provided
+    /// roster (`fighters`, party then monsters in `TeamList` order). The `Turn`
+    /// phase drives the real `PlayerQuickFight` melee AI ([`TurnDriver::MeleeAi`]).
+    /// `combat_round` starts at 0 (`BattleSetup`, `ovr011.cs:1170`); the stalemate
+    /// cap defaults to [`DEFAULT_NO_ACTION_LIMIT`]. Occupancy is painted from the
+    /// initial placements. This is the former `CombatWorld::new`.
+    pub fn new(map: CombatMap, fighters: Vec<Combatant>) -> Self {
+        let mut s = CombatState {
+            fighters,
+            map,
             combat_round: 0,
             no_action_limit: DEFAULT_NO_ACTION_LIMIT,
             surprise_mask: 0,
             phase: Phase::RoundStart,
+            turn: TurnDriver::MeleeAi,
             pass: 0,
+            area_can_cast_spells: false,
+            enemy_health_pct: 100,
+            monster_morale: 0,
+            area_field_58c: 0,
+            map_direction: 0,
+            sink: None,
+        };
+        s.rebuild_occupancy();
+        s
+    }
+
+    /// Enters the **initiative/selection harness** over a caller-provided roster —
+    /// the `Turn` phase is the zero-draw stub ([`TurnDriver::Stub`]), so the draw
+    /// stream is pure initiative + selection, the cleanest parity target (study
+    /// §2/§14). No battlefield is needed (initiative never reads the map), so an
+    /// all-void placeholder map is used. This is the former one-argument
+    /// `CombatState::new(roster)`.
+    pub fn initiative_only(roster: Vec<Combatant>) -> Self {
+        CombatState {
+            fighters: roster,
+            map: CombatMap::uniform(0),
+            combat_round: 0,
+            no_action_limit: DEFAULT_NO_ACTION_LIMIT,
+            surprise_mask: 0,
+            phase: Phase::RoundStart,
+            turn: TurnDriver::Stub,
+            pass: 0,
+            area_can_cast_spells: false,
+            enemy_health_pct: 100,
+            monster_morale: 0,
+            area_field_58c: 0,
+            map_direction: 0,
             sink: None,
         }
     }
@@ -328,13 +566,18 @@ impl CombatState {
         self.combat_round
     }
 
-    /// The roster in iteration order (read-only; draw order depends on it).
+    /// The roster in iteration order (read-only; draw order depends on it). An
+    /// accessor alias for the public [`fighters`](Self::fighters) field.
     pub fn roster(&self) -> &[Combatant] {
-        &self.roster
+        &self.fighters
     }
 
     /// Advances combat by one tick and returns what happened (D8: control
-    /// returns each step). See [`CombatStep`].
+    /// returns each step). The `Turn` phase resolves the acting combatant's whole
+    /// turn *inside* this call (via the [`TurnDriver`]), so a headless caller can
+    /// drive an entire fight with `while state.step(rng) != CombatStep::Ended {}`
+    /// — that is exactly what [`run_combat`](Self::run_combat) is. See
+    /// [`CombatStep`].
     pub fn step(&mut self, rng: &mut EngineRng) -> CombatStep {
         match self.phase {
             Phase::Ended => CombatStep::Ended,
@@ -343,21 +586,28 @@ impl CombatState {
         }
     }
 
-    /// `MainCombatLoop`'s per-round head (`ovr009.cs:37-44`): count teams, roll
-    /// initiative over the whole roster, then clear the surprise mask.
+    /// `MainCombatLoop`'s per-round head (`ovr009.cs:29-44`): the emptiness guard,
+    /// `calc_enemy_health_percentage` (draw-free, the morale input), initiative
+    /// over the whole roster, then clear the surprise mask.
     fn begin_round(&mut self, rng: &mut EngineRng) -> CombatStep {
         // CountCombatTeamMembers + the pre-loop / round-top emptiness guard
-        // (ovr009.cs:29-33). With no death model the counts are static, so this
-        // only ever short-circuits a roster missing a whole side.
-        let (friends, foe) = self.team_counts();
-        if friends == 0 || foe == 0 {
+        // (ovr009.cs:29-33). Counts LIVE (in_combat) members — with a real death
+        // model this ends the fight when a side is wiped; with no deaths (the
+        // stub harness) live == all, so it reduces to the whole-roster count.
+        let (party, monsters) = self.live_counts();
+        if party == 0 || monsters == 0 {
             self.phase = Phase::Ended;
             return CombatStep::Ended;
         }
 
-        // Initiative: foreach player in TeamList → CalculateInitiative.
-        for i in 0..self.roster.len() {
-            self.calculate_initiative(i, rng);
+        // calc_enemy_health_percentage (ovr014.cs:1674) — draw-free; the morale/
+        // advance input read by the AI turn.
+        self.recompute_enemy_health();
+
+        // Initiative: foreach player in TeamList → CalculateInitiative (one d6 per
+        // in-combat member, roster order).
+        for i in 0..self.fighters.len() {
+            self.calculate_initiative(rng, i, self.combat_round, self.surprise_mask);
         }
 
         // ovr009.cs:44 — clear the per-round surprise mask AFTER initiative read
@@ -370,64 +620,26 @@ impl CombatState {
         }
     }
 
-    /// `CalculateInitiative(player)` (`ovr014.cs:8`) reduced to its draw-bearing
-    /// core: one d6 + DEX reaction adjustment, clamp-to-1, team `-6`, then
-    /// out-of-range → 0. (The attack/movement recalculation `CalculateInitiative`
-    /// also does is RNG-free — study §3 — and out of scope for this slice.)
-    fn calculate_initiative(&mut self, i: usize, rng: &mut EngineRng) {
-        let Combatant {
-            id,
-            team,
-            reaction_adj,
-            in_combat,
-            ..
-        } = self.roster[i];
-
-        let (delay, surprise) = if in_combat {
-            // action.delay = (sbyte)(roll_dice(6,1) + DexReactionAdj(player))
-            let d6 = roll_dice(rng, 6, 1) as i32;
-            let mut delay = d6 + reaction_adj as i32;
-            // if (action.delay < 1) action.delay = 1;   ← BEFORE the -6
-            if delay < 1 {
-                delay = 1;
-            }
-            // if (((combat_team+1) & area2_ptr.field_596) != 0) action.delay -= 6;
-            let surprise = ((team as i32 + 1) & self.surprise_mask as i32) != 0;
-            if surprise {
-                delay -= 6;
-            }
-            // if (action.delay < 0 || action.delay > 20) action.delay = 0;
-            if !(0..=20).contains(&delay) {
-                delay = 0;
-            }
-            (delay as i8, surprise)
-        } else {
-            (0, false)
-        };
-
-        self.roster[i].delay = delay;
-        self.emit(ActionEvent::Init {
-            combatant_id: id,
-            delay,
-            dex_adj: reaction_adj,
-            surprise,
-        });
-    }
-
     /// One `FindNextCombatant` pass (`ovr009.cs:63-99`): roll one d100 per roster
-    /// member, pick per the two-`if` tie-break, and either yield the pick (its
-    /// turn) or — on the terminating empty pass (`max_delay == 0`) — run
-    /// `BattleRoundChecks`. The terminating pass **still draws its K d100s**
-    /// (study §14 landmine 1) before ending the round.
+    /// member, pick per the two-`if` tie-break, and either take the pick's turn or
+    /// — on the terminating empty pass (`max_delay == 0`) — run `BattleRoundChecks`.
+    /// The terminating pass **still draws its K d100s** (study §14 landmine 1)
+    /// before ending the round.
+    ///
+    /// The turn itself resolves here, via the [`TurnDriver`]: `Stub` zeroes the
+    /// picked combatant's `delay` with **zero draws**; `MeleeAi` runs the real
+    /// `PlayerQuickFight` turn ([`melee_ai_turn`](Self::melee_ai_turn)), whose
+    /// dice follow the K d100 of this pass — the exact order `MainCombatLoop`'s
+    /// `while (FindNextCombatant) DoTurn` produced.
     fn select_or_end(&mut self, rng: &mut EngineRng) -> CombatStep {
         // One d100 per roster member, EVERY pass (dead/zero-delay members
         // included). Draw first, into roster order, so the seam sees exactly K
         // draws for this pass.
-        let rolls: Vec<u16> = (0..self.roster.len())
+        let rolls: Vec<u16> = (0..self.fighters.len())
             .map(|_| roll_dice(rng, 100, 1))
             .collect();
 
-        let delays: Vec<i8> = self.roster.iter().map(|c| c.delay).collect();
+        let delays: Vec<i8> = self.fighters.iter().map(|c| c.delay).collect();
         let picked = select_combatant(&delays, &rolls);
 
         let pass = self.pass;
@@ -435,22 +647,41 @@ impl CombatState {
 
         match picked {
             Some((idx, roll)) => {
-                let id = self.roster[idx].id;
-                let delay = self.roster[idx].delay;
+                let id = self.fighters[idx].id;
+                let delay = self.fighters[idx].delay;
                 self.emit(ActionEvent::Pick {
                     pass,
                     combatant_id: id,
                     delay,
                     roll,
                 });
-                // Turn slot (stub): DoPlayerCombatTurn eventually sets
-                // action.delay = 0 (ovr010.cs:521 etc.). With no real turn yet we
-                // zero it immediately, consuming ZERO draws — so it is not
-                // re-picked and the draw stream stays pure initiative.
-                self.roster[idx].delay = 0;
+                self.take_turn(rng, idx);
                 CombatStep::Turn { combatant_id: id }
             }
             None => self.battle_round_checks(),
+        }
+    }
+
+    /// Resolve the picked combatant's turn per the active [`TurnDriver`] — the
+    /// dispatch `MainCombatLoop`'s `while (FindNextCombatant) { … }` body performs
+    /// (`ovr009.cs:59-95`).
+    fn take_turn(&mut self, rng: &mut EngineRng, idx: usize) {
+        match self.turn {
+            // Zero-draw stub: DoPlayerCombatTurn eventually sets action.delay = 0
+            // (ovr010.cs:521 etc.). The harness zeroes it immediately, consuming
+            // ZERO draws, so it is not re-picked and the stream stays pure
+            // initiative/selection.
+            TurnDriver::Stub => self.fighters[idx].delay = 0,
+            // The real melee AI turn. coab's guard: only a live, un-delayed
+            // combatant acts; otherwise clear_actions (draw-free) drops it so it
+            // isn't re-picked (`run_combat_observed`'s old `if in_combat && delay>0`).
+            TurnDriver::MeleeAi => {
+                if self.fighters[idx].in_combat && self.fighters[idx].delay > 0 {
+                    self.melee_ai_turn(rng, idx);
+                } else {
+                    self.clear_actions(idx);
+                }
+            }
         }
     }
 
@@ -460,8 +691,8 @@ impl CombatState {
     /// systems not in this slice.
     fn battle_round_checks(&mut self) -> CombatStep {
         self.combat_round += 1; // ovr009.cs:366 — the byte_1D8B7 increment
-        let (friends, foe) = self.team_counts();
-        let battle_over = friends == 0 || foe == 0 || self.combat_round >= self.no_action_limit;
+        let (party, monsters) = self.live_counts();
+        let battle_over = party == 0 || monsters == 0 || self.combat_round >= self.no_action_limit;
         let round = self.combat_round;
         self.phase = if battle_over {
             Phase::Ended
@@ -471,19 +702,19 @@ impl CombatState {
         CombatStep::RoundEnded { round, battle_over }
     }
 
-    /// `CountCombatTeamMembers` (`ovr025.cs:1268`) → `(friends_count, foe_count)`.
-    /// No death model in this slice, so every roster member counts toward its
-    /// team.
-    fn team_counts(&self) -> (usize, usize) {
-        let mut friends = 0;
-        let mut foe = 0;
-        for c in &self.roster {
-            match c.team {
-                Team::Party => friends += 1,
-                Team::Monster => foe += 1,
-            }
+    /// The fight's decision from the live team counts — `PartyWins` if the
+    /// monsters are gone (checked first, as `MainCombatLoop` does), `MonstersWin`
+    /// if the party is gone, else `Stalemate`. Read by [`run_combat`](Self::run_combat)
+    /// once the tick loop ends.
+    fn outcome(&self) -> CombatOutcome {
+        let (party, monsters) = self.live_counts();
+        if monsters == 0 {
+            CombatOutcome::PartyWins
+        } else if party == 0 {
+            CombatOutcome::MonstersWin
+        } else {
+            CombatOutcome::Stalemate
         }
-        (friends, foe)
     }
 
     fn emit(&mut self, event: ActionEvent) {
@@ -2105,200 +2336,19 @@ const DATA_2B8: [[i32; 6]; 11] = [
     [2, 2, 0, 4, 4, 4],
 ];
 
-/// One combatant as the melee AI drives it — the `Player`/`Action` fields the turn
-/// reads and writes. Richer than the initiative-only [`Combatant`]: it carries the
-/// position, hit points, the readied melee attack profile, and the persistent
-/// per-combatant `Action` scratch (`field_15`, `target`, morale flags) the turn
-/// mutates. Constructed by the encounter-setup slice (deferred); tests build it
-/// directly.
-///
-/// **Scope:** a single **melee** attack profile (profile 1). The second attack
-/// form (`attack2_*` dice) and the `ThisRoundActionCount` 3/2 derivation of
-/// `attack{1,2}_left` are the initiative/`BattleSetup` concern (§3.1, FD-3) — the
-/// turn faithfully consumes whatever `attack1_left`/`attack2_left` the fighter
-/// carries (`attack2_left` defaults 0, so the `AttackTarget01` loop makes exactly
-/// `attack1_left` swings with the profile-1 dice).
-#[derive(Debug, Clone)]
-pub struct Fighter {
-    pub id: usize,
-    pub team: Team,
-    /// `control_morale >= Control.NPC_Base` — an NPC/monster. **Only NPCs draw the
-    /// per-step morale-advance d100** (`moralFailureEscape:387`); PCs short-circuit
-    /// it. Also gates the `FleeCheck_001` morale block.
-    pub npc: bool,
-    /// Footprint size (`field_DE & 7`); combat uses 1 for single-cell combatants.
-    pub size: u8,
-    pub pos: GridPos,
-    /// Alive and fighting (`player.in_combat`); a killed combatant flips this false
-    /// and is excluded from target lists / occupancy.
-    pub in_combat: bool,
-    pub hp_current: i32,
-    pub hp_max: i32,
-    /// Raw on-disk AC (`Player.ac@0x19a`; display AC = `0x3C - ac`).
-    pub ac: u8,
-    /// `attacker.hitBonus@0x199` (THAC0-derived to-hit number).
-    pub hit_bonus: i32,
-    /// `HitDice` — `TrySweepAttack` only sweeps `HitDice == 0` targets.
-    pub hit_dice: u8,
-    /// Base movement (`player.movement`) → [`calc_moves`] at initiative.
-    pub movement: i32,
-    pub reaction_adj: i8,
-    /// Base attack half-actions (`attacksCount@0x11c`) — `reclac_attacks`/
-    /// `ThisRoundActionCount` fold this into `attack1_left` each round (the 3/2
-    /// rule, §3.1). `2` = one attack per round.
-    pub attacks_count: u8,
-    // --- readied melee attack profile 1 ---
-    pub dice_count: u8,
-    pub dice_size: u8,
-    pub damage_bonus: u8,
-    // --- Action scratch (per-round / persistent) ---
-    /// `action.delay@0x03` — the initiative key; zeroed when the turn completes.
-    pub delay: i8,
-    /// `action.move@0x06` — half-move budget this round ([`calc_moves`]).
-    pub move_left: i32,
-    /// `attack1_AttacksLeft@0x19c` — profile-1 swings left this round.
-    pub attack1_left: u8,
-    /// `attack2_AttacksLeft@0x19d` — profile-2 swings (0 for single-form melee).
-    pub attack2_left: u8,
-    /// `action.attackIdx@0x04` — starts 2 (`CalculateInitiative`), the profile the
-    /// `AttackTarget01` loop counts down from.
-    pub attack_idx: u8,
-    /// `action.field_15@0x15` — the **persistent** target-mode scratch
-    /// ([`field_15_mode_gate`]); `Action.Clear` does NOT reset it.
-    pub field_15: u8,
-    /// `action.target@0x0A` — the current target roster index; persists across
-    /// turns (`Action.Clear` doesn't reset it) until invalidated.
-    pub target: Option<usize>,
-    pub moral_failure: bool,
-    pub fleeing: bool,
-    /// `action.guarding@0x07` — set by `TryGuarding`; consumed by opportunity
-    /// attacks (`move_step_into_attack`).
-    pub guarding: bool,
-    /// `action.can_use@0x02` — may use an item this round (set true at initiative);
-    /// the `sub_354AA` wand-scan guard.
-    pub can_use: bool,
-    /// `action.direction@0x09` — facing; set to the move heading by each step.
-    pub direction: u8,
-    /// `action.AttacksReceived@0x0F` — attacks taken since the last move.
-    pub attacks_received: u8,
-}
+/// **`CombatWorld` is the former name of the now-unified [`CombatState`].** Kept
+/// as a type alias so the audit-accepted slice-4 tests and both demos build the
+/// fight by the name they always used, unchanged by the merge. `CombatWorld::new`
+/// resolves to [`CombatState::new`] — the `(map, fighters)` full-fight constructor.
+pub type CombatWorld = CombatState;
 
-impl Fighter {
-    /// A single-cell melee combatant with a fresh turn state (`delay`/`move_left`/
-    /// `attack1_left` supplied by the caller — normally from initiative). `field_15`
-    /// starts 0, `attack_idx` 2, `can_use` true, no target — the `CalculateInitiative`
-    /// reset state.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_melee(
-        id: usize,
-        team: Team,
-        npc: bool,
-        pos: GridPos,
-        hp: i32,
-        ac: u8,
-        hit_bonus: i32,
-        movement: i32,
-        dice: (u8, u8, u8),
-        delay: i8,
-        attack1_left: u8,
-    ) -> Self {
-        Fighter {
-            id,
-            team,
-            npc,
-            size: 1,
-            pos,
-            in_combat: true,
-            hp_current: hp,
-            hp_max: hp,
-            ac,
-            hit_bonus,
-            hit_dice: 1,
-            movement,
-            reaction_adj: 0,
-            attacks_count: 2,
-            dice_count: dice.0,
-            dice_size: dice.1,
-            damage_bonus: dice.2,
-            delay,
-            move_left: calc_moves(movement),
-            attack1_left,
-            attack2_left: 0,
-            attack_idx: 2,
-            field_15: 0,
-            target: None,
-            moral_failure: false,
-            fleeing: false,
-            guarding: false,
-            can_use: true,
-            direction: 0,
-            attacks_received: 0,
-        }
-    }
-}
-
-/// The mutable battlefield the melee AI turn operates on: the terrain map, the
-/// roster of [`Fighter`]s (index = roster id, matching `player_array[i+1]`
-/// 1-based occupancy), and the combat-area scalars the AI reads (the normal-area
-/// `can_cast_spells` flag, the morale inputs). Positions, hit points, and Action
-/// scratch mutate as the turn runs.
-///
-/// Carries an optional [`ActionSink`] (D-OR3): when attached, the turn emits the
-/// `ai`/`morale`/`move` action events (§9) alongside the draw stream. `None` in
-/// normal play (a single `Option::is_some` branch per emit).
-pub struct CombatWorld {
-    pub map: CombatMap,
-    pub fighters: Vec<Fighter>,
-    /// `area_ptr.can_cast_spells` — **`false` in a normal area = casting allowed**
-    /// (inverted-name field; §4.1.1). `false` ⇒ the `sub_354AA` wand-scan d7 fires.
-    pub area_can_cast_spells: bool,
-    /// `gbl.enemyHealthPercentage` — the morale/advance input (0..100).
-    pub enemy_health_pct: i32,
-    /// `gbl.monster_morale` scratch (set by `FleeCheck_001`).
-    pub monster_morale: i32,
-    /// `area2.field_58C` — a morale threshold (default 0).
-    pub area_field_58c: i32,
-    /// `gbl.mapDirection` — the party's world facing, read only by the flee-move
-    /// direction (`moralFailureEscape:401`).
-    pub map_direction: u8,
-    /// Optional action-trace observer (D-OR3). `None` in normal play.
-    sink: Option<Box<dyn ActionSink>>,
-}
-
-impl CombatWorld {
-    /// A world over an explicit map and roster (normal area: casting allowed).
-    pub fn new(map: CombatMap, fighters: Vec<Fighter>) -> Self {
-        let mut w = CombatWorld {
-            map,
-            fighters,
-            area_can_cast_spells: false,
-            enemy_health_pct: 100,
-            monster_morale: 0,
-            area_field_58c: 0,
-            map_direction: 0,
-            sink: None,
-        };
-        w.rebuild_occupancy();
-        w
-    }
-
-    /// Attaches an action-trace observer (D-OR3); returns any prior one.
-    pub fn attach_action_sink(&mut self, sink: Box<dyn ActionSink>) -> Option<Box<dyn ActionSink>> {
-        self.sink.replace(sink)
-    }
-
-    /// Detaches and returns the current observer.
-    pub fn take_action_sink(&mut self) -> Option<Box<dyn ActionSink>> {
-        self.sink.take()
-    }
-
-    /// Emit an action event if an observer is attached (inert otherwise).
-    fn emit_action(&mut self, event: ActionEvent) {
-        if let Some(s) = self.sink.as_mut() {
-            s.on_action(event);
-        }
-    }
-
+// The melee-AI turn and the round loop, on the one unified `CombatState`. These
+// were the former `CombatWorld` methods; the model merge moved them onto the
+// single state type. `new(map, fighters)`, the `sink` field, `attach_action_sink`/
+// `take_action_sink`, and `emit` already live on the `CombatState` impl above (the
+// former `CombatWorld::new`/`emit_action` were duplicates and were dropped), so
+// they are not repeated here.
+impl CombatState {
     /// The range layer's view of the roster (`size = 0` for the dead, so they drop
     /// out of target lists — matching coab's `combatantMap.size > 0` gate).
     fn range_combatants(&self) -> Vec<RangeCombatant> {
@@ -2649,7 +2699,7 @@ impl CombatWorld {
         }
         self.fighters[actor].pos = new;
         self.rebuild_occupancy();
-        self.emit_action(ActionEvent::Move {
+        self.emit(ActionEvent::Move {
             combatant_id: actor,
             from_x: old.x,
             from_y: old.y,
@@ -2776,7 +2826,7 @@ impl CombatWorld {
             self.enemy_health_pct <= morale_roll as i32 + self.monster_morale
                 || self.fighters[actor].team == Team::Monster
         };
-        self.emit_action(ActionEvent::Morale {
+        self.emit(ActionEvent::Morale {
             combatant_id: actor,
             monster_morale: self.monster_morale,
             enemy_hp_pct: self.enemy_health_pct,
@@ -3055,7 +3105,7 @@ impl CombatWorld {
         }
 
         // The turn's `ai` action event (§9): its resolved mode + target.
-        self.emit_action(ActionEvent::Ai {
+        self.emit(ActionEvent::Ai {
             combatant_id: actor,
             field_15: self.fighters[actor].field_15,
             target_id: self.fighters[actor].target.map(|t| t as i64).unwrap_or(-1),
@@ -3112,90 +3162,95 @@ impl CombatWorld {
         round: u16,
         surprise_mask: u8,
     ) {
-        let f = &mut self.fighters[i];
-        f.can_use = true;
-        f.attack_idx = 2;
-        f.guarding = false;
-        f.attack1_left = this_round_action_count(f.attacks_count as i32, round) as u8;
-        f.attack2_left = 0;
-        f.move_left = calc_moves(f.movement);
-        if f.in_combat {
+        // The draw-free Action reset (can_use, attack_idx = 2, guarding = false,
+        // the 3/2 attack count, the move budget). Scoped so its &mut borrow ends
+        // before the d6 draw and the Init emit.
+        let in_combat = {
+            let f = &mut self.fighters[i];
+            f.can_use = true;
+            f.attack_idx = 2;
+            f.guarding = false;
+            f.attack1_left = this_round_action_count(f.attacks_count as i32, round) as u8;
+            f.attack2_left = 0;
+            f.move_left = calc_moves(f.movement);
+            f.in_combat
+        };
+
+        let team = self.fighters[i].team;
+        let reaction_adj = self.fighters[i].reaction_adj;
+        let (delay, surprise) = if in_combat {
+            // action.delay = (sbyte)(roll_dice(6,1) + DexReactionAdj(player))
             let d6 = roll_dice(rng, 6, 1) as i32;
-            let mut delay = d6 + f.reaction_adj as i32;
+            let mut delay = d6 + reaction_adj as i32;
+            // if (action.delay < 1) action.delay = 1;   ← BEFORE the -6
             if delay < 1 {
                 delay = 1;
             }
-            if ((f.team as i32 + 1) & surprise_mask as i32) != 0 {
+            // if (((combat_team+1) & area2_ptr.field_596) != 0) action.delay -= 6;
+            let surprise = ((team as i32 + 1) & surprise_mask as i32) != 0;
+            if surprise {
                 delay -= 6;
             }
+            // if (action.delay < 0 || action.delay > 20) action.delay = 0;
             if !(0..=20).contains(&delay) {
                 delay = 0;
             }
-            f.delay = delay as i8;
+            (delay as i8, surprise)
         } else {
-            f.delay = 0;
-        }
+            (0, false)
+        };
+
+        let id = self.fighters[i].id;
+        self.fighters[i].delay = delay;
+        self.emit(ActionEvent::Init {
+            combatant_id: id,
+            delay,
+            dex_adj: reaction_adj,
+            surprise,
+        });
     }
 
-    /// One `FindNextCombatant` pass (`ovr009.cs:59`): roll one d100 per roster
-    /// member (every pass — the §14 landmine), then yield the highest-`delay`
-    /// member ([`select_combatant`]'s two-`if` tie-break). `None` ends the round
-    /// (after its K d100s are still drawn).
-    fn select_next(&mut self, rng: &mut EngineRng) -> Option<usize> {
-        let rolls: Vec<u16> = (0..self.fighters.len())
-            .map(|_| roll_dice(rng, 100, 1))
-            .collect();
-        let delays: Vec<i8> = self.fighters.iter().map(|f| f.delay).collect();
-        select_combatant(&delays, &rolls).map(|(idx, _)| idx)
-    }
-
-    /// `MainCombatLoop` (`ovr009.cs:22`): run whole rounds — count teams,
-    /// `CalculateInitiative` for everyone, then `FindNextCombatant → melee_ai_turn`
-    /// until the round's picks are exhausted — until one side is gone or the
-    /// stalemate cap. The complete all-AI fight; the draw stream is initiative d6s,
-    /// then d100 selection passes interleaved with each actor's turn draws (study
-    /// §2's per-round fingerprint). Returns the [`CombatOutcome`].
+    /// `MainCombatLoop` (`ovr009.cs:22`) as a **thin driver over
+    /// [`step`](Self::step)** (D8): pump the one tick machine to completion —
+    /// `while step(rng) != Ended {}` — then read the [`CombatOutcome`] from the live
+    /// team counts. The engine core is the tick machine; this is just the headless
+    /// caller that runs it start to finish, so the whole all-AI fight (initiative
+    /// d6s, then d100 selection passes interleaved with each actor's turn draws,
+    /// study §2) flows through the single `step` path — no separate blocking loop.
+    /// Returns the [`CombatOutcome`].
     pub fn run_combat(&mut self, rng: &mut EngineRng, max_rounds: u16) -> CombatOutcome {
         self.run_combat_observed(rng, max_rounds, |_, _| {})
     }
 
-    /// [`run_combat`](Self::run_combat) with a per-round observer — `on_round(world,
-    /// round)` fires after each round's turns resolve (before the next round's
-    /// initiative), for transcripts/rendering. Observation never touches the draw
-    /// stream.
-    pub fn run_combat_observed<F: FnMut(&CombatWorld, u16)>(
+    /// [`run_combat`](Self::run_combat) with a per-round observer — `on_round(state,
+    /// round)` fires after each round's turns resolve (when `step` reports the
+    /// round ended), for transcripts/rendering, with the 0-based round index.
+    /// Observation never touches the draw stream. This is the thin `step`-pumping
+    /// driver; `max_rounds` is applied as the stalemate cap.
+    pub fn run_combat_observed<F: FnMut(&CombatState, u16)>(
         &mut self,
         rng: &mut EngineRng,
         max_rounds: u16,
         mut on_round: F,
     ) -> CombatOutcome {
-        let mut round = 0u16;
+        self.no_action_limit = max_rounds;
         loop {
-            let (party, monsters) = self.live_counts();
-            if monsters == 0 {
-                return CombatOutcome::PartyWins;
-            }
-            if party == 0 {
-                return CombatOutcome::MonstersWin;
-            }
-            if round >= max_rounds {
-                return CombatOutcome::Stalemate;
-            }
-
-            self.recompute_enemy_health();
-            for i in 0..self.fighters.len() {
-                self.calculate_initiative(rng, i, round, 0);
-            }
-            while let Some(i) = self.select_next(rng) {
-                if self.fighters[i].in_combat && self.fighters[i].delay > 0 {
-                    self.melee_ai_turn(rng, i);
-                } else {
-                    self.clear_actions(i);
+            match self.step(rng) {
+                CombatStep::RoundEnded { round, battle_over } => {
+                    // `round` is post-increment (1-based); the observer wants the
+                    // 0-based index the old MainCombatLoop passed. A `round` of 0 is
+                    // impossible here (battle_round_checks incremented it), so the
+                    // subtraction never underflows.
+                    on_round(self, round - 1);
+                    if battle_over {
+                        break;
+                    }
                 }
+                CombatStep::Ended => break,
+                _ => {}
             }
-            on_round(self, round);
-            round += 1;
         }
+        self.outcome()
     }
 }
 
@@ -3206,7 +3261,7 @@ pub fn this_round_action_count(half_actions: i32, round: u16) -> i32 {
     (half_actions + (round as i32 & 1)) / 2
 }
 
-/// The result of a full [`CombatWorld::run_combat`].
+/// The result of a full [`CombatState::run_combat`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CombatOutcome {
     /// The monster team was wiped out.
@@ -3354,7 +3409,7 @@ mod tests {
             Combatant::new(2, Team::Party, 0, false), // not in combat → no d6
             monster(3),                               // reaction 0
         ];
-        let mut state = CombatState::new(roster);
+        let mut state = CombatState::initiative_only(roster);
 
         let step = state.step(&mut rng);
         assert_eq!(step, CombatStep::RoundStarted { round: 0 });
@@ -3384,7 +3439,7 @@ mod tests {
 
         // Party is bit (0+1)=1 → surprise_mask bit 0 set. A monster is needed
         // for the fight to actually start (the emptiness guard).
-        let mut state = CombatState::new(vec![party(0, -3), monster(9)]).with_surprise_mask(0b01);
+        let mut state = CombatState::initiative_only(vec![party(0, -3), monster(9)]).with_surprise_mask(0b01);
         state.attach_action_sink(actions.sink());
         state.step(&mut rng);
 
@@ -3437,7 +3492,7 @@ mod tests {
             roster.push(monster(id));
         }
         assert_eq!(roster.len(), 16);
-        let mut state = CombatState::new(roster);
+        let mut state = CombatState::initiative_only(roster);
 
         // RoundStarted step: 16 d6 (all in combat).
         let mut before = log.len();
@@ -3480,7 +3535,7 @@ mod tests {
 
         let roster = vec![party(0, 0), party(1, 0), monster(2), monster(3)];
         let k = roster.len();
-        let mut state = CombatState::new(roster);
+        let mut state = CombatState::initiative_only(roster);
 
         let mut turns = 0;
         loop {
@@ -3507,7 +3562,7 @@ mod tests {
         let mut rng = EngineRng::new(SEED);
         let actions = ActionLog::default();
         let roster = vec![party(0, 0), party(1, 0), monster(2)];
-        let mut state = CombatState::new(roster);
+        let mut state = CombatState::initiative_only(roster);
         state.attach_action_sink(actions.sink());
 
         let mut picks = Vec::new();
@@ -3555,7 +3610,7 @@ mod tests {
     fn combat_terminates_at_the_stalemate_cap() {
         // Nobody dies in the stub, so the only terminator is combat_round >= 15.
         let mut rng = EngineRng::new(SEED);
-        let mut state = CombatState::new(vec![party(0, 0), monster(1)]);
+        let mut state = CombatState::initiative_only(vec![party(0, 0), monster(1)]);
 
         let mut rounds_ended = 0;
         let final_step = loop {
@@ -3583,7 +3638,7 @@ mod tests {
         let mut rng = EngineRng::new(SEED);
         rng.attach_sink(log.sink());
         // No monsters → no fight.
-        let mut state = CombatState::new(vec![party(0, 0), party(1, 0)]);
+        let mut state = CombatState::initiative_only(vec![party(0, 0), party(1, 0)]);
         assert_eq!(state.step(&mut rng), CombatStep::Ended);
         assert_eq!(log.len(), 0, "the emptiness guard draws nothing");
     }
@@ -4786,6 +4841,114 @@ mod tests {
             assert_eq!(Some(p.random(d.n.unwrap())), d.result, "draw {i} result");
             assert_eq!(d.after, p.state(), "draw {i} after");
         }
+    }
+
+    #[test]
+    fn run_combat_driver_matches_raw_step_pumping_draw_for_draw() {
+        // Deliverable 3b — the model-unification proof: `run_combat` is now a THIN
+        // DRIVER over `step()`, so the tick machine alone must produce the ENTIRE
+        // fight. Drive one fight via `run_combat` and an identical one by pumping
+        // `step()` straight to `Ended` (a bare `while step() != Ended {}`), and
+        // assert the two whole-fight draw streams are byte-identical and the final
+        // combatant state matches — the merge added nothing and hid nothing. (This
+        // is the "whole-fight draw stream identical whether driven by the driver or
+        // the raw tick loop" assertion the brief asks for.)
+        fn build() -> CombatState {
+            CombatState::new(
+                CombatMap::uniform(FLOOR),
+                vec![
+                    Fighter::new_melee(
+                        0,
+                        Team::Party,
+                        false,
+                        GridPos::new(25, 14),
+                        8,
+                        5,
+                        20,
+                        12,
+                        (1, 6, 2),
+                        0,
+                        1,
+                    ),
+                    Fighter::new_melee(
+                        1,
+                        Team::Party,
+                        false,
+                        GridPos::new(26, 14),
+                        8,
+                        5,
+                        20,
+                        12,
+                        (1, 6, 2),
+                        0,
+                        1,
+                    ),
+                    Fighter::new_melee(
+                        2,
+                        Team::Monster,
+                        true,
+                        GridPos::new(25, 12),
+                        8,
+                        5,
+                        20,
+                        12,
+                        (1, 6, 2),
+                        0,
+                        1,
+                    ),
+                    Fighter::new_melee(
+                        3,
+                        Team::Monster,
+                        true,
+                        GridPos::new(26, 12),
+                        8,
+                        5,
+                        20,
+                        12,
+                        (1, 6, 2),
+                        0,
+                        1,
+                    ),
+                ],
+            )
+        }
+
+        // Path A: the run_combat driver.
+        let log_a = DrawLog::default();
+        let mut rng_a = EngineRng::new(SEED);
+        rng_a.attach_sink(log_a.sink());
+        let mut a = build();
+        a.run_combat(&mut rng_a, DEFAULT_NO_ACTION_LIMIT);
+
+        // Path B: pump step() directly to Ended (a headless `while step() != Ended`).
+        // `new` already defaulted no_action_limit to DEFAULT_NO_ACTION_LIMIT — the
+        // same cap run_combat applied — so the two fights share every parameter.
+        let log_b = DrawLog::default();
+        let mut rng_b = EngineRng::new(SEED);
+        rng_b.attach_sink(log_b.sink());
+        let mut b = build();
+        while b.step(&mut rng_b) != CombatStep::Ended {}
+
+        let draws_a = log_a.draws.borrow().clone();
+        let draws_b = log_b.draws.borrow().clone();
+        assert!(!draws_a.is_empty(), "the fight drew from the PRNG");
+        assert_eq!(
+            draws_a, draws_b,
+            "run_combat and raw step() pumping draw the exact same whole-fight stream"
+        );
+
+        // …and reach the exact same fight (final HP + alive flags across the roster).
+        let final_a: Vec<(i32, bool)> = a
+            .fighters
+            .iter()
+            .map(|f| (f.hp_current, f.in_combat))
+            .collect();
+        let final_b: Vec<(i32, bool)> = b
+            .fighters
+            .iter()
+            .map(|f| (f.hp_current, f.in_combat))
+            .collect();
+        assert_eq!(final_a, final_b, "identical final combatant state");
     }
 
     #[test]

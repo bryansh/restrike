@@ -251,7 +251,7 @@ pub struct MoveEvent {
 }
 
 /// An `action`-profile `ai` event (D-OR3; `combat-study.md` §9, pinned by the
-/// melee-AI slice — `gbx-engine`'s `combat::CombatWorld::melee_ai_turn`). Emitted
+/// melee-AI slice — `gbx-engine`'s `combat::CombatState::melee_ai_turn`). Emitted
 /// once per melee AI turn, after its target is resolved.
 ///
 /// Field order **is** the canonical on-disk order: `combatant_id`, `field_15`,
