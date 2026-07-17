@@ -1320,6 +1320,7 @@ version = "0.1.0"
 dependencies = [
  "gbx-engine",
  "gbx-prng",
+ "gbx-rules",
  "serde",
  "serde_json",
  "sha2",

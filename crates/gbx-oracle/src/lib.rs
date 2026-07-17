@@ -30,6 +30,7 @@ pub mod sink;
 
 pub use compare::{check_chain, compare, ChainBreak, Comparison, Divergence, Incomparable};
 pub use format::{
-    InitEvent, ParseError, PickEvent, Profile, RngEvent, Trace, TraceEvent, TraceHeader,
+    CombatEntryCombatant, CombatEntryEvent, InitEvent, ParseError, PickEvent, Profile, RngEvent,
+    Trace, TraceEvent, TraceHeader,
 };
 pub use sink::TraceCollector;

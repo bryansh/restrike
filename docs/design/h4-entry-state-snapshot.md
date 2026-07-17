@@ -130,3 +130,57 @@ against the original for a real encounter. Leaves for later (each already
 scoped): faithful wilderness terrain (draw-bearing), spell/ranged/item/backstab
 effects (M5), XP/treasure (`AfterCombatExpAndTreasure`), and then the graphical
 combat renderer (the visible payoff, safe to build once H4 proves the logic).
+
+## 9. Result (implemented 2026-07-17 — the first live replay)
+
+The snapshot was captured (`~/goldbox-data/traces/h4-combat-barbrawl-2026-07-17.gbxtrace`,
+D10 local-only) and replayed. Structure realized as planned: one `combat_entry`
+event (`rng_state` + 16 combatants in `TeamList` order, each `team`/`x`/`y`/0x1A6
+record) then the fight's 3,162-draw `rng` stream. The encounter is a **Tilverton
+bar brawl** — 6 party (MATHEW/MARK/TRAVIS/LEDERA/SHARA/PHILIPPE, unarmed 1d2+STR
+fists, hd 4–5) vs **10 identical BAR PATRONs** (16 HP, hd 2, morale 0x80 = NPC,
+1d6 fists). A pure melee fight, exactly the melee-only target §7 asked for.
+
+**Built (this session):**
+- **Reader** (`gbx-oracle::format`): the `combat_entry` event — typed struct with
+  hex-decoded `[u8;0x1A6]` records; the comparator + chain-check **ignore it**
+  (it is replay input, not a draw). Synthetic CI tests.
+- **Replay harness** (`gbx-engine::combat::combat_state_from_records`): decodes
+  each record and builds a `CombatState` in the captured order at the captured
+  positions (no `PlaceCombatants`), seeded from `rng_state`. The record→combat
+  field mapping is documented on `combatant_from_record` (hp/ac/`hitBonus@0x199`/
+  attack-1 dice/`DexReactionAdj(full DEX)`/`attacksCount@0x11c`/hd). Synthetic CI
+  test.
+- **Differential milestone** (`gbx-oracle/tests/h4_replay.rs`, local-tier, gated
+  on `GBX_DATA_DIR`/`GBX_H4_CAPTURE` so plain `cargo test` skips it): runs our
+  engine to `Ended` with an `RngSink` and compares draw-for-draw on `(before,
+  after)`.
+
+**Outcome — 2,995 / 3,162 draws match bit-exactly (94.7%), then a tail
+divergence — H4 melee is NOT yet fully closed.** Our stream is an *exact prefix*
+of the capture's for 2,995 draws (every `before` **and** `after` identical), so
+the RNG seam, multi-round initiative, `FindNextCombatant` selection, to-hit,
+damage, saving-throw and QuickFight-AI-turn draw *structure*, and morale-draw
+*timing* are all validated across ~9 rounds of a real 16-combatant fight. That is
+the oracle effort paying off.
+
+**The divergence is a *length* difference at the very end, not a wrong roll:**
+our fight ends (`PartyWins`) at draw 2995 — our per-round monster survivors go
+10→10→8→8→7→6→3→3→1→0 (rounds 0–9) — while the capture continues **167 more
+draws** into a further round. The first missing capture draw (#2995) is a
+QuickFight-AI **d7**, and the tail contains a fresh **7-combatant** (6 party + 1
+monster) initiative d6 burst: **the original keeps its last BAR PATRON alive and
+acting for ~1 more round than we do.** Because every draw up to that point
+matched (identical rolls, identical damage) and all records enter at `hpC == hpM`
+(so HP-entry mapping is *not* the cause), this is a **draw-free combat-tail
+decision**: our engine removes/finishes the final low-morale NPC one round early.
+
+Leading hypothesis (for the next session — do **not** fix in the harness):
+end-of-fight **morale/flee handling** (`FleeCheck_001` / `moralFailureEscape`) —
+a BAR PATRON is a low-morale NPC (0x80) and combat #4 explicitly stubbed the
+`Surrenders`/flee-removal branch ("a morale-failing NPC flees rather than
+surrenders here"). The original likely keeps a fled/surrendering patron in combat
+(still taking turns) where our stub removes it (→ `monsters == 0` → `PartyWins`).
+Alternative: a death/removal-threshold or opportunity-attack application detail.
+The harness re-verifies draw-for-draw the moment that tail is corrected — a clean
+`H4 MELEE CLOSED: N draws matched` line replaces the finding.

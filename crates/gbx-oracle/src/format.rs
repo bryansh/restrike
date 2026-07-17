@@ -109,6 +109,13 @@ pub enum TraceEvent {
     /// `morale` (`action` profile) — one per morale/advance decision, bracketing
     /// its 0-or-1 `random(100)`.
     Morale(MoraleEvent),
+    /// `combat_entry` — the **combat entry-state snapshot** (D-OR5(b), H4): the
+    /// seed + full roster (team/position/0x1A6 record) captured live at the moment
+    /// a fight begins. It is the replay **input**, not a draw: the comparator and
+    /// the chain-continuity check both **ignore** it (it carries no PRNG state and
+    /// must never count as an event mismatch). A capture emits exactly one, ahead
+    /// of the fight's `rng` stream.
+    CombatEntry(CombatEntryEvent),
 }
 
 /// A `prng`-profile draw event (D-OR3): `{"e":"rng","before":u32,"after":u32}`
@@ -282,6 +289,113 @@ pub struct MoraleEvent {
     pub failed: u8,
 }
 
+/// The byte length of one combat record — a full `Player`/monster record
+/// (`0x1A6` = 422 bytes). Named here so the `.gbxtrace` format layer stays
+/// self-describing (it deliberately does not depend on `gbx-formats`); the
+/// engine-side decoder validates the same length independently.
+pub const COMBAT_RECORD_LEN: usize = 0x1A6;
+
+/// The `combat_entry` snapshot event (D-OR5(b), H4): the replay seed plus the
+/// full combat roster captured live at fight start. **Input, not a draw** — the
+/// [`crate::compare`] comparator and chain-check both skip it (see the
+/// [`TraceEvent::CombatEntry`] doc).
+///
+/// `rng_state` is the seed the replay pokes into `gbx-prng`; it equals the
+/// `before` of the first following `rng` event (chain-continuous across the
+/// snapshot). `combatants` is in `TeamList` order — party then monsters — which
+/// **is** the initiative draw order, so the harness must preserve it verbatim.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CombatEntryEvent {
+    /// The replay seed (`DS:0x47F0` at combat entry) == the first following draw's
+    /// `before`.
+    pub rng_state: u32,
+    /// The roster in `TeamList` (== initiative draw) order.
+    pub combatants: Vec<CombatEntryCombatant>,
+}
+
+/// One combatant in a [`CombatEntryEvent`]: its team, grid position, and the
+/// raw `0x1A6` record bytes (a full `Player`/monster record). The record is
+/// carried as a `2·0x1A6`-char lowercase-hex string on the wire (integers-only /
+/// byte-hashable canonical encoding, D-OR3) and decoded to a fixed array by the
+/// reader. **Real record bytes are local-only (D10)** — a `combat_entry` line
+/// never lands in the repo/CI; only synthetic records exercise this in CI.
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CombatEntryCombatant {
+    /// `0` = party (`CombatTeam.Ours`), `1` = monsters (`CombatTeam.Enemy`).
+    pub team: u8,
+    pub x: u8,
+    pub y: u8,
+    /// The full `0x1A6` combat record, hex-encoded on the wire.
+    #[serde(with = "hex_record")]
+    pub record: [u8; COMBAT_RECORD_LEN],
+}
+
+impl fmt::Debug for CombatEntryCombatant {
+    /// Compact: the 422-byte record would swamp any diagnostic, so it is elided.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CombatEntryCombatant")
+            .field("team", &self.team)
+            .field("x", &self.x)
+            .field("y", &self.y)
+            .field("record", &format_args!("[{} bytes]", COMBAT_RECORD_LEN))
+            .finish()
+    }
+}
+
+/// Fixed-length-array hex serde for the combat record. Serializes to lowercase
+/// hex (canonical, deterministic); deserializes with a strict length + hex-digit
+/// check (a trace is tooling input — garbage is a loud, located error, D-OR3).
+mod hex_record {
+    use super::COMBAT_RECORD_LEN;
+    use serde::de::{Deserialize, Deserializer, Error as _};
+    use serde::Serializer;
+
+    pub fn serialize<S: Serializer>(
+        bytes: &[u8; COMBAT_RECORD_LEN],
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = String::with_capacity(COMBAT_RECORD_LEN * 2);
+        for &b in bytes.iter() {
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 0x0f) as usize] as char);
+        }
+        s.serialize_str(&out)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<[u8; COMBAT_RECORD_LEN], D::Error> {
+        let s = String::deserialize(d)?;
+        let want = COMBAT_RECORD_LEN * 2;
+        if s.len() != want {
+            return Err(D::Error::custom(format!(
+                "combat_entry record must be {want} hex chars ({COMBAT_RECORD_LEN} bytes), got {}",
+                s.len()
+            )));
+        }
+        let raw = s.as_bytes();
+        let mut out = [0u8; COMBAT_RECORD_LEN];
+        for (i, slot) in out.iter_mut().enumerate() {
+            let hi =
+                hex_digit(raw[2 * i]).ok_or_else(|| D::Error::custom("non-hex char in record"))?;
+            let lo = hex_digit(raw[2 * i + 1])
+                .ok_or_else(|| D::Error::custom("non-hex char in record"))?;
+            *slot = (hi << 4) | lo;
+        }
+        Ok(out)
+    }
+
+    fn hex_digit(c: u8) -> Option<u8> {
+        match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(c - b'a' + 10),
+            b'A'..=b'F' => Some(c - b'A' + 10),
+            _ => None,
+        }
+    }
+}
+
 /// A fully parsed trace: its header plus its events in file (draw) order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Trace {
@@ -385,7 +499,18 @@ impl Trace {
             | TraceEvent::Save(_)
             | TraceEvent::Move(_)
             | TraceEvent::Ai(_)
-            | TraceEvent::Morale(_) => None,
+            | TraceEvent::Morale(_)
+            | TraceEvent::CombatEntry(_) => None,
+        })
+    }
+
+    /// The single `combat_entry` snapshot, if the trace carries one (a live
+    /// combat capture does; a synthetic prng stream does not). The replay harness
+    /// reads its `rng_state` + roster to build the `CombatState`.
+    pub fn combat_entry(&self) -> Option<&CombatEntryEvent> {
+        self.events.iter().find_map(|e| match e {
+            TraceEvent::CombatEntry(c) => Some(c),
+            _ => None,
         })
     }
 
@@ -603,6 +728,81 @@ mod tests {
         assert_eq!(trace.rng_event_count(), 0);
         // Canonical round-trip is a fixed point.
         assert_eq!(Trace::parse(&trace.to_canonical_string()).unwrap(), trace);
+    }
+
+    /// D1: the `combat_entry` snapshot parses into a typed struct, round-trips
+    /// through the canonical form, and is **not** a draw (its record is
+    /// hex-decoded to the fixed 0x1A6 array). Synthetic records only (D10).
+    #[test]
+    fn combat_entry_parses_round_trips_and_is_not_a_draw() {
+        // Two synthetic records: byte i = i (mod 256) shifted, distinct per member.
+        let rec = |seed: u8| {
+            let mut r = [0u8; COMBAT_RECORD_LEN];
+            for (i, b) in r.iter_mut().enumerate() {
+                *b = (i as u8).wrapping_add(seed);
+            }
+            r
+        };
+        let event = TraceEvent::CombatEntry(CombatEntryEvent {
+            rng_state: 0xdead_beef,
+            combatants: vec![
+                CombatEntryCombatant {
+                    team: 0,
+                    x: 26,
+                    y: 12,
+                    record: rec(0),
+                },
+                CombatEntryCombatant {
+                    team: 1,
+                    x: 34,
+                    y: 13,
+                    record: rec(7),
+                },
+            ],
+        });
+
+        // Tag-first, `combat_entry`, records as 2·0x1A6 lowercase-hex chars.
+        let line = serde_json::to_string(&event).unwrap();
+        assert!(line.starts_with(r#"{"e":"combat_entry","rng_state":3735928559,"combatants":[{"team":0,"x":26,"y":12,"record":"00010203"#));
+        // The two records serialize to exactly 2·0x1A6 hex chars each.
+        assert_eq!(line.matches("\"record\":\"").count(), 2);
+
+        // The reader accepts it, decodes the array, and it is not a draw.
+        let header = serde_json::to_string(&TraceHeader {
+            encounter: "combat-entry-slice".to_string(),
+            ..sample_header()
+        })
+        .unwrap();
+        let text = format!("{header}\n{line}\n");
+        let trace = Trace::parse(&text).expect("combat_entry is an accepted event type");
+        assert_eq!(trace.events.len(), 1);
+        assert_eq!(trace.rng_event_count(), 0, "combat_entry is not a draw");
+        let ce = trace
+            .combat_entry()
+            .expect("combat_entry accessor finds it");
+        assert_eq!(ce.rng_state, 0xdead_beef);
+        assert_eq!(ce.combatants.len(), 2);
+        assert_eq!(ce.combatants[0].record, rec(0));
+        assert_eq!(ce.combatants[1].record, rec(7));
+        assert_eq!((ce.combatants[1].team, ce.combatants[1].x), (1, 34));
+
+        // Canonical round-trip is a fixed point.
+        assert_eq!(Trace::parse(&trace.to_canonical_string()).unwrap(), trace);
+    }
+
+    /// A `combat_entry` record of the wrong hex length is a loud, located error.
+    #[test]
+    fn combat_entry_wrong_record_length_is_a_located_error() {
+        let header = serde_json::to_string(&sample_header()).unwrap();
+        // A record with only 4 hex chars (2 bytes), not 0x1A6.
+        let text = format!(
+            "{header}\n{}\n",
+            r#"{"e":"combat_entry","rng_state":1,"combatants":[{"team":0,"x":1,"y":2,"record":"dead"}]}"#
+        );
+        match Trace::parse(&text) {
+            Err(ParseError::Event { line_no, .. }) => assert_eq!(line_no, 2),
+            other => panic!("expected a located event error, got {other:?}"),
+        }
     }
 
     #[test]

@@ -1,0 +1,318 @@
+//! **The H4 melee-closure milestone** (D-OR5(b)): replay a *live* combat
+//! entry-state capture through our engine and assert our PRNG draw stream equals
+//! the original's, **draw-for-draw**.
+//!
+//! This is the measurement, not a combat-mechanic fix. It seeds `gbx-prng` from
+//! the capture's `rng_state`, builds a `CombatState` from the captured roster
+//! (order + positions from the snapshot, records decoded by
+//! `gbx_engine::combat::combat_state_from_records`), runs the unified tick engine
+//! to `Ended` with an `RngSink`, and compares the resulting `(before, after)`
+//! draw stream to the capture's `rng` events.
+//!
+//! - **Full match** ⇒ H4 melee closes (a clear `H4 MELEE CLOSED` line + assert).
+//! - **Divergence** ⇒ the **first** divergent draw is printed in full (index,
+//!   both sides' `(before, after, operand)`, the draw before it, and the inferred
+//!   mechanic), and the test fails with that diagnostic. **We do not fix combat
+//!   here** — the divergence is the finding that scopes the next session.
+//!
+//! **D10:** the capture holds real character/monster record bytes and is
+//! **local-only** — never in the repo/CI. The test gates on its presence and
+//! loud-skips when absent, like every local-tier test.
+
+use std::path::{Path, PathBuf};
+
+use gbx_engine::combat::DEFAULT_NO_ACTION_LIMIT;
+use gbx_engine::combat::{combat_state_from_records, CombatMap, RecordCombatant, Team};
+use gbx_engine::rng::{EngineRng, RngDraw, RngSink};
+use gbx_oracle::Trace;
+use gbx_rules::adnd1::flavor_impl::Adnd1;
+use gbx_rules::pack::RuleSet;
+use std::cell::RefCell;
+use std::rc::Rc;
+
+/// The canonical local-only capture (D10). Overridable with `GBX_H4_CAPTURE`;
+/// otherwise the `~/goldbox-data/traces/` sibling of `GBX_DATA_DIR`.
+const CAPTURE_NAME: &str = "h4-combat-barbrawl-2026-07-17.gbxtrace";
+
+/// Resolve the capture path, or `None` when the **local tier is not active**.
+/// The local tier is active when either `GBX_H4_CAPTURE` (explicit override) or
+/// `GBX_DATA_DIR` (the project-wide local-data signal the demos gate on) is set —
+/// so a plain `cargo test` (the CI gate, neither var set) **skips** this
+/// milestone test exactly as it skips the `GBX_DATA_DIR` demos, keeping the gate
+/// green while the fight-tail divergence is an open finding (D10).
+fn capture_path() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("GBX_H4_CAPTURE") {
+        return Some(PathBuf::from(p));
+    }
+    // Only auto-discover the default path when the local tier is explicitly on.
+    std::env::var_os("GBX_DATA_DIR")?;
+    let home = std::env::var_os("HOME")?;
+    Some(
+        Path::new(&home)
+            .join("goldbox-data/traces")
+            .join(CAPTURE_NAME),
+    )
+}
+
+/// Open-floor combat map (`0x17` = passable floor, move_cost 1) — the same
+/// open-ground default the accepted `watch_a_real_data_fight` demo uses. The
+/// capture snapshots positions but not terrain (`SetupGroundTiles` ran before the
+/// capture window); this is the harness's one documented free variable.
+const FLOOR: u8 = 0x17;
+
+/// A draw tap recording every `(before, after, n)` at the engine seam.
+#[derive(Clone, Default)]
+struct DrawTap {
+    draws: Rc<RefCell<Vec<RngDraw>>>,
+}
+impl RngSink for DrawTap {
+    fn on_draw(&mut self, draw: RngDraw) {
+        self.draws.borrow_mut().push(draw);
+    }
+}
+
+/// The capture's combat draws: `(before, after, operand)` per `rng` event that
+/// appears **after** the `combat_entry` snapshot, in file order. `operand` is
+/// `ss_sp_words[3]` (the draw's `Random(n)` argument, diagnostic only) — an
+/// unknown field to the typed reader, so it is pulled from the raw JSON here.
+struct CaptureDraw {
+    before: u32,
+    after: u32,
+    operand: Option<u16>,
+}
+
+/// Pull the capture's post-`combat_entry` draws straight from the raw JSONL, so
+/// the diagnostic operand (`ss_sp_words[3]`) is available alongside
+/// `(before, after)`. Ordering matches the typed reader's event order.
+fn capture_combat_draws(text: &str) -> Vec<CaptureDraw> {
+    let mut out = Vec::new();
+    let mut seen_entry = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        match v.get("e").and_then(|e| e.as_str()) {
+            Some("combat_entry") => seen_entry = true,
+            Some("rng") if seen_entry => {
+                let before = v["before"].as_u64().unwrap() as u32;
+                let after = v["after"].as_u64().unwrap() as u32;
+                let operand = v
+                    .get("ss_sp_words")
+                    .and_then(|w| w.as_array())
+                    .and_then(|w| w.get(3))
+                    .and_then(|n| n.as_u64())
+                    .map(|n| n as u16);
+                out.push(CaptureDraw {
+                    before,
+                    after,
+                    operand,
+                });
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Infer which combat mechanic drew, from the `Random(n)` operand — the honest
+/// die tells the mechanic (§2/§4/§9 draw map).
+fn mechanic_for(operand: Option<u16>) -> &'static str {
+    match operand {
+        Some(6) => "initiative d6 (CalculateInitiative)",
+        Some(100) => "d100 (FindNextCombatant selection, or FleeCheck/advance morale)",
+        Some(20) => "d20 (to-hit PC_CanHitTarget, or a saving throw)",
+        Some(7) => "d7 (QuickFight AI mode-gate / wand-scan / spell-priority)",
+        Some(n) => match n {
+            0 => "random(0) edge draw",
+            _ => "damage die (weapon/monster attack dice)",
+        },
+        None => "unknown (operand not recorded)",
+    }
+}
+
+#[test]
+fn h4_melee_replays_the_bar_brawl_capture_draw_for_draw() {
+    let Some(path) = capture_path() else {
+        eprintln!("SKIPPED: no HOME/GBX_H4_CAPTURE to locate the H4 capture");
+        return;
+    };
+    if !path.exists() {
+        eprintln!(
+            "SKIPPED: local-tier H4 capture absent at {} \
+             (set GBX_H4_CAPTURE; real record bytes are local-only, D10)",
+            path.display()
+        );
+        return;
+    }
+
+    let text = std::fs::read_to_string(&path).expect("H4 capture must be readable");
+
+    // The reader extension (D1) parses the combat_entry snapshot + the rng stream.
+    let trace = Trace::parse(&text).expect("H4 capture parses");
+    let entry = trace
+        .combat_entry()
+        .expect("the capture carries a combat_entry snapshot");
+
+    // Build the replay roster in the captured order, at the captured positions.
+    let entries: Vec<RecordCombatant> = entry
+        .combatants
+        .iter()
+        .map(|c| RecordCombatant {
+            team: match c.team {
+                0 => Team::Party,
+                1 => Team::Monster,
+                other => panic!("combat_entry has an unknown team byte {other}"),
+            },
+            pos: gbx_engine::combat::GridPos::new(c.x as i32, c.y as i32),
+            record: &c.record,
+        })
+        .collect();
+
+    let n_combatants = entries.len();
+    let (party, monsters) = entries.iter().fold((0, 0), |(p, m), e| match e.team {
+        Team::Party => (p + 1, m),
+        Team::Monster => (p, m + 1),
+    });
+
+    let rules = RuleSet::load();
+    let flavor = Adnd1::new(&rules);
+    let mut state = combat_state_from_records(&entries, CombatMap::uniform(FLOOR), &flavor)
+        .expect("records decode");
+
+    // Seed gbx-prng with the snapshot's rng_state and tap every draw.
+    let tap = DrawTap::default();
+    let draws = tap.draws.clone();
+    let mut rng = EngineRng::new(entry.rng_state);
+    rng.attach_sink(Box::new(tap));
+
+    // Record the per-round survivor trajectory (draw-free observation) so a
+    // length divergence names the round our fight ended vs the capture's.
+    let mut rounds: Vec<(u16, usize, usize)> = Vec::new();
+    let outcome = state.run_combat_observed(&mut rng, DEFAULT_NO_ACTION_LIMIT, |s, r| {
+        let (p, m) =
+            s.roster()
+                .iter()
+                .filter(|f| f.in_combat)
+                .fold((0usize, 0usize), |(p, m), f| match f.team {
+                    Team::Party => (p + 1, m),
+                    Team::Monster => (p, m + 1),
+                });
+        rounds.push((r, p, m));
+    });
+
+    // The two draw streams.
+    let ours = draws.borrow();
+    let capture = capture_combat_draws(&text);
+
+    eprintln!(
+        "H4 replay: {n_combatants} combatants ({party} party, {monsters} monster), \
+         seed {:#010x}; our fight = {} draws ({:?}), capture = {} draws",
+        entry.rng_state,
+        ours.len(),
+        outcome,
+        capture.len()
+    );
+    eprintln!(
+        "  our per-round survivors (round: party/monsters at round end): {:?}",
+        rounds
+    );
+
+    // Draw-for-draw comparison over the equality surface (before, after).
+    let max = ours.len().max(capture.len());
+    for i in 0..max {
+        match (ours.get(i), capture.get(i)) {
+            (Some(o), Some(c)) => {
+                if o.before == c.before && o.after == c.after {
+                    continue;
+                }
+                // First divergence — print it in full and stop.
+                eprintln!("\n=== H4 REPLAY DIVERGENCE at draw #{i} ===");
+                if i > 0 {
+                    let po = &ours[i - 1];
+                    let pc = &capture[i - 1];
+                    eprintln!(
+                        "  draw #{} (context, matched): ours ({:#010x}->{:#010x}, n={:?}) | \
+                         capture ({:#010x}->{:#010x}, op={:?})",
+                        i - 1,
+                        po.before,
+                        po.after,
+                        po.n,
+                        pc.before,
+                        pc.after,
+                        pc.operand
+                    );
+                }
+                eprintln!(
+                    "  ours   : before={:#010x} after={:#010x} n={:?}",
+                    o.before, o.after, o.n
+                );
+                eprintln!(
+                    "  capture: before={:#010x} after={:#010x} op={:?}",
+                    c.before, c.after, c.operand
+                );
+                let which = if o.before != c.before {
+                    "before"
+                } else {
+                    "after"
+                };
+                eprintln!(
+                    "  field `{which}` differs; inferred mechanic (ours): {} | (capture): {}",
+                    mechanic_for(o.n),
+                    mechanic_for(c.operand)
+                );
+                eprintln!("  {}/{} draws matched before divergence.", i, max);
+                panic!(
+                    "H4 replay diverged at draw #{i} on `{which}`: \
+                     ours ({:#010x}->{:#010x}, n={:?}) vs capture ({:#010x}->{:#010x}, op={:?}); \
+                     inferred mechanic {} — this scopes the next fix session (do NOT fix combat in the harness).",
+                    o.before, o.after, o.n, c.before, c.after, c.operand, mechanic_for(c.operand)
+                );
+            }
+            (Some(o), None) => {
+                panic!(
+                    "H4 replay diverged at draw #{i} on `length`: our fight drew MORE \
+                     ({} draws) than the capture ({}). First extra draw: ({:#010x}->{:#010x}, n={:?}), \
+                     mechanic {}. {} draws matched.",
+                    ours.len(),
+                    capture.len(),
+                    o.before,
+                    o.after,
+                    o.n,
+                    mechanic_for(o.n),
+                    capture.len()
+                );
+            }
+            (None, Some(c)) => {
+                panic!(
+                    "H4 replay diverged at draw #{i} on `length`: our fight ENDED EARLY \
+                     ({} draws) vs the capture ({}). First missing capture draw: ({:#010x}->{:#010x}, op={:?}), \
+                     mechanic {}. {} draws matched.",
+                    ours.len(),
+                    capture.len(),
+                    c.before,
+                    c.after,
+                    c.operand,
+                    mechanic_for(c.operand),
+                    ours.len()
+                );
+            }
+            (None, None) => unreachable!("i < max(len)"),
+        }
+    }
+
+    // Every draw matched and the lengths are equal — H4 melee closes.
+    eprintln!(
+        "\nH4 MELEE CLOSED: {} draws matched draw-for-draw against the live bar-brawl capture.",
+        ours.len()
+    );
+    assert_eq!(
+        ours.len(),
+        capture.len(),
+        "full draw-stream equality (checked above; this pins the count)"
+    );
+}
