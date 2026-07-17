@@ -2108,6 +2108,10 @@ pub struct Fighter {
     /// Base movement (`player.movement`) → [`calc_moves`] at initiative.
     pub movement: i32,
     pub reaction_adj: i8,
+    /// Base attack half-actions (`attacksCount@0x11c`) — `reclac_attacks`/
+    /// `ThisRoundActionCount` fold this into `attack1_left` each round (the 3/2
+    /// rule, §3.1). `2` = one attack per round.
+    pub attacks_count: u8,
     // --- readied melee attack profile 1 ---
     pub dice_count: u8,
     pub dice_size: u8,
@@ -2177,6 +2181,7 @@ impl Fighter {
             hit_dice: 1,
             movement,
             reaction_adj: 0,
+            attacks_count: 2,
             dice_count: dice.0,
             dice_size: dice.1,
             damage_bonus: dice.2,
@@ -2970,6 +2975,146 @@ impl CombatWorld {
             }
         }
     }
+
+    // --- the round loop (MainCombatLoop, ovr009.cs:22) ---------------------
+
+    /// `(live party, live monsters)`.
+    fn live_counts(&self) -> (usize, usize) {
+        let mut party = 0;
+        let mut monsters = 0;
+        for f in &self.fighters {
+            if f.in_combat {
+                match f.team {
+                    Team::Party => party += 1,
+                    Team::Monster => monsters += 1,
+                }
+            }
+        }
+        (party, monsters)
+    }
+
+    /// `calc_enemy_health_percentage` (`ovr014.cs:1674`): `((20·ΣcurHP)/ΣmaxHP)·5`
+    /// over the live **monster** team — the morale/advance input. Draw-free.
+    fn recompute_enemy_health(&mut self) {
+        let (mut cur, mut max) = (0i32, 0i32);
+        for f in &self.fighters {
+            if f.team == Team::Monster && f.in_combat {
+                cur += f.hp_current;
+                max += f.hp_max;
+            }
+        }
+        self.enemy_health_pct = if max > 0 {
+            (((20 * cur) / max) * 5).clamp(0, 100)
+        } else {
+            0
+        };
+    }
+
+    /// `CalculateInitiative(i)` (`ovr014.cs:8`) on the rich model: reset the Action
+    /// (`can_use`, `attack_idx = 2`, `guarding = false`), refresh the per-round
+    /// attack count and move budget, and roll `delay = clamp(d6 + reaction_adj)`
+    /// with the surprise `-6`. One d6 per in-combat fighter — the exact initiative
+    /// draw of the audit-accepted [`CombatState`] slice.
+    ///
+    /// (`attack2_left` is kept 0 — the profile-2/movement-half-action semantics of
+    /// coab's `attack2_AttacksLeft = ThisRoundActionCount(baseHalfMoves)` are the
+    /// unresolved FD-3 question, so a single melee profile is used; flagged.)
+    fn calculate_initiative(
+        &mut self,
+        rng: &mut EngineRng,
+        i: usize,
+        round: u16,
+        surprise_mask: u8,
+    ) {
+        let f = &mut self.fighters[i];
+        f.can_use = true;
+        f.attack_idx = 2;
+        f.guarding = false;
+        f.attack1_left = this_round_action_count(f.attacks_count as i32, round) as u8;
+        f.attack2_left = 0;
+        f.move_left = calc_moves(f.movement);
+        if f.in_combat {
+            let d6 = roll_dice(rng, 6, 1) as i32;
+            let mut delay = d6 + f.reaction_adj as i32;
+            if delay < 1 {
+                delay = 1;
+            }
+            if ((f.team as i32 + 1) & surprise_mask as i32) != 0 {
+                delay -= 6;
+            }
+            if !(0..=20).contains(&delay) {
+                delay = 0;
+            }
+            f.delay = delay as i8;
+        } else {
+            f.delay = 0;
+        }
+    }
+
+    /// One `FindNextCombatant` pass (`ovr009.cs:59`): roll one d100 per roster
+    /// member (every pass — the §14 landmine), then yield the highest-`delay`
+    /// member ([`select_combatant`]'s two-`if` tie-break). `None` ends the round
+    /// (after its K d100s are still drawn).
+    fn select_next(&mut self, rng: &mut EngineRng) -> Option<usize> {
+        let rolls: Vec<u16> = (0..self.fighters.len())
+            .map(|_| roll_dice(rng, 100, 1))
+            .collect();
+        let delays: Vec<i8> = self.fighters.iter().map(|f| f.delay).collect();
+        select_combatant(&delays, &rolls).map(|(idx, _)| idx)
+    }
+
+    /// `MainCombatLoop` (`ovr009.cs:22`): run whole rounds — count teams,
+    /// `CalculateInitiative` for everyone, then `FindNextCombatant → melee_ai_turn`
+    /// until the round's picks are exhausted — until one side is gone or the
+    /// stalemate cap. The complete all-AI fight; the draw stream is initiative d6s,
+    /// then d100 selection passes interleaved with each actor's turn draws (study
+    /// §2's per-round fingerprint). Returns the [`CombatOutcome`].
+    pub fn run_combat(&mut self, rng: &mut EngineRng, max_rounds: u16) -> CombatOutcome {
+        let mut round = 0u16;
+        loop {
+            let (party, monsters) = self.live_counts();
+            if monsters == 0 {
+                return CombatOutcome::PartyWins;
+            }
+            if party == 0 {
+                return CombatOutcome::MonstersWin;
+            }
+            if round >= max_rounds {
+                return CombatOutcome::Stalemate;
+            }
+
+            self.recompute_enemy_health();
+            for i in 0..self.fighters.len() {
+                self.calculate_initiative(rng, i, round, 0);
+            }
+            while let Some(i) = self.select_next(rng) {
+                if self.fighters[i].in_combat && self.fighters[i].delay > 0 {
+                    self.melee_ai_turn(rng, i);
+                } else {
+                    self.clear_actions(i);
+                }
+            }
+            round += 1;
+        }
+    }
+}
+
+/// `ThisRoundActionCount` (`ovr014.cs:519`): `(halfActions + oddRound) / 2` — the
+/// AD&D 3/2-attacks rule folded into a `combat_round`-parity test (§3.1). Odd
+/// rounds get the `+1`.
+pub fn this_round_action_count(half_actions: i32, round: u16) -> i32 {
+    (half_actions + (round as i32 & 1)) / 2
+}
+
+/// The result of a full [`CombatWorld::run_combat`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CombatOutcome {
+    /// The monster team was wiped out.
+    PartyWins,
+    /// The party was wiped out.
+    MonstersWin,
+    /// Neither side could finish the other within the stalemate cap.
+    Stalemate,
 }
 
 #[cfg(test)]
@@ -4433,6 +4578,113 @@ mod tests {
                 p.state(),
                 "draw {i}: after-state matches the replay"
             );
+        }
+    }
+
+    #[test]
+    fn run_combat_full_round_loop_is_a_parity_artifact() {
+        // The real all-AI round loop (initiative → FindNextCombatant → melee turns):
+        // a 2v2 fight run to a decision. Deterministic, terminating, Prng-consistent,
+        // and it opens with the round-loop fingerprint — one initiative d6 per
+        // combatant before any d100 selection (study §2).
+        fn run(seed: u32) -> (Vec<RngDraw>, CombatOutcome, [bool; 4]) {
+            let log = DrawLog::default();
+            let mut rng = EngineRng::new(seed);
+            rng.attach_sink(log.sink());
+            let mut world = CombatWorld::new(
+                CombatMap::uniform(FLOOR),
+                vec![
+                    Fighter::new_melee(
+                        0,
+                        Team::Party,
+                        false,
+                        GridPos::new(25, 14),
+                        8,
+                        5,
+                        20,
+                        12,
+                        (1, 6, 2),
+                        0,
+                        1,
+                    ),
+                    Fighter::new_melee(
+                        1,
+                        Team::Party,
+                        false,
+                        GridPos::new(26, 14),
+                        8,
+                        5,
+                        20,
+                        12,
+                        (1, 6, 2),
+                        0,
+                        1,
+                    ),
+                    Fighter::new_melee(
+                        2,
+                        Team::Monster,
+                        true,
+                        GridPos::new(25, 12),
+                        8,
+                        5,
+                        20,
+                        12,
+                        (1, 6, 2),
+                        0,
+                        1,
+                    ),
+                    Fighter::new_melee(
+                        3,
+                        Team::Monster,
+                        true,
+                        GridPos::new(26, 12),
+                        8,
+                        5,
+                        20,
+                        12,
+                        (1, 6, 2),
+                        0,
+                        1,
+                    ),
+                ],
+            );
+            let outcome = world.run_combat(&mut rng, DEFAULT_NO_ACTION_LIMIT);
+            let alive = [
+                world.fighters[0].in_combat,
+                world.fighters[1].in_combat,
+                world.fighters[2].in_combat,
+                world.fighters[3].in_combat,
+            ];
+            let draws = log.draws.borrow().clone();
+            (draws, outcome, alive)
+        }
+
+        let (draws1, o1, a1) = run(SEED);
+        let (draws2, o2, a2) = run(SEED);
+        assert_eq!(draws1, draws2, "same seed → identical draw stream");
+        assert_eq!((o1, a1), (o2, a2), "deterministic outcome");
+        assert!(!draws1.is_empty());
+
+        // The round opens with one d6 per combatant (initiative), before selection.
+        let ns: Vec<u16> = draws1.iter().map(|d| d.n.unwrap()).collect();
+        assert_eq!(&ns[0..4], &[6, 6, 6, 6], "four initiative d6s open round 0");
+        assert_eq!(ns[4], 100, "then the first FindNextCombatant d100");
+
+        // A decisive fight ends with one side wiped; a stalemate leaves both alive.
+        let party_alive = a1[0] || a1[1];
+        let monsters_alive = a1[2] || a1[3];
+        match o1 {
+            CombatOutcome::PartyWins => assert!(party_alive && !monsters_alive),
+            CombatOutcome::MonstersWin => assert!(!party_alive && monsters_alive),
+            CombatOutcome::Stalemate => {}
+        }
+
+        // Prng-consistent across the whole fight.
+        let mut p = Prng::new(SEED);
+        for (i, d) in draws1.iter().enumerate() {
+            assert_eq!(d.before, p.state(), "draw {i} before");
+            assert_eq!(Some(p.random(d.n.unwrap())), d.result, "draw {i} result");
+            assert_eq!(d.after, p.state(), "draw {i} after");
         }
     }
 }

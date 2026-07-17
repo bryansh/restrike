@@ -343,9 +343,17 @@ PlayerQuickFight(player):
 > full turn's operand stream against an independent replay (§4.1.7's worked
 > example), `monster_approach_…` proves the PC/NPC d100 asymmetry, and
 > `all_ai_1v1_fight_…` runs a fight to a victor with a Prng-consistent,
-> deterministic draw stream. **Still remaining:** pin the `ai`/`morale`/`move`
-> action events (D4), wire the turn into `CombatState::step` replacing the stub
-> (D5), and update the ASCII demos to the real AI (D6). Spell/wand/turn-undead
+> deterministic draw stream. **The full all-AI round loop is landed too** —
+> `CombatWorld::run_combat` (`MainCombatLoop`, `ovr009.cs:22`) drives
+> initiative (`calculate_initiative`, reusing the audit-accepted `select_combatant`)
+> → `FindNextCombatant` (`select_next`) → `melee_ai_turn` over whole rounds to a
+> `CombatOutcome`, with `run_combat_full_round_loop_is_a_parity_artifact` proving
+> the round-loop draw fingerprint (K initiative d6s, then d100 selection passes
+> interleaved with turn draws), determinism, termination, and Prng-consistency.
+> **Still remaining:** pin the `ai`/`morale`/`move` action events (D4), fold
+> `run_combat` into the tick-based `CombatState::step` (D5 — a model unification
+> that touches the initiative slice), and update the ASCII demos to the real AI
+> (D6). Spell/wand/turn-undead
 > **effects**, backstab detection, ranged weapons, sweep (0-HD) attacks, and
 > affects are stubbed (guards+draws faithful; effects deferred to M5).
 
