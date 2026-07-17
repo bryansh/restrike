@@ -1040,3 +1040,289 @@ fn watch_a_battlefield() {
         "the melee AI closed and traded blows on the battlefield"
     );
 }
+
+// --- M4 combat #5: the PAYOFF — a fight assembled from REAL game data ---
+
+/// The real-data fight (local-tier, `GBX_DATA_DIR`-gated): the model-unification
+/// payoff. Unlike the two synthetic demos above, the monster team here is decoded
+/// from **real game data** — the bundled `MON2CHA.DAX` Tilverton records, each a
+/// full 0x1A6 `Player` record (`gbx_formats::monster` → [`LoadedMonster`]) — and the
+/// battlefield terrain is derived from a **real area map**, `GEO2.DAX` block 1
+/// (Tilverton City), whose wall topology stamps the combat map's obstacles. A small
+/// synthetic D10-clean party is the other side. The whole fight then runs through
+/// the **one unified tick engine** ([`crate::combat::CombatState`] via
+/// [`CombatState::run_combat_observed`](crate::combat::CombatState::run_combat_observed),
+/// a thin driver over `step()`) to a victor — proving the single model works on real
+/// game data. This is the last piece before the ECL `COMBAT`-opcode encounter
+/// trigger wires a *running script* into this same engine.
+///
+/// **Provisional terrain derivation (documented, not the faithful path):** the real
+/// `SetupGroundTiles` paints a rotated iso combat *diamond* from the source area's
+/// walls (`build_background_tiles_*`, `ovr011.cs:149`) — that derivation is deferred
+/// with the encounter-trigger slice (see the §11 note in `combat.rs`). Here the GEO
+/// block's fully-enclosed (4-walled) squares are stamped as rock obstacles onto an
+/// otherwise-open field via [`CombatMap::from_ground`] (the derivation slice 3
+/// built), and the deployment core is kept clear so the roster places. It is real
+/// GEO data shaping a real fight, not the faithful diamond — flagged as such.
+///
+/// Run: `GBX_DATA_DIR=~/goldbox-data/cotab cargo test -p gbx-engine \
+///   -- --nocapture watch_a_real_data_fight`
+#[test]
+fn watch_a_real_data_fight() {
+    use crate::combat::{
+        place_combatants, CombatMap, CombatOutcome, CombatState, Combatant, GridPos, PlacementInput,
+        Team, TilePassability, DEFAULT_NO_ACTION_LIMIT, MAP_H, MAP_W,
+    };
+    use crate::monster::LoadedMonster;
+    use crate::rng::EngineRng;
+    use gbx_formats::geo::GeoBlock;
+    use gbx_formats::monster::parse_cha_archive;
+
+    let Some(dir) = std::env::var_os("GBX_DATA_DIR") else {
+        eprintln!("SKIPPED: real-data fight needs GBX_DATA_DIR — watch_a_real_data_fight");
+        return;
+    };
+    let dir = std::path::Path::new(&dir);
+    let data = load_dir(dir).expect("GBX_DATA_DIR must be readable");
+
+    // --- REAL monster roster: decode MON2CHA.DAX (Tilverton, area 2) ---
+    // A monster IS a 0x1A6 Player record (coab load_mob → new Player(data, 0)).
+    let cha = data
+        .raw_file("MON2CHA.DAX")
+        .expect("GBX_DATA_DIR/MON2CHA.DAX must exist");
+    let entries = parse_cha_archive(cha).expect("MON2CHA.DAX parses");
+    let decoded: Vec<LoadedMonster> = entries
+        .iter()
+        .map(|e| LoadedMonster::from_record(&e.monster))
+        .collect();
+    // A themed Tilverton street ambush, by record index (0 ROYAL GUARD, 1 FIRE
+    // KNIFE, 2 THIEF). Whatever the shipped records hold drives the fight; nothing
+    // here is invented.
+    let monster_picks: &[usize] = &[0, 1, 2];
+
+    // --- REAL area terrain: GEO2.DAX block 1 (Tilverton City) ---
+    let geo = GeoBlock::parse(&data.block("GEO2.DAX", 1).expect("GEO2.DAX block 1 loads"))
+        .expect("GEO2 block 1 parses");
+    const FLOOR: u8 = 0x17; // passable floor (move_cost 1)
+    const ROCK: u8 = 1; // move_cost 0xFF → wall
+    let mut ground = vec![FLOOR; (MAP_W * MAP_H) as usize];
+    let mut rock_cells = 0usize;
+    // Provisional overlay: a fully-enclosed (4-walled) GEO square → a rock obstacle
+    // at combat cell (gx+17, gy+3), placing the 16×16 patch over the visible field.
+    for gy in 0..16usize {
+        for gx in 0..16usize {
+            let s = geo.square(gx, gy);
+            let walls = [s.wall_north, s.wall_east, s.wall_south, s.wall_west]
+                .iter()
+                .filter(|&&w| w != 0)
+                .count();
+            if walls == 4 {
+                let (cx, cy) = (gx as i32 + 17, gy as i32 + 3);
+                if (0..MAP_W).contains(&cx) && (0..MAP_H).contains(&cy) {
+                    ground[(cy * MAP_W + cx) as usize] = ROCK;
+                    rock_cells += 1;
+                }
+            }
+        }
+    }
+    let mut map = CombatMap::from_ground(ground);
+    // Keep the deployment diamond clear so the roster places (the faithful diamond
+    // derivation is deferred — see this fn's doc comment).
+    for y in 6..=16 {
+        for x in 20..=30 {
+            map.set_tile(GridPos::new(x, y), FLOOR);
+        }
+    }
+
+    // --- The synthetic D10-clean party (the "small synthetic party" side) ---
+    struct P {
+        name: &'static str,
+        hp: i32,
+        raw_ac: u8,
+        hit_bonus: i32,
+        movement: i32,
+        dice: (u8, u8, u8),
+    }
+    let party = [
+        P { name: "Ravd", hp: 30, raw_ac: 54, hit_bonus: 45, movement: 12, dice: (1, 8, 3) },
+        P { name: "Ilma", hp: 26, raw_ac: 52, hit_bonus: 44, movement: 12, dice: (1, 10, 2) },
+        P { name: "Bex", hp: 22, raw_ac: 50, hit_bonus: 43, movement: 12, dice: (1, 6, 3) },
+    ];
+
+    // Build the roster in TeamList order: party (Team::Party) then monsters.
+    let placement_inputs: Vec<PlacementInput> = party
+        .iter()
+        .map(|_| PlacementInput { team: Team::Party, size: 1, in_combat: true })
+        .chain(monster_picks.iter().map(|_| PlacementInput {
+            team: Team::Monster,
+            size: 1,
+            in_combat: true,
+        }))
+        .collect();
+    let placements = place_combatants(&mut map, &placement_inputs, 0, 1, GridPos::new(0, 0), None);
+    assert!(
+        placements.iter().all(|p| p.placed),
+        "everyone finds a cell on the GEO-derived field"
+    );
+
+    // Party Combatants (synthetic stats).
+    let mut fighters: Vec<Combatant> = party
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            Combatant::new_melee(
+                i,
+                Team::Party,
+                false,
+                placements[i].pos,
+                p.hp,
+                p.raw_ac,
+                p.hit_bonus,
+                p.movement,
+                p.dice,
+                0, // delay — CalculateInitiative sets it each round
+                1, // one swing/round
+            )
+        })
+        .collect();
+    // Monster Combatants — every stat from the decoded record. `hit_bonus` is the
+    // record's stored THAC0 (`@0x73`, already in the raw-AC offset space, so the
+    // `d20 + hit_bonus >= raw_ac` compare is faithful; the DexReaction/strength
+    // folding into hitBonus@0x199 is a BattleSetup concern, deferred). raw AC is
+    // the on-disk `@0x19a` byte; damage is attack profile 1.
+    for (k, &ri) in monster_picks.iter().enumerate() {
+        let m = &decoded[ri];
+        let a1 = m.attacks[0];
+        let id = party.len() + k;
+        fighters.push(Combatant::new_melee(
+            id,
+            Team::Monster,
+            m.is_npc(),
+            placements[id].pos,
+            m.hit_point_max as i32,
+            m.ac as u8,
+            m.thac0 as i32,
+            m.movement as i32,
+            (a1.dice_count, a1.dice_size, a1.damage_bonus as u8),
+            0,
+            1,
+        ));
+    }
+    let names: Vec<String> = party
+        .iter()
+        .map(|p| p.name.to_string())
+        .chain(monster_picks.iter().map(|&ri| decoded[ri].name.clone()))
+        .collect();
+
+    let mut state = CombatState::new(map, fighters);
+
+    let seed = 0x0C0F_FEE0u32;
+    let mut rng = EngineRng::new(seed);
+
+    eprintln!("== A REAL-DATA FIGHT ==  (seed {seed:#010x}; the ONE unified tick engine)");
+    eprintln!(
+        "Monsters: decoded from MON2CHA.DAX (real 0x1A6 records)   Terrain: GEO2.DAX block 1 \
+         ({rock_cells} rock cells derived)"
+    );
+    eprintln!("Party is synthetic, D10-clean.\n");
+    for (i, f) in state.fighters.iter().enumerate() {
+        eprintln!(
+            "  {:<6} {:<12} AC {:>2}  HP {:>3}  hit+{:<2} {}d{}+{}  @({:>2},{:>2})",
+            if f.team == Team::Party { "party" } else { "mob" },
+            names[i],
+            0x3C - f.ac as i32,
+            f.hp_max,
+            f.hit_bonus,
+            f.dice_count,
+            f.dice_size,
+            f.damage_bonus,
+            f.pos.x,
+            f.pos.y,
+        );
+    }
+
+    // Render the live battlefield (crop to the combatants' bounding box + margin).
+    fn render(state: &CombatState) {
+        let glyph = |i: usize, team: Team| -> char {
+            let base = if team == Team::Party { b'A' } else { b'a' };
+            (base + (i as u8 % 26)) as char
+        };
+        let live: Vec<(usize, GridPos, Team)> = state
+            .fighters
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.in_combat)
+            .map(|(i, f)| (i, f.pos, f.team))
+            .collect();
+        if live.is_empty() {
+            return;
+        }
+        let (mut min_x, mut min_y, mut max_x, mut max_y) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+        for (_, p, _) in &live {
+            min_x = min_x.min(p.x);
+            min_y = min_y.min(p.y);
+            max_x = max_x.max(p.x);
+            max_y = max_y.max(p.y);
+        }
+        let (min_x, min_y) = ((min_x - 2).max(0), (min_y - 2).max(0));
+        let (max_x, max_y) = ((max_x + 2).min(MAP_W - 1), (max_y + 2).min(MAP_H - 1));
+        for y in min_y..=max_y {
+            let mut row = String::from("      ");
+            for x in min_x..=max_x {
+                let here = GridPos::new(x, y);
+                if let Some((i, _, team)) = live.iter().find(|(_, p, _)| *p == here) {
+                    row.push(glyph(*i, *team));
+                } else {
+                    row.push(match state.map.passability(here) {
+                        TilePassability::Passable { .. } => '.',
+                        TilePassability::Wall => '#',
+                        TilePassability::Void => ' ',
+                    });
+                }
+                row.push(' ');
+            }
+            eprintln!("{row}");
+        }
+    }
+
+    eprintln!("\nInitial deployment (A.. party, a.. monsters; '#' GEO-derived rock):");
+    render(&state);
+
+    let outcome = state.run_combat_observed(&mut rng, DEFAULT_NO_ACTION_LIMIT, |s, round| {
+        let living: Vec<String> = s
+            .fighters
+            .iter()
+            .filter(|f| f.in_combat)
+            .map(|f| format!("{} {}hp", names[f.id], f.hp_current))
+            .collect();
+        eprintln!("── after round {} ──  {}", round + 1, living.join("  "));
+    });
+
+    eprintln!(
+        "\n== OUTCOME: {} ==",
+        match outcome {
+            CombatOutcome::PartyWins => "the party stands",
+            CombatOutcome::MonstersWin => "the Tilverton mob wins",
+            CombatOutcome::Stalemate => "stalemate (round cap reached)",
+        }
+    );
+    for (i, f) in state.fighters.iter().enumerate() {
+        eprintln!(
+            "  {:<12} {}",
+            names[i],
+            if f.in_combat {
+                format!("HP {}/{}", f.hp_current, f.hp_max)
+            } else {
+                "DOWN".to_string()
+            }
+        );
+    }
+
+    // The real monster records genuinely drove a fight through the one engine — the
+    // outcome is the seed's to determine (like the synthetic demos), the assertion
+    // is only that the unified engine closed and traded blows on real data.
+    assert!(
+        state.fighters.iter().any(|f| f.hp_current < f.hp_max),
+        "the unified engine fought on real MON2CHA data"
+    );
+}
