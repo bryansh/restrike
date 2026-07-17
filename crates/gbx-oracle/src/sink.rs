@@ -28,8 +28,8 @@ use gbx_engine::combat::{ActionEvent, ActionSink};
 use gbx_engine::rng::{RngDraw, RngSink};
 
 use crate::format::{
-    AttackEvent, DmgEvent, InitEvent, PickEvent, RngEvent, SaveEvent, Trace, TraceEvent,
-    TraceHeader,
+    AiEvent, AttackEvent, DmgEvent, InitEvent, MoraleEvent, MoveEvent, PickEvent, RngEvent,
+    SaveEvent, Trace, TraceEvent, TraceHeader,
 };
 
 /// A shared draw buffer. Cheap to clone (an `Rc` bump); every clone — including
@@ -173,6 +173,43 @@ impl ActionSink for CollectorActionSink {
                 save_type,
                 roll,
                 made: made as u8,
+            }),
+            ActionEvent::Move {
+                combatant_id,
+                from_x,
+                from_y,
+                to_x,
+                to_y,
+                cost,
+            } => TraceEvent::Move(MoveEvent {
+                combatant_id: combatant_id as u32,
+                from_x,
+                from_y,
+                to_x,
+                to_y,
+                cost,
+            }),
+            ActionEvent::Ai {
+                combatant_id,
+                field_15,
+                target_id,
+            } => TraceEvent::Ai(AiEvent {
+                combatant_id: combatant_id as u32,
+                field_15,
+                target_id,
+            }),
+            ActionEvent::Morale {
+                combatant_id,
+                monster_morale,
+                enemy_hp_pct,
+                roll,
+                failed,
+            } => TraceEvent::Morale(MoraleEvent {
+                combatant_id: combatant_id as u32,
+                monster_morale,
+                enemy_hp_pct,
+                roll,
+                failed: failed as u8,
             }),
         };
         self.events.borrow_mut().push(translated);

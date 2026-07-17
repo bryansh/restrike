@@ -842,8 +842,14 @@ session, M5-adjacent).
 > PINNED (2026-07-16, attack slice).** D-OR3 leaves the `action`-profile
 > *vocabulary* for the combat sessions to pin as each system lands; its
 > *mechanism* (profile tag, canonical field order, same-tick emission order)
-> already exists in `gbx-oracle`. The `move`/`ai`/`status`/`morale`/`award` rows
-> are still a strawman. All values are integers (D-OR3 canonical encoding —
+> already exists in `gbx-oracle`. **`move`/`ai`/`morale` PINNED (2026-07-16,
+> melee-AI slice)** — `gbx-oracle`'s `MoveEvent`/`AiEvent`/`MoraleEvent`, emitted
+> by `CombatWorld` through the engine `ActionSink` (a test asserts the sink is
+> inert on the draw stream). Canonical forms: `move` =
+> `{combatant_id, from_x, from_y, to_x, to_y, cost}` (the `{x,y}` pairs flattened),
+> `ai` = `{combatant_id, field_15, target_id}` (`target_id = -1` for none), `morale`
+> = `{combatant_id, monster_morale, enemy_hp_pct, roll, failed}` (`roll = 0` when no
+> d100 drawn). The `status`/`award` rows are still a strawman. All values are integers (D-OR3 canonical encoding —
 > `surprise`/`hit`/`backstab`/`made` are `0`/`1`, not bools); `combatant_id` is a
 > stable per-encounter index into the roster. Equality over action events is
 > **not** yet a gate, even for the pinned rows — pinning fixes the field

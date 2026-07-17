@@ -72,9 +72,10 @@ pub struct TraceHeader {
 /// vocabulary is pinned as combat systems land (D-OR3, step 5): the **initiative
 /// slice** pinned [`InitEvent`] and [`PickEvent`] (`init`/`pick`); the **attack
 /// slice** pins [`AttackEvent`], [`DmgEvent`], and [`SaveEvent`]
-/// (`attack`/`dmg`/`save`); the remaining action types
-/// (`move`/`ai`/`status`/`morale`/`award`) are still absent and their sessions
-/// add them. An unknown `e` value is rejected loudly by the reader (a foreign
+/// (`attack`/`dmg`/`save`); the **melee-AI slice** pins [`MoveEvent`], [`AiEvent`],
+/// and [`MoraleEvent`] (`move`/`ai`/`morale`); the remaining action types
+/// (`status`/`award`) are still absent and their sessions add them. An unknown `e`
+/// value is rejected loudly by the reader (a foreign
 /// event type), distinct from tolerating unknown *fields*, which it does — so
 /// pinning a vocabulary means adding a variant here, moving it out of "unknown".
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -100,6 +101,14 @@ pub enum TraceEvent {
     Dmg(DmgEvent),
     /// `save` (`action` profile) — one per saving throw, bracketing its one d20.
     Save(SaveEvent),
+    /// `move` (`action` profile) — one per movement step (`sub_3E748`). Draw-free.
+    Move(MoveEvent),
+    /// `ai` (`action` profile) — one per melee AI turn (`PlayerQuickFight`): its
+    /// resolved target-mode + target.
+    Ai(AiEvent),
+    /// `morale` (`action` profile) — one per morale/advance decision, bracketing
+    /// its 0-or-1 `random(100)`.
+    Morale(MoraleEvent),
 }
 
 /// A `prng`-profile draw event (D-OR3): `{"e":"rng","before":u32,"after":u32}`
@@ -222,6 +231,57 @@ pub struct SaveEvent {
     pub made: u8,
 }
 
+/// An `action`-profile `move` event (D-OR3; `combat-study.md` §9, pinned by the
+/// melee-AI slice — `gbx-engine`'s `combat` `sub_3E748`). Emitted per movement
+/// step; **draw-free** (movement rolls no dice — the per-step monster morale d100
+/// is the separate `morale` event that precedes the step).
+///
+/// Field order **is** the canonical on-disk order: `combatant_id`, `from_x`,
+/// `from_y`, `to_x`, `to_y`, `cost`. The `{x,y}` pairs of the §9 strawman are
+/// flattened to integers (D-OR3 canonical encoding); `cost` is the half-move cost
+/// deducted (diagonal ×3 / orthogonal ×2 of the destination tile's move_cost).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MoveEvent {
+    pub combatant_id: u32,
+    pub from_x: i32,
+    pub from_y: i32,
+    pub to_x: i32,
+    pub to_y: i32,
+    pub cost: i32,
+}
+
+/// An `action`-profile `ai` event (D-OR3; `combat-study.md` §9, pinned by the
+/// melee-AI slice — `gbx-engine`'s `combat::CombatWorld::melee_ai_turn`). Emitted
+/// once per melee AI turn, after its target is resolved.
+///
+/// Field order **is** the canonical on-disk order: `combatant_id`, `field_15`,
+/// `target_id`. `field_15` is the (post-gate) target-mode scratch (`1..=6`);
+/// `target_id` the chosen target's roster index, or **`-1` when none** (guarding /
+/// no reachable enemy) — integer-encoded per D-OR3 (no `Option`/null on the wire).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AiEvent {
+    pub combatant_id: u32,
+    pub field_15: u8,
+    pub target_id: i64,
+}
+
+/// An `action`-profile `morale` event (D-OR3; `combat-study.md` §9, pinned by the
+/// melee-AI slice — `gbx-engine`'s `combat` `moralFailureEscape`/`FleeCheck_001`).
+/// Emitted per morale/advance decision, bracketing its **0-or-1** `random(100)`.
+///
+/// Field order **is** the canonical on-disk order: `combatant_id`,
+/// `monster_morale`, `enemy_hp_pct`, `roll`, `failed`. `roll` is the advance d100
+/// (`1..=100`) when drawn — a **monster** draws it; **`0` when none was drawn**
+/// (a PC short-circuits the gate). `failed` (`0`/`1`) is `moral_failure`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MoraleEvent {
+    pub combatant_id: u32,
+    pub monster_morale: i32,
+    pub enemy_hp_pct: i32,
+    pub roll: u16,
+    pub failed: u8,
+}
+
 /// A fully parsed trace: its header plus its events in file (draw) order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Trace {
@@ -322,7 +382,10 @@ impl Trace {
             | TraceEvent::Pick(_)
             | TraceEvent::Attack(_)
             | TraceEvent::Dmg(_)
-            | TraceEvent::Save(_) => None,
+            | TraceEvent::Save(_)
+            | TraceEvent::Move(_)
+            | TraceEvent::Ai(_)
+            | TraceEvent::Morale(_) => None,
         })
     }
 
@@ -444,6 +507,54 @@ mod tests {
             serde_json::to_string(&save).unwrap(),
             r#"{"e":"save","combatant_id":3,"save_type":4,"roll":9,"made":0}"#
         );
+    }
+
+    #[test]
+    fn move_ai_morale_events_are_canonical_and_tag_first() {
+        let mv = TraceEvent::Move(MoveEvent {
+            combatant_id: 0,
+            from_x: 25,
+            from_y: 8,
+            to_x: 25,
+            to_y: 9,
+            cost: 2,
+        });
+        assert_eq!(
+            serde_json::to_string(&mv).unwrap(),
+            r#"{"e":"move","combatant_id":0,"from_x":25,"from_y":8,"to_x":25,"to_y":9,"cost":2}"#
+        );
+
+        let ai = TraceEvent::Ai(AiEvent {
+            combatant_id: 0,
+            field_15: 5,
+            target_id: -1,
+        });
+        assert_eq!(
+            serde_json::to_string(&ai).unwrap(),
+            r#"{"e":"ai","combatant_id":0,"field_15":5,"target_id":-1}"#
+        );
+
+        let morale = TraceEvent::Morale(MoraleEvent {
+            combatant_id: 0,
+            monster_morale: 40,
+            enemy_hp_pct: 100,
+            roll: 73,
+            failed: 0,
+        });
+        assert_eq!(
+            serde_json::to_string(&morale).unwrap(),
+            r#"{"e":"morale","combatant_id":0,"monster_morale":40,"enemy_hp_pct":100,"roll":73,"failed":0}"#
+        );
+
+        // The reader round-trips them (accepted, tag-first) and they are not draws.
+        for line in [
+            r#"{"e":"move","combatant_id":0,"from_x":25,"from_y":8,"to_x":25,"to_y":9,"cost":2}"#,
+            r#"{"e":"ai","combatant_id":0,"field_15":5,"target_id":-1}"#,
+            r#"{"e":"morale","combatant_id":0,"monster_morale":40,"enemy_hp_pct":100,"roll":73,"failed":0}"#,
+        ] {
+            let parsed: TraceEvent = serde_json::from_str(line).unwrap();
+            assert_eq!(serde_json::to_string(&parsed).unwrap(), line);
+        }
     }
 
     #[test]

@@ -169,6 +169,9 @@ fn kind(e: &TraceEvent) -> &'static str {
         TraceEvent::Attack(_) => "attack",
         TraceEvent::Dmg(_) => "dmg",
         TraceEvent::Save(_) => "save",
+        TraceEvent::Move(_) => "move",
+        TraceEvent::Ai(_) => "ai",
+        TraceEvent::Morale(_) => "morale",
     }
 }
 
@@ -309,7 +312,10 @@ pub fn check_chain(trace: &Trace) -> Result<(), ChainBreak> {
             | TraceEvent::Pick(_)
             | TraceEvent::Attack(_)
             | TraceEvent::Dmg(_)
-            | TraceEvent::Save(_) => {}
+            | TraceEvent::Save(_)
+            | TraceEvent::Move(_)
+            | TraceEvent::Ai(_)
+            | TraceEvent::Morale(_) => {}
             TraceEvent::Rng(r) => {
                 // Link: this draw's `before` must equal the previous `after`.
                 if let Some(prev) = prev_after {

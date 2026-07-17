@@ -179,6 +179,41 @@ pub enum ActionEvent {
         roll: u8,
         made: bool,
     },
+    /// Per melee AI turn (`PlayerQuickFight`, `ovr010.cs:8`), emitted once the
+    /// turn's target is resolved. Pins the study §9 `ai` vocabulary now that the AI
+    /// lands: `field_15` is the (post-gate) target-mode scratch, `target_id` the
+    /// chosen target (`-1` = none/guarding). Draw-bracketing is loose here (the
+    /// turn's draws are the mode-gate + behavior d7s + find_target + the swing);
+    /// the event marks *which* combatant acted with what mode/target.
+    Ai {
+        combatant_id: usize,
+        field_15: u8,
+        /// Roster index of the target, or `-1` when none (guarding / no reachable
+        /// enemy). Integer-encoded per D-OR3 (no `Option` on the wire).
+        target_id: i64,
+    },
+    /// Per morale/advance decision — the `FleeCheck_001` outcome and the
+    /// `moralFailureEscape:387` advance gate (§6.2). `roll` is the advance d100 (a
+    /// monster draws it; `0` when none was drawn, e.g. a PC or a draw-free
+    /// `FleeCheck`); `failed` is `moral_failure`. Brackets the 0-or-1 `random(100)`.
+    Morale {
+        combatant_id: usize,
+        monster_morale: i32,
+        enemy_hp_pct: i32,
+        roll: u16,
+        failed: bool,
+    },
+    /// Per movement step (`sub_3E748`, `ovr014.cs:252`): the from/to cells and the
+    /// half-move `cost`. Draw-free (movement rolls no dice; the per-step monster
+    /// d100 is the separate `Morale` event that precedes the step).
+    Move {
+        combatant_id: usize,
+        from_x: i32,
+        from_y: i32,
+        to_x: i32,
+        to_y: i32,
+        cost: i32,
+    },
 }
 
 /// The engine's action-trace seam (D-OR3, task deliverable 4), mirroring
@@ -2207,7 +2242,10 @@ impl Fighter {
 /// 1-based occupancy), and the combat-area scalars the AI reads (the normal-area
 /// `can_cast_spells` flag, the morale inputs). Positions, hit points, and Action
 /// scratch mutate as the turn runs.
-#[derive(Debug, Clone)]
+///
+/// Carries an optional [`ActionSink`] (D-OR3): when attached, the turn emits the
+/// `ai`/`morale`/`move` action events (§9) alongside the draw stream. `None` in
+/// normal play (a single `Option::is_some` branch per emit).
 pub struct CombatWorld {
     pub map: CombatMap,
     pub fighters: Vec<Fighter>,
@@ -2223,6 +2261,8 @@ pub struct CombatWorld {
     /// `gbl.mapDirection` — the party's world facing, read only by the flee-move
     /// direction (`moralFailureEscape:401`).
     pub map_direction: u8,
+    /// Optional action-trace observer (D-OR3). `None` in normal play.
+    sink: Option<Box<dyn ActionSink>>,
 }
 
 impl CombatWorld {
@@ -2236,9 +2276,27 @@ impl CombatWorld {
             monster_morale: 0,
             area_field_58c: 0,
             map_direction: 0,
+            sink: None,
         };
         w.rebuild_occupancy();
         w
+    }
+
+    /// Attaches an action-trace observer (D-OR3); returns any prior one.
+    pub fn attach_action_sink(&mut self, sink: Box<dyn ActionSink>) -> Option<Box<dyn ActionSink>> {
+        self.sink.replace(sink)
+    }
+
+    /// Detaches and returns the current observer.
+    pub fn take_action_sink(&mut self) -> Option<Box<dyn ActionSink>> {
+        self.sink.take()
+    }
+
+    /// Emit an action event if an observer is attached (inert otherwise).
+    fn emit_action(&mut self, event: ActionEvent) {
+        if let Some(s) = self.sink.as_mut() {
+            s.on_action(event);
+        }
     }
 
     /// The range layer's view of the roster (`size = 0` for the dead, so they drop
@@ -2591,6 +2649,14 @@ impl CombatWorld {
         }
         self.fighters[actor].pos = new;
         self.rebuild_occupancy();
+        self.emit_action(ActionEvent::Move {
+            combatant_id: actor,
+            from_x: old.x,
+            from_y: old.y,
+            to_x: new.x,
+            to_y: new.y,
+            cost,
+        });
         self.fighters[actor].attacks_received = 0;
         self.move_step_into_attack(rng, actor);
         if !self.fighters[actor].in_combat {
@@ -2700,10 +2766,23 @@ impl CombatWorld {
 
         // The morale-advance gate (ovr010.cs:386-388). C# `||` short-circuit:
         // a PC (control<NPC_Base) makes the FIRST operand true → NO d100; an NPC
-        // (control>=NPC_Base) evaluates operand C → draws the d100.
-        let advance = !self.fighters[actor].npc
-            || (self.enemy_health_pct <= roll_dice(rng, 100, 1) as i32 + self.monster_morale)
-            || self.fighters[actor].team == Team::Monster;
+        // (control>=NPC_Base) evaluates operand C → draws the d100. `morale_roll`
+        // stays 0 when no d100 is drawn.
+        let mut morale_roll: u16 = 0;
+        let advance = if !self.fighters[actor].npc {
+            true
+        } else {
+            morale_roll = roll_dice(rng, 100, 1);
+            self.enemy_health_pct <= morale_roll as i32 + self.monster_morale
+                || self.fighters[actor].team == Team::Monster
+        };
+        self.emit_action(ActionEvent::Morale {
+            combatant_id: actor,
+            monster_morale: self.monster_morale,
+            enemy_hp_pct: self.enemy_health_pct,
+            roll: morale_roll,
+            failed: self.fighters[actor].moral_failure,
+        });
 
         if !advance {
             self.try_guarding(actor);
@@ -2974,6 +3053,13 @@ impl CombatWorld {
                 break;
             }
         }
+
+        // The turn's `ai` action event (§9): its resolved mode + target.
+        self.emit_action(ActionEvent::Ai {
+            combatant_id: actor,
+            field_15: self.fighters[actor].field_15,
+            target_id: self.fighters[actor].target.map(|t| t as i64).unwrap_or(-1),
+        });
     }
 
     // --- the round loop (MainCombatLoop, ovr009.cs:22) ---------------------
@@ -4700,5 +4786,94 @@ mod tests {
             assert_eq!(Some(p.random(d.n.unwrap())), d.result, "draw {i} result");
             assert_eq!(d.after, p.state(), "draw {i} after");
         }
+    }
+
+    #[test]
+    fn ai_action_events_emit_and_are_inert_on_the_draw_stream() {
+        // D-OR3: attaching an ActionSink must NOT change the draw stream. Run the
+        // same monster-approach turn with and without a sink — identical draws —
+        // and confirm the sink saw the pinned ai/morale/move events.
+        fn run(with_sink: bool) -> (Vec<u16>, Vec<ActionEvent>) {
+            let log = DrawLog::default();
+            let mut rng = EngineRng::new(SEED);
+            rng.attach_sink(log.sink());
+            let actions = ActionLog::default();
+            let mut world = CombatWorld::new(
+                CombatMap::uniform(FLOOR),
+                vec![
+                    Fighter::new_melee(
+                        0,
+                        Team::Monster,
+                        true,
+                        GridPos::new(25, 8),
+                        30,
+                        5,
+                        20,
+                        12,
+                        (1, 4, 2),
+                        5,
+                        1,
+                    ),
+                    Fighter::new_melee(
+                        1,
+                        Team::Party,
+                        false,
+                        GridPos::new(25, 12),
+                        30,
+                        5,
+                        20,
+                        12,
+                        (1, 4, 2),
+                        5,
+                        1,
+                    ),
+                ],
+            );
+            if with_sink {
+                world.attach_action_sink(actions.sink());
+            }
+            world.melee_ai_turn(&mut rng, 0);
+            (log.ns(), actions.events())
+        }
+
+        let (ns_plain, _) = run(false);
+        let (ns_sunk, events) = run(true);
+        assert_eq!(
+            ns_plain, ns_sunk,
+            "the action sink is inert on the draw stream"
+        );
+
+        // The monster resolved a target (ai), checked morale on each step, and moved.
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                ActionEvent::Ai {
+                    combatant_id: 0,
+                    target_id: 1,
+                    ..
+                }
+            )),
+            "an ai event names the picked target"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                ActionEvent::Morale {
+                    combatant_id: 0,
+                    ..
+                }
+            )),
+            "a morale event per approach step"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                ActionEvent::Move {
+                    combatant_id: 0,
+                    ..
+                }
+            )),
+            "a move event per step"
+        );
     }
 }
