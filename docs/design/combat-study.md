@@ -331,14 +331,23 @@ PlayerQuickFight(player):
 
 ## 4.1 The melee AI turn — the complete draw-sequence map (M4 combat #4)
 
-> **Implementation status (2026-07-16):** deliverable 2 (the wall-respecting
-> range ray, §4.1.3's `getTargetRange`/`BuildNearTargets`) is **landed** in
-> `gbx-engine`'s `combat` module (`reach_ray`/`can_reach`/`get_target_range`/
-> `build_near_targets`, tested, draw-free). The **`field_15` mode-gate** (§4.1.2)
-> is **landed** as `field_15_mode_gate` (the short-circuit + gate-distribution
-> tests). The behavior-guard d7s (sites C/F), `find_target` picks, and the
-> `sub_35DB1` move-attack loop (§4.1.4-6) — plus wiring into `CombatState::step`
-> and the all-AI parity artifact — are the remaining pieces.
+> **Implementation status (2026-07-16):** the **whole melee AI turn is landed**
+> in `gbx-engine`'s `combat` module. Deliverable 2 (the range ray §4.1.3):
+> `reach_ray`/`can_reach`/`get_target_range`/`build_near_targets`. Deliverable 3
+> (the turn): `field_15_mode_gate` (§4.1.2), `flee_check` (draw-free morale), the
+> two behavior-guard d7s (`wand_scan_d7` site C + the unconditional `sub_3560B`
+> d7 site F), `find_target` (pick+retry), and `sub_35db1` (the move-attack loop
+> with the per-step monster d100, opportunity attacks, and `attack_target`) — all
+> on a `CombatWorld`/`Fighter` model, faithful and draw-exact. The **parity
+> artifact** proves it: `melee_turn_adjacent_draws_the_exact_sequence` asserts the
+> full turn's operand stream against an independent replay (§4.1.7's worked
+> example), `monster_approach_…` proves the PC/NPC d100 asymmetry, and
+> `all_ai_1v1_fight_…` runs a fight to a victor with a Prng-consistent,
+> deterministic draw stream. **Still remaining:** pin the `ai`/`morale`/`move`
+> action events (D4), wire the turn into `CombatState::step` replacing the stub
+> (D5), and update the ASCII demos to the real AI (D6). Spell/wand/turn-undead
+> **effects**, backstab detection, ranged weapons, sweep (0-HD) attacks, and
+> affects are stubbed (guards+draws faithful; effects deferred to M5).
 
 > **THIS IS THE PARITY SPEC.** The full melee call chain was read leaf-to-leaf
 > for the AI slice (2026-07-16). Every `roll_dice`/`Random` site a melee

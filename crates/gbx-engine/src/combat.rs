@@ -2049,6 +2049,929 @@ pub fn field_15_mode_gate(rng: &mut EngineRng, field_15: u8) -> u8 {
     v as u8
 }
 
+/// `data_2B8` (`ovr010.cs:290-293`, `seg600:02BD`) — the approach-angle table.
+/// `data_2B8[field_15][dirStep-1]` is an iso-direction *offset* added to the
+/// heading toward the target, so `field_15` (1..=6) selects an "approach
+/// personality" (straight vs. weaving) and `dirStep` (1..=6) is the retry index
+/// `CanMove`/`moralFailureEscape` walk. Value 8 = "no direction". 11 rows (the
+/// used rows are 1..=6); the trailing commented `{4,2,6,6}` row in coab is not in
+/// the live array.
+const DATA_2B8: [[i32; 6]; 11] = [
+    [8, 7, 6, 1, 2, 8],
+    [8, 1, 2, 7, 6, 7],
+    [7, 1, 8, 6, 2, 1],
+    [1, 7, 8, 2, 6, 8],
+    [8, 7, 6, 5, 4, 8],
+    [8, 1, 2, 3, 4, 8],
+    [8, 4, 6, 2, 8, 6],
+    [6, 4, 0, 8, 0, 6],
+    [6, 2, 8, 2, 0, 4],
+    [4, 0, 0, 2, 6, 2],
+    [2, 2, 0, 4, 4, 4],
+];
+
+/// One combatant as the melee AI drives it — the `Player`/`Action` fields the turn
+/// reads and writes. Richer than the initiative-only [`Combatant`]: it carries the
+/// position, hit points, the readied melee attack profile, and the persistent
+/// per-combatant `Action` scratch (`field_15`, `target`, morale flags) the turn
+/// mutates. Constructed by the encounter-setup slice (deferred); tests build it
+/// directly.
+///
+/// **Scope:** a single **melee** attack profile (profile 1). The second attack
+/// form (`attack2_*` dice) and the `ThisRoundActionCount` 3/2 derivation of
+/// `attack{1,2}_left` are the initiative/`BattleSetup` concern (§3.1, FD-3) — the
+/// turn faithfully consumes whatever `attack1_left`/`attack2_left` the fighter
+/// carries (`attack2_left` defaults 0, so the `AttackTarget01` loop makes exactly
+/// `attack1_left` swings with the profile-1 dice).
+#[derive(Debug, Clone)]
+pub struct Fighter {
+    pub id: usize,
+    pub team: Team,
+    /// `control_morale >= Control.NPC_Base` — an NPC/monster. **Only NPCs draw the
+    /// per-step morale-advance d100** (`moralFailureEscape:387`); PCs short-circuit
+    /// it. Also gates the `FleeCheck_001` morale block.
+    pub npc: bool,
+    /// Footprint size (`field_DE & 7`); combat uses 1 for single-cell combatants.
+    pub size: u8,
+    pub pos: GridPos,
+    /// Alive and fighting (`player.in_combat`); a killed combatant flips this false
+    /// and is excluded from target lists / occupancy.
+    pub in_combat: bool,
+    pub hp_current: i32,
+    pub hp_max: i32,
+    /// Raw on-disk AC (`Player.ac@0x19a`; display AC = `0x3C - ac`).
+    pub ac: u8,
+    /// `attacker.hitBonus@0x199` (THAC0-derived to-hit number).
+    pub hit_bonus: i32,
+    /// `HitDice` — `TrySweepAttack` only sweeps `HitDice == 0` targets.
+    pub hit_dice: u8,
+    /// Base movement (`player.movement`) → [`calc_moves`] at initiative.
+    pub movement: i32,
+    pub reaction_adj: i8,
+    // --- readied melee attack profile 1 ---
+    pub dice_count: u8,
+    pub dice_size: u8,
+    pub damage_bonus: u8,
+    // --- Action scratch (per-round / persistent) ---
+    /// `action.delay@0x03` — the initiative key; zeroed when the turn completes.
+    pub delay: i8,
+    /// `action.move@0x06` — half-move budget this round ([`calc_moves`]).
+    pub move_left: i32,
+    /// `attack1_AttacksLeft@0x19c` — profile-1 swings left this round.
+    pub attack1_left: u8,
+    /// `attack2_AttacksLeft@0x19d` — profile-2 swings (0 for single-form melee).
+    pub attack2_left: u8,
+    /// `action.attackIdx@0x04` — starts 2 (`CalculateInitiative`), the profile the
+    /// `AttackTarget01` loop counts down from.
+    pub attack_idx: u8,
+    /// `action.field_15@0x15` — the **persistent** target-mode scratch
+    /// ([`field_15_mode_gate`]); `Action.Clear` does NOT reset it.
+    pub field_15: u8,
+    /// `action.target@0x0A` — the current target roster index; persists across
+    /// turns (`Action.Clear` doesn't reset it) until invalidated.
+    pub target: Option<usize>,
+    pub moral_failure: bool,
+    pub fleeing: bool,
+    /// `action.guarding@0x07` — set by `TryGuarding`; consumed by opportunity
+    /// attacks (`move_step_into_attack`).
+    pub guarding: bool,
+    /// `action.can_use@0x02` — may use an item this round (set true at initiative);
+    /// the `sub_354AA` wand-scan guard.
+    pub can_use: bool,
+    /// `action.direction@0x09` — facing; set to the move heading by each step.
+    pub direction: u8,
+    /// `action.AttacksReceived@0x0F` — attacks taken since the last move.
+    pub attacks_received: u8,
+}
+
+impl Fighter {
+    /// A single-cell melee combatant with a fresh turn state (`delay`/`move_left`/
+    /// `attack1_left` supplied by the caller — normally from initiative). `field_15`
+    /// starts 0, `attack_idx` 2, `can_use` true, no target — the `CalculateInitiative`
+    /// reset state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_melee(
+        id: usize,
+        team: Team,
+        npc: bool,
+        pos: GridPos,
+        hp: i32,
+        ac: u8,
+        hit_bonus: i32,
+        movement: i32,
+        dice: (u8, u8, u8),
+        delay: i8,
+        attack1_left: u8,
+    ) -> Self {
+        Fighter {
+            id,
+            team,
+            npc,
+            size: 1,
+            pos,
+            in_combat: true,
+            hp_current: hp,
+            hp_max: hp,
+            ac,
+            hit_bonus,
+            hit_dice: 1,
+            movement,
+            reaction_adj: 0,
+            dice_count: dice.0,
+            dice_size: dice.1,
+            damage_bonus: dice.2,
+            delay,
+            move_left: calc_moves(movement),
+            attack1_left,
+            attack2_left: 0,
+            attack_idx: 2,
+            field_15: 0,
+            target: None,
+            moral_failure: false,
+            fleeing: false,
+            guarding: false,
+            can_use: true,
+            direction: 0,
+            attacks_received: 0,
+        }
+    }
+}
+
+/// The mutable battlefield the melee AI turn operates on: the terrain map, the
+/// roster of [`Fighter`]s (index = roster id, matching `player_array[i+1]`
+/// 1-based occupancy), and the combat-area scalars the AI reads (the normal-area
+/// `can_cast_spells` flag, the morale inputs). Positions, hit points, and Action
+/// scratch mutate as the turn runs.
+#[derive(Debug, Clone)]
+pub struct CombatWorld {
+    pub map: CombatMap,
+    pub fighters: Vec<Fighter>,
+    /// `area_ptr.can_cast_spells` — **`false` in a normal area = casting allowed**
+    /// (inverted-name field; §4.1.1). `false` ⇒ the `sub_354AA` wand-scan d7 fires.
+    pub area_can_cast_spells: bool,
+    /// `gbl.enemyHealthPercentage` — the morale/advance input (0..100).
+    pub enemy_health_pct: i32,
+    /// `gbl.monster_morale` scratch (set by `FleeCheck_001`).
+    pub monster_morale: i32,
+    /// `area2.field_58C` — a morale threshold (default 0).
+    pub area_field_58c: i32,
+    /// `gbl.mapDirection` — the party's world facing, read only by the flee-move
+    /// direction (`moralFailureEscape:401`).
+    pub map_direction: u8,
+}
+
+impl CombatWorld {
+    /// A world over an explicit map and roster (normal area: casting allowed).
+    pub fn new(map: CombatMap, fighters: Vec<Fighter>) -> Self {
+        let mut w = CombatWorld {
+            map,
+            fighters,
+            area_can_cast_spells: false,
+            enemy_health_pct: 100,
+            monster_morale: 0,
+            area_field_58c: 0,
+            map_direction: 0,
+        };
+        w.rebuild_occupancy();
+        w
+    }
+
+    /// The range layer's view of the roster (`size = 0` for the dead, so they drop
+    /// out of target lists — matching coab's `combatantMap.size > 0` gate).
+    fn range_combatants(&self) -> Vec<RangeCombatant> {
+        self.fighters
+            .iter()
+            .map(|f| RangeCombatant {
+                pos: f.pos,
+                size: if f.in_combat { f.size } else { 0 },
+                team: f.team,
+            })
+            .collect()
+    }
+
+    /// `setup_mapToPlayerIndex_and_playerScreen` (`ovr033.cs:111`): repaint the
+    /// occupancy grid from live fighter footprints (1-based index). Called after
+    /// every position change, exactly as `sub_3E748` does.
+    fn rebuild_occupancy(&mut self) {
+        let placements: Vec<Placement> = self
+            .fighters
+            .iter()
+            .map(|f| Placement {
+                pos: f.pos,
+                size: if f.in_combat { f.size } else { 0 },
+                placed: true,
+            })
+            .collect();
+        self.map.rebuild_occupancy(&placements);
+    }
+
+    /// Live count of the team opposite `team` — the `teamCount`/`friends_count`/
+    /// `foe_count` the wand and morale guards read.
+    fn opposite_count(&self, team: Team) -> usize {
+        self.fighters
+            .iter()
+            .filter(|f| f.in_combat && f.team != team)
+            .count()
+    }
+
+    /// `CanSeeTargetA` (`ovr014.cs:571`) — the **invisibility** affect check, not
+    /// geometry. No affects are modeled, so a live target is always "seen".
+    fn can_see_target(&self, target: usize) -> bool {
+        self.fighters[target].in_combat
+    }
+
+    /// `BuildNearTargets(max_range, actor)` over the live roster.
+    fn build_near(&self, actor: usize, max_range: i32, ignore_walls: bool) -> Vec<NearTarget> {
+        build_near_targets(
+            &self.map,
+            &self.range_combatants(),
+            actor,
+            max_range,
+            ignore_walls,
+        )
+    }
+
+    /// `clear_actions` → `Action.Clear` (`Classes/Action.cs`): zero `delay`,
+    /// `guarding`, and `move` — but **keep** `field_15`/`target`/morale (persistent).
+    fn clear_actions(&mut self, actor: usize) {
+        let f = &mut self.fighters[actor];
+        f.delay = 0;
+        f.guarding = false;
+        f.move_left = 0;
+    }
+
+    /// `TryGuarding` (`ovr010.cs:685`): for a melee combatant (not held, not
+    /// ranged), `guarding()` = `Action.Clear` (zeroes `delay`) **then** sets
+    /// `guarding = true` (`ovr025.cs`); a `delay == 0` combatant just clears. Either
+    /// way `delay` ends 0, so it is not re-picked. Draw-free.
+    fn try_guarding(&mut self, actor: usize) {
+        if self.fighters[actor].delay == 0 {
+            self.clear_actions(actor);
+        } else {
+            self.clear_actions(actor);
+            self.fighters[actor].guarding = true;
+        }
+    }
+
+    /// `FleeCheck_001` (`ovr010.cs:760`) — draw-free. Sets `moral_failure`/`fleeing`
+    /// per the morale ladder; returns the surrender flag (`var_1`, the turn-ending
+    /// `RemoveFromCombat("Surrenders")` path). PCs (`!npc`, and not already fleeing)
+    /// skip the whole block. The morale d100 lives in the *move* path, not here.
+    fn flee_check(&mut self, actor: usize) -> bool {
+        self.fighters[actor].moral_failure = false;
+        // RemoveAttackersAffects — draw-free, no affects modeled.
+        if self.fighters[actor].fleeing {
+            self.fighters[actor].moral_failure = true;
+            return false;
+        }
+        if !self.fighters[actor].npc {
+            return false; // control_morale < NPC_Base
+        }
+        // monster_morale = (control_morale & PC_Mask) << 1; we don't model the raw
+        // control byte, so use the caller-provided monster_morale as the scratch
+        // seed and follow the ladder. CheckAffectsEffect(Morale) is draw-free.
+        let hp_pct = (self.fighters[actor].hp_current * 100) / self.fighters[actor].hp_max.max(1);
+        if self.monster_morale < (100 - hp_pct) || self.monster_morale == 0 {
+            self.monster_morale = self.enemy_health_pct;
+            if self.monster_morale < (100 - self.area_field_58c)
+                || self.monster_morale == 0
+                || self.fighters[actor].team == Team::Party
+            {
+                // MaxOppositionMoves / CalcMoves — draw-free.
+                let max_opp = self.max_opposition_moves(actor);
+                if max_opp <= calc_moves(self.fighters[actor].movement) / 2 {
+                    self.fighters[actor].moral_failure = true;
+                }
+                // (the Int>5 "Surrenders" branch needs an Int score we don't model;
+                // omitted — a morale-failing NPC flees rather than surrenders here.)
+            }
+        }
+        false
+    }
+
+    /// `MaxOppositionMoves` (`ovr014.cs:1699`) — the largest half-move budget over
+    /// the live opposite team. Draw-free.
+    fn max_opposition_moves(&self, actor: usize) -> i32 {
+        let team = self.fighters[actor].team;
+        self.fighters
+            .iter()
+            .filter(|f| f.in_combat && f.team != team)
+            .map(|f| calc_moves(f.movement) / 2)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// `sub_354AA` (`ovr010.cs:183`) — the wand scan. Draws **one d7** (`:192`) iff
+    /// `can_use && oppTeamCount>0 && !area_can_cast_spells` (normal area). The item
+    /// scan is draw-free for a weapon-only combatant (no readied spell-item), so
+    /// this always returns `false` (no wand used) after the d7. Wand *effects* are
+    /// deferred (M5).
+    fn wand_scan_d7(&mut self, rng: &mut EngineRng, actor: usize) -> bool {
+        let team = self.fighters[actor].team;
+        if self.fighters[actor].can_use
+            && self.opposite_count(team) > 0
+            && !self.area_can_cast_spells
+        {
+            let _priorities = roll_dice(rng, 7, 1); // ovr010.cs:192
+                                                    // for i in 0..priorities { foreach item … } — no items, draw-free.
+        }
+        false
+    }
+
+    /// `find_target(clear, arg_2, max_range, actor)` (`ovr014.cs:2238`): keep a
+    /// still-valid target (**0 draws**), else pick a random near-target
+    /// (`roll_dice(nearTargets.Count, 1)` per retry, `:2275`). With no invisibility
+    /// modeled, `CanSeeTargetA` is always true, so the first pick succeeds — exactly
+    /// **1 draw** when a target is found from scratch, 0 when none exist or the old
+    /// target survives. Two passes (the second `ignoreWalls`) as coab.
+    fn find_target(
+        &mut self,
+        rng: &mut EngineRng,
+        actor: usize,
+        clear: bool,
+        arg_2: u8,
+        max_range: i32,
+    ) -> bool {
+        let team = self.fighters[actor].team;
+        let invalidate = clear
+            || match self.fighters[actor].target {
+                Some(t) => {
+                    let tf = &self.fighters[t];
+                    tf.team == team || !tf.in_combat || !self.can_see_target(t)
+                }
+                None => false,
+            };
+        if invalidate {
+            self.fighters[actor].target = None;
+        }
+        if self.fighters[actor].target.is_some() {
+            return true;
+        }
+
+        let mut found = false;
+        let mut second_pass = false;
+        let mut var_5 = false;
+        while !found && !var_5 {
+            var_5 = second_pass;
+            let ignore_walls = second_pass && !clear;
+            let mut near = self.build_near(actor, max_range, ignore_walls);
+            let mut try_count = 20;
+            while try_count > 0 && !found && !near.is_empty() {
+                try_count -= 1;
+                let roll = roll_dice(rng, near.len() as u16, 1); // ovr014.cs:2275
+                let epi = near[(roll - 1) as usize];
+                if (arg_2 != 0 && ignore_walls) || self.can_see_target(epi.idx) {
+                    found = true;
+                    self.fighters[actor].target = Some(epi.idx);
+                } else {
+                    near.retain(|n| n.idx != epi.idx);
+                }
+            }
+            if !second_pass {
+                second_pass = true;
+            }
+        }
+        found
+    }
+
+    /// Apply melee damage to `target`; a drop to `<= 0` HP removes it from combat
+    /// (`in_combat = false`, `CombatantKilled` → occupancy `size 0`).
+    fn apply_damage(&mut self, target: usize, amount: i32) {
+        let t = &mut self.fighters[target];
+        t.hp_current -= amount;
+        if t.hp_current <= 0 {
+            t.hp_current = 0;
+            t.in_combat = false;
+        }
+    }
+
+    /// `AttackTarget → AttackTarget01` (`ovr014.cs:904/724`), melee core: for
+    /// `attackIdx` counting down from `attack_idx`, drain `AttacksLeft(attackIdx)`
+    /// swings — each **one d20** to-hit ([`pc_can_hit_target`]); **on a hit only**,
+    /// profile-1 damage ([`roll_damage`]). A hit that kills the target sets
+    /// `targetNotInCombat` and stops the remaining swings (no further draws). Sets
+    /// `delay = 0` (via `clear_actions`) when the turn's attacks are spent, and
+    /// returns `turnComplete`. Backstab/behind AC and the held-slay path are
+    /// deferred (raw AC used).
+    fn attack_target(&mut self, rng: &mut EngineRng, actor: usize, target: usize) -> bool {
+        if self.fighters[actor].attack1_left == 0 && self.fighters[actor].attack2_left == 0 {
+            self.clear_actions(actor);
+            return true;
+        }
+        let target_ac = self.fighters[target].ac;
+        let hit_bonus = self.fighters[actor].hit_bonus;
+        let mut target_gone = false;
+
+        let start = self.fighters[actor].attack_idx;
+        for attack_idx in (1..=start).rev() {
+            loop {
+                let left = if attack_idx == 1 {
+                    self.fighters[actor].attack1_left
+                } else {
+                    self.fighters[actor].attack2_left
+                };
+                if left == 0 || target_gone {
+                    break;
+                }
+                if attack_idx == 1 {
+                    self.fighters[actor].attack1_left -= 1;
+                } else {
+                    self.fighters[actor].attack2_left -= 1;
+                }
+                self.fighters[actor].attack_idx = attack_idx;
+
+                let th = pc_can_hit_target(rng, target_ac, hit_bonus, 0); // one d20
+                if th.hit {
+                    let (dc, ds, db) = (
+                        self.fighters[actor].dice_count,
+                        self.fighters[actor].dice_size,
+                        self.fighters[actor].damage_bonus,
+                    );
+                    let dmg = roll_damage(rng, ds, dc, db, None);
+                    self.apply_damage(target, dmg.amount);
+                    if !self.fighters[target].in_combat {
+                        target_gone = true;
+                    }
+                }
+            }
+        }
+
+        let complete =
+            self.fighters[actor].attack1_left == 0 && self.fighters[actor].attack2_left == 0;
+        if complete || !self.fighters[actor].in_combat {
+            self.clear_actions(actor);
+            return true;
+        }
+        false
+    }
+
+    /// `RecalcAttacksReceived` (`ovr014.cs:887`) — bump the target's received-attack
+    /// counter and directional bookkeeping. Draw-free; the direction math is
+    /// only read by backstab (deferred), so only the counter is tracked.
+    fn recalc_attacks_received(&mut self, target: usize, _attacker: usize) {
+        self.fighters[target].attacks_received =
+            self.fighters[target].attacks_received.saturating_add(1);
+    }
+
+    /// `TrySweepAttack` (`ovr014.cs:530`): a melee sweep vs. `HitDice == 0` targets.
+    /// **Draw-free and returns `false` for a normal (`hit_dice > 0`) target** — the
+    /// only case this slice's fights use. The 0-HD sweep (extra swings per victim)
+    /// is deferred with 0-HD monsters flagged.
+    fn try_sweep_attack(&mut self, target: usize, _actor: usize) -> bool {
+        // Guard `target.HitDice == 0` fails for hit_dice > 0 → no sweep, no draws.
+        let _ = target;
+        false
+    }
+
+    /// `getGroundInformation(direction, actor)` (`ovr033.cs:433`) for a single-cell
+    /// combatant: the destination cell (`pos + delta[direction]`), returning its
+    /// ground-tile index (0 for void/OOB) and any *other* occupant (1-based; 0 =
+    /// empty).
+    fn ground_info_dir(&self, actor: usize, direction: u8) -> (i32, u16) {
+        let dest = self.fighters[actor].pos.stepped(direction);
+        let ground = self.map.ground_tile(dest) as i32;
+        let occ = self.map.occupant(dest);
+        let current = (actor + 1) as u16;
+        let occ = if occ == current { 0 } else { occ };
+        (ground, occ)
+    }
+
+    /// `CanMove(baseDirection, dirStep, actor)` (`ovr010.cs:295`): can the actor step
+    /// in `(baseDirection + data_2B8[field_15][dirStep-1]) % 8`? Returns
+    /// `(can_move, ground_clear)` where `ground_clear` is the void case. Draw-free
+    /// (the cloud save at `:341` needs a poison/noxious cloud — none modeled).
+    fn can_move(&self, actor: usize, base_dir: u8, dir_step: i32) -> (bool, bool) {
+        let f15 = self.fighters[actor].field_15 as usize;
+        let offset = DATA_2B8[f15][(dir_step - 1) as usize];
+        let player_dir = ((base_dir as i32 + offset) % 8) as u8;
+        let (ground_tile, occ) = self.ground_info_dir(actor, player_dir);
+
+        if ground_tile == 0 {
+            return (false, true); // void → groundClear, can't move
+        }
+        let mc = ground_tile_move_cost(ground_tile);
+        if mc == 0xFF {
+            return (false, false); // wall
+        }
+        let cost = if player_dir & 1 != 0 {
+            mc as i32 * 3
+        } else {
+            mc as i32 * 2
+        };
+        let can = occ == 0 && cost < self.fighters[actor].move_left;
+        (can, false)
+    }
+
+    /// `sub_3E748(direction, actor)` (`ovr014.cs:252`): step one tile, deduct the
+    /// move cost, repaint occupancy, then run opportunity attacks by *guarding*
+    /// enemies at the new cell (`move_step_into_attack`). The position updates
+    /// unconditionally (coab), but `CanMove` already guaranteed the cost is
+    /// affordable.
+    fn sub_3e748(&mut self, rng: &mut EngineRng, actor: usize, direction: u8) {
+        let old = self.fighters[actor].pos;
+        let new = old.stepped(direction);
+        if !new.in_bounds() {
+            return;
+        }
+        let base = self.map.move_cost(new) as i32;
+        let cost = if direction & 1 != 0 {
+            base * 3
+        } else {
+            base * 2
+        };
+        if cost > self.fighters[actor].move_left {
+            self.fighters[actor].move_left = 0;
+        } else {
+            self.fighters[actor].move_left -= cost;
+        }
+        self.fighters[actor].pos = new;
+        self.rebuild_occupancy();
+        self.fighters[actor].attacks_received = 0;
+        self.move_step_into_attack(rng, actor);
+        if !self.fighters[actor].in_combat {
+            self.fighters[actor].move_left = 0;
+        }
+    }
+
+    /// `move_step_into_attack(mover)` (`ovr014.cs:226`): every adjacent enemy that
+    /// is **guarding** attacks the mover entering its reach (`AttackTarget(null,0)`).
+    /// In a fresh melee no one guards, so this is draw-free; it becomes draw-bearing
+    /// only once a combatant has fallen back to guard.
+    fn move_step_into_attack(&mut self, rng: &mut EngineRng, mover: usize) {
+        if !self.fighters[mover].in_combat {
+            return;
+        }
+        let near = self.build_near(mover, 1, false);
+        for n in near {
+            let att = n.idx;
+            if self.fighters[att].guarding {
+                self.fighters[att].guarding = false;
+                self.recalc_attacks_received(mover, att);
+                self.attack_target(rng, att, mover);
+            }
+        }
+    }
+
+    /// `move_step_away_attack(direction, mover)` (`ovr014.cs:326`): every enemy the
+    /// mover **leaves** melee adjacency with (adjacent now, not adjacent at the
+    /// destination) gets a free `AttackTarget(null,1)`. In a clean open-ground
+    /// approach the mover isn't adjacent to anyone, so this is draw-free; it fires
+    /// once melee is joined and a combatant steps out.
+    fn move_step_away_attack(&mut self, rng: &mut EngineRng, mover: usize, direction: u8) {
+        let origin = self.build_near(mover, 1, false);
+        if origin.is_empty() {
+            return;
+        }
+        // Peek the destination's adjacent enemies (move, measure, move back).
+        let orig_pos = self.fighters[mover].pos;
+        self.fighters[mover].pos = orig_pos.stepped(direction);
+        self.rebuild_occupancy();
+        let dest = self.build_near(mover, 1, false);
+        self.fighters[mover].pos = orig_pos;
+        self.rebuild_occupancy();
+        if !self.fighters[mover].in_combat {
+            return;
+        }
+        let dest_ids: std::collections::HashSet<usize> = dest.iter().map(|n| n.idx).collect();
+        let departed: Vec<usize> = origin
+            .iter()
+            .map(|n| n.idx)
+            .filter(|i| !dest_ids.contains(i))
+            .collect();
+        for att in departed {
+            if !self.fighters[att].in_combat || !self.can_see_target(mover) {
+                continue;
+            }
+            // The tmpDir visibility scan (ovr014.cs:374-380): an attacker that
+            // hasn't acted (delay>0) or hasn't been attacked qualifies immediately.
+            let base = self.fighters[att].direction as i32 + 6;
+            let qualifies = (base..=base + 4).any(|tmp| {
+                self.fighters[att].delay > 0
+                    || self.fighters[att].attacks_received == 0
+                    || can_see_combatant(
+                        (tmp % 8) as u8,
+                        self.fighters[mover].pos,
+                        self.fighters[att].pos,
+                    )
+            });
+            if qualifies {
+                let idx = if self.fighters[att].attack1_left > 0 {
+                    1
+                } else if self.fighters[att].attack2_left > 0 {
+                    2
+                } else {
+                    1
+                };
+                self.fighters[att].attack_idx = idx;
+                if idx == 1 && self.fighters[att].attack1_left == 0 {
+                    self.fighters[att].attack1_left = 1;
+                } else if idx == 2 && self.fighters[att].attack2_left == 0 {
+                    self.fighters[att].attack2_left = 1;
+                }
+                self.attack_target(rng, att, mover);
+            }
+        }
+    }
+
+    /// `moralFailureEscape(actor)` (`ovr010.cs:369`, `sub_359D1`) — one **approach**
+    /// (or flee) step toward the target. For an **NPC** advancing, the morale gate
+    /// draws **one d100** (`:387`); a **PC** short-circuits it (0 draws). Then a
+    /// `CanMove` retry loop picks a step direction from [`DATA_2B8`], the mover
+    /// faces it (`draw_74B3F` sets `direction`), leaving-adjacency enemies attack
+    /// (`move_step_away_attack`), and the step lands (`sub_3E748`). The flee branch
+    /// (`moral_failure`) draws the `:400` d2; only the non-flee approach is
+    /// exercised by the parity fights.
+    fn moral_failure_escape(
+        &mut self,
+        rng: &mut EngineRng,
+        actor: usize,
+        b1ab18: &mut i32,
+        b1ab19: &mut i32,
+    ) {
+        if !(self.fighters[actor].move_left / 2 > 0 && self.fighters[actor].delay > 0) {
+            self.try_guarding(actor);
+            return;
+        }
+
+        // The morale-advance gate (ovr010.cs:386-388). C# `||` short-circuit:
+        // a PC (control<NPC_Base) makes the FIRST operand true → NO d100; an NPC
+        // (control>=NPC_Base) evaluates operand C → draws the d100.
+        let advance = !self.fighters[actor].npc
+            || (self.enemy_health_pct <= roll_dice(rng, 100, 1) as i32 + self.monster_morale)
+            || self.fighters[actor].team == Team::Monster;
+
+        if !advance {
+            self.try_guarding(actor);
+            return;
+        }
+
+        let dir = if !self.fighters[actor].moral_failure {
+            let tp = self.fighters[self.fighters[actor].target.unwrap()].pos;
+            target_direction(self.fighters[actor].pos, tp)
+        } else {
+            // Flee direction (ovr010.cs:400-408) — draws the d2, then a fixed
+            // heading from mapDirection. Only reached when moral_failure is set.
+            self.fighters[actor].field_15 = roll_dice(rng, 2, 1) as u8;
+            let md = self.map_direction as i32;
+            let mut d = md - (((md + 2) % 4) / 2) + 8;
+            if self.fighters[actor].team == Team::Party {
+                d += 4;
+            }
+            (d % 8) as u8
+        };
+
+        // CanMove retry loop (ovr010.cs:415-428): find the first dir_step whose
+        // DATA_2B8-offset direction is walkable. flee_battle only in the flee case.
+        let mut dir_step = 1i32;
+        let mut var_5 = false;
+        while dir_step < 6 && !var_5 {
+            let (can, ground_clear) = self.can_move(actor, dir, dir_step);
+            if can {
+                break;
+            }
+            if self.fighters[actor].moral_failure && ground_clear {
+                var_5 = true;
+                self.flee_battle(rng, actor);
+            } else {
+                dir_step += 1;
+            }
+        }
+
+        if var_5 {
+            self.fighters[actor].move_left = 0;
+            self.fighters[actor].moral_failure = false;
+            self.clear_actions(actor);
+            return;
+        }
+
+        let f15 = self.fighters[actor].field_15 as usize;
+        let offset = DATA_2B8[f15][(dir_step.min(6) - 1) as usize];
+        let var_2 = (offset + dir as i32).rem_euclid(8);
+
+        // Anti-oscillation (ovr010.cs:440-460): a 180° reversal or a failed step
+        // rotates field_15 and (after 2) retargets — find_target here DRAWS.
+        if dir_step == 6 || (var_2 + 4) % 8 == *b1ab18 {
+            *b1ab19 += 1;
+            self.fighters[actor].field_15 = (self.fighters[actor].field_15 % 6) + 1;
+            if *b1ab19 > 1 {
+                self.fighters[actor].target = None;
+                if *b1ab19 > 2 {
+                    self.fighters[actor].move_left = 0;
+                    var_5 = true;
+                } else if !self.find_target(rng, actor, false, 1, 0xff) {
+                    var_5 = true;
+                    self.try_guarding(actor);
+                }
+            }
+        }
+
+        if dir_step < 6 {
+            *b1ab18 = var_2;
+        } else {
+            var_5 = true;
+        }
+
+        if var_5 {
+            return;
+        }
+
+        // Face the step direction (draw_74B3F sets actions.direction), take
+        // opportunity attacks for leaving, then step.
+        self.fighters[actor].direction = var_2 as u8;
+        self.move_step_away_attack(rng, actor, var_2 as u8);
+        if !self.fighters[actor].in_combat {
+            self.clear_actions(actor);
+            return;
+        }
+        if self.fighters[actor].move_left > 0 {
+            self.sub_3e748(rng, actor, self.fighters[actor].direction);
+        }
+        // in_poison_cloud — draw-free (no cloud).
+    }
+
+    /// `flee_battle` (`ovr014.cs:426`): the escape check, drawing a `d2` tiebreak
+    /// (`:443`) only when the fastest opponent exactly matches the fleer's speed.
+    /// Reached only from the flee path; removes the fleer on success.
+    fn flee_battle(&mut self, rng: &mut EngineRng, actor: usize) {
+        let gets_away = if self.build_near(actor, 0xff, false).is_empty() {
+            true
+        } else {
+            let var_4 = calc_moves(self.fighters[actor].movement) / 2;
+            let var_3 = self.max_opposition_moves(actor);
+            if var_3 < var_4 {
+                true
+            } else {
+                var_3 == var_4 && roll_dice(rng, 2, 1) == 1 // ovr014.cs:443
+            }
+        };
+        if gets_away {
+            self.fighters[actor].in_combat = false;
+        }
+        self.clear_actions(actor);
+    }
+
+    /// `sub_35DB1(actor)` (`ovr010.cs:511`) — the move-then-attack loop. Approaches
+    /// the target one step per iteration (each NPC step drawing the morale d100)
+    /// until adjacent, then attacks (`AttackTarget01`'s d20s + damage). Returns
+    /// `delayed == false` (the turn is spent). The 20-iteration `counter` cap
+    /// guarantees termination.
+    fn sub_35db1(&mut self, rng: &mut EngineRng, actor: usize) -> bool {
+        let mut b1ab18 = 8i32;
+        let mut b1ab19 = 0i32;
+        // CheckAffectsEffect(Type_14) / bandage(true) — both draw-free (party-only
+        // bandage of a dying ally; none modeled → no effect).
+        let mut counter = 0;
+        let mut stop = false;
+        let mut delayed = self.fighters[actor].delay != 0;
+
+        while !stop && delayed {
+            if self.fighters[actor].moral_failure {
+                while self.fighters[actor].move_left > 0
+                    && self.fighters[actor].delay > 0
+                    && self.fighters[actor].delay < 20
+                {
+                    self.moral_failure_escape(rng, actor, &mut b1ab18, &mut b1ab19);
+                }
+            }
+
+            let d = self.fighters[actor].delay;
+            if d == 0 || d == 20 {
+                delayed = false;
+            }
+
+            if !stop && delayed {
+                counter += 1;
+                if counter > 20 {
+                    stop = true;
+                    delayed = false;
+                    self.try_guarding(actor);
+                }
+
+                if !stop {
+                    let mut reachable = false;
+                    let range = 1i32; // melee (no ranged weapon modeled)
+
+                    // Drop an invalid target (ovr010.cs:576-581).
+                    if let Some(t) = self.fighters[actor].target {
+                        let tf = &self.fighters[t];
+                        if !tf.in_combat || tf.team == self.fighters[actor].team {
+                            self.fighters[actor].target = None;
+                        }
+                    }
+
+                    // Reachability probe (ovr010.cs:583-598) — draw-free.
+                    if let Some(t) = self.fighters[actor].target {
+                        if self.can_see_target(t) {
+                            let ap = self.fighters[actor].pos;
+                            let tp = self.fighters[t].pos;
+                            if let Some(steps) = can_reach(&self.map, ap, tp, range, false) {
+                                if steps as i32 / 2 <= range {
+                                    reachable = true;
+                                }
+                            }
+                        }
+                    }
+
+                    if !reachable {
+                        let near = self.build_near(actor, range, false);
+                        if near.is_empty() {
+                            // No adjacent enemy → approach one step toward the target.
+                            if self.find_target(rng, actor, false, 0, 0xff) {
+                                self.moral_failure_escape(rng, actor, &mut b1ab18, &mut b1ab19);
+                            } else {
+                                stop = true;
+                                self.try_guarding(actor);
+                            }
+                        } else {
+                            // An adjacent enemy exists → re-pick among them (:618).
+                            let roll = roll_dice(rng, near.len() as u16, 1);
+                            let picked = near[(roll - 1) as usize].idx;
+                            self.fighters[actor].target = Some(picked);
+                            let tp = self.fighters[picked].pos;
+                            if get_target_range(&self.map, tp, self.fighters[actor].pos) == 1
+                                || self.can_see_target(picked)
+                            {
+                                reachable = true;
+                            }
+                        }
+                    }
+
+                    if reachable {
+                        let t = self.fighters[actor].target.unwrap();
+                        if self.try_sweep_attack(t, actor) {
+                            stop = true;
+                            self.clear_actions(actor);
+                        } else {
+                            self.recalc_attacks_received(t, actor);
+                            stop = self.attack_target(rng, actor, t);
+                            if stop {
+                                delayed = false;
+                            } else if !self.fighters[t].in_combat {
+                                stop = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        !delayed
+    }
+
+    /// `PlayerQuickFight(actor)` (`ovr010.cs:8`) — the whole melee AI turn, in draw
+    /// order (study §4.1): the `field_15` mode-gate, `FleeCheck_001` (draw-free),
+    /// the two normal-area behavior-guard d7s (`sub_354AA:192` + `sub_3560B:248`),
+    /// then the `find_target` pick and the `sub_35DB1` move-attack loop. Spell/
+    /// wand/turn-undead **effects** are stubbed; their **guards and draws** are
+    /// faithful. Every draw flows through `rng`, so an attached `RngSink` sees the
+    /// exact stream (D9).
+    pub fn melee_ai_turn(&mut self, rng: &mut EngineRng, actor: usize) {
+        // process_input_in_monsters_turn — headless, draw-free, returns false.
+        if !self.fighters[actor].in_combat {
+            self.clear_actions(actor);
+            return;
+        }
+
+        // 1. field_15 mode-gate (ovr010.cs:20-36).
+        self.fighters[actor].field_15 = field_15_mode_gate(rng, self.fighters[actor].field_15);
+
+        // 2. FleeCheck_001 (ovr010.cs:40) — draw-free.
+        let surrendered = self.flee_check(actor);
+        if surrendered {
+            return;
+        }
+
+        // 3. sub_354AA wand scan (ovr010.cs:54) — the normal-area d7.
+        if self.wand_scan_d7(rng, actor) {
+            self.clear_actions(actor);
+            return;
+        }
+
+        // 4. queued spell (spell_id>0) — none for a fighter.
+        // 5. turn_undead — non-cleric, short-circuit, draw-free.
+
+        // 6. sub_3560B (ovr010.cs:74) — the UNCONDITIONAL memorized-spell d7 (:248).
+        let _spell_priority = roll_dice(rng, 7, 1);
+        // (spells_count==0 → the inner roll_dice(spells_count,1) loop never runs.)
+
+        // 7. AI_items_selection (ovr010.cs:79) — draw-free (weapon-only no-op).
+        // 8. process_input again — draw-free.
+
+        // 9. the target/move-attack loop (ovr010.cs:82-95).
+        loop {
+            let found = self.find_target(rng, actor, false, 1, 0xff);
+            if found && self.fighters[actor].delay > 0 && self.fighters[actor].in_combat {
+                if self.sub_35db1(rng, actor) {
+                    break;
+                }
+            } else {
+                self.try_guarding(actor);
+                break;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3255,6 +4178,261 @@ mod tests {
             field_15 = field_15_mode_gate(&mut rng, field_15);
             assert_eq!(field_15 as u16, expected, "matches an independent replay");
             assert!((1..=6).contains(&field_15) || !entered);
+        }
+    }
+
+    // === the melee AI turn — the parity artifact (M4 combat #4, D3/D6) =======
+
+    #[test]
+    fn melee_turn_adjacent_draws_the_exact_sequence() {
+        // A monster (NPC) adjacent to a PC: mode-gate → the two behavior-guard d7s
+        // → find_target pick (d1) → attack (d20 + damage on a hit). The exact
+        // operand sequence AND values are hand-derived from an INDEPENDENT replay
+        // (not the engine), so this is a real parity assertion (study §4.1.7).
+        let dice = (2u8, 6u8, 1u8); // 2d6+1
+        let mut world = CombatWorld::new(
+            CombatMap::uniform(FLOOR),
+            vec![
+                Fighter::new_melee(
+                    0,
+                    Team::Monster,
+                    true,
+                    GridPos::new(25, 12),
+                    20,
+                    5,
+                    20,
+                    12,
+                    dice,
+                    5,
+                    1,
+                ),
+                Fighter::new_melee(
+                    1,
+                    Team::Party,
+                    false,
+                    GridPos::new(26, 12),
+                    20,
+                    5,
+                    0,
+                    12,
+                    (1, 4, 0),
+                    5,
+                    1,
+                ),
+            ],
+        );
+
+        // Independent replay → the expected (operand) stream, branch-following.
+        let mut o = Replay::new(SEED);
+        let mut expect: Vec<u16> = Vec::new();
+        // field_15 gate: field_15 starts 0 → the || short-circuits the d4 gate.
+        let d8 = o.roll(8);
+        expect.push(8);
+        if d8 != 8 {
+            o.roll(2);
+            expect.push(2);
+        } else {
+            o.roll(4);
+            expect.push(4);
+        }
+        // wand-scan d7 (normal area), memorized-spell d7 (unconditional).
+        o.roll(7);
+        expect.push(7);
+        o.roll(7);
+        expect.push(7);
+        // find_target: one target, d1 pick.
+        o.roll(1);
+        expect.push(1);
+        // attack: one d20 to-hit; damage dice on a hit.
+        let d20 = o.roll(20);
+        expect.push(20);
+        let effective = if d20 == 20 { 100 } else { d20 as i32 };
+        let hit = d20 > 1 && effective + 20 >= 5; // hit_bonus 20 vs raw AC 5
+        if hit {
+            for _ in 0..dice.0 {
+                o.roll(dice.1 as u16);
+                expect.push(dice.1 as u16);
+            }
+        }
+
+        let log = DrawLog::default();
+        let mut rng = EngineRng::new(SEED);
+        rng.attach_sink(log.sink());
+        world.melee_ai_turn(&mut rng, 0);
+
+        assert_eq!(
+            log.ns(),
+            expect,
+            "the melee turn's exact draw operand sequence"
+        );
+        assert_eq!(world.fighters[0].target, Some(1), "target was picked");
+        assert_eq!(world.fighters[0].delay, 0, "turn spent (delay zeroed)");
+        assert!(
+            (1..=6).contains(&world.fighters[0].field_15),
+            "field_15 updated"
+        );
+        if hit {
+            assert!(
+                world.fighters[1].hp_current < 20,
+                "the PC took damage on a hit"
+            );
+        }
+    }
+
+    #[test]
+    fn monster_approach_draws_a_d100_per_step_but_a_pc_does_not() {
+        // The control asymmetry (§4.1.4): an NPC approaching a distant target draws
+        // the morale-advance d100 on each step; a PC in the identical geometry
+        // short-circuits it and draws none. Both still close and attack.
+        for npc in [true, false] {
+            let (a_team, t_team) = if npc {
+                (Team::Monster, Team::Party)
+            } else {
+                (Team::Party, Team::Monster)
+            };
+            let mut world = CombatWorld::new(
+                CombatMap::uniform(FLOOR),
+                vec![
+                    Fighter::new_melee(
+                        0,
+                        a_team,
+                        npc,
+                        GridPos::new(25, 8),
+                        30,
+                        5,
+                        20,
+                        12,
+                        (1, 4, 2),
+                        5,
+                        1,
+                    ),
+                    Fighter::new_melee(
+                        1,
+                        t_team,
+                        !npc,
+                        GridPos::new(25, 12),
+                        30,
+                        5,
+                        20,
+                        12,
+                        (1, 4, 2),
+                        5,
+                        1,
+                    ),
+                ],
+            );
+            let log = DrawLog::default();
+            let mut rng = EngineRng::new(SEED);
+            rng.attach_sink(log.sink());
+            let start = world.fighters[0].pos;
+            world.melee_ai_turn(&mut rng, 0);
+
+            let d100s = log.ns().iter().filter(|&&n| n == 100).count();
+            if npc {
+                assert!(d100s >= 1, "an NPC draws a morale d100 per approach step");
+            } else {
+                assert_eq!(d100s, 0, "a PC never draws the morale-advance d100");
+            }
+            assert_ne!(
+                world.fighters[0].pos, start,
+                "the actor moved toward the target"
+            );
+            assert!(
+                log.ns().contains(&20),
+                "and eventually swung (a d20 to-hit)"
+            );
+        }
+    }
+
+    #[test]
+    fn all_ai_1v1_fight_is_deterministic_terminates_and_is_prng_consistent() {
+        // The D6 artifact (turn level): two adjacent all-AI combatants trade blows
+        // over rounds until one falls. Same seed → byte-identical draw stream
+        // (determinism); a victor emerges (termination); and every captured draw
+        // reproduces through an independent `Prng` (before→result→after chain).
+        fn run_fight(seed: u32) -> (Vec<RngDraw>, usize) {
+            let log = DrawLog::default();
+            let mut rng = EngineRng::new(seed);
+            rng.attach_sink(log.sink());
+            let mut world = CombatWorld::new(
+                CombatMap::uniform(FLOOR),
+                vec![
+                    Fighter::new_melee(
+                        0,
+                        Team::Monster,
+                        true,
+                        GridPos::new(25, 12),
+                        12,
+                        5,
+                        20,
+                        12,
+                        (1, 6, 1),
+                        5,
+                        1,
+                    ),
+                    Fighter::new_melee(
+                        1,
+                        Team::Party,
+                        false,
+                        GridPos::new(26, 12),
+                        12,
+                        5,
+                        20,
+                        12,
+                        (1, 6, 1),
+                        5,
+                        1,
+                    ),
+                ],
+            );
+            let mut winner = usize::MAX;
+            for _round in 0..100 {
+                for actor in 0..2 {
+                    if world.fighters[actor].in_combat && world.fighters[actor].delay > 0 {
+                        world.melee_ai_turn(&mut rng, actor);
+                    }
+                }
+                let alive: Vec<usize> = (0..2).filter(|&i| world.fighters[i].in_combat).collect();
+                if alive.len() <= 1 {
+                    winner = *alive.first().unwrap_or(&usize::MAX);
+                    break;
+                }
+                // Initiative stub for the next round: re-arm each survivor's delay +
+                // per-round attack (so multi-round trades occur).
+                for i in 0..2 {
+                    if world.fighters[i].in_combat {
+                        world.fighters[i].delay = 5;
+                        world.fighters[i].attack1_left = 1;
+                        world.fighters[i].attack_idx = 2;
+                    }
+                }
+            }
+            let draws = log.draws.borrow().clone();
+            (draws, winner)
+        }
+
+        let (draws1, w1) = run_fight(SEED);
+        let (draws2, w2) = run_fight(SEED);
+        assert_eq!(draws1, draws2, "same seed → identical draw stream");
+        assert_eq!(w1, w2, "deterministic victor");
+        assert_ne!(w1, usize::MAX, "the fight produced a victor");
+        assert!(!draws1.is_empty(), "the fight drew from the PRNG");
+
+        // Every draw reproduces through an independent Prng replay of the seed.
+        let mut p = Prng::new(SEED);
+        for (i, d) in draws1.iter().enumerate() {
+            assert_eq!(
+                d.before,
+                p.state(),
+                "draw {i}: before-state matches the replay"
+            );
+            let r = p.random(d.n.expect("operand recorded"));
+            assert_eq!(Some(r), d.result, "draw {i}: result matches the replay");
+            assert_eq!(
+                d.after,
+                p.state(),
+                "draw {i}: after-state matches the replay"
+            );
         }
     }
 }
