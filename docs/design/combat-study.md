@@ -782,6 +782,16 @@ study — they land with status-tier-1 implementation (PLAN M4) and M5.
 
 ### 8.1 Where monster records come from
 
+> **IMPLEMENTED — combat #6 (2026-07-16).** `EngineVmHost::load_monster` now
+> decodes block `monster_id` of `MON{game_area}CHA.DAX` (via
+> `gbx_formats::monster`) and accumulates it `num_copies` times into a
+> `PendingCombat` roster on `EngineState` (coab's `gbl.TeamList` monster half +
+> `monstersLoaded`/`monster_icon_id`, the 63-cap, `num_copies <= 0 → 1`);
+> `CLEARMONSTERS` resets it. The SPC/ITM companion files (innate affects + carried
+> items) and the CPIC icon are recorded but not yet consumed (visual/effect state,
+> deferred). A missing/undecodable `.dax` keeps the non-aborting `MissingAsset`
+> analogue. This is the roster the `COMBAT` opcode consumes (§16.1 piece 1).
+
 `CMD_LoadMonster` (`ovr003.cs:238`, the `MONSTER` opcode handler) reads three ECL
 operands — monster id, copy count, CPIC block — and calls **`ovr017.load_mob(mod_id)`**
 (`ovr003.cs:247`), then `ShallowClone`s the master up to `num_copies` times into
@@ -948,6 +958,36 @@ out of scope here and lands with the item/treasure session.
 > `BattleSetup` roster assembly are the later encounter-trigger slice; here the
 > map is built from a provided terrain descriptor and the area→wall-flags input is
 > a caller `dir_flags` hook defaulting to open ground.
+
+> **UPDATE — the `COMBAT`-opcode wiring slice (2026-07-16, M4 combat #6).** The
+> encounter-trigger half is now wired: a running ECL script's `COMBAT` opcode
+> (`CMD_Combat`, `ovr003.cs:971`) assembles the roster (party team 0 + the
+> `LOAD MONSTER`-loaded monsters team 1) and runs the unified `CombatState` to a
+> victor (`gbx-engine`'s `combat::run_encounter`, driven from the shell/tick
+> path). `encounter_distance` (`sub_304B4`, `ovr008.cs:157`) is transliterated
+> and **confirmed draw-free** (a forward wall ray: wilderness = 2; a dungeon rays
+> up to 2 cells to the first wall). **The roster/map gap this §11 banner named is
+> closed; only the *faithful terrain derivation* remains deferred** — behind
+> `combat::provisional_combat_map` (fully-walled GEO squares → rock, deployment
+> core kept clear), a documented draw-free stand-in.
+>
+> **★ FINDING that CORRECTS this §11's "the whole path is draw-free" claim:** it
+> holds only for **dungeon** areas. `SetupGroundTiles` (`ovr011.cs:757`) splits on
+> `inDungeon`: `SetupDungeonFloor` (`get_dir_flags`/`build_background_tiles_*`) is
+> genuinely draw-free, but **`SetupWildernessFloor` DRAWS** — `SetupWildernessFloor01`
+> (`ovr011.cs:551`), `SetupWildernessFloor02` (`:597`), `SetupWildernessFloor03`
+> (`:680`) and `SetGroupMapStepped` (`:653`) call `roll_dice(100,1)`,
+> `roll_dice(2,1)`, `roll_dice(4,5)`, `roll_dice(20,1)`, `roll_dice(5,1)` to
+> scatter grass/rock decoration across the field. So a faithful wilderness/city
+> terrain is **draw-bearing**: an oracle replay of a wilderness combat must
+> reproduce those terrain draws *in exact order* before the first initiative d6,
+> or every subsequent draw desyncs. (Slice 3's zero-draw assertion covered
+> placement + movement geometry + the dungeon-only path it exercised.) This is a
+> third, decisive reason the faithful `SetupGroundTiles` diamond is deferred to
+> its own carefully-verified slice — a wrong draw order there is worse than the
+> flagged provisional map. Combat #6's draw-parity test asserts *our* wiring adds
+> no draw before initiative (it uses the draw-free provisional map), which stays
+> true; the finding is about the deferred faithful path.
 
 `BattleSetup` (`ovr011.cs:1169`, `battle_begins`) builds the battlefield:
 
@@ -1236,22 +1276,26 @@ merged them, behavior-preserving — **not one draw and not one outcome changed*
 This makes the tick machine (§1) the single combat engine, on real game data
 (`watch_a_real_data_fight`).
 
-### 16.1 What actually closes H4 (the two remaining pieces)
+### 16.1 What actually closes H4 (one remaining piece)
 
-The engine is now one coherent model on real data. Two pieces remain, and they
-are what close H4 — both are *encounter-trigger* wiring, not new combat mechanics:
+The engine is now one coherent model on real data. Two pieces remained; **combat
+#6 (2026-07-16) landed the first**, so only the entry-state snapshot is left:
 
-1. **The ECL `COMBAT`-opcode → `BattleSetup` trigger.** Today the roster is
-   assembled *by the caller* (the demo/test hands `CombatState::new` a `Vec<Combatant>`).
-   The real path is a *running ECL script* hitting the `COMBAT` opcode
-   (`CMD_Combat`, `ovr003.cs:971`) → `BattleSetup` (`ovr011.cs:1169`), which loads
-   the encounter's monsters (`load_mob`, §8.1), calls the real `SetupGroundTiles`
-   (the faithful iso-diamond terrain derivation `place_combatants`'s deferred
-   `dir_flags` hook stands in for, §11) and `PlaceCombatants`, and enters the loop
-   with `combat_round = 0`. Wiring that opcode into `gbx-vm`/`gbx-engine` so a
-   script assembles the roster is the encounter-trigger slice.
+1. ✅ **The ECL `COMBAT`-opcode → `BattleSetup` trigger — LANDED (combat #6).** A
+   *running ECL script*'s `COMBAT` opcode (`CMD_Combat`, `ovr003.cs:971`) now
+   assembles the roster itself — the party as team 0 plus the `LOAD MONSTER`-loaded
+   monsters (`load_mob`, §8.1) as team 1 — and runs the unified `CombatState` to a
+   victor (`combat::run_encounter`, driven from the shell/tick path). `LOAD
+   MONSTER`/`CLEARMONSTERS` accumulate a real decoded roster; `encounter_distance`
+   (`sub_304B4`) is transliterated and draw-free; the fight's draw stream begins
+   exactly with the §2 initiative fingerprint (asserted). The **roster + map gap is
+   closed.** What remains deferred from *this* piece is only the faithful
+   `SetupGroundTiles` iso-diamond terrain (a documented provisional GEO overlay
+   stands in — §11 and its ★ draw-bearing-wilderness finding) and
+   `AfterCombatExpAndTreasure` (XP/treasure) + the non-combat (shop/temple) COMBAT
+   branch (stubbed with citations).
 
-2. **The combat entry-state snapshot (D-OR5(b)).** To replay a *captured original
+2. **The combat entry-state snapshot (D-OR5(b)) — the only H4-closing piece left.** To replay a *captured original
    fight* draw-for-draw we need the fight's entry state: the RNG state at combat
    start (recoverable from a `.gbxtrace`) **plus** the combatant roster —
    positions, `delay`s, `field_15`, teams — which needs the D-OR5(b) structure

@@ -15,6 +15,14 @@
 //!   §2 initiative fingerprint — one d6 per combatant, then the d100 selection
 //!   pass — so the wiring injects/drops no setup draw before the first
 //!   initiative roll (what keeps a future oracle replay honest).
+//!
+//! Why no *real* `ECL2.DAX` combat here: a real script only reaches `COMBAT`
+//! with monsters loaded after walking into a scripted/random encounter, which
+//! needs the cross-area transition our walk loop doesn't do yet (FD-19) — the
+//! bundled save's boot vector never hits `COMBAT`. So the real-data proof stays
+//! `demo::watch_a_real_data_fight` (real `MON2CHA.DAX` monsters through the same
+//! `CombatState`), and this synthetic program proves the *opcode→fight→resume*
+//! wiring the demo's caller-assembled roster can't.
 
 #![cfg(test)]
 
@@ -153,11 +161,12 @@ fn combat_from_a_running_script_resolves_and_resumes() {
                 TranscriptEntry::Request(label) if label.starts_with("combat:") => {
                     combat_line = Some(label);
                 }
-                TranscriptEntry::Print { text, .. } if text.contains("AFTERWARD") => {
-                    // The PRINT only runs if COMBAT resumed the script.
-                    if combat_line.is_some() {
-                        saw_resume_print = true;
-                    }
+                // The PRINT only runs if COMBAT resumed the script, so gate on
+                // having already seen the `combat:` line.
+                TranscriptEntry::Print { text, .. }
+                    if text.contains("AFTERWARD") && combat_line.is_some() =>
+                {
+                    saw_resume_print = true;
                 }
                 _ => {}
             }

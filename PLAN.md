@@ -337,6 +337,19 @@ Walk around Tilverton, looking right.
   shipped monsters — a runtime flag, out-of-range read unreachable) and closed
   **FD-29**'s monster clause (max damage roll 45 ≪ 255, inert). No combat
   mechanics implemented (they need the Phase-0 captures).
+- **Combat mechanics landed as slices #1–#6 (2026-07-16), all through the one
+  tick engine (`gbx-engine::combat`):** #1 initiative, #2 attack resolution, #3
+  the tactical map/placement/movement, #4 the melee QuickFight AI (a draw-exact
+  parity artifact), #5 model unification (one `CombatState` on real monster
+  data), and **#6 the ECL `COMBAT`-opcode wiring** — a running script's `LOAD
+  MONSTER; COMBAT` now assembles the roster (party + decoded monsters) and runs
+  the fight, resuming the script with the outcome; the opcode→combat path is
+  draw-free before the first initiative d6 (asserted). Deferred with citations:
+  the faithful `SetupGroundTiles` terrain (a provisional GEO overlay stands in —
+  and a combat #6 finding shows the *wilderness* path is draw-bearing), XP/
+  treasure, and the non-combat (shop/temple) COMBAT branch. **The last
+  H4-closing piece is the combat entry-state snapshot (D-OR5(b))** so a captured
+  fight replays draw-for-draw.
 - Combat map generation from encounter data; combatant placement.
 - Initiative, action economy, movement costs, facing/rear attacks; THAC0 melee + ranged with
   range brackets; damage; attacks-per-round.
