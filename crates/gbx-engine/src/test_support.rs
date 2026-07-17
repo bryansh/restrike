@@ -49,7 +49,7 @@ pub fn exit_only_block() -> EclBuilder {
 
 /// `load_ecl_dax`'s 2-byte prefix (`vmhost.rs`'s citation) — every
 /// synthetic ECL block needs this ahead of its real bytecode.
-fn ecl_dax_block(bytecode: &[u8]) -> Vec<u8> {
+pub(crate) fn ecl_dax_block(bytecode: &[u8]) -> Vec<u8> {
     let mut v = vec![0u8, 0u8];
     v.extend_from_slice(bytecode);
     v
@@ -69,7 +69,7 @@ fn rle_encode_literal(raw: &[u8]) -> Vec<u8> {
 /// A synthetic multi-block DAX file (`dax.rs`'s layout) — `gbx-formats::dax`
 /// ships no public encoder by design (D10: only test code ever needs to
 /// *write* the format).
-fn build_dax_file(blocks: &[(u8, Vec<u8>)]) -> Vec<u8> {
+pub(crate) fn build_dax_file(blocks: &[(u8, Vec<u8>)]) -> Vec<u8> {
     let mut entries = Vec::new();
     let mut data_area = Vec::new();
     for (id, raw) in blocks {

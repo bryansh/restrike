@@ -43,6 +43,8 @@ pub mod vmhost;
 pub mod widgets;
 
 #[cfg(test)]
+mod combat_wiring;
+#[cfg(test)]
 mod demo;
 #[cfg(test)]
 mod h2_conformance;
