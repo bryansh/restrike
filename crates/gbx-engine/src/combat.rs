@@ -30,6 +30,7 @@
 //! wiring it to the ECL `COMBAT` opcode / `BattleSetup` is a later session.
 
 use crate::rng::EngineRng;
+use gbx_formats::geo::GeoBlock;
 use gbx_rules::flavor::Flavor;
 
 /// One `roll_dice(size, count)` (`ovr024.cs:586-598`): `count` dice, each
@@ -1329,6 +1330,88 @@ pub fn size_footprint(size: u8, pos: GridPos) -> Vec<GridPos> {
         .iter()
         .map(|&(dx, dy)| GridPos::new(pos.x + dx, pos.y + dy))
         .collect()
+}
+
+// --- provisional area terrain (the deferred SetupGroundTiles hook) --------
+
+/// The passable floor tile the provisional derivation lays down (`move_cost`
+/// 1 — see `BACKGROUND_MOVE_COST`). Matches the `watch_a_real_data_fight`
+/// demo's overlay so the two agree.
+pub const PROVISIONAL_FLOOR: u8 = 0x17;
+/// A rock/obstacle tile (`move_cost 0xFF` → [`TilePassability::Wall`]).
+pub const PROVISIONAL_ROCK: u8 = 1;
+
+/// **PROVISIONAL, draw-free combat terrain from an area's GEO wall topology**
+/// (M4 combat #6, the ECL `COMBAT`-opcode wiring's map hook).
+///
+/// ## Why this is provisional, not the faithful `SetupGroundTiles`
+///
+/// The real battlefield floor is painted by `SetupGroundTiles`
+/// (`ovr011.cs:757`) → `SetupDungeonFloor`/`SetupWildernessFloor`
+/// (`ovr011.cs:500`/`:746`) → `build_background_tiles_1..4`
+/// (`ovr011.cs:149-497`) driven by `get_dir_flags` (`ovr011.cs:136`) /
+/// `sub_37306` (`ovr011.cs:90`): for each of a 13×5 band of source map cells
+/// around where the party stood, it samples the four directional wall flags
+/// (0=open / 1=wall / 3=door) and stamps a **rotated iso "diamond"** of
+/// specific ground-tile indices via `set_background_tile`. That derivation is
+/// deferred here for three compounding reasons — landing a *wrong* faithful
+/// map would be worse than a flagged provisional one (this slice's stated
+/// boundary):
+///
+/// 1. **It is a large, intricate transliteration** — four dense
+///    `build_background_tiles_*` switch tables of magic tile indices plus the
+///    iso `set_background_tile` transform and the `dir_*_flags` sampling.
+/// 2. **There is no map oracle to verify it against.** The staging hook
+///    (`docs/design/oracle-rig.md` D-OR2) dumps the PRNG *draw* stream, not
+///    the `CombatMap` grid, so a transliterated diamond could only be checked
+///    by re-derivation — exactly the un-cross-checkable state the boundary
+///    warns against.
+/// 3. **The wilderness/city floor path DRAWS from the PRNG** — a finding this
+///    slice made reading the chain: `SetupWildernessFloor01/02/03` and
+///    `SetGroupMapStepped` (`ovr011.cs:551-743`) call `roll_dice(100,1)`,
+///    `roll_dice(2,1)`, `roll_dice(4,5)`, `roll_dice(20,1)`, `roll_dice(5,1)`
+///    to scatter grass/rock decoration. Only `SetupDungeonFloor`
+///    (`get_dir_flags`/`build_background_tiles_*`) is genuinely draw-free.
+///    (This corrects M4 combat #3's "SetupGroundTiles is draw-free" claim,
+///    which held only for the dungeon path.) So a faithful wilderness terrain
+///    would have to reproduce those draws **in exact order** or desync every
+///    subsequent draw in an oracle replay — another reason it belongs in its
+///    own carefully-verified slice, not this wiring one.
+///
+/// ## What this does instead (draw-free, deterministic)
+///
+/// Stamps every fully-enclosed (all-four-walls-nonzero) GEO square as a rock
+/// obstacle onto an otherwise-open field, then re-clears the deployment core
+/// (where `place_combatants` fans the roster out, party origin `(0,0)` → iso
+/// centre ≈ `(27,13)`) so everyone always finds a cell. It is *real* GEO data
+/// shaping the fight — just not the faithful iso diamond. Identical to the
+/// `watch_a_real_data_fight` demo's overlay (which predates this shared fn).
+pub fn provisional_combat_map(geo: &GeoBlock) -> CombatMap {
+    let mut ground = vec![PROVISIONAL_FLOOR; (MAP_W * MAP_H) as usize];
+    for gy in 0..gbx_formats::geo::GEO_GRID_SIZE {
+        for gx in 0..gbx_formats::geo::GEO_GRID_SIZE {
+            let s = geo.square(gx, gy);
+            let walls = [s.wall_north, s.wall_east, s.wall_south, s.wall_west]
+                .iter()
+                .filter(|&&w| w != 0)
+                .count();
+            if walls == 4 {
+                let (cx, cy) = (gx as i32 + 17, gy as i32 + 3);
+                if (0..MAP_W).contains(&cx) && (0..MAP_H).contains(&cy) {
+                    ground[(cy * MAP_W + cx) as usize] = PROVISIONAL_ROCK;
+                }
+            }
+        }
+    }
+    let mut map = CombatMap::from_ground(ground);
+    // Keep the deployment diamond clear so the roster always places (the
+    // faithful diamond derivation is deferred — see this fn's doc comment).
+    for y in 6..=16 {
+        for x in 20..=30 {
+            map.set_tile(GridPos::new(x, y), PROVISIONAL_FLOOR);
+        }
+    }
+    map
 }
 
 // --- placement (PlaceCombatants) ------------------------------------------
@@ -4076,6 +4159,114 @@ mod tests {
             ]
         );
         assert!(p.iter().all(|c| c.placed), "all six find a cell");
+    }
+
+    // --- provisional area terrain (D2) ------------------------------------
+
+    /// A `0x402`-byte GEO payload with the named squares fully enclosed (all
+    /// four wall nibbles nonzero); every other square is fully open. Mirrors
+    /// the plane layout `gbx_formats::geo` documents (NE plane packs N high /
+    /// E low at offset 2; SW plane packs S high / W low at offset 2+256).
+    fn synthetic_geo_with_walled_squares(cells: &[(usize, usize)]) -> GeoBlock {
+        const PLANE_NE: usize = 2;
+        const PLANE_SW: usize = 2 + 256;
+        let mut data = vec![0u8; gbx_formats::geo::GEO_BLOCK_SIZE];
+        for &(gx, gy) in cells {
+            let i = gx + 16 * gy;
+            data[PLANE_NE + i] = (3 << 4) | 3; // N=3, E=3
+            data[PLANE_SW + i] = (3 << 4) | 3; // S=3, W=3
+        }
+        GeoBlock::parse(&data).unwrap()
+    }
+
+    #[test]
+    fn provisional_map_stamps_fully_walled_squares_as_rock() {
+        // (0,0) fully walled → rock at (17,3); (1,0) only partially walled →
+        // stays floor.
+        let mut data = vec![0u8; gbx_formats::geo::GEO_BLOCK_SIZE];
+        data[2] = (3 << 4) | 3; // sq (0,0): N=3,E=3
+        data[2 + 256] = (3 << 4) | 3; // sq (0,0): S=3,W=3
+        data[2 + 1] = 3 << 4; // sq (1,0): N=3 only (not enclosed)
+        let geo = GeoBlock::parse(&data).unwrap();
+
+        let map = provisional_combat_map(&geo);
+        assert!(
+            matches!(map.passability(GridPos::new(17, 3)), TilePassability::Wall),
+            "a fully-walled GEO square becomes a rock obstacle"
+        );
+        assert!(
+            matches!(
+                map.passability(GridPos::new(18, 3)),
+                TilePassability::Passable { .. }
+            ),
+            "a partially-walled square stays open floor"
+        );
+        // A cell nowhere near any wall is open floor.
+        assert!(matches!(
+            map.passability(GridPos::new(45, 20)),
+            TilePassability::Passable { .. }
+        ));
+    }
+
+    #[test]
+    fn provisional_map_keeps_the_deployment_core_clear() {
+        // Square (5,5) maps to (22,8), which lands INSIDE the deployment core
+        // (x 20..=30, y 6..=16) — so even though it is fully walled, the core
+        // re-clear stamps it back to floor and the roster can deploy there.
+        let geo = synthetic_geo_with_walled_squares(&[(5, 5)]);
+        let map = provisional_combat_map(&geo);
+        assert!(
+            matches!(
+                map.passability(GridPos::new(22, 8)),
+                TilePassability::Passable { .. }
+            ),
+            "the deployment core is re-cleared over any wall"
+        );
+        // And the whole party origin (27,13) region places.
+        let roster: Vec<PlacementInput> = (0..3)
+            .map(|_| place_input(Team::Party))
+            .chain((0..3).map(|_| place_input(Team::Monster)))
+            .collect();
+        let mut map = map;
+        let p = place_combatants(&mut map, &roster, 0, 1, GridPos::new(0, 0), None);
+        assert!(p.iter().all(|c| c.placed), "everyone finds a cell");
+    }
+
+    /// Local-tier: the real Tilverton City block (`GEO2.DAX` block 1) derives
+    /// a provisional field with the invariants the wiring relies on — the
+    /// deployment core is fully passable, and it is real GEO data (at least
+    /// one rock cell is stamped from the block's enclosed squares).
+    #[test]
+    fn provisional_map_from_real_geo2_block1_invariants() {
+        let Some(dir) = std::env::var_os("GBX_DATA_DIR") else {
+            eprintln!(
+                "SKIPPED: provisional_map_from_real_geo2_block1_invariants needs GBX_DATA_DIR"
+            );
+            return;
+        };
+        let data = gbx_formats::game_data::load_dir(std::path::Path::new(&dir))
+            .expect("GBX_DATA_DIR must be readable");
+        let geo = GeoBlock::parse(&data.block("GEO2.DAX", 1).expect("GEO2.DAX block 1 loads"))
+            .expect("GEO2 block 1 parses");
+        let map = provisional_combat_map(&geo);
+
+        for y in 6..=16 {
+            for x in 20..=30 {
+                assert!(
+                    matches!(
+                        map.passability(GridPos::new(x, y)),
+                        TilePassability::Passable { .. }
+                    ),
+                    "deployment core cell ({x},{y}) must be passable"
+                );
+            }
+        }
+        let rocks = (0..MAP_H)
+            .flat_map(|y| (0..MAP_W).map(move |x| GridPos::new(x, y)))
+            .filter(|&p| matches!(map.passability(p), TilePassability::Wall))
+            .count();
+        assert!(rocks > 0, "real GEO2 block 1 stamps at least one rock cell");
+        eprintln!("GEO2 block 1 → {rocks} rock cell(s) on the provisional field");
     }
 
     #[test]
