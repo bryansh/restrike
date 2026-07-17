@@ -1070,8 +1070,8 @@ fn watch_a_battlefield() {
 #[test]
 fn watch_a_real_data_fight() {
     use crate::combat::{
-        place_combatants, CombatMap, CombatOutcome, CombatState, Combatant, GridPos, PlacementInput,
-        Team, TilePassability, DEFAULT_NO_ACTION_LIMIT, MAP_H, MAP_W,
+        place_combatants, CombatMap, CombatOutcome, CombatState, Combatant, GridPos,
+        PlacementInput, Team, TilePassability, DEFAULT_NO_ACTION_LIMIT, MAP_H, MAP_W,
     };
     use crate::monster::LoadedMonster;
     use crate::rng::EngineRng;
@@ -1144,15 +1144,40 @@ fn watch_a_real_data_fight() {
         dice: (u8, u8, u8),
     }
     let party = [
-        P { name: "Ravd", hp: 30, raw_ac: 54, hit_bonus: 45, movement: 12, dice: (1, 8, 3) },
-        P { name: "Ilma", hp: 26, raw_ac: 52, hit_bonus: 44, movement: 12, dice: (1, 10, 2) },
-        P { name: "Bex", hp: 22, raw_ac: 50, hit_bonus: 43, movement: 12, dice: (1, 6, 3) },
+        P {
+            name: "Ravd",
+            hp: 30,
+            raw_ac: 54,
+            hit_bonus: 45,
+            movement: 12,
+            dice: (1, 8, 3),
+        },
+        P {
+            name: "Ilma",
+            hp: 26,
+            raw_ac: 52,
+            hit_bonus: 44,
+            movement: 12,
+            dice: (1, 10, 2),
+        },
+        P {
+            name: "Bex",
+            hp: 22,
+            raw_ac: 50,
+            hit_bonus: 43,
+            movement: 12,
+            dice: (1, 6, 3),
+        },
     ];
 
     // Build the roster in TeamList order: party (Team::Party) then monsters.
     let placement_inputs: Vec<PlacementInput> = party
         .iter()
-        .map(|_| PlacementInput { team: Team::Party, size: 1, in_combat: true })
+        .map(|_| PlacementInput {
+            team: Team::Party,
+            size: 1,
+            in_combat: true,
+        })
         .chain(monster_picks.iter().map(|_| PlacementInput {
             team: Team::Monster,
             size: 1,
@@ -1228,7 +1253,11 @@ fn watch_a_real_data_fight() {
     for (i, f) in state.fighters.iter().enumerate() {
         eprintln!(
             "  {:<6} {:<12} AC {:>2}  HP {:>3}  hit+{:<2} {}d{}+{}  @({:>2},{:>2})",
-            if f.team == Team::Party { "party" } else { "mob" },
+            if f.team == Team::Party {
+                "party"
+            } else {
+                "mob"
+            },
             names[i],
             0x3C - f.ac as i32,
             f.hp_max,

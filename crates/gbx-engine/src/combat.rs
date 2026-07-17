@@ -3439,7 +3439,8 @@ mod tests {
 
         // Party is bit (0+1)=1 → surprise_mask bit 0 set. A monster is needed
         // for the fight to actually start (the emptiness guard).
-        let mut state = CombatState::initiative_only(vec![party(0, -3), monster(9)]).with_surprise_mask(0b01);
+        let mut state =
+            CombatState::initiative_only(vec![party(0, -3), monster(9)]).with_surprise_mask(0b01);
         state.attach_action_sink(actions.sink());
         state.step(&mut rng);
 
