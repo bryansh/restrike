@@ -184,3 +184,63 @@ surrenders here"). The original likely keeps a fled/surrendering patron in comba
 Alternative: a death/removal-threshold or opportunity-attack application detail.
 The harness re-verifies draw-for-draw the moment that tail is corrected — a clean
 `H4 MELEE CLOSED: N draws matched` line replaces the finding.
+
+## 10. The flee hypothesis, tested and REFUTED (2026-07-17, session 2)
+
+§9's leading hypothesis (end-of-fight morale/flee) was investigated directly
+against `FleeCheck_001` (`ovr010.cs:760`) and the live capture, and **it is not
+the cause.** The flee/surrender outcome was implemented faithfully and it makes
+the match **worse**, so it was reverted (the tree is pristine — no engine change
+this session). The evidence:
+
+- **`FleeCheck_001` re-seeds `gbl.monster_morale = (control_morale & 0x7F) << 1`
+  *per combatant* (`ovr010.cs:774`).** Every BAR PATRON in the capture decodes
+  `control_morale == 0x80` (`@0xf7`), so that seed is `0` for all ten — the first
+  morale gate is then always taken via `== 0`, `monster_morale` becomes
+  `enemyHealthPercentage`, and the inner gate fires the moment a single monster
+  dies (`enemyHealthPercentage < 100`, round 2+). Enemies and monsters are
+  equal-speed (`CalcMoves/2 == MaxOppositionMoves == 12`), so the branch taken is
+  **panic** (`moral_failure`), not surrender. Result: implementing the reseed
+  **routs the entire monster team from round 2** and the replay diverges at draw
+  **1549** — a 1,446-draw *regression* of the 2,995 prefix.
+- **Identical `control_morale` ⇒ the flee decision is all-or-none.** It cannot
+  selectively keep *only* the last patron acting while the prefix (nine rounds of
+  the same monsters fighting) stays intact. Any faithful flee change perturbs
+  draws long before 2995.
+- **The capture shows no routing.** Operand histograms of our clean 2,995-draw
+  fight vs. the capture's 3,162 are nearly identical — d20 to-hits 111 vs 114, d7
+  mode-gates 230 vs 253, initiative d6 165 vs 187 — i.e. both are *attack*-heavy;
+  the capture is simply **~1 round longer**. The tail (§9's draws 2994-3161) is
+  ordinary attack turns (`field_15` gate → the two d7s → d20 to-hit → damage),
+  **not** `moralFailureEscape` flee turns (which would draw the `:400` d2 flee
+  direction). The party keeps hitting a surviving id 11 for one extra round.
+- **coab's RNG ≠ the capture's.** coab's `seg051.Random` is C# `System.Random`;
+  the capture is the DOS binary's Turbo-Pascal LCG (what `gbx-prng` implements).
+  `FleeCheck_001` is draw-free, so this doesn't change the flee *decision* — but
+  it is a standing reminder that coab is a control-flow oracle, not a draw oracle.
+
+**Restated finding (for the next session).** The last monster (`id 11`, entering
+the final round at 6/16 HP) is finished **one round early** by our party's
+cumulative attacks; the capture's party takes an extra round to land the kill.
+Because draws match bit-for-bit to 2994 and all records enter `hpC == hpM`, this
+is a **draw-free, endgame kill-timing** divergence in the *attack* path, not
+morale. The two most likely levers, both **outside** the combat-#4 flee scope:
+
+1. **The terrain free variable.** The replay runs on a uniform open floor
+   (`FLOOR = 0x17`); the real bar map (`SetupGroundTiles`, not snapshotted) shapes
+   `find_target`'s random near-target pick and wall-flood reachability. Different
+   target selection ⇒ our party concentrates fire and kills id 11 a round sooner.
+   (Bar/dungeon floor is draw-free per combat #6, so faithful terrain here would
+   change *which* target, hence the tail length, without adding draws — the exact
+   draw-free lever this divergence needs.)
+2. **The FD-3 attack-count derivation.** `ThisRoundActionCount` /
+   `attack{1,2}_left` (the 3/2-attacks rule) is the acknowledged single-profile
+   simplification; an over-count would let the party out-damage the original and
+   finish monsters early.
+
+Recommended next step: instrument per-round *target selection* (which enemy each
+party member picks) under uniform-floor vs. a faithful bar map, and audit the
+party's `attack1_left`/`attack2_left` per round against `ThisRoundActionCount`, to
+localize which lever moves the final kill from round 10 to round 11. The flee
+branch is genuinely stubbed and worth finishing for M5 completeness, but it is
+**not** what closes this H4 replay.
