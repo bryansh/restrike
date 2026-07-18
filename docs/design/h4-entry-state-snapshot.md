@@ -290,3 +290,47 @@ The residual is a draw-free targeting-**order** fidelity gap (which interchangea
 monster dies in which round), affecting no roll and no mechanic. Full draw-for-draw
 closure (`N/N`) awaits the targeting investigation above; the mechanics claim
 stands on its own.
+
+## 12. The targeting mechanism, fully traced (2026-07-17, session 4) — reach + sort key are FAITHFUL
+
+The residual (draw-free endgame kill-timing, §10/§11) is a **targeting-order**
+divergence: `find_target` (`ovr014.cs:2238`) picks `nearTargets[roll-1]`, and the
+*order* of `nearTargets` decides which interchangeable monster is hit. The order
+comes from `BuildNearTargets` (`ovr025.cs:1290`) → `Rebuild_SortedCombatantList`
+(`ovr032.cs:221`): for each enemy, the minimum reach over the size-footprint cells,
+then `sortedCombatants.Sort()`.
+
+**The reach (`canReachTargetCalc`, `ovr032.cs:92`, `sub_733F1`) is NOT a flood or a
+plain ray — it is a Bresenham line-walk with a 3D elevation LoS:** `SteppingPath`
+walks attacker→target (`+2` per step, `+3` on a diagonal advance) while a second
+path tracks a flat height line at the attacker's tile elevation (`BackGroundTiles
+[tile].field_1`); a tile blocks when its wall-height (`field_2`) exceeds that
+elevation.
+
+**The sort comparator (`SortedCombatant.CompareTo`, `Classes/Combat.cs`):**
+`steps` asc, then `direction` asc; the `(direction%2)` branch only fires when
+directions are already equal, so it is a **no-op** — the effective key is
+`(steps, direction)`.
+
+**Verified faithful in our engine (checked line-by-line, not assumed):**
+- `combat::reach_ray` — its Bresenham (`delta_count += diff_minor*2`, threshold
+  `>= diff_major`, `+2`/`+1` counting) and its elevation block
+  (`TILE_WALL_HEIGHT > TILE_HEIGHT[attacker]`) match `SteppingPath.Step()` /
+  `canReachTargetCalc` exactly.
+- `build_near_targets` sort key (`steps` then `direction`) matches the comparator.
+
+**So the two biggest suspects are ruled out.** The residual is cornered into three
+subtle, draw-free candidates, none distinguishable by code reading:
+1. **Sort *stability* on exact `(steps, direction)` ties.** coab's `List.Sort` is
+   **unstable**; ours (`sort_by`) is **stable** — and neither necessarily matches
+   the *binary's* sort (`sub_738D8`), which is the capture's ground truth.
+2. **Movement** — combatants move draw-free (`sub_35DB1`/`step_cost`); a different
+   landing cell drifts positions and hence targeting.
+3. **`find_combatant_direction`** octant edge cases.
+
+**Next: instrument, don't guess (two hypotheses already refuted).** Extend the hook
+to emit a per-round snapshot of every combatant's `{index, team, pos, hit_point_
+current}` at each `combat_round` increment. The replay snapshots the same per round
+and diffs; the first divergent round + combatant localizes it — a `pos` divergence
+points at movement (#2), an `hp` divergence at targeting (#1/#3). That converts
+three suspects into one measured fact.
