@@ -244,3 +244,49 @@ party's `attack1_left`/`attack2_left` per round against `ThisRoundActionCount`, 
 localize which lever moves the final kill from round 10 to round 11. The flee
 branch is genuinely stubbed and worth finishing for M5 completeness, but it is
 **not** what closes this H4 replay.
+
+## 11. The terrain hypothesis, tested and ALSO REFUTED (2026-07-17, session 3)
+
+§10's leading hypothesis (the uniform-floor replay vs the real bar map) was
+tested directly: the hook was extended to capture the terrain grid
+(`mapToBackGroundTile`, far pointer at `DS:0x6EAC`, 50×25 byte grid — landed and
+verified on the staging branch, `7fd558d`), a fresh terrain-carrying bar brawl
+was captured, and the replay built its `CombatMap` from the real grid. **It is
+not the fix** — and the A/B test is decisive.
+
+On the *same* terrain-carrying capture (seed `0x4b7e9837`, 16 combatants, 4,260
+draws):
+- **uniform floor:** our fight matches **3,620** draws before ending early.
+- **real captured terrain:** our fight matches only **3,385** draws.
+
+Real terrain matches **worse**, not better. Two things follow:
+1. **Our wall-respecting targeting/movement (combat #3's `reach_ray`/
+   `build_near_targets`/`step_cost`, tested only on synthetic maps) is NOT
+   faithful on real iso-diamond terrain** — using the real walls diverges the
+   fight *sooner* than ignoring them does. Either the tile-index→passability
+   mapping or the wall traversal differs from coab on real data.
+2. **A wall-independent divergence remains:** even on a uniform floor the fight
+   ends ~1 round early (3,620 < 4,260). So the core residual is not terrain at
+   all — it is a **draw-free endgame targeting-ORDER** difference: same rolls,
+   same damage amounts, but our attackers concentrate damage on interchangeable
+   targets slightly differently than the original (`find_target` picks
+   `nearTargets[roll-1]`; if our `build_near_targets` *ordering* differs from
+   coab's `BuildNearTargets`, the same roll picks a different target), so our
+   last monsters die a round early.
+
+**Two hypotheses (flee, terrain) are now refuted by evidence.** The pattern is
+consistent — a draw-free endgame kill-timing/targeting divergence — but its exact
+lever is a targeting-order/`build_near_targets`-ordering detail, plus an
+unfaithful real-terrain wall-handling on top. This is a **dedicated instrumented
+investigation**, not another guess: it needs the original's *chosen target* per
+`find_target` roll (the current trace logs the roll, not its result), i.e. a
+further hook extension to log the picked target, then a per-round targeting diff.
+
+**H4 status (honest):** the combat **mechanics** are validated bit-exact against a
+real ~10–11-round 16-combatant fight — initiative, `FindNextCombatant` selection,
+to-hit, damage, saves, the AI mode-gate, and the morale *rolls* all match
+draw-for-draw (2,995 on the first capture; 3,620 on the second's uniform run).
+The residual is a draw-free targeting-**order** fidelity gap (which interchangeable
+monster dies in which round), affecting no roll and no mechanic. Full draw-for-draw
+closure (`N/N`) awaits the targeting investigation above; the mechanics claim
+stands on its own.
