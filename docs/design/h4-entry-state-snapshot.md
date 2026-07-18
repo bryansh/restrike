@@ -334,3 +334,25 @@ current}` at each `combat_round` increment. The replay snapshots the same per ro
 and diffs; the first divergent round + combatant localizes it — a `pos` divergence
 points at movement (#2), an `hp` divergence at targeting (#1/#3). That converts
 three suspects into one measured fact.
+
+## 13. Targeting subsystem verified faithful; residual cornered to movement-vs-sort-tie (2026-07-17, session 4 cont.)
+
+The per-round `round_snapshot` instrumentation (§12) localized the first divergence
+to **round 1**: the same damage roll lands on a different *equidistant* monster
+(capture's #13 vs our #11 take an 8-damage hit), and positions drift across the
+whole roster. Then, line-by-line against coab, the **entire targeting subsystem was
+verified faithful**: `reach_ray` (Bresenham + elevation LoS) == `canReachTargetCalc`;
+the sort key `(steps, direction)` == `SortedCombatant.CompareTo` (its `%2` branch a
+no-op); `find_combatant_direction` == `FindCombatantDirection`; and **all 8 octant
+cases** of `can_see_combatant` == `CanSeeCombatant`.
+
+Since every targeting *input* is faithful and positions start identical
+(`combat_entry`), a divergent target can only arise from (a) **movement** — a mover
+lands on a different cell, so a later `find_target` sees different positions — or
+(b) **sort *stability*** on an exact `(steps, direction)` tie (coab `List.Sort`
+unstable, ours stable, neither necessarily the binary `sub_738D8`). Movement is the
+prime suspect (the one unverified piece, `sub_35DB1` pathing), but it is **measured,
+not assumed**, by the next step: a **per-turn** `turn_snapshot` adding each
+combatant's `{pos, hp, target}` (target via `actions`@record `+0x18D` → `Action.target`
+@`+0x0A` → `player_array` index). The first divergent turn names it — `target` differs
+with matching positions ⇒ sort-tie; `pos` differs ⇒ movement.
