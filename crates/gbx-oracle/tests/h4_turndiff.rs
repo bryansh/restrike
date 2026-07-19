@@ -641,9 +641,7 @@ fn h4_round0_moves() {
         }
     }
 
-    let names = [
-        "MATHEW", "MARK", "TRAVIS", "LEDERA", "SHARA", "PHILIPPE",
-    ];
+    let names = ["MATHEW", "MARK", "TRAVIS", "LEDERA", "SHARA", "PHILIPPE"];
     eprintln!("=== OUR round-0 Pick order + moves (vs capture) ===");
     eprintln!("capture: SHARA(4)->(32,13) MARK(1)->(33,14) LEDERA(3)->(31,12) MATHEW(0)->(31,11) TRAVIS(2)->(32,14)");
     for line in log.borrow().iter() {
@@ -662,9 +660,18 @@ fn h4_round0_moves() {
 
 #[test]
 fn h4_locate_draw() {
-    let target: usize = std::env::var("GBX_DRAW").ok().and_then(|s| s.parse().ok()).unwrap_or(358);
-    let Some(path) = capture_path() else { eprintln!("SKIPPED"); return; };
-    if !path.exists() { eprintln!("SKIPPED"); return; }
+    let target: usize = std::env::var("GBX_DRAW")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(358);
+    let Some(path) = capture_path() else {
+        eprintln!("SKIPPED");
+        return;
+    };
+    if !path.exists() {
+        eprintln!("SKIPPED");
+        return;
+    }
     let text = std::fs::read_to_string(&path).expect("readable");
     let cap = parse_capture(&text);
 
@@ -672,44 +679,73 @@ fn h4_locate_draw() {
     let log: Rc<RefCell<Vec<(usize, String)>>> = Rc::new(RefCell::new(Vec::new()));
     struct Ctr(Rc<RefCell<usize>>);
     impl RngSink for Ctr {
-        fn on_draw(&mut self, _d: RngDraw) { *self.0.borrow_mut() += 1; }
+        fn on_draw(&mut self, _d: RngDraw) {
+            *self.0.borrow_mut() += 1;
+        }
     }
     struct Rec(Rc<RefCell<usize>>, Rc<RefCell<Vec<(usize, String)>>>);
     impl gbx_engine::combat::ActionSink for Rec {
         fn on_action(&mut self, e: gbx_engine::combat::ActionEvent) {
-            self.1.borrow_mut().push((*self.0.borrow(), format!("{e:?}")));
+            self.1
+                .borrow_mut()
+                .push((*self.0.borrow(), format!("{e:?}")));
         }
     }
     let records: Vec<Vec<u8>> = cap.entry.iter().map(|c| c.record.clone()).collect();
-    let entries: Vec<RecordCombatant> = cap.entry.iter().zip(&records)
-        .map(|(c, rec)| RecordCombatant { team: team_of(c.team), pos: GridPos::new(c.x, c.y), record: rec })
+    let entries: Vec<RecordCombatant> = cap
+        .entry
+        .iter()
+        .zip(&records)
+        .map(|(c, rec)| RecordCombatant {
+            team: team_of(c.team),
+            pos: GridPos::new(c.x, c.y),
+            record: rec,
+        })
         .collect();
     let rules = RuleSet::load();
     let flavor = Adnd1::new(&rules);
-    let mut state = combat_state_from_records(&entries, CombatMap::from_ground(cap.terrain.clone()), &flavor).expect("decode");
+    let mut state = combat_state_from_records(
+        &entries,
+        CombatMap::from_ground(cap.terrain.clone()),
+        &flavor,
+    )
+    .expect("decode");
     state.attach_action_sink(Box::new(Rec(count.clone(), log.clone())));
     let mut rng = EngineRng::new(cap.rng_state);
     rng.attach_sink(Box::new(Ctr(count.clone())));
     let mut guard = 0;
     loop {
         guard += 1;
-        if guard > 1_000_000 || *count.borrow() > target + 30 { break; }
+        if guard > 1_000_000 || *count.borrow() > target + 30 {
+            break;
+        }
         match state.step(&mut rng) {
             CombatStep::Ended => break,
-            CombatStep::RoundEnded { battle_over, .. } => if battle_over { break; },
+            CombatStep::RoundEnded { battle_over, .. } if battle_over => break,
             _ => {}
         }
     }
     eprintln!("=== our events near draw {target} (draw#: event) ===");
     for (dc, e) in log.borrow().iter() {
-        if *dc + 20 >= target && *dc <= target + 20 {
-            if e.starts_with("Pick") || e.starts_with("Ai") || e.starts_with("Attack") || e.starts_with("Dmg") || e.starts_with("Move") {
-                eprintln!("  d{dc}: {e}");
-            }
+        if *dc + 20 >= target
+            && *dc <= target + 20
+            && (e.starts_with("Pick")
+                || e.starts_with("Ai")
+                || e.starts_with("Attack")
+                || e.starts_with("Dmg")
+                || e.starts_with("Move"))
+        {
+            eprintln!("  d{dc}: {e}");
         }
     }
-    eprintln!("\ncapture operands {}-{}: {:?}", target.saturating_sub(6), target + 6,
-        (target.saturating_sub(6)..=target+6).filter_map(|i| cap.draws.get(i).map(|d| d.2)).collect::<Vec<_>>());
+    eprintln!(
+        "\ncapture operands {}-{}: {:?}",
+        target.saturating_sub(6),
+        target + 6,
+        (target.saturating_sub(6)..=target + 6)
+            .filter_map(|i| cap.draws.get(i).map(|d| d.2))
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
