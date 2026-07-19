@@ -2289,7 +2289,8 @@ pub struct NearTarget {
     /// Roster index into the `combatants` slice given to [`build_near_targets`].
     pub idx: usize,
     pub pos: GridPos,
-    /// `SortedCombatant.steps` — half-steps, floored at `max_range` (see below).
+    /// `SortedCombatant.steps` — the REAL minimum path steps over the footprint
+    /// cell pairs (binary `sub_738D8` stores actual steps; see §20 note below).
     pub steps: u16,
 }
 
@@ -2298,13 +2299,23 @@ pub struct NearTarget {
 /// from `attacker_idx` within `max_range` tiles, **sorted nearest-first** (the
 /// `SortedCombatant.CompareTo` order: `steps` asc, then `direction` asc). Draw-free.
 ///
-/// **Faithful `found_range` floor (`ovr032.cs:243-262`):** `found_range` starts at
-/// `max_range` and is only lowered when a pair's `steps < found_range`. Because the
-/// minimum possible `steps` is 2 (one orthogonal step), a small `max_range` (e.g.
-/// `BuildNearTargets(1)`) leaves every reachable target's stored `steps == max_range`
-/// — the AI only reads `.Count` and picks a random index there, so the floored
-/// value is immaterial; a large `max_range` (`0xff`, used by `find_target`) records
-/// the true min steps and yields a genuine nearest-first order.
+/// **§20 bug #8 — the best-pair accumulator init (`sub_738D8` @`ovr032:097B`):**
+/// the binary initializes the per-candidate best range `var_1F` to **0xFF (255)**,
+/// NOT to `max_range` as coab wrote (`found_range = max_range`, ovr032.cs:243).
+/// So the first successful reach ALWAYS fires the `steps < best` update: the
+/// winning attacker/target footprint cells (`var_5`/`var_6`) and the REAL step
+/// count are recorded for every entry, the entry stores real `steps` (@`+1` of
+/// the stride-3 record at `DS:0x6EAE`), and the direction (@`+2`) is computed by
+/// the `FindCombatantDirection` scan from the real winning cells. coab's
+/// `max_range` init happens to COINCIDE with the binary at `max_range == 0xff`
+/// (`find_target`'s lists were therefore correct) but degenerates at range 1:
+/// every entry got `(steps=max_range, dir=0-from-(0,0))` and the sort collapsed
+/// to roster order — the draw-747 re-pick divergence.
+///
+/// (The binary's `sub_738D8` also takes a direction arg (`arg_6`): if `< 8` it is
+/// stored verbatim instead of scanned, and it pre-filters candidate cell pairs via
+/// `sub_7354A`. Every path we model passes 0xFF — scan + no-op filter — so it is
+/// not a parameter here.)
 ///
 /// **Tie order:** `SortedCombatant.CompareTo` returns 0 for equal `(steps,
 /// direction)` and coab's `List.Sort` is unstable, so the live order of exact ties
@@ -2330,7 +2341,8 @@ pub fn build_near_targets(
         let target_map = size_footprint(c.size, c.pos);
 
         let mut found = false;
-        let mut found_range: i32 = max_range;
+        // Binary `ovr032:097B`: `mov [bp+var_1F], 0FFh` — 255, NOT `max_range`.
+        let mut found_range: i32 = 0xFF;
         let mut found_target = GridPos::new(0, 0);
         let mut found_attacker = GridPos::new(0, 0);
 
@@ -5038,8 +5050,10 @@ mod tests {
         let near = build_near_targets(&map, &combatants, 0, 1, false);
         assert_eq!(near.len(), 1, "only the adjacent enemy is near at range 1");
         assert_eq!(near[0].idx, 1);
-        // found_range is floored at max_range (1) — the AI reads only .len()/index.
-        assert_eq!(near[0].steps, 1);
+        // §20 bug #8 (`ovr032:097B`): the binary's best-pair init is 0xFF, not
+        // max_range, so the entry stores the REAL steps (3 for a diagonal step)
+        // even at range 1 — this is what direction-sorts the range-1 re-pick.
+        assert_eq!(near[0].steps, 3);
     }
 
     #[test]

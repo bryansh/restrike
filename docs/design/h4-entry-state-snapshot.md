@@ -658,3 +658,43 @@ This was a clean domino found by diffing the enclosing functions from the listin
 **clear** `actions.target` — the capture shows PHILIPPE ending his guard with `tgt255` while ours
 holds `tgt11` (`TryGuarding`/`clear_actions` → `actions.target = null`, cf. ovr010.cs:447 /
 ovr014.cs:2357). Same `actions.target` lifecycle family.
+
+## 20. Bug #8 — the near-list best-pair init; and a metric refinement (2026-07-19, Fable)
+
+The draw-747 kill-cascade traced to combatant 14 (a monster) re-picking the wrong PC in
+round 0 (SHARA in ours, MATHEW in the capture). Root: `build_near_targets`' `found_range`
+accumulator is initialized to **`0xFF`** in the binary (`sub_738D8` @`ovr032:097B`:
+`mov [bp+var_1F], 0FFh`), not `max_range` as coab wrote (`found_range = max_range`,
+ovr032.cs:243) and we copied. With `0xFF`, the first reachable footprint pair *always* fires
+the `steps < best` update, so every entry records the **real** min steps (2 orthogonal, 3
+diagonal) and the direction from the **real** winning cells. coab's `max_range` init happens
+to coincide with `0xFF` exactly when `max_range == 0xff` — which is why `find_target`'s lists
+(range `0xff`) were always correct and **only the range-1 re-pick list degenerated**: every
+entry got `(steps=1, dir=find_combatant_direction((0,0),(0,0)))`, so the sub_73033 sort
+collapsed to roster order and `near[roll]` picked the wrong PC. (My earlier "coab shares this
+bug" was the false premise — it's coab's alone. My `near_enermy`-uses-a-different-list
+suspicion was also refuted: `near_enermy`/`ovr025:25E0` fills its table from the *same*
+`sub_738D8` output, preserving order.) Fix: `found_range` init `max_range` → `0xFF`; the sort
+key is then **(real steps, real direction)** — orthogonal-adjacent (2) sorts before
+diagonal-adjacent (3), which a direction-only patch missed (hence its board regression).
+
+**Result:** first divergent **round 1 → 3** — rounds 0–2 are now board-exact (MATHEW enters
+round 1 at hp46, byte-identical; combatant 14 re-picks MATHEW). 324 tests pass (one range-1
+adjacency assertion recomputed: a diagonal step now stores real steps 3, not the clamp).
+
+**Metric refinement (important going forward).** The operand frontier stayed at **747** — and
+that is *expected, not a failure*: a draw-free targeting fix (the re-pick draws the same `d2`
+whichever PC it hits) can't move the operand frontier until the cascade reaches a
+turn-*structure* change. With draw-free targeting/movement divergences now dominating, the
+**first-divergent-round** (from the cadence-robust per-round board diff) is the **leading**
+indicator; the operand frontier lags. Track both.
+
+**Next residual: round 2 (draw-free).** At the round-3 snapshot, party damage concentration
+differs (capture → monster 11 hp4, ours → monster 14 hp5) and monster 10's approach path
+differs by ~3 cells. Same species as the six layers already peeled — a draw-free
+targeting/movement order detail, localizer pointing at the round.
+
+**Process note (Fable's):** both recent "murky knots" resolved to a single-line, binary-citable
+fix (bug #6: one `cmp` operand; bug #8: one init byte), each found by transliterating the
+*enclosing* binary function rather than re-reading the already-verified callees. When ours ==
+coab but the capture disagrees, attack coab's fidelity at the enclosing frame first.
