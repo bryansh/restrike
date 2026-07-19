@@ -2525,15 +2525,6 @@ impl CombatState {
         self.map.rebuild_occupancy(&placements);
     }
 
-    /// Live count of the team opposite `team` — the `teamCount`/`friends_count`/
-    /// `foe_count` the wand and morale guards read.
-    fn opposite_count(&self, team: Team) -> usize {
-        self.fighters
-            .iter()
-            .filter(|f| f.in_combat && f.team != team)
-            .count()
-    }
-
     /// `CanSeeTargetA` (`ovr014.cs:571`) — the **invisibility** affect check, not
     /// geometry. No affects are modeled, so a live target is always "seen".
     fn can_see_target(&self, target: usize) -> bool {
@@ -2621,20 +2612,18 @@ impl CombatState {
             .unwrap_or(0)
     }
 
-    /// `sub_354AA` (`ovr010.cs:183`) — the wand scan. Draws **one d7** (`:192`) iff
-    /// `can_use && oppTeamCount>0 && !area_can_cast_spells` (normal area). The item
-    /// scan is draw-free for a weapon-only combatant (no readied spell-item), so
-    /// this always returns `false` (no wand used) after the d7. Wand *effects* are
-    /// deferred (M5).
-    fn wand_scan_d7(&mut self, rng: &mut EngineRng, actor: usize) -> bool {
-        let team = self.fighters[actor].team;
-        if self.fighters[actor].can_use
-            && self.opposite_count(team) > 0
-            && !self.area_can_cast_spells
-        {
-            let _priorities = roll_dice(rng, 7, 1); // ovr010.cs:192
-                                                    // for i in 0..priorities { foreach item … } — no items, draw-free.
-        }
+    /// `sub_354AA` (`ovr010:04AA`) — the wand scan. The binary rolls the **d7
+    /// unconditionally at proc entry** (`ovr010:04C6`: `call roll_dice(7,1)` into
+    /// `var_3`) and only THEN checks `can_use` (`:04D6`), the opposite-team live
+    /// count (`:04EE`, `friends_count[on_our_team(actor)]`), and
+    /// `area.can_cast_spells` (`:04FC`) — those guards gate the **item scan**, not
+    /// the roll. (coab ovr010.cs:188 hoisted the guard above the roll — coab ≠
+    /// binary; the difference is only visible when a guard goes false, e.g. the
+    /// last enemy died earlier this round.) The scan itself is draw-free for a
+    /// weapon-only combatant (no readied spell-item), so this always returns
+    /// `false` (no wand used). Wand *effects* are deferred (M5).
+    fn wand_scan_d7(&mut self, rng: &mut EngineRng, _actor: usize) -> bool {
+        let _priorities = roll_dice(rng, 7, 1); // ovr010:04C6 — before the guards
         false
     }
 

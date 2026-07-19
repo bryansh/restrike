@@ -765,3 +765,37 @@ goes with death UI.)
 **Result: operand frontier 1923 → 2979 and the round frontier reached the fight's end — all
 11 rounds match board-for-board.** Our draw count 3070 vs capture 3075: the whole residual
 is one 5-draw tail divergence inside round 10.
+
+## 23. Bug #11 — the sub_354AA d7 rolls BEFORE its guards; ★ H4 MELEE CLOSED: 3075/3075 ★ (2026-07-19, session 8)
+
+The 5-draw tail: round 10, MARK (pass 0) kills the last patron (monster 8, hp3 — the capture
+does too, seq 192), then PHILIPPE's turn draws `d4 + d7` in ours but `d4 + d7 + d7` in the
+capture — the wand d7, **with zero live enemies**. Instrumentation showed our guard failing on
+`opposite_count == 0`; coab agrees (`teamCount > 0` hoisted above the roll, ovr010.cs:188) —
+ours == coab, capture disagrees → transliterate the enclosing binary function.
+
+**The binary (`sub_354AA` @`ovr010:04AA`) rolls the d7 at proc entry, before any guard:**
+`call roll_dice(7,1)` at `:04C6` into `var_3`; only then `can_use` (`:04D6`, `actions+2`), the
+opposite-team live count (`:04EE`, `friends_count[on_our_team(actor)]` @`0x6FAA`), and
+`area.can_cast_spells` (`:04FC`) — each `jmp`ing to exit past the **item scan**, which is what
+the guards actually gate (and which is draw-free for a weapon-only combatant anyway). coab
+hoisted the whole guard above the roll. Invisible until a guard goes false mid-fight — here,
+the last enemy dying earlier in the round. Fix: `wand_scan_d7` rolls unconditionally; the
+guards live in the doc comment until wand effects land (M5). (`opposite_count` lost its last
+caller and is removed.)
+
+**Result: `h4_turndiff` reports NO divergence — operand match 3075/3075, our draw count ==
+the capture's 3075, all 11 rounds board-exact.** The `combat4` bar brawl — 16 combatants,
+11 rounds, initiative, selection, the full QuickFight melee AI, movement, targeting, to-hit,
+damage, deaths — replays **bit-exact, draw-for-draw, end to end**. (The per-turn `tgt11` vs
+`tgt255` line the localizer still prints at snapshot 0 is the pre-turn/post-turn hook-cadence
+artifact — capture `turn_snapshot`s fire on state writes, ours post-turn; §19's guard-clears-
+target thread stays open as a state-fidelity note with zero draw impact in this capture.)
+
+**The eleven coab-vs-binary bugs, in peel order:** #1 field_15 gate entry+branches
+(`ovr010:0090`), #2 `DATA_2B8` stride-5 row (`ovr010:076D`), #3 weapon range (deferred M5),
+#4 the class-5 mage guard (`ovr010:0AA3`), #5 the near-sort partial order (`ovr032:0033`),
+#6 the monster attack-spread validity check (`ovr010:0F12`), #7 the attack write-back to
+`actions.target` (ovr014.cs:939), #8 near-list best-pair init `0xFF` (`ovr032:097B`),
+#9 death zeroes pending initiative (`ovr025:24BB`), #10 removal repaints occupancy
+(`ovr024:154F`/`sub_74E6F`), #11 the pre-guard wand d7 (`ovr010:04C6`).
