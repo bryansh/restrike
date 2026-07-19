@@ -734,3 +734,34 @@ capture the reverse; every hp byte-identical. The operand fork at 1923 is the do
 adjacent-count artifact (`d1` vs `d2` re-pick after a `d6` find inside a later turn). Same
 species as §17/§20: a draw-free step/order detail, now in party movement into freed corpse
 cells.
+
+## 22. Bug #10 — leaving combat frees the occupancy footprint immediately (`sub_74E6F`/`sub_644A7` → `sub_743E7`) (2026-07-19, session 8)
+
+§21's round-5 residual pinned to one grotesque turn: MATHEW's round-5 approach to monster 7.
+The capture steps once, orthogonal E — `(31,11)→(32,11)` — and attacks; ours takes **three
+diagonal steps in a spiral** — SW to `(30,12)`(!), SE to `(31,13)`, NE to `(32,12)` — before
+attacking the same monster with the same draws (PC steps are draw-free, so the PRNG never sees
+it; LEDERA then can't take `(32,12)`, and the pair land swapped).
+
+The spiral decodes exactly as a **stale occupancy grid**: our `rebuild_occupancy` ran only on
+position changes, so the corpses of 9/11 (both on `(32,11)`) and 14 (`(32,12)`) — dead since
+rounds 3–4, during which nobody moved — still blocked `can_move` at MATHEW's step 1 (S is
+LEDERA, E and SE are "occupied" corpses → dir_step 4 = SW), and then **his own first step's
+repaint freed them mid-turn** (steps 2–3 walk back through the freed cells). The binary
+repaints at the removal moment, in both paths:
+
+- **damage kill**: the post-damage display path calls `CombatantKilled` (`sub_74E6F`,
+  coab ovr033.cs:534), which ends `CombatMap[idx].size = 0` +
+  `setup_mapToPlayerIndex_and_playerScreen()` (`sub_743E7`);
+- **surrender/flee**: `RemoveFromCombat` (`sub_644A7` @`ovr024:154F`: `call sub_743E7`
+  between the footprint zero and `clear_actions`).
+
+Fix: `apply_damage`'s kill branch and `flee_battle`'s removal both call
+`rebuild_occupancy()`. (Cited-deferred: `CombatantKilled` also swaps the ground tile to
+`Tile_DownPlayer` (0x1F) for downed **party** members — `nonTeamMember` is true past
+`party_size` (ovr011.cs:800), so it never fires for monsters and is out of combat4's scope;
+goes with death UI.)
+
+**Result: operand frontier 1923 → 2979 and the round frontier reached the fight's end — all
+11 rounds match board-for-board.** Our draw count 3070 vs capture 3075: the whole residual
+is one 5-draw tail divergence inside round 10.

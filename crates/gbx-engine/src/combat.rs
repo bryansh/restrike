@@ -2707,6 +2707,14 @@ impl CombatState {
             // loses its pending initiative, so the corpse can never win a
             // `FindNextCombatant` pass (which still draws its d100 every pass).
             t.delay = 0;
+            // `CombatantKilled` (`sub_74E6F`, `ovr033:534`→coab) ends with
+            // `CombatMap[idx].size = 0` + `sub_743E7` — the occupancy repaint
+            // happens AT the kill, so a corpse's cells free up immediately (a
+            // later mover's `CanMove` must see them empty), not at the next
+            // position change. (The party-member `Tile_DownPlayer` ground swap
+            // there is monster-irrelevant — `nonTeamMember` is true past
+            // `party_size`, ovr011.cs:800 — and deferred with death UI.)
+            self.rebuild_occupancy();
         }
     }
 
@@ -3115,6 +3123,10 @@ impl CombatState {
         };
         if gets_away {
             self.fighters[actor].in_combat = false;
+            // `RemoveFromCombat` (`sub_644A7` @`ovr024:154F`) calls `sub_743E7`
+            // right after dropping the fleer: the freed footprint is visible to
+            // every later `CanMove` this same round.
+            self.rebuild_occupancy();
         }
         self.clear_actions(actor);
     }
