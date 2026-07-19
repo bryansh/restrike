@@ -1319,6 +1319,7 @@ name = "gbx-oracle"
 version = "0.1.0"
 dependencies = [
  "gbx-engine",
+ "gbx-formats",
  "gbx-prng",
  "gbx-rules",
  "serde",

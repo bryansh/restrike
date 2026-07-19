@@ -134,6 +134,18 @@ pub struct Combatant {
     /// `DexReactionAdj(player)` (`ovr025.cs:537`) — a table lookup, no draw —
     /// precomputed via `gbx-rules`' `Flavor::dex_reaction_bonus`. Range `-4..=5`.
     pub reaction_adj: i8,
+    /// `Player.class@0x75`. The QuickFight approach guards a **pure Magic-User**
+    /// (`class == 5`): §15 bug #4, `sub_359D1` @`ovr010:0AA3` — a non-fleeing
+    /// class-5 combatant with a null [`Combatant::field_159`] does **not** advance
+    /// (PHILIPPE the mage holds his corner all fight). Default 0 (no guard) for
+    /// synthetically-built combatants.
+    pub class: u8,
+    /// `Player.field_159@0x159` (a runtime far-pointer, 4 bytes) is **null** here.
+    /// The mage-hold guard (§15 bug #4) only fires when this is null; a mage with a
+    /// readied `field_159` (a ranged option) advances instead. In the entry-state
+    /// snapshot it is whatever the capture recorded (null in the bar brawl). Like
+    /// the §1.7 pointer fields it is not otherwise decoded. Default `true` (null).
+    pub field_159_null: bool,
     /// Base attack half-actions (`attacksCount@0x11c`) — `reclac_attacks`/
     /// `ThisRoundActionCount` fold this into `attack1_left` each round (the 3/2
     /// rule, §3.1). `2` = one attack per round.
@@ -197,6 +209,8 @@ impl Combatant {
             hit_dice: 0,
             movement: 0,
             reaction_adj,
+            class: 0,
+            field_159_null: true,
             attacks_count: 0,
             dice_count: 0,
             dice_size: 0,
@@ -258,6 +272,8 @@ impl Combatant {
             hit_dice: 1,
             movement,
             reaction_adj: 0,
+            class: 0,
+            field_159_null: true,
             attacks_count: 2,
             dice_count: dice.0,
             dice_size: dice.1,
@@ -2364,49 +2380,63 @@ pub fn build_near_targets(
 // the opportunity attacks) are the remaining pieces; see the handoff. Every draw
 // flows through the one `EngineRng`/`roll_dice` seam (D9).
 
-/// The QuickFight `field_15` **target-mode gate** (`ovr010.cs:20-36`; study
-/// §4.1.2) — the very first draws of a melee AI turn, run before any target
-/// selection. Given the combatant's persistent `field_15` (`Action@0x15`, which
-/// `CalculateInitiative` does **not** reset), returns its new value and draws
-/// faithfully.
+/// The QuickFight `field_15` **target-mode gate** (`sub_3504B` @`ovr010:0090`;
+/// study §4.1.2, corrected by the §15 binary RE) — the very first draws of a
+/// melee AI turn, run before any target selection. Given the combatant's
+/// persistent `field_15` (`Action@0x15`, which `CalculateInitiative` does **not**
+/// reset), returns its new value and draws faithfully.
 ///
 /// ```text
-/// if (field_15 == 0 || field_15 == 4 || roll_dice(4,1) == 1) {  // d4 GATE (short-circuits)
+/// if (field_15 == 0 || field_15 > 4 || roll_dice(4,1) == 1) {   // d4 GATE (short-circuits)
 ///     v = roll_dice(8,1);                                       // d8
-///     v = (v == 8) ? roll_dice(4,1) : roll_dice(2,1) + 4;       // d4 (→1..4) or d2 (→5..6)
+///     v = (v != 8) ? roll_dice(4,1) : roll_dice(2,1) + 4;       // d4 (→1..4) or d2+4 (→5..6)
 /// }
 /// ```
 ///
-/// **The `||` short-circuit is the landmine (D9):** when `field_15` is 0 or 4 the
-/// `roll_dice(4,1)` gate is **not evaluated** — that turn draws only the body's
-/// **2** dice (d8 then d2|d4), not 3. Since `field_15` starts at 0, *every
-/// combatant's first turn* takes this 2-draw path. When `field_15 ∉ {0,4}`: one d4
+/// **§15 binary correction (bug #1).** This supersedes combat #4 D1's coab-derived
+/// reading, which was wrong two ways against the binary at `ovr010:0090`:
+/// - the entry short-circuit is `field_15 > 4` (`cmp 4; ja loc_350AB`), **not**
+///   `== 4`; and
+/// - the `d8` body branches are **swapped** — `d8 != 8` draws `roll_dice(4,1)`
+///   (`loc_350D4` → 1..4) and `d8 == 8` draws `roll_dice(2,1)+4` (→ 5..6). coab/our
+///   old code had these reversed, drawing a `d2` in the common `d8 != 8` case.
+///
+/// **The `||` short-circuit is still the landmine (D9):** when `field_15` is 0 or
+/// `> 4` the `roll_dice(4,1)` gate is **not evaluated** — that turn draws only the
+/// body's **2** dice (d8 then d4|d2), not 3. Since `field_15` starts at 0, *every
+/// combatant's first turn* takes this 2-draw path. When `field_15 ∈ 1..=4`: one d4
 /// gate draw always; then the 2-draw body only if the gate rolled 1 (so 1 or 3
-/// draws). The result is always in `1..=6` (never 0/7/8), so it never re-triggers
-/// the `==0` short-circuit but can land on 4 (re-triggering `==4`).
+/// draws). The result is always in `1..=6`.
 pub fn field_15_mode_gate(rng: &mut EngineRng, field_15: u8) -> u8 {
     let mut v = field_15 as u16;
-    // ovr010.cs:22 — the `||` short-circuits, so roll_dice(4,1) is skipped for
-    // field_15 ∈ {0,4}. Rust `||` short-circuits identically.
-    let enter = v == 0 || v == 4 || roll_dice(rng, 4, 1) == 1;
+    // ovr010:0090 — `cmp 0; jz body` / `cmp 4; ja body` then the d4 gate. The `||`
+    // short-circuits, so roll_dice(4,1) is skipped for field_15 ∈ {0} ∪ {>4}.
+    let enter = v == 0 || v > 4 || roll_dice(rng, 4, 1) == 1;
     if enter {
-        v = roll_dice(rng, 8, 1); // ovr010.cs:24
+        v = roll_dice(rng, 8, 1); // ovr010:00AB — d8
         if v != 8 {
-            v = roll_dice(rng, 2, 1) + 4; // ovr010.cs:28 → 5..6
+            v = roll_dice(rng, 4, 1); // ovr010:00D4 — d8!=8 → 1..4
         } else {
-            v = roll_dice(rng, 4, 1); // ovr010.cs:32 → 1..4
+            v = roll_dice(rng, 2, 1) + 4; // ovr010:00BF — d8==8 → 5..6
         }
     }
     v as u8
 }
 
-/// `data_2B8` (`ovr010.cs:290-293`, `seg600:02BD`) — the approach-angle table.
-/// `data_2B8[field_15][dirStep-1]` is an iso-direction *offset* added to the
-/// heading toward the target, so `field_15` (1..=6) selects an "approach
-/// personality" (straight vs. weaving) and `dirStep` (1..=6) is the retry index
-/// `CanMove`/`moralFailureEscape` walk. Value 8 = "no direction". 11 rows (the
-/// used rows are 1..=6); the trailing commented `{4,2,6,6}` row in coab is not in
-/// the live array.
+/// `data_2B8` (`seg600:02BD`) — the approach-angle table. Each entry is an
+/// iso-direction *offset* added to the heading toward the target, so `field_15`
+/// selects an "approach personality" (straight vs. weaving) and `dirStep` (1..=6)
+/// is the retry index `CanMove`/`moralFailureEscape` walk. Value 8 = "no
+/// direction". 11 rows materialized from coab's 6-wide windows.
+///
+/// **§15 binary correction (bug #2).** The binary (`CanMove`/`sub_3573B`
+/// @`ovr010:076D`) indexes the *flat* table as `byte[0x2B8 + 5·field_15 + dirStep]`
+/// = `T[5·(field_15−1) + dirStep]` (base `0x2BD`) — a **stride-5 sliding window**.
+/// coab materialized the overlapping windows into these 6-wide rows and indexed
+/// row `field_15`, an off-by-one: coab row `R` is `T[5R+1 ..= 5R+6]`, so binary
+/// `field_15 = N` reads coab **row N−1**. Both call sites therefore index
+/// [`DATA_2B8`]`[field_15 − 1]` (post-gate `field_15` is always 1..=6). Verified
+/// `DATA_2B8[N−1][dirStep−1] == T[5·(N−1)+dirStep]` for `dirStep` 1..=6.
 const DATA_2B8: [[i32; 6]; 11] = [
     [8, 7, 6, 1, 2, 8],
     [8, 1, 2, 7, 6, 7],
@@ -2740,7 +2770,8 @@ impl CombatState {
     /// (the cloud save at `:341` needs a poison/noxious cloud — none modeled).
     fn can_move(&self, actor: usize, base_dir: u8, dir_step: i32) -> (bool, bool) {
         let f15 = self.fighters[actor].field_15 as usize;
-        let offset = DATA_2B8[f15][(dir_step - 1) as usize];
+        // §15 bug #2: binary indexes coab row field_15−1 (stride-5 window).
+        let offset = DATA_2B8[f15.saturating_sub(1)][(dir_step - 1) as usize];
         let player_dir = ((base_dir as i32 + offset) % 8) as u8;
         let (ground_tile, occ) = self.ground_info_dir(actor, player_dir);
 
@@ -2924,6 +2955,21 @@ impl CombatState {
             return;
         }
 
+        // §15 bug #4 — the Magic-User hold (`sub_359D1` @`ovr010:0AA3`, `loc_35AA3`,
+        // the shared post-advance block both PCs and advancing NPCs reach). A
+        // non-fleeing pure Magic-User (`class == 5`) with a null `field_159` does
+        // **not** advance — it `jmp loc_35D9E` (guard). This is what pins PHILIPPE
+        // to his corner the whole capture. The `sub_35DB1` caller then exits its
+        // loop draw-free (`find_target` re-draws nothing once a target is held),
+        // exactly like the binary.
+        if !self.fighters[actor].moral_failure
+            && self.fighters[actor].field_159_null
+            && self.fighters[actor].class == 5
+        {
+            self.try_guarding(actor);
+            return;
+        }
+
         let dir = if !self.fighters[actor].moral_failure {
             let tp = self.fighters[self.fighters[actor].target.unwrap()].pos;
             target_direction(self.fighters[actor].pos, tp)
@@ -2964,7 +3010,8 @@ impl CombatState {
         }
 
         let f15 = self.fighters[actor].field_15 as usize;
-        let offset = DATA_2B8[f15][(dir_step.min(6) - 1) as usize];
+        // §15 bug #2: binary indexes coab row field_15−1 (stride-5 window).
+        let offset = DATA_2B8[f15.saturating_sub(1)][(dir_step.min(6) - 1) as usize];
         let var_2 = (offset + dir as i32).rem_euclid(8);
 
         // Anti-oscillation (ovr010.cs:440-460): a 180° reversal or a failed step
@@ -3068,7 +3115,12 @@ impl CombatState {
 
                 if !stop {
                     let mut reachable = false;
-                    let range = 1i32; // melee (no ranged weapon modeled)
+                    // TODO(M5, FD-29): §15 bug #3 — the binary (`sub_35DB1`
+                    // @`ovr010:0ED1`) derives `var_4` (attack range) from the
+                    // readied weapon: `field_151` → `[field_2E]` → table `@0x5D1C`
+                    // → `<<4 − 1`, default 1. We hardcode 1 (no ranged weapon
+                    // modeled); harmless for the unarmed brawl (range 1).
+                    let range = 1i32;
 
                     // Drop an invalid target (ovr010.cs:576-581).
                     if let Some(t) = self.fighters[actor].target {
@@ -3587,6 +3639,7 @@ fn combatant_from_record(
     team: Team,
     pos: GridPos,
     rec: &CharRecord,
+    raw: &[u8],
     flavor: &dyn Flavor,
 ) -> Combatant {
     let npc = rec.control_morale >= 0x80;
@@ -3617,6 +3670,14 @@ fn combatant_from_record(
     c.hit_dice = rec.hit_dice;
     c.reaction_adj = reaction_adj;
     c.attacks_count = rec.attack_profile_base[0]; // attacksCount @0x11c
+                                                  // §15 bug #4 (the mage hold): class @0x75 and field_159 @0x159 (a 4-byte
+                                                  // runtime far-pointer; null == all-zero). The QuickFight approach guards a
+                                                  // non-fleeing class-5 (pure Magic-User) with a null field_159.
+    c.class = rec.class;
+    c.field_159_null = match raw.get(0x159..0x15D) {
+        Some(p) => p.iter().all(|&b| b == 0),
+        None => true, // full 0x1A6 records always carry it; missing → treat as null
+    };
     c
 }
 
@@ -3639,7 +3700,9 @@ pub fn combat_state_from_records(
     let mut fighters = Vec::with_capacity(entries.len());
     for (id, e) in entries.iter().enumerate() {
         let rec = decode_char_record(e.record)?;
-        fighters.push(combatant_from_record(id, e.team, e.pos, &rec, flavor));
+        fighters.push(combatant_from_record(
+            id, e.team, e.pos, &rec, e.record, flavor,
+        ));
     }
     Ok(CombatState::new(map, fighters))
 }
@@ -4966,10 +5029,15 @@ mod tests {
     // === the field_15 mode-gate (M4 combat #4, deliverable 3 start) =========
 
     #[test]
-    fn field_15_gate_short_circuits_on_0_and_4() {
-        // field_15 ∈ {0,4}: the d4 gate is skipped (||-short-circuit), so exactly
-        // TWO draws — d8 then (d2 or d4) — never three.
-        for start in [0u8, 4u8] {
+    fn field_15_gate_short_circuits_on_0_and_over_4() {
+        // §15 bug #1: the entry short-circuit is `field_15 == 0 || field_15 > 4`
+        // (binary `cmp 4; ja`), NOT `== 4`. So field_15 ∈ {0} ∪ {5,6,…} skips the
+        // d4 gate → exactly TWO draws (d8 then the swapped tail), never three.
+        for start in [0u8, 5u8, 6u8, 7u8] {
+            let mut oracle = Replay::new(SEED);
+            let d8 = oracle.roll(8);
+            let tail = if d8 != 8 { 4 } else { 2 }; // swapped branch: d8!=8→d4, d8==8→d2+4
+
             let log = DrawLog::default();
             let mut rng = EngineRng::new(SEED);
             rng.attach_sink(log.sink());
@@ -4977,15 +5045,40 @@ mod tests {
             let ns = log.ns();
             assert_eq!(ns.len(), 2, "field_15={start}: no d4 gate, just d8 + tail");
             assert_eq!(ns[0], 8, "first body draw is the d8");
-            assert!(ns[1] == 2 || ns[1] == 4, "tail is d2 (→5..6) or d4 (→1..4)");
+            assert_eq!(
+                ns[1], tail,
+                "field_15={start}: d8={d8} → tail d{tail} (d8!=8→d4, d8==8→d2+4)"
+            );
             assert!((1..=6).contains(&out), "result in 1..=6, got {out}");
         }
     }
 
     #[test]
-    fn field_15_gate_draws_the_d4_when_not_0_or_4() {
-        // field_15 ∉ {0,4}: one d4 gate draw always. If the gate rolls 1 → the
-        // 2-draw body follows (3 total); else just the gate (1 draw, value kept).
+    fn field_15_gate_enters_the_body_when_over_4_gate_is_skipped() {
+        // A concrete `field_15 > 4` start (5): the || short-circuits the d4 gate
+        // and the body's swapped branch runs. Compare the exact stream + result to
+        // an independent replay.
+        let mut oracle = Replay::new(SEED);
+        let d8 = oracle.roll(8);
+        let expected = if d8 != 8 {
+            oracle.roll(4)
+        } else {
+            oracle.roll(2) + 4
+        };
+
+        let log = DrawLog::default();
+        let mut rng = EngineRng::new(SEED);
+        rng.attach_sink(log.sink());
+        let out = field_15_mode_gate(&mut rng, 5);
+        assert_eq!(log.ns(), vec![8, if d8 != 8 { 4 } else { 2 }]);
+        assert_eq!(out as u16, expected, "matches an independent replay");
+    }
+
+    #[test]
+    fn field_15_gate_draws_the_d4_gate_for_1_through_4() {
+        // §15 bug #1: field_15 ∈ 1..=4 evaluates the d4 gate (not short-circuited,
+        // since it is neither 0 nor > 4). One d4 gate draw always; if it rolls 1 →
+        // the 2-draw body follows (3 total); else just the gate (1 draw, value kept).
         let mut oracle = Replay::new(SEED);
         let gate = oracle.roll(4); // the first draw the gate will make
 
@@ -5008,22 +5101,23 @@ mod tests {
     #[test]
     fn field_15_gate_distribution_stays_in_range_and_respects_the_branch() {
         // Over many entries via the persistent field_15, every produced value is
-        // 1..=6 and honors the d8==8→d4(1..4) / else→d2+4(5..6) branch. Re-derive
-        // each gate with an independent replay to check the branch, not just range.
+        // 1..=6 and honors the §15-corrected branch: entry short-circuits on
+        // `0 || >4`, and the body draws d4(1..4) when d8!=8 / d2+4(5..6) when d8==8.
+        // Re-derive each gate with an independent replay to check the branch.
         let mut rng = EngineRng::new(SEED);
         let mut oracle = Replay::new(SEED);
         let mut field_15 = 0u8;
         for _ in 0..500 {
-            let entered = field_15 == 0 || field_15 == 4 || {
+            let entered = field_15 == 0 || field_15 > 4 || {
                 let g = oracle.roll(4);
                 g == 1
             };
             let expected = if entered {
                 let d8 = oracle.roll(8);
                 if d8 != 8 {
-                    oracle.roll(2) + 4
-                } else {
                     oracle.roll(4)
+                } else {
+                    oracle.roll(2) + 4
                 }
             } else {
                 field_15 as u16
@@ -5079,14 +5173,15 @@ mod tests {
         let mut o = Replay::new(SEED);
         let mut expect: Vec<u16> = Vec::new();
         // field_15 gate: field_15 starts 0 → the || short-circuits the d4 gate.
+        // §15 bug #1 swapped branch: d8!=8 → d4 (1..4); d8==8 → d2+4 (5..6).
         let d8 = o.roll(8);
         expect.push(8);
         if d8 != 8 {
-            o.roll(2);
-            expect.push(2);
-        } else {
             o.roll(4);
             expect.push(4);
+        } else {
+            o.roll(2);
+            expect.push(2);
         }
         // wand-scan d7 (normal area), memorized-spell d7 (unconditional).
         o.roll(7);

@@ -356,3 +356,207 @@ not assumed**, by the next step: a **per-turn** `turn_snapshot` adding each
 combatant's `{pos, hp, target}` (target via `actions`@record `+0x18D` → `Action.target`
 @`+0x0A` → `player_array` index). The first divergent turn names it — `target` differs
 with matching positions ⇒ sort-tie; `pos` differs ⇒ movement.
+
+## 14. NAMED: the residual is the QuickFight AI turn body (coab ≠ binary), NOT the PRNG (2026-07-17, session 5)
+
+Bryan re-captured a full bar brawl with `combat_entry` (now carrying **terrain**),
+`round_snapshot`, and `turn_snapshot` (per-turn `{pos,hp,target}`) →
+`~/goldbox-data/traces/combat4.gbxtrace` (seed `0x80ee4cee`, 16 combatants, 3075
+draws, 11 rounds, 198 turn snapshots). The repo-side localizer is
+`crates/gbx-oracle/tests/h4_turndiff.rs` (local-tier, D10-gated). It diffs three
+ways — draw stream (operands, not just before/after), per-round board, per-turn
+board — and it named the divergence precisely. Findings, in order of certainty:
+
+- **The PRNG is CORRECT — decisively ruled out.** The draw-stream "matches 3075/3075"
+  is a *count-only* artifact (a pure LCG makes `(before,after)` trivially equal until
+  the draw counts desync). The real signal is the **operand** (`Random(N)` die size,
+  from `ss_sp_words[3]`), and it first diverges at **draw 33**. That draw is the
+  `field_15` gate's second roll: ours `d2`, capture `d4`. Chasing it, I disassembled
+  the wrapper at image `0xa55a`: `call RandNext; xor ax,ax; …; xchg ax,dx; div bx;
+  xchg ax,dx; retf 2` — i.e. `(0:hi16) / N`, remainder → `hi16(new_state) mod N`.
+  **Exactly what `gbx-prng` implements.** A full-state or lo16 reduction would
+  overflow the 16-bit `div` (and, tested empirically, reshuffles initiative to the
+  wrong first actor). So the RNG is right; the divergence is *logic*, not dice. (Same
+  lesson as v1: the binary is the spec, and it exonerated the RNG here.)
+- **Initiative + selection are CORRECT.** Both our engine and the capture pick
+  **combatant 5 first** (PHILIPPE, `delay 8`). 16 d6 + 16 d100 match.
+- **Terrain is REAL and load-bearing** (reverses §11's refutation, which used the
+  buggy first terrain hook). The grid is a coherent bar room — party clustered left,
+  monsters right, diagonal walls, every combatant on a passable tile. Using it drops
+  our excess draws from 3668 (uniform) to 3232; the real fight is 3075.
+- **The divergence is turn 1, combatant 5 = PHILIPPE, the party's Magic-User**
+  (class 5; the others are Paladin/Paladin/Fighter-Thief/Fighter-Mage/Cleric). In the
+  **capture PHILIPPE holds his corner the ENTIRE fight** — `(23,11)` hp27 in every one
+  of the 11 `round_snapshot`s, never moving, never attacked, only re-targeting
+  (11→13→8) as each enemy dies. **Our engine marches him into melee** (moves to
+  `(32,13)`, swings a `d20`), which desyncs the whole board from round 1 and makes our
+  fight run **157 draws longer** (3232 vs 3075).
+- **The turn-body fork (draw-level):** capture's PHILIPPE turn = `[d8, d4, d7, d7,
+  d10]` then **ends** (guards). Ours = `[d8, d2, d7, d7, d10, d1, d20]` then attacks.
+  So two concrete coab-vs-binary gaps: (a) the `field_15` behavior-gate (draw 33: for
+  the *same* `d8`=5, the binary draws `roll_dice(4,1)` where our coab-derived
+  `field_15_mode_gate` draws `roll_dice(2,1)`), and (b) find_target picks a different
+  target (7 vs 11 — same roll on an identical state, so the near-list **order** differs)
+  and then the binary **guards** where ours enters `sub_35DB1` and swings.
+- **coab is NOT the spec here.** coab's `find_target` (`ovr014.cs:2238`) is identical
+  to ours and *also* returns a target for a far-off caster, and coab's turn body would
+  also charge PHILIPPE in — so this is a genuine coab-vs-binary divergence in
+  `PlayerQuickFight`, exactly like the PRNG, the `Random(0)` short-circuit, and the
+  other ~7 confirmed classes. `field_15` in our engine only indexes `DATA_2B8`
+  (movement approach angle), so fixing the gate corrects the *path*, not the
+  hold-vs-charge — the hold is a separate turn-body behavior.
+
+**Next (a real RE session, not a guess):** disassemble the binary's `PlayerQuickFight`
+turn body in `GAME.OVR` (start at the `field_15` gate that first forks at draw 33,
+then the target/move-attack loop), and model the caster/hold behavior the binary has
+and coab lacks. Then re-run `h4_turndiff` toward `N/N` → **H4 MELEE CLOSED**. The
+localizer + `combat4.gbxtrace` are the ground-truth harness for that work.
+
+## 15. The binary RE: three coab≠binary bugs in the QuickFight turn body (2026-07-18, session 6)
+
+Disassembled `PlayerQuickFight` and its callees directly from the IDA listing
+`~/src/goldbox-refs/coab/coab_new.lst` (CP437; the `ovr010` segment starts at line
+~94171; **ovr010 file offset = IDA-linear − 0x35000**, so `sub_3504B`=`ovr010:004B`,
+`sub_35DB1`=`ovr010:0DB1`, `sub_359D1`=`ovr010:09D1`, `CanMove/sub_3573B`=`ovr010:073B`).
+Three confirmed divergences, all where our engine faithfully copied **coab** and coab
+diverges from the **binary** (the spec):
+
+**Bug #1 — the `field_15` gate (`sub_3504B` @ovr010:0090). CONFIRMED + empirically
+validated.** The binary:
+```
+cmp field_15,0 ; jz body        ; enter directly on 0
+cmp field_15,4 ; ja body        ; enter directly on >4  (coab wrote "== 4")
+  roll_dice(4,1); jnz skip      ; field_15 in 1..4: draw d4, enter iff ==1
+body:
+  roll_dice(8,1) → v
+  v != 8 → field_15 = roll_dice(4,1)      (1..4)   ; coab draws d2+4 here
+  v == 8 → field_15 = roll_dice(2,1)+4    (5..6)   ; coab draws d4 here
+```
+Two errors in coab/our `field_15_mode_gate`: (a) entry short-circuit `== 4` should be
+`> 4`; (b) the `d8==8` branches are **swapped**. The common case (d8≠8) draws a **d4**,
+not d2. Applying just (a)+(b) moved the first operand divergence **draw 33 → 37** —
+proving the read. (This supersedes combat #4 D1's "short-circuits on {0,4}", derived
+from coab.)
+
+**Bug #2 — the `data_2B8` approach-direction table (`CanMove`/`sub_3573B` @ovr010:076D).
+CONFIRMED from raw bytes.** The table lives at `seg600:0x2BD` =
+`[0, 8,7,6,1,2,8, 1,2,7,6,7, 1,8,6,2,1,7,8,2,6,8, 7,6,5,4,8, …]`. The binary indexes
+`byte[0x2B8 + 5·field_15 + dirStep]` = `T[5·(field_15−1) + dirStep]` — a **stride-5
+sliding window**, so binary `field_15=N` reads coab **row N−1**. coab materialized the
+overlapping windows into 6-wide rows and indexes `data_2B8[field_15][dirStep−1]` (row
+**N**) — an **off-by-one on the approach-direction row**, which our `DATA_2B8` copies.
+The fix is `DATA_2B8[field_15−1]`. (Verified it changes movement, but see below — it is
+not the hold cause on its own.)
+
+**Bug #3 — the attack range (`sub_35DB1` @ovr010:0ED1). Mechanism identified.** The
+binary computes `var_4` (attack range) from the readied weapon: `field_151` (a weapon
+struct ptr on the record) → `[field_2E]` → table `@0x5D1C` → `<<4 − 1`, defaulting to 1.
+The reach/attack decision is then `steps/2 > var_4 → move, else attack` — **identical to
+our engine** except we hardcode `var_4 = 1` ("no ranged weapon modeled"). This is the
+ranged-weapon gap; it does not affect the unarmed bar brawl (range 1) but is needed for
+armed fights.
+
+**Bug #4 — the Magic-User guard (`sub_359D1` @loc_35AA3). PINNED + validated. THIS is the
+hold** (Bryan confirmed live: PHILIPPE guards the whole fight, no magic, no attack).
+`sub_359D1` **is** coab's `moralFailureEscape` (a coab misnomer; the "Move/Attack, Move
+Left =" string proves it's the *approach* step, and it also handles flee — one function, as
+in the binary). Its PC path has an explicit early exit:
+```
+loc_35AA3:
+  cmp actions.moral_failure(+14h), 0 ; jnz →advance    ; fleeing → move
+  mov ax,[player+159h]; or [player+15Bh]; jnz →advance ; field_159 ptr non-null → move
+  cmp player.class(+75h), 5 ; jnz →advance             ; class != 5 → move
+  jmp loc_35D9E                                         ; class 5 + not fleeing + field_159 null → GUARD
+```
+So **a non-fleeing pure Magic-User (`class == 5`, record `+0x75`) with a null `field_159`
+does not advance in QuickFight — it guards.** PHILIPPE is class 5 → holds all fight; the
+party's Paladins/Cleric/Fighter-multiclasses are not → they advance and fight. Our
+`moral_failure_escape` has no class-5 guard, so it charges PHILIPPE in. (The near-list is
+*faithful* — our `near[5]` = monster 11, same as the binary; the earlier "target 7" was a
+**consequence** of charging + retargeting, not the cause. `field_159` @0x159 is a
+far-pointer, null here — likely a readied ranged option; a mage with one would advance.)
+
+**Empirical validation (all four, layered, over `combat4`).** Applying #1 + the class-5
+guard moved the first *operand* divergence draw **33 → 129**; adding #2 → **153**; and the
+round-1 board is now **near-exact** — PHILIPPE (5) and LEDERA (3) identical, most monsters
+identical, only MATHEW (0)/TRAVIS (2)/SHARA (4) ~1 cell off. PHILIPPE holds at (23,11) with
+target 11, exactly like the capture. Draw count closes from 3668 (baseline uniform) to 3146
+(all-four, real terrain) vs the capture's 3075. The draw-153 fork is `combatant 12`'s turn:
+every draw matches through its move `(34,12)→(33,13)`, then `roll_dice(near.len())` for the
+adjacent re-pick draws `d1` (our 1 adjacent party member) vs `d2` (capture's 2) — a **cascade**
+from a party member's round-0 move landing one cell off, not a fresh mechanic. So the last
+knot is a **fine movement-step difference** in round 0 (a mover takes one extra/fewer step or
+a 1-off direction), best localized empirically move-by-move (our per-turn positions vs the
+capture's `turn_snapshot`s) rather than by more static reads. `dirStep`/`data_2B8`/base-dir
+all check out (base dir = `sub_409BC`/`getTargetDirection`, our `target_direction`, matches;
+the loop is `dir_step`/`var_3` 1..5 both sides).
+
+**Plan.** The complete fix is: **#1** (`field_15` gate), **#2** (`data_2B8` row `field_15−1`),
+and **#4** (decode `class`@0x75 + `field_159`@0x159 onto `Combatant`; guard a non-fleeing
+class-5 mage with null `field_159` in the approach), plus updating the coab-based gate/parity
+tests to the binary behavior; **#3** (weapon range) stays scoped to M5. Then close the draw-153
+movement residual and re-run `h4_turndiff` → `N/N` = **H4 MELEE CLOSED**. All engine edits this
+session were reverted (RE-validation only).
+
+**Status/plan.** Bugs #1 and #2 are confirmed and ready to implement (with the coab-based
+gate/parity tests updated to the binary behavior); #3 is scoped (ranged weapons, likely
+M5). The remaining RE step is `sub_359D1`'s PC approach loop to pin the hold, then the
+combined fix + `h4_turndiff` re-run toward `N/N` closes H4 melee. All engine edits this
+session were reverted (RE-validation only); the repo carries only the localizer test,
+its dev-dep, and this doc.
+
+## 16. The four fixes IMPLEMENTED — draw match 33 → 153, residual = round-0 movement (2026-07-18, session 7)
+
+§15's four findings were **implemented and landed** in `gbx-engine::combat`, each first
+re-verified against the actual IDA listing `coab_new.lst` (`grep -a`; CP437) at its cited
+`ovr010:` address before writing code:
+
+- **#1 `field_15_mode_gate`** (`ovr010:0090`): entry `v == 0 || v > 4` (the `cmp 4; ja
+  loc_350AB`, not `== 4`); body branches **swapped** so `d8 != 8` → `roll_dice(4,1)`
+  (`loc_350D4`, 1..4) and `d8 == 8` → `roll_dice(2,1)+4` (`loc_350BF`, 5..6).
+- **#2 `DATA_2B8`** (`CanMove`/`sub_3573B`): both call sites (`can_move`,
+  `moral_failure_escape`) now index `DATA_2B8[field_15.saturating_sub(1)]` — the binary's
+  stride-5 window reads coab row `N−1`; coab row `R` = `T[5R+1..=5R+6]` includes the 6th
+  column, so `field_15−1` is faithful for `dir_step` 1..=6.
+- **#4 the Magic-User hold** (`sub_359D1` @`loc_35AA3`): `class`@0x75 and `field_159`@0x159
+  (a 4-byte far-pointer, null == all-zero) are decoded onto `Combatant`
+  (`combatant_from_record`, from the raw record bytes). The guard sits at the shared
+  post-advance block `loc_35AA3` (reached by **both** the PC path — `control_morale < 0x80`
+  → `jb loc_35AA3`, skipping the d100 — and the advancing-NPC path): a **non-fleeing**
+  combatant with `class == 5` and a null `field_159` calls `try_guarding` and returns
+  (`jmp loc_35D9E`, which is `sub_361F7` = our `TryGuarding`). The `sub_35DB1` caller then
+  exits its loop **draw-free** (once a target is held, `find_target` re-draws nothing).
+- **#3 weapon range** left as a cited `TODO(M5, FD-29)` at the `range = 1` hardcode
+  (`ovr010:0ED1`, `field_151` → table `@0x5D1C`) — unarmed brawl is range 1.
+
+**Parity tests updated to the binary behavior (recomputed, not weakened):** the two
+`field_15` gate unit tests (renamed `..._short_circuits_on_0_and_over_4` /
+`..._draws_the_d4_gate_for_1_through_4`, plus a new `..._enters_the_body_when_over_4...`),
+the distribution test's oracle, and `melee_turn_adjacent`'s hand-derived stream — each
+re-derives its expected draws from an independent `gbx-prng` replay of the corrected logic.
+The invariant-style parity tests (`monster_approach`, `all_ai_1v1`,
+`run_combat_full_round_loop`, `run_combat_driver_matches_raw_step`) needed no change — they
+self-derive from the actual draw stream. `.rsav`/save goldens untouched; both `watch_*`
+demos assert only invariants (no committed transcript to re-bless).
+
+**`h4_turndiff` result (real terrain, `combat4.gbxtrace`, seed `0x80ee4cee`):**
+- first **operand** divergence moved **draw 33 → 153** (exactly §15's layered validation);
+- our draw count closed **3971 (uniform) / 3146 (real terrain)** vs the capture's **3075**;
+- round-1 board: **PHILIPPE (5)** holds `(23,11)` and **LEDERA (3)** `(31,12)` are
+  **byte-identical** to the capture; most monsters identical.
+
+**Residual (unchanged in character from §15 — a round-0 movement cascade, NOT a mechanic):**
+the first divergent *round* is round 1, combatant 0 (MATHEW) at `(31,10)` vs capture
+`(31,11)` — one cell off — with combatants 1/2/4 and monster 13 also ~1 cell off. The
+draw-153 fork is `combatant 12`'s adjacent re-pick: `roll_dice(near.len())` draws `d1` (our
+1 adjacent) vs `d2` (capture's 2), purely because a party member's round-0 step landed one
+cell off. Movement is draw-free, so this shifts draw-free targeting without changing any
+roll until draw 153. **This needs a dedicated RE of the `sub_35DB1`/`sub_3E748` approach
+stepping** (a step-count or `CanMove` tie for the approaching party members — base
+direction, `dir_step` loop, and `move_cost` gates already check out per §11–§13), so per the
+brief the confirmed #1/#2/#4 fixes land as a reviewed slice and the residual is reported
+with this localization rather than blocking on it. The localizer
+(`h4_turndiff::h4_turndiff_localize`) gained a **per-turn POSITION-only** diff (cadence-
+caveated) alongside the authoritative cadence-robust per-round diff. Gates 6/6 green
+(build+wasm core/web, 324 workspace tests, clippy, fmt, guard); `.rsav` goldens untouched;
+no new coab `Data/*.DAX` read.
