@@ -2702,6 +2702,12 @@ impl CombatState {
     /// returns `turnComplete`. Backstab/behind AC and the held-slay path are
     /// deferred (raw AC used).
     fn attack_target(&mut self, rng: &mut EngineRng, actor: usize, target: usize) -> bool {
+        // §19: `AttackTarget` (`sub_3F9DB`, ovr014.cs:939) sets
+        // `attacker.actions.target = target` — the attacked (possibly re-picked)
+        // combatant becomes the persistent target, so next round's `find_target`
+        // keeps it draw-free. Draw-free; only the *held target* carried into later
+        // rounds changes (the §18 re-pick correctly writes only a local `chosen`).
+        self.fighters[actor].target = Some(target);
         if self.fighters[actor].attack1_left == 0 && self.fighters[actor].attack2_left == 0 {
             self.clear_actions(actor);
             return true;

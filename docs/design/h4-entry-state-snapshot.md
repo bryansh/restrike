@@ -633,3 +633,28 @@ where the capture attacks a **held** target draw-free (`find_target`/`sub_41E44`
 surviving held target). The residual family is the **`actions.target` lifecycle** (who writes/
 clears it, at find_target / re-pick / TryGuarding / clear_actions / attack-cleanup) — a bounded,
 named read, localizer already pointing at the exact actor and draw.
+
+## 19. Bug #7 — the attack write-back to actions.target (2026-07-19)
+
+The draw-459 residual was the `actions.target` lifecycle, as Fable predicted. Draw 459 is
+SHARA (party, round 1): the capture attacks a **held** target draw-free while ours draws a `d3`
+re-pick. Instrumenting showed our SHARA carries `actions.target = 6` into round 1 while the
+capture carries **7** — the monster she actually *attacked* in round 0 after a reach re-pick.
+The §18 fix correctly stopped the re-pick from writing `actions.target` (it writes only the
+local `chosen`, per the binary) — but I'd missed the compensating write: **`AttackTarget`
+(`sub_3F9DB`, ovr014.cs:939) sets `attacker.actions.target = target`** on every attack. So the
+persistent target becomes the *attacked* combatant, and next round's `find_target` keeps it
+draw-free (target 7 is adjacent → attack directly, no `d3`). Our `attack_target` never did this.
+
+Fix: `attack_target` sets `self.fighters[actor].target = Some(target)` up front. Draw-free (only
+the held target carried into later rounds changes), so round-0 draws are untouched; 324 tests
+still pass (the parity test already asserts the post-attack target).
+
+**Result:** first operand divergence **459 → 747** (real terrain, +288 — the biggest single jump
+yet); draw count 3346 → 3342 vs capture 3075. The onion is yielding *more* per layer, not less.
+This was a clean domino found by diffing the enclosing functions from the listing (§18's lesson).
+
+**Next residual: draw 747.** Corroborating open thread (not yet the blocker): a guard turn should
+**clear** `actions.target` — the capture shows PHILIPPE ending his guard with `tgt255` while ours
+holds `tgt11` (`TryGuarding`/`clear_actions` → `actions.target = null`, cf. ovr010.cs:447 /
+ovr014.cs:2357). Same `actions.target` lifecycle family.
