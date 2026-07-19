@@ -560,3 +560,34 @@ with this localization rather than blocking on it. The localizer
 caveated) alongside the authoritative cadence-robust per-round diff. Gates 6/6 green
 (build+wasm core/web, 324 workspace tests, clippy, fmt, guard); `.rsav` goldens untouched;
 no new coab `Data/*.DAX` read.
+
+## 17. Bug #5 — the near-target sort (`sub_73033`); the "movement residual" was targeting (2026-07-19)
+
+The §15/§16 "round-0 movement cascade" turned out **not to be movement at all** — it was the
+near-target **sort**. Instrumenting the first mover (SHARA, combatant 4) showed her drifting
+north because she targeted monster **14** (`33,11`), while the capture targets **6**/then 7
+(`34,13`). The draws match through her turn, so her `find_target` roll matches the binary —
+which means her **near-list order** differed. Her near-list has monster 6 (dir 2) and monster
+14 (dir 1) **tied on steps (18)**; our sort put 14 first, the binary keeps 6 first.
+
+**The binary (`sub_73033` @`ovr032:0033`) is a selection sort with a PARTIAL-order predicate**,
+not a clean key. Element `j` swaps before element `i` iff `steps[j] < steps[i]`, OR
+(`steps` equal AND `dir[j] < dir[i]` AND `dir[j]%2 <= dir[i]%2`). For a diagonal-vs-orthogonal
+tie (`dir 1` vs `dir 2`) **neither** swaps the other, so **build (roster) order is preserved**
+— monster 6 (roster-earlier) stays before 14. coab's `SortedCombatant.CompareTo` collapsed
+this into a clean `(steps, direction)` key with the `direction % 2` term as an *unreachable*
+innermost tie-break (§12 dismissed it as a no-op) — wrong. The fix replaces
+`build_near_targets`' `sort_by` with the exact `sub_73033` nested-loop predicate.
+
+**Result:** first operand divergence **draw 153 → 358** (real terrain), and **MATHEW's round-1
+position now matches the capture exactly** — the whole cell-off cascade is gone (it was
+target-order the whole time, per the §13 sort-tie suspicion). 324 engine tests still pass (the
+synthetic parity tests don't hit a tie, so the sort change is inert there). This also retires
+the "per-step move capture" plan from §16 — no finer capture was needed; the disassembly of
+`sub_73033` settled it.
+
+**New residual: draw 358** — a `d20`-vs-`d2` (to-hit vs damage) split inside a round-0 turn
+(after a `find_target` d6), i.e. an **attack-resolution** subtlety, not movement. Next onion
+layer. (Method note: the metric switch from count-only `(before,after)` to the **operand**
+stream — §16's "2995" was LCG-trivial count-matching — is what makes each of these layers
+visible; the operand localizer is the load-bearing tool.)

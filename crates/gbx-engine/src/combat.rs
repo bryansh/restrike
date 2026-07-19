@@ -2363,7 +2363,27 @@ pub fn build_near_targets(
     // SortedCombatant.CompareTo: steps asc, then direction asc (the `direction%2`
     // tertiary key is 0 whenever directions are equal). Stable → roster order on
     // full ties.
-    out.sort_by(|a, b| a.0.steps.cmp(&b.0.steps).then(a.1.cmp(&b.1)));
+    // §15 bug #5 — the near-target sort is the binary's `sub_73033` (ovr032:0033):
+    // a selection sort whose swap predicate is a PARTIAL order, not a clean key.
+    // Element `j` sorts before element `i` when `steps[j] < steps[i]`, OR
+    // (`steps` equal AND `dir[j] < dir[i]` AND `dir[j]%2 <= dir[i]%2`). Incomparable
+    // pairs keep build (roster) order — e.g. a `dir 1` (diagonal) and a `dir 2`
+    // (orthogonal) at equal steps are never swapped, so the binary keeps the
+    // roster-earlier one first. coab's `SortedCombatant.CompareTo` mis-orders this
+    // as a clean `(steps, direction)` key (it has the `%2` term only as an
+    // unreachable innermost tie-break); that gave the wrong `find_target` pick and
+    // the round-0 movement cascade.
+    let n = out.len();
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let (si, di) = (out[i].0.steps, out[i].1 as i32);
+            let (sj, dj) = (out[j].0.steps, out[j].1 as i32);
+            let swap = sj < si || (sj == si && dj < di && (dj % 2) <= (di % 2));
+            if swap {
+                out.swap(i, j);
+            }
+        }
+    }
 
     out.into_iter().map(|(nt, _)| nt).collect()
 }
