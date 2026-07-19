@@ -591,3 +591,45 @@ the "per-step move capture" plan from §16 — no finer capture was needed; the 
 layer. (Method note: the metric switch from count-only `(before,after)` to the **operand**
 stream — §16's "2995" was LCG-trivial count-matching — is what makes each of these layers
 visible; the operand localizer is the load-bearing tool.)
+
+## 18. Bug #6 — monster attack-spreading; the target-validity check (2026-07-19, Fable review)
+
+Found by a Fable review pass when this session mis-called the draw-358 divergence a "murky
+reach knot" and leaned toward banking. It was neither murky nor reach — it was **ours vs coab**
+(our engine had "normalized" coab's correct-but-asymmetric code), three lines *above* the reach
+probe I'd been re-reading.
+
+The binary's target-validity check at the top of `sub_35DB1`'s loop body (`ovr010:0F12–0F46`)
+loads `actions.target` into a **local** `player01` and nulls that local when the target is out
+of combat **or** `cmp [combat_team], 0` — an **immediate-0 compare (Team::Party)**, NOT the
+attacker's team, which is never loaded. coab is faithful (`target.combat_team == CombatTeam.Ours`,
+ovr010.cs:578). Our engine had rewritten it as the "obvious" symmetric sanity check
+`tf.team == attacker.team` — which is *always false* (targets are opposite-team), so we **never
+dropped**, always took the attack-directly fast path.
+
+Consequence: a **monster** attacker's held target is always a party member (`team == Party`), so
+the binary always drops it here and falls through to the near-list **re-pick** — i.e. monsters
+**spread attacks uniformly among adjacent PCs** (`roll_dice(near.count)`, the capture's extra
+`d2`), the classic Gold Box behavior. A **party** attacker holds a monster target
+(`team != Party`) and keeps the fast path. Two more faithful details: the drop nulls only the
+**local**, not `actions.target`; and the re-pick stores to the **local** only (no write-back).
+Fix: thread a local `chosen` through the loop body; `tf.team == Team::Party` for the drop.
+
+**Result:** first operand divergence **358 → 459** (real terrain); our draw count 3744 → 3346
+(capture 3075); the round-1 board now has **all 16 positions and all 10 monsters byte-identical**
+to the capture (only two party hp cells differ — the draw-459 fork). One parity test recomputed
+(`melee_turn_adjacent`: the monster's `d1` re-pick added via the independent oracle). 324 tests
+pass.
+
+**Method lesson (Fable's):** "clean domino vs murky knot" is a statement about *comprehension*,
+not the code — a genuine contradiction always means a false premise (here: "our validity check
+matches coab's"). Before declaring a knot, **diff the entire enclosing function against the Rust
+from the listing, not from coab.** The banked claim would have been *wrong*: the divergent
+mechanic was monster damage-allocation across the party, gameplay-visible every round — exactly
+what H4 exists to catch.
+
+**Next residual: draw 459** — SHARA (party), round 1: ours draws a `d3` (find_target near-count)
+where the capture attacks a **held** target draw-free (`find_target`/`sub_41E44` early-outs on a
+surviving held target). The residual family is the **`actions.target` lifecycle** (who writes/
+clears it, at find_target / re-pick / TryGuarding / clear_actions / attack-cleanup) — a bounded,
+named read, localizer already pointing at the exact actor and draw.

@@ -3142,16 +3142,23 @@ impl CombatState {
                     // modeled); harmless for the unarmed brawl (range 1).
                     let range = 1i32;
 
-                    // Drop an invalid target (ovr010.cs:576-581).
-                    if let Some(t) = self.fighters[actor].target {
+                    // The binary's `player01` local (ovr010:0F12-0F46): load
+                    // actions.target, then null the LOCAL if the target is out
+                    // of combat or on the PARTY team — `cmp combat_team, 0` is
+                    // an immediate-0 compare (Team::Party), NOT the attacker's
+                    // team, and actions.target itself is NOT cleared. A monster
+                    // therefore never keeps a held party target here: it always
+                    // falls through to the near-list re-pick.
+                    let mut chosen: Option<usize> = self.fighters[actor].target;
+                    if let Some(t) = chosen {
                         let tf = &self.fighters[t];
-                        if !tf.in_combat || tf.team == self.fighters[actor].team {
-                            self.fighters[actor].target = None;
+                        if !tf.in_combat || tf.team == Team::Party {
+                            chosen = None;
                         }
                     }
 
                     // Reachability probe (ovr010.cs:583-598) — draw-free.
-                    if let Some(t) = self.fighters[actor].target {
+                    if let Some(t) = chosen {
                         if self.can_see_target(t) {
                             let ap = self.fighters[actor].pos;
                             let tp = self.fighters[t].pos;
@@ -3175,9 +3182,11 @@ impl CombatState {
                             }
                         } else {
                             // An adjacent enemy exists → re-pick among them (:618).
+                            // Binary loc_36036: the pick lands in the LOCAL
+                            // `player01` only — actions.target is not written.
                             let roll = roll_dice(rng, near.len() as u16, 1);
                             let picked = near[(roll - 1) as usize].idx;
-                            self.fighters[actor].target = Some(picked);
+                            chosen = Some(picked);
                             let tp = self.fighters[picked].pos;
                             if get_target_range(&self.map, tp, self.fighters[actor].pos) == 1
                                 || self.can_see_target(picked)
@@ -3188,7 +3197,7 @@ impl CombatState {
                     }
 
                     if reachable {
-                        let t = self.fighters[actor].target.unwrap();
+                        let t = chosen.unwrap();
                         if self.try_sweep_attack(t, actor) {
                             stop = true;
                             self.clear_actions(actor);
@@ -5209,6 +5218,11 @@ mod tests {
         o.roll(7);
         expect.push(7);
         // find_target: one target, d1 pick.
+        o.roll(1);
+        expect.push(1);
+        // §18 bug #6: a monster attacker's held target is on the party team, so
+        // the target-validity check drops it (ovr010:0F36 `cmp combat_team, 0`)
+        // and it re-picks among adjacent PCs — one adjacent enemy → a d1 re-pick.
         o.roll(1);
         expect.push(1);
         // attack: one d20 to-hit; damage dice on a hit.
