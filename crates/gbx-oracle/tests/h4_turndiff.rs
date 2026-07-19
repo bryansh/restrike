@@ -316,6 +316,42 @@ fn operand_match_len(ours: &[(u32, u32, Option<u16>)], cap: &[(u32, u32, Option<
     (0..n).take_while(|&i| ours[i].2 == cap[i].2).count()
 }
 
+/// Demonstrates the metric difference behind the "2995 vs 153" question:
+/// the count-only `(before,after)` match (what h4_replay used) vs the operand
+/// (die-size) match. Point it at any capture with `GBX_H4_TURNDIFF`.
+#[test]
+fn h4_count_vs_operand_metric() {
+    let Some(path) = capture_path() else {
+        eprintln!("SKIPPED");
+        return;
+    };
+    if !path.exists() {
+        eprintln!("SKIPPED: {} absent", path.display());
+        return;
+    }
+    let text = std::fs::read_to_string(&path).expect("readable");
+    let cap = parse_capture(&text);
+    // Uniform floor so it works on terrain-less captures too.
+    let ours = run(&cap, CombatMap::uniform(0x17));
+    let count = draw_match_len(&ours.draws, &cap.draws);
+    let operand = operand_match_len(&ours.draws, &cap.draws);
+    eprintln!(
+        "capture {} : {} combatants, {} capture draws, our {} draws",
+        path.file_name().unwrap().to_string_lossy(),
+        cap.entry.len(),
+        cap.draws.len(),
+        ours.draws.len(),
+    );
+    eprintln!(
+        "  COUNT-only (before,after) match: {count}/{}   <- what h4_replay measured (LCG-trivial)",
+        cap.draws.len()
+    );
+    eprintln!(
+        "  OPERAND (die-size) match:        {operand}/{}   <- the real mechanic-level test",
+        cap.draws.len()
+    );
+}
+
 fn die_label(n: Option<u16>) -> &'static str {
     match n {
         Some(6) => "d6 init",
@@ -422,7 +458,7 @@ fn h4_first_turn_trace() {
     let mut steps = 0;
     loop {
         steps += 1;
-        if steps > 400 {
+        if steps > 2000 {
             break;
         }
         match state.step(&mut rng) {
@@ -432,7 +468,7 @@ fn h4_first_turn_trace() {
             } => break,
             _ => {}
         }
-        if timeline.borrow().len() > 400 {
+        if timeline.borrow().len() > 900 {
             break;
         }
     }
@@ -466,13 +502,13 @@ fn h4_first_turn_trace() {
                 }
             }
         }
-        if draw_i > 162 {
+        if draw_i > 372 {
             break;
         }
     }
 
     eprintln!("\n=== CAPTURE operands 145-160 for reference ===");
-    for i in 145..161.min(cap.draws.len()) {
+    for i in 350..371.min(cap.draws.len()) {
         eprintln!(
             "  draw {i:3}: d{}",
             cap.draws[i].2.map(|x| x as i32).unwrap_or(-1)
@@ -508,7 +544,10 @@ fn h4_philippe_near_list() {
         })
         .collect();
 
-    let actor = 5usize; // PHILIPPE
+    let actor = std::env::var("GBX_ACTOR")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5usize); // PHILIPPE by default; GBX_ACTOR=4 for SHARA
     let ap = combatants[actor].pos;
     eprintln!("PHILIPPE (actor {actor}) at ({},{})", ap.x, ap.y);
     eprintln!("\n=== per-monster raw reach from PHILIPPE (real terrain) ===");
@@ -546,6 +585,131 @@ fn h4_philippe_near_list() {
         );
     }
     eprintln!("\n(capture picks monster 11; if near[5] != 11 here, the sort order diverges)");
+}
+
+#[test]
+fn h4_round0_moves() {
+    let Some(path) = capture_path() else {
+        eprintln!("SKIPPED");
+        return;
+    };
+    if !path.exists() {
+        eprintln!("SKIPPED: capture absent");
+        return;
+    }
+    let text = std::fs::read_to_string(&path).expect("readable");
+    let cap = parse_capture(&text);
+
+    // Collect Move + Pick events with an action sink.
+    let log: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    struct S(Rc<RefCell<Vec<String>>>);
+    impl gbx_engine::combat::ActionSink for S {
+        fn on_action(&mut self, e: gbx_engine::combat::ActionEvent) {
+            self.0.borrow_mut().push(format!("{e:?}"));
+        }
+    }
+
+    let records: Vec<Vec<u8>> = cap.entry.iter().map(|c| c.record.clone()).collect();
+    let entries: Vec<RecordCombatant> = cap
+        .entry
+        .iter()
+        .zip(&records)
+        .map(|(c, rec)| RecordCombatant {
+            team: team_of(c.team),
+            pos: GridPos::new(c.x, c.y),
+            record: rec,
+        })
+        .collect();
+    let rules = RuleSet::load();
+    let flavor = Adnd1::new(&rules);
+    let mut state = combat_state_from_records(
+        &entries,
+        CombatMap::from_ground(cap.terrain.clone()),
+        &flavor,
+    )
+    .expect("decode");
+    state.attach_action_sink(Box::new(S(log.clone())));
+    let mut rng = EngineRng::new(cap.rng_state);
+    rng.attach_sink(Box::new(DrawTap::default()));
+
+    // Run through round 0 (stop at the first RoundEnded).
+    loop {
+        match state.step(&mut rng) {
+            CombatStep::RoundEnded { .. } => break,
+            CombatStep::Ended => break,
+            _ => {}
+        }
+    }
+
+    let names = [
+        "MATHEW", "MARK", "TRAVIS", "LEDERA", "SHARA", "PHILIPPE",
+    ];
+    eprintln!("=== OUR round-0 Pick order + moves (vs capture) ===");
+    eprintln!("capture: SHARA(4)->(32,13) MARK(1)->(33,14) LEDERA(3)->(31,12) MATHEW(0)->(31,11) TRAVIS(2)->(32,14)");
+    for line in log.borrow().iter() {
+        if line.starts_with("Pick") {
+            eprintln!("{line}");
+        } else if line.starts_with("Move") {
+            eprintln!("   {line}");
+        }
+    }
+    eprintln!("\n=== our round-0 final positions ===");
+    for (i, f) in state.roster().iter().enumerate() {
+        let nm = if i < 6 { names[i] } else { "PATRON" };
+        eprintln!("  {nm}({i}): ({},{})", f.pos.x, f.pos.y);
+    }
+}
+
+#[test]
+fn h4_locate_draw() {
+    let target: usize = std::env::var("GBX_DRAW").ok().and_then(|s| s.parse().ok()).unwrap_or(358);
+    let Some(path) = capture_path() else { eprintln!("SKIPPED"); return; };
+    if !path.exists() { eprintln!("SKIPPED"); return; }
+    let text = std::fs::read_to_string(&path).expect("readable");
+    let cap = parse_capture(&text);
+
+    let count = Rc::new(RefCell::new(0usize));
+    let log: Rc<RefCell<Vec<(usize, String)>>> = Rc::new(RefCell::new(Vec::new()));
+    struct Ctr(Rc<RefCell<usize>>);
+    impl RngSink for Ctr {
+        fn on_draw(&mut self, _d: RngDraw) { *self.0.borrow_mut() += 1; }
+    }
+    struct Rec(Rc<RefCell<usize>>, Rc<RefCell<Vec<(usize, String)>>>);
+    impl gbx_engine::combat::ActionSink for Rec {
+        fn on_action(&mut self, e: gbx_engine::combat::ActionEvent) {
+            self.1.borrow_mut().push((*self.0.borrow(), format!("{e:?}")));
+        }
+    }
+    let records: Vec<Vec<u8>> = cap.entry.iter().map(|c| c.record.clone()).collect();
+    let entries: Vec<RecordCombatant> = cap.entry.iter().zip(&records)
+        .map(|(c, rec)| RecordCombatant { team: team_of(c.team), pos: GridPos::new(c.x, c.y), record: rec })
+        .collect();
+    let rules = RuleSet::load();
+    let flavor = Adnd1::new(&rules);
+    let mut state = combat_state_from_records(&entries, CombatMap::from_ground(cap.terrain.clone()), &flavor).expect("decode");
+    state.attach_action_sink(Box::new(Rec(count.clone(), log.clone())));
+    let mut rng = EngineRng::new(cap.rng_state);
+    rng.attach_sink(Box::new(Ctr(count.clone())));
+    let mut guard = 0;
+    loop {
+        guard += 1;
+        if guard > 1_000_000 || *count.borrow() > target + 30 { break; }
+        match state.step(&mut rng) {
+            CombatStep::Ended => break,
+            CombatStep::RoundEnded { battle_over, .. } => if battle_over { break; },
+            _ => {}
+        }
+    }
+    eprintln!("=== our events near draw {target} (draw#: event) ===");
+    for (dc, e) in log.borrow().iter() {
+        if *dc + 20 >= target && *dc <= target + 20 {
+            if e.starts_with("Pick") || e.starts_with("Ai") || e.starts_with("Attack") || e.starts_with("Dmg") || e.starts_with("Move") {
+                eprintln!("  d{dc}: {e}");
+            }
+        }
+    }
+    eprintln!("\ncapture operands {}-{}: {:?}", target.saturating_sub(6), target + 6,
+        (target.saturating_sub(6)..=target+6).filter_map(|i| cap.draws.get(i).map(|d| d.2)).collect::<Vec<_>>());
 }
 
 #[test]
