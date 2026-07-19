@@ -30,16 +30,17 @@ use gbx_rules::pack::RuleSet;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-/// The canonical local-only capture (D10). Overridable with `GBX_H4_CAPTURE`;
-/// otherwise the `~/goldbox-data/traces/` sibling of `GBX_DATA_DIR`.
-const CAPTURE_NAME: &str = "h4-combat-barbrawl-2026-07-17.gbxtrace";
+/// The canonical local-only capture (D10): the `combat4` bar brawl (16
+/// combatants, seed `0x80ee4cee`, 3,075 draws, real terrain + board snapshots).
+/// Overridable with `GBX_H4_CAPTURE`; otherwise the `~/goldbox-data/traces/`
+/// sibling of `GBX_DATA_DIR`.
+const CAPTURE_NAME: &str = "combat4.gbxtrace";
 
 /// Resolve the capture path, or `None` when the **local tier is not active**.
 /// The local tier is active when either `GBX_H4_CAPTURE` (explicit override) or
 /// `GBX_DATA_DIR` (the project-wide local-data signal the demos gate on) is set —
 /// so a plain `cargo test` (the CI gate, neither var set) **skips** this
-/// milestone test exactly as it skips the `GBX_DATA_DIR` demos, keeping the gate
-/// green while the fight-tail divergence is an open finding (D10).
+/// milestone test exactly as it skips the `GBX_DATA_DIR` demos (D10).
 fn capture_path() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("GBX_H4_CAPTURE") {
         return Some(PathBuf::from(p));
@@ -54,11 +55,25 @@ fn capture_path() -> Option<PathBuf> {
     )
 }
 
-/// Open-floor combat map (`0x17` = passable floor, move_cost 1) — the same
-/// open-ground default the accepted `watch_a_real_data_fight` demo uses. The
-/// capture snapshots positions but not terrain (`SetupGroundTiles` ran before the
-/// capture window); this is the harness's one documented free variable.
+/// Open-floor fallback tile (`0x17` = passable floor, move_cost 1) — used only
+/// when the capture predates the `combat_entry.terrain` field. Terrain is
+/// load-bearing for movement (doc §14), so a modern capture's replay always
+/// builds its map from the captured ground grid.
 const FLOOR: u8 = 0x17;
+
+/// Decode the `combat_entry.terrain` lowercase-hex ground grid.
+fn decode_terrain(hex: &str) -> Vec<u8> {
+    let b = hex.as_bytes();
+    let val = |c: u8| match c {
+        b'0'..=b'9' => c - b'0',
+        b'a'..=b'f' => c - b'a' + 10,
+        b'A'..=b'F' => c - b'A' + 10,
+        _ => 0,
+    };
+    b.chunks_exact(2)
+        .map(|p| (val(p[0]) << 4) | val(p[1]))
+        .collect()
+}
 
 /// A draw tap recording every `(before, after, n)` at the engine seam.
 #[derive(Clone, Default)]
@@ -181,8 +196,13 @@ fn h4_melee_replays_the_bar_brawl_capture_draw_for_draw() {
 
     let rules = RuleSet::load();
     let flavor = Adnd1::new(&rules);
-    let mut state = combat_state_from_records(&entries, CombatMap::uniform(FLOOR), &flavor)
-        .expect("records decode");
+    // Real terrain when the capture carries it (§14: load-bearing), else the
+    // documented open-floor fallback for pre-terrain captures.
+    let map = match entry.terrain.as_deref() {
+        Some(hex) => CombatMap::from_ground(decode_terrain(hex)),
+        None => CombatMap::uniform(FLOOR),
+    };
+    let mut state = combat_state_from_records(&entries, map, &flavor).expect("records decode");
 
     // Seed gbx-prng with the snapshot's rng_state and tap every draw.
     let tap = DrawTap::default();

@@ -799,3 +799,37 @@ target thread stays open as a state-fidelity note with zero draw impact in this 
 `actions.target` (ovr014.cs:939), #8 near-list best-pair init `0xFF` (`ovr032:097B`),
 #9 death zeroes pending initiative (`ovr025:24BB`), #10 removal repaints occupancy
 (`ovr024:154F`/`sub_74E6F`), #11 the pre-guard wand d7 (`ovr010:04C6`).
+
+## 24. The milestone assert: `h4_replay` passes — H4 MELEE CLOSED on the asserting harness (2026-07-19, session 8)
+
+`h4_replay` (the D-OR5(b) milestone differential, dormant since the capture format grew board
+snapshots) is revived as the **asserting** proof. The typed `.gbxtrace` reader learned the two
+capture-side observation events — `round_snapshot` (`{round, combatants[{team,x,y,hp}]}`) and
+`turn_snapshot` (`{seq, combatants[{…,target}]}`) — treated exactly like `combat_entry`:
+parse-typed, **ignored by the comparator and the chain-continuity check** (no draw, no PRNG
+state). `combat_entry` gained the optional `terrain` field (lowercase hex, wire-ordered between
+`rng_state` and `combatants`; the canonical writer omits it when absent, so all existing
+goldens stay byte-identical). `h4_replay` now targets `combat4.gbxtrace`, builds its
+`CombatMap` from the captured terrain (uniform-floor fallback only for pre-terrain captures),
+and **passes**:
+
+```
+H4 replay: 16 combatants (6 party, 10 monster), seed 0x80ee4cee;
+           our fight = 3075 draws (PartyWins), capture = 3075 draws
+per-round survivors: (0,6,10) (1,6,9) (2,6,9) (3,6,7) (4,6,6) (5,6,5)
+                     (6,6,4) (7,6,3) (8,6,2) (9,6,1) (10,6,0)
+H4 MELEE CLOSED: 3075 draws matched draw-for-draw against the live bar-brawl capture.
+```
+
+The equality surface here is the full `(before, after)` **chain**, draw-for-draw, with equal
+totals — strictly stronger than the localizer's operand view. CI still skips it without the
+local capture (D10). Gates 6/6 (886 workspace tests, clippy 0, fmt, wasm core+web, guard).
+
+**What this closes and what it doesn't (unchanged from §8's frame):** the initiative /
+selection / QuickFight-melee / movement / targeting / to-hit / damage / death subsystems are
+draw-stream-proven against one real 16-combatant fight. Stubbed-by-design and still open for
+M5: spell/wand/turn-undead *effects*, ranged weapons (bug #3's `field_151` range table),
+backstab, the 0-HD sweep, surrender's `Int>5` branch + `FleeCheck` morale ladder beyond what
+this capture exercised (its patrons never rout: `control_morale 0x80` seeds morale 0 and the
+area's `field_58C` keeps the ladder closed — a second capture in a rout-prone encounter would
+exercise it), XP/treasure, and the wilderness draw-bearing `SetupGroundTiles`.

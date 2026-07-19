@@ -116,6 +116,16 @@ pub enum TraceEvent {
     /// must never count as an event mismatch). A capture emits exactly one, ahead
     /// of the fight's `rng` stream.
     CombatEntry(CombatEntryEvent),
+    /// `round_snapshot` — a capture-side **observation** (H4 localizer): the full
+    /// board (`team`/`x`/`y`/`hp` per roster slot) at a round boundary. Like
+    /// `combat_entry` it carries no PRNG state and is not a draw — the comparator
+    /// and the chain-continuity check both ignore it. The board-diff harnesses
+    /// (`h4_turndiff`) are its consumers.
+    RoundSnapshot(RoundSnapshotEvent),
+    /// `turn_snapshot` — a capture-side observation: the board (plus each slot's
+    /// `target`) recorded by the staging hook on in-turn state writes
+    /// (position/hp/target). Ignored by comparator + chain like `combat_entry`.
+    TurnSnapshot(TurnSnapshotEvent),
 }
 
 /// A `prng`-profile draw event (D-OR3): `{"e":"rng","before":u32,"after":u32}`
@@ -309,8 +319,51 @@ pub struct CombatEntryEvent {
     /// The replay seed (`DS:0x47F0` at combat entry) == the first following draw's
     /// `before`.
     pub rng_state: u32,
+    /// The ground-tile grid (`mapToBackGroundTile`, 50×25 row-major) as
+    /// lowercase hex, when the staging hook captured it — terrain is
+    /// load-bearing for movement (§14), so an H4 replay must build its
+    /// `CombatMap` from this. Optional: pre-terrain and synthetic captures omit
+    /// it (and the canonical writer then omits the field).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub terrain: Option<String>,
     /// The roster in `TeamList` (== initiative draw) order.
     pub combatants: Vec<CombatEntryCombatant>,
+}
+
+/// The `round_snapshot` observation event (H4): the capture-side board at a
+/// round boundary. See [`TraceEvent::RoundSnapshot`].
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RoundSnapshotEvent {
+    /// The round counter at the snapshot.
+    pub round: u16,
+    /// One row per roster slot, roster order.
+    pub combatants: Vec<SnapshotCombatant>,
+}
+
+/// The `turn_snapshot` observation event (H4): the capture-side board recorded
+/// on an in-turn state write. See [`TraceEvent::TurnSnapshot`].
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TurnSnapshotEvent {
+    /// The hook's monotonically increasing snapshot sequence number.
+    pub seq: u32,
+    /// One row per roster slot, roster order.
+    pub combatants: Vec<SnapshotCombatant>,
+}
+
+/// One board row in a [`RoundSnapshotEvent`]/[`TurnSnapshotEvent`]: team,
+/// position, hp, and (turn snapshots only) the slot's `actions.target`
+/// (`255` = none on the wire).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SnapshotCombatant {
+    /// `0` = party, `1` = monsters (as [`CombatEntryCombatant::team`]).
+    pub team: u8,
+    pub x: u8,
+    pub y: u8,
+    pub hp: u8,
+    /// `actions.target` as a roster index, `255` = none. Emitted by
+    /// `turn_snapshot` only; absent on `round_snapshot` rows.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub target: Option<u8>,
 }
 
 /// One combatant in a [`CombatEntryEvent`]: its team, grid position, and the
@@ -500,7 +553,9 @@ impl Trace {
             | TraceEvent::Move(_)
             | TraceEvent::Ai(_)
             | TraceEvent::Morale(_)
-            | TraceEvent::CombatEntry(_) => None,
+            | TraceEvent::CombatEntry(_)
+            | TraceEvent::RoundSnapshot(_)
+            | TraceEvent::TurnSnapshot(_) => None,
         })
     }
 
@@ -745,6 +800,7 @@ mod tests {
         };
         let event = TraceEvent::CombatEntry(CombatEntryEvent {
             rng_state: 0xdead_beef,
+            terrain: None,
             combatants: vec![
                 CombatEntryCombatant {
                     team: 0,

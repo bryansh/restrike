@@ -97,20 +97,19 @@ pub enum Comparison {
 pub fn compare(a: &Trace, b: &Trace) -> Result<Comparison, Incomparable> {
     validity_gate(a, b)?;
 
-    // The `combat_entry` snapshot is replay *input*, not a draw or an action
-    // event (D-OR5(b)): it must never count as an event/length mismatch, so it is
-    // filtered out before the positional walk (one side may carry it, the other
-    // not). Every other event kind keeps its position.
-    let a_events: Vec<&TraceEvent> = a
-        .events
-        .iter()
-        .filter(|e| !matches!(e, TraceEvent::CombatEntry(_)))
-        .collect();
-    let b_events: Vec<&TraceEvent> = b
-        .events
-        .iter()
-        .filter(|e| !matches!(e, TraceEvent::CombatEntry(_)))
-        .collect();
+    // The `combat_entry` snapshot is replay *input*, and the two board
+    // snapshots are capture-side *observations* — none is a draw or an action
+    // event (D-OR5(b)): they must never count as an event/length mismatch, so
+    // they are filtered out before the positional walk (one side may carry
+    // them, the other not). Every other event kind keeps its position.
+    let is_positional = |e: &&TraceEvent| {
+        !matches!(
+            e,
+            TraceEvent::CombatEntry(_) | TraceEvent::RoundSnapshot(_) | TraceEvent::TurnSnapshot(_)
+        )
+    };
+    let a_events: Vec<&TraceEvent> = a.events.iter().filter(is_positional).collect();
+    let b_events: Vec<&TraceEvent> = b.events.iter().filter(is_positional).collect();
 
     // Draw index counts `rng` events only, so diagnostics match how a human
     // numbers draws when bisecting.
@@ -185,6 +184,8 @@ fn kind(e: &TraceEvent) -> &'static str {
         TraceEvent::Ai(_) => "ai",
         TraceEvent::Morale(_) => "morale",
         TraceEvent::CombatEntry(_) => "combat_entry",
+        TraceEvent::RoundSnapshot(_) => "round_snapshot",
+        TraceEvent::TurnSnapshot(_) => "turn_snapshot",
     }
 }
 
@@ -329,9 +330,12 @@ pub fn check_chain(trace: &Trace) -> Result<(), ChainBreak> {
             | TraceEvent::Move(_)
             | TraceEvent::Ai(_)
             | TraceEvent::Morale(_)
-            // The combat_entry snapshot carries no PRNG state; it links the draw
-            // before it to the draw after it transparently (D-OR5(b)).
-            | TraceEvent::CombatEntry(_) => {}
+            // The combat_entry/board snapshots carry no PRNG state; they link
+            // the draw before them to the draw after them transparently
+            // (D-OR5(b)).
+            | TraceEvent::CombatEntry(_)
+            | TraceEvent::RoundSnapshot(_)
+            | TraceEvent::TurnSnapshot(_) => {}
             TraceEvent::Rng(r) => {
                 // Link: this draw's `before` must equal the previous `after`.
                 if let Some(prev) = prev_after {
