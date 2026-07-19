@@ -2702,6 +2702,11 @@ impl CombatState {
         if t.hp_current <= 0 {
             t.hp_current = 0;
             t.in_combat = false;
+            // `damage_player`'s death branch (`ovr025:24BB`, coab ovr025.cs:1240)
+            // also zeroes `actions.delay`: a combatant killed before its turn
+            // loses its pending initiative, so the corpse can never win a
+            // `FindNextCombatant` pass (which still draws its d100 every pass).
+            t.delay = 0;
         }
     }
 

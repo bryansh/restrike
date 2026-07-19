@@ -698,3 +698,39 @@ targeting/movement order detail, localizer pointing at the round.
 fix (bug #6: one `cmp` operand; bug #8: one init byte), each found by transliterating the
 *enclosing* binary function rather than re-reading the already-verified callees. When ours ==
 coab but the capture disagrees, attack coab's fidelity at the enclosing frame first.
+
+## 21. Bug #9 — death cancels pending initiative (`damage_player` @ovr025:24BB) (2026-07-19, session 8)
+
+§20's "round-2 draw-free targeting" residual was neither targeting nor round 2 — it was round
+1's **selection**. Reconstructing the capture's round-1 turn sequence from its draw-indexed
+`turn_snapshot`s (a scratchpad script diffing consecutive snapshots, plus a d100-run-compressed
+operand dump) showed two structural facts: every `FindNextCombatant` pass is **d100 ×16 even
+after combatant 9 dies at draw 524** (the dead slot keeps drawing), and **every pass resolves an
+acting turn** — 15 turns + the terminating empty pass, no double bursts. Ours instead had a
+double burst at 731–762: pass 13 picked **dead combatant 9** (Pick: delay 3, roll 70 — killed at
+draw 524 *before its turn*, still holding its round-1 initiative delay), dead-skipped, and burned
+an extra 16-draw pass, displacing a live actor's 7-draw turn (capture 747–753: d4 gate → d8/d4,
+d7, d7, d1 find, d20 miss).
+
+coab's `FindNextCombatant` (ovr009.cs:59) is a pure `(delay, roll)` two-if with no alive check —
+faithful, same as ours (the corpse keeps its d100 slot, matching the ×16 bursts). The false
+premise was the **death path**: `damage_player`'s death branch (`ovr025:24BB`:
+`mov byte ptr es:[di+3], 0` on the actions struct; coab ovr025.cs:1240) zeroes `actions.delay`
+alongside `in_combat = false` and the team-count decrement — a combatant killed before acting
+loses its pending initiative, so a corpse can never *win* a pass. Our `apply_damage` set
+`in_combat = false` but left `delay` standing, so the corpse stayed the max-delay candidate.
+(The flee path was already right: `flee_battle` → `clear_actions` zeroes delay.)
+
+**Fix: one line** — `apply_damage`'s kill branch zeroes `delay` (cited `ovr025:24BB`).
+
+**Result: first divergent round 3 → 6** (rounds 0–5 board-exact) **and operand frontier 747 →
+1923** (+1176, the biggest single jump yet; both metrics moved because a selection bug is
+turn-*structural*, not draw-free). Our draw count 3543 vs capture 3075. 324 engine tests pass
+unchanged (no synthetic fight kills a pending-delay combatant that later wins a pass).
+
+**Next residual: round 5, draw-free movement.** At the round-6 snapshot the ONLY divergence is
+combatants [0] (MATHEW) and [3] with **swapped positions** — ours `[0]@(32,12), [3]@(32,11)`,
+capture the reverse; every hp byte-identical. The operand fork at 1923 is the downstream
+adjacent-count artifact (`d1` vs `d2` re-pick after a `d6` find inside a later turn). Same
+species as §17/§20: a draw-free step/order detail, now in party movement into freed corpse
+cells.
