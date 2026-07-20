@@ -104,6 +104,56 @@ pub enum Team {
 /// turn faithfully consumes whatever `attack1_left`/`attack2_left` the combatant
 /// carries (`attack2_left` defaults 0, so the `AttackTarget01` loop makes exactly
 /// `attack1_left` swings with the profile-1 dice).
+/// `Player.health_status@0x195` (`Status`, `Classes/Enums.cs`) reduced to the
+/// values `damage_player` / the bandage / bleed paths key on (§26). The original
+/// `Status` enum runs `okey=0 … gone=8`; a melee replay only ever moves a
+/// combatant through **okey → {unconscious, dying, dead}**, and reads `animated`
+/// in `damage_player`'s special-case (`new_hp == 0 && animated → dead`). The
+/// other original values (`tempgone`/`running`/`stoned`/`gone`) are set only by
+/// spell/affect paths (M5), so they are not modeled — an entry record carrying
+/// one decodes to [`HealthStatus::Okey`] (documented on [`decode_health_status`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HealthStatus {
+    /// `okey` (0) — conscious and fighting. Entry records are all okey.
+    Okey,
+    /// `animated` (1) — an animated-dead combatant; `damage_player` treats a
+    /// `new_hp == 0` hit on an animated combatant as an outright kill.
+    Animated,
+    /// `unconscious` (4) — dropped to exactly 0 HP (no overkill); out of combat,
+    /// not bleeding.
+    Unconscious,
+    /// `dying` (5) — dropped past 0 with 1..=9 overkill; out of combat and
+    /// bleeding (`actions.bleeding`), bandageable, bleeds to `Dead` if untended.
+    Dying,
+    /// `dead` (6) — overkill > 9, or a `new_hp == 0` hit on an `animated`, or a
+    /// bleed-out (`bleeding > 9`).
+    Dead,
+}
+
+impl HealthStatus {
+    /// `damage_player`'s survivor test: a combatant whose status is `okey` or
+    /// `animated` after the ladder keeps its HP and stays in combat; any other
+    /// status flips `in_combat = false` (`ovr025.cs:1218`).
+    fn is_conscious(self) -> bool {
+        matches!(self, HealthStatus::Okey | HealthStatus::Animated)
+    }
+}
+
+/// Decode the `health_status@0x195` byte onto the minimal [`HealthStatus`]. Entry
+/// records are `okey` (0); the unmodeled `Status` values (`tempgone`/`running`/
+/// `stoned`/`gone`, and any out-of-range byte) fold to [`HealthStatus::Okey`]
+/// since a plain-melee replay never enters those states (they are spell/affect
+/// outcomes, M5). `animated=1`/`unconscious=4`/`dying=5`/`dead=6` map through.
+pub fn decode_health_status(byte: u8) -> HealthStatus {
+    match byte {
+        1 => HealthStatus::Animated,
+        4 => HealthStatus::Unconscious,
+        5 => HealthStatus::Dying,
+        6 => HealthStatus::Dead,
+        _ => HealthStatus::Okey,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Combatant {
     /// Stable per-encounter roster index (the D-OR3 `combatant_id`).
@@ -190,6 +240,16 @@ pub struct Combatant {
     /// `memorized-spells` stub tripwire (`sub_3560B`'s inner spell-selection
     /// draws are unmodeled, M5). `0` for synthetic combatants.
     pub memorized_spells: u8,
+    /// `Player.health_status@0x195` — the downed-PC ladder (§26). Entry records
+    /// are [`HealthStatus::Okey`]; `damage_player` moves a downed combatant to
+    /// `dying`/`unconscious`/`dead` (`apply_damage`), the bleed tick advances
+    /// `dying → dead`, and a bandage turn advances `dying → unconscious`.
+    pub health_status: HealthStatus,
+    /// `action.bleeding@0x13` (offset within the `Action` struct) — the overkill
+    /// carried into `dying` by `damage_player` (`bleeding = neg_hp`); the bleed
+    /// tick adds 1/round and kills at `> 9`; a bandage zeroes it. `0` for a
+    /// combatant that is not dying.
+    pub bleeding: u8,
 }
 
 impl Combatant {
@@ -234,6 +294,8 @@ impl Combatant {
             direction: 0,
             attacks_received: 0,
             memorized_spells: 0,
+            health_status: HealthStatus::Okey,
+            bleeding: 0,
         }
     }
 
@@ -298,6 +360,8 @@ impl Combatant {
             direction: 0,
             attacks_received: 0,
             memorized_spells: 0,
+            health_status: HealthStatus::Okey,
+            bleeding: 0,
         }
     }
 }
@@ -2722,40 +2786,65 @@ impl CombatState {
         found
     }
 
-    /// Apply melee damage to `target`; a drop to `<= 0` HP removes it from combat
-    /// (`in_combat = false`, `CombatantKilled` → occupancy `size 0`).
+    /// `damage_player` (`ovr025:23D5`, coab ovr025.cs:1183-1242) — apply melee
+    /// damage and run the health-status ladder (§26.1). `neg_hp` is the overkill
+    /// (`damage − hp`, else 0); `new_hp` the survivor's HP (`hp − damage`, else 0):
+    /// - overkill `> 9`, or a `new_hp == 0` hit on an `animated` combatant → **dead**;
+    /// - else overkill `1..=9` → **dying**, and `actions.bleeding = neg_hp`;
+    /// - else an exact drop to 0 (`new_hp == 0`) → **unconscious**.
+    ///
+    /// A combatant left `okey`/`animated` keeps `new_hp` and stays in combat; any
+    /// other status flips `in_combat = false`, zeroes HP and `actions.delay`
+    /// (`ovr025:24BB` — the corpse can never win a `FindNextCombatant` pass, bug
+    /// #9), and frees its occupancy footprint immediately (`CombatantKilled`,
+    /// bug #10). `gbl.game_state == GameState.Combat` holds on this path, so the
+    /// `bleeding` and `delay = 0` writes are unconditional here.
     fn apply_damage(&mut self, target: usize, amount: i32) {
         let t = &mut self.fighters[target];
-        t.hp_current -= amount;
-        if t.hp_current <= 0 {
-            t.hp_current = 0;
-            t.in_combat = false;
-            // `damage_player`'s death branch (`ovr025:24BB`, coab ovr025.cs:1240)
-            // also zeroes `actions.delay`: a combatant killed before its turn
-            // loses its pending initiative, so the corpse can never win a
-            // `FindNextCombatant` pass (which still draws its d100 every pass).
-            t.delay = 0;
-            let downed_party = t.team == Team::Party;
-            let id = t.id;
-            // `CombatantKilled` (`sub_74E6F`, `ovr033:534`→coab) ends with
-            // `CombatMap[idx].size = 0` + `sub_743E7` — the occupancy repaint
-            // happens AT the kill, so a corpse's cells free up immediately (a
-            // later mover's `CanMove` must see them empty), not at the next
-            // position change. (The party-member `Tile_DownPlayer` ground swap
-            // there is monster-irrelevant — `nonTeamMember` is true past
-            // `party_size`, ovr011.cs:800 — and deferred with death UI.)
-            self.rebuild_occupancy();
-            // Tripwire: a PARTY member dropping enters original mechanics we do
-            // not model — `damage_player`'s dying/unconscious + bleeding states,
-            // ally bandage turns, and `CombatantKilled`'s `Tile_DownPlayer`
-            // ground swap (ovr033.cs:579). Both length-diverging bar-brawl
-            // captures (`combat`, `combat2`) reached exactly this.
-            if downed_party {
-                self.emit(ActionEvent::StubTripped {
-                    combatant_id: id,
-                    stub: "downed-pc",
-                });
-            }
+        let (neg_hp, new_hp) = if t.hp_current >= amount {
+            (0, t.hp_current - amount)
+        } else {
+            (amount - t.hp_current, 0)
+        };
+
+        // The ladder (ovr025.cs:1197-1216).
+        if neg_hp > 9 || (new_hp == 0 && t.health_status == HealthStatus::Animated) {
+            t.health_status = HealthStatus::Dead;
+        } else if neg_hp > 0 {
+            t.health_status = HealthStatus::Dying;
+            t.bleeding = neg_hp as u8;
+        } else if new_hp == 0 {
+            t.health_status = HealthStatus::Unconscious;
+        }
+
+        // Survivor (ovr025.cs:1218): status stayed okey/animated → keep the
+        // reduced HP, stay in combat.
+        if t.health_status.is_conscious() {
+            t.hp_current = new_hp;
+            return;
+        }
+
+        // Removed from combat (ovr025.cs:1220-1240).
+        t.hp_current = 0;
+        t.in_combat = false;
+        t.delay = 0;
+        let downed_party = t.team == Team::Party;
+        let id = t.id;
+        // `CombatantKilled` (`sub_74E6F`, `ovr033:534`→coab) ends with
+        // `CombatMap[idx].size = 0` + `sub_743E7` — the occupancy repaint happens
+        // AT removal, so a corpse's cells free up immediately (a later mover's
+        // `CanMove` must see them empty), not at the next position change.
+        self.rebuild_occupancy();
+        // Tripwire: a PARTY member dropping enters original mechanics not yet
+        // consumed at this commit — the bandage turn, the bleed tick, and the
+        // `Tile_DownPlayer` ground swap (following commits). Retired once those
+        // land. Both length-diverging bar-brawl captures (`combat`, `combat2`)
+        // reached exactly this.
+        if downed_party {
+            self.emit(ActionEvent::StubTripped {
+                combatant_id: id,
+                stub: "downed-pc",
+            });
         }
     }
 
@@ -3802,6 +3891,10 @@ fn combatant_from_record(
     // The `memorized-spells` tripwire input: non-zero spellList@0x1E slots ≈
     // coab's `player.spells.Count` (sub_3560B's inner selection draws, M5).
     c.memorized_spells = rec.spell_list.iter().filter(|&&b| b != 0).count() as u8;
+    // §26.1 the downed-PC ladder: the entry `health_status@0x195` (okey in a
+    // fresh combat snapshot). `bleeding` starts 0; `damage_player` seeds it.
+    c.health_status = decode_health_status(rec.health_status);
+    c.bleeding = 0;
     c
 }
 
