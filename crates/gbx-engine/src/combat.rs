@@ -185,6 +185,11 @@ pub struct Combatant {
     pub direction: u8,
     /// `action.AttacksReceived@0x0F` — attacks taken since the last move.
     pub attacks_received: u8,
+    /// The count of non-zero `spellList`@0x1E slots on the source record — an
+    /// approximation of coab's `player.spells.Count`, decoded ONLY to drive the
+    /// `memorized-spells` stub tripwire (`sub_3560B`'s inner spell-selection
+    /// draws are unmodeled, M5). `0` for synthetic combatants.
+    pub memorized_spells: u8,
 }
 
 impl Combatant {
@@ -228,6 +233,7 @@ impl Combatant {
             can_use: true,
             direction: 0,
             attacks_received: 0,
+            memorized_spells: 0,
         }
     }
 
@@ -291,6 +297,7 @@ impl Combatant {
             can_use: true,
             direction: 0,
             attacks_received: 0,
+            memorized_spells: 0,
         }
     }
 }
@@ -395,6 +402,19 @@ pub enum ActionEvent {
         to_x: i32,
         to_y: i32,
         cost: i32,
+    },
+    /// A deliberately-stubbed original mechanic was **reached** this fight (the
+    /// M5 ledger, doc §24): the engine took its modeled path, but the binary
+    /// would have consulted a subsystem we have not built — so from this point
+    /// the replay is in unproven territory even if the draw stream still
+    /// matches. **Diagnostic only**: never part of the `.gbxtrace` vocabulary
+    /// (the oracle collector drops it); the replay harnesses report it so a
+    /// capture that wanders into a stub names itself instead of silently
+    /// diverging. `stub` is a short stable name: `"downed-pc"`,
+    /// `"memorized-spells"`, `"0-hd-sweep"`, `"surrender-int5"`.
+    StubTripped {
+        combatant_id: usize,
+        stub: &'static str,
     },
 }
 
@@ -2592,9 +2612,17 @@ impl CombatState {
                 let max_opp = self.max_opposition_moves(actor);
                 if max_opp <= calc_moves(self.fighters[actor].movement) / 2 {
                     self.fighters[actor].moral_failure = true;
+                } else {
+                    // Tripwire: the binary's ELSE branch consults `Int > 5` and
+                    // `RemoveFromCombat("Surrenders", unconscious)` (coab
+                    // ovr010.cs:803) — an Int score we don't decode and a
+                    // surrender path we don't model (M5). Reaching here at all
+                    // means the replay is past the modeled ladder.
+                    self.emit(ActionEvent::StubTripped {
+                        combatant_id: actor,
+                        stub: "surrender-int5",
+                    });
                 }
-                // (the Int>5 "Surrenders" branch needs an Int score we don't model;
-                // omitted — a morale-failing NPC flees rather than surrenders here.)
             }
         }
         false
@@ -2696,6 +2724,8 @@ impl CombatState {
             // loses its pending initiative, so the corpse can never win a
             // `FindNextCombatant` pass (which still draws its d100 every pass).
             t.delay = 0;
+            let downed_party = t.team == Team::Party;
+            let id = t.id;
             // `CombatantKilled` (`sub_74E6F`, `ovr033:534`→coab) ends with
             // `CombatMap[idx].size = 0` + `sub_743E7` — the occupancy repaint
             // happens AT the kill, so a corpse's cells free up immediately (a
@@ -2704,6 +2734,17 @@ impl CombatState {
             // there is monster-irrelevant — `nonTeamMember` is true past
             // `party_size`, ovr011.cs:800 — and deferred with death UI.)
             self.rebuild_occupancy();
+            // Tripwire: a PARTY member dropping enters original mechanics we do
+            // not model — `damage_player`'s dying/unconscious + bleeding states,
+            // ally bandage turns, and `CombatantKilled`'s `Tile_DownPlayer`
+            // ground swap (ovr033.cs:579). Both length-diverging bar-brawl
+            // captures (`combat`, `combat2`) reached exactly this.
+            if downed_party {
+                self.emit(ActionEvent::StubTripped {
+                    combatant_id: id,
+                    stub: "downed-pc",
+                });
+            }
         }
     }
 
@@ -2785,9 +2826,16 @@ impl CombatState {
     /// **Draw-free and returns `false` for a normal (`hit_dice > 0`) target** — the
     /// only case this slice's fights use. The 0-HD sweep (extra swings per victim)
     /// is deferred with 0-HD monsters flagged.
-    fn try_sweep_attack(&mut self, target: usize, _actor: usize) -> bool {
+    fn try_sweep_attack(&mut self, target: usize, actor: usize) -> bool {
         // Guard `target.HitDice == 0` fails for hit_dice > 0 → no sweep, no draws.
-        let _ = target;
+        // Tripwire: a 0-HD target means the binary WOULD enter the sweep path
+        // (extra swings + their draws) that this stub skips (M5).
+        if self.fighters[target].hit_dice == 0 {
+            self.emit(ActionEvent::StubTripped {
+                combatant_id: actor,
+                stub: "0-hd-sweep",
+            });
+        }
         false
     }
 
@@ -3277,6 +3325,15 @@ impl CombatState {
         // 6. sub_3560B (ovr010.cs:74) — the UNCONDITIONAL memorized-spell d7 (:248).
         let _spell_priority = roll_dice(rng, 7, 1);
         // (spells_count==0 → the inner roll_dice(spells_count,1) loop never runs.)
+        // Tripwire: a combatant with memorized spells means the binary's inner
+        // selection loop WOULD draw (roll_dice(spells_count,1) + casting) — the
+        // whole spell subsystem is M5.
+        if self.fighters[actor].memorized_spells > 0 {
+            self.emit(ActionEvent::StubTripped {
+                combatant_id: actor,
+                stub: "memorized-spells",
+            });
+        }
 
         // 7. AI_items_selection (ovr010.cs:79) — draw-free (weapon-only no-op).
         // 8. process_input again — draw-free.
@@ -3731,6 +3788,9 @@ fn combatant_from_record(
         Some(p) => p.iter().all(|&b| b == 0),
         None => true, // full 0x1A6 records always carry it; missing → treat as null
     };
+    // The `memorized-spells` tripwire input: non-zero spellList@0x1E slots ≈
+    // coab's `player.spells.Count` (sub_3560B's inner selection draws, M5).
+    c.memorized_spells = rec.spell_list.iter().filter(|&&b| b != 0).count() as u8;
     c
 }
 
@@ -5870,5 +5930,83 @@ mod tests {
             assert_eq!(*n, 6, "draw #{i} must be an initiative d6");
         }
         assert_eq!(ns[5], 100, "the d100 selection pass follows the 5 d6s");
+    }
+
+    // --- stub tripwires (doc §24: the M5 ledger names itself) ---------------
+
+    /// Every deliberately-stubbed original mechanic must EMIT when reached, so
+    /// a replay that wanders into unmodeled territory produces a named finding
+    /// instead of a silent divergence. Four wires: `downed-pc` (apply_damage on
+    /// a party member), `0-hd-sweep` (try_sweep_attack vs hit_dice 0),
+    /// `surrender-int5` (flee_check's omitted Int branch), `memorized-spells`
+    /// (sub_3560B's unmodeled selection loop).
+    #[test]
+    fn stub_tripwires_fire_when_unmodeled_mechanics_are_reached() {
+        #[derive(Clone, Default)]
+        struct Trips(Rc<RefCell<Vec<(usize, &'static str)>>>);
+        impl ActionSink for Trips {
+            fn on_action(&mut self, e: ActionEvent) {
+                if let ActionEvent::StubTripped { combatant_id, stub } = e {
+                    self.0.borrow_mut().push((combatant_id, stub));
+                }
+            }
+        }
+
+        let mk = |team, npc, pos, movement| {
+            Fighter::new_melee(0, team, npc, pos, 30, 5, 20, movement, (1, 4, 2), 5, 1)
+        };
+        let mut world = CombatWorld::new(
+            CombatMap::uniform(FLOOR),
+            vec![
+                {
+                    let mut f = mk(Team::Party, false, GridPos::new(25, 12), 12);
+                    f.id = 0;
+                    f
+                },
+                {
+                    let mut f = mk(Team::Monster, true, GridPos::new(26, 12), 12);
+                    f.id = 1;
+                    f
+                },
+                // A fast opposing monster so flee_check's `max_opp > own/2` else
+                // branch (the surrender wire) is reachable for fighter 1.
+                {
+                    let mut f = mk(Team::Monster, true, GridPos::new(30, 12), 12);
+                    f.id = 2;
+                    f
+                },
+            ],
+        );
+        let trips = Trips::default();
+        world.attach_action_sink(Box::new(trips.clone()));
+
+        // 1. downed-pc: lethal damage to the party member.
+        world.apply_damage(0, 99);
+        assert!(!world.fighters[0].in_combat);
+
+        // 2. 0-hd-sweep: a 0-HD target reaches the stubbed sweep guard.
+        world.fighters[2].hit_dice = 0;
+        assert!(!world.try_sweep_attack(2, 1));
+
+        // 3. surrender-int5: an NPC whose fastest opponent outruns half its own
+        // moves lands in the binary's Int>5 surrender branch. Party fighter 0 is
+        // down, so make the survivor fast via a fresh party opponent.
+        world.fighters[0].in_combat = true; // revive the opponent for the ladder
+        world.fighters[0].movement = 48; // max_opp 96 > calc_moves(12)/2 = 12
+        world.monster_morale = 0; // cond1 `== 0` passes
+        world.enemy_health_pct = 5; // cond2 `< 100 - 0` passes
+        world.area_field_58c = 0;
+        assert!(!world.flee_check(1));
+
+        // 4. memorized-spells: a caster with memorized slots runs a turn.
+        world.fighters[1].memorized_spells = 2;
+        let mut rng = EngineRng::new(SEED);
+        world.melee_ai_turn(&mut rng, 1);
+
+        let got: Vec<&'static str> = trips.0.borrow().iter().map(|(_, s)| *s).collect();
+        assert!(got.contains(&"downed-pc"), "trips: {got:?}");
+        assert!(got.contains(&"0-hd-sweep"), "trips: {got:?}");
+        assert!(got.contains(&"surrender-int5"), "trips: {got:?}");
+        assert!(got.contains(&"memorized-spells"), "trips: {got:?}");
     }
 }

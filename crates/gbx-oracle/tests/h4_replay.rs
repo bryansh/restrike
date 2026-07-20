@@ -208,7 +208,32 @@ fn h4_melee_replays_the_bar_brawl_capture_draw_for_draw() {
     let tap = DrawTap::default();
     let draws = tap.draws.clone();
     let mut rng = EngineRng::new(entry.rng_state);
-    rng.attach_sink(Box::new(tap));
+    rng.attach_sink(Box::new(tap.clone()));
+
+    // Stub tripwires (doc §24): collect every `StubTripped` with the draw index
+    // it fired at, so a capture that reaches unmodeled territory (downed PC,
+    // memorized spells, 0-HD sweep, the surrender branch) NAMES itself — before
+    // any divergence diagnostic, and even when the stream still matches.
+    /// One trip: `(draw index when it fired, combatant, stub name)`.
+    type Trip = (usize, usize, &'static str);
+    struct StubTap {
+        draws: Rc<RefCell<Vec<RngDraw>>>,
+        trips: Rc<RefCell<Vec<Trip>>>,
+    }
+    impl gbx_engine::combat::ActionSink for StubTap {
+        fn on_action(&mut self, e: gbx_engine::combat::ActionEvent) {
+            if let gbx_engine::combat::ActionEvent::StubTripped { combatant_id, stub } = e {
+                self.trips
+                    .borrow_mut()
+                    .push((self.draws.borrow().len(), combatant_id, stub));
+            }
+        }
+    }
+    let trips: Rc<RefCell<Vec<Trip>>> = Rc::new(RefCell::new(Vec::new()));
+    state.attach_action_sink(Box::new(StubTap {
+        draws: tap.draws.clone(),
+        trips: trips.clone(),
+    }));
 
     // Record the per-round survivor trajectory (draw-free observation) so a
     // length divergence names the round our fight ended vs the capture's.
@@ -241,6 +266,12 @@ fn h4_melee_replays_the_bar_brawl_capture_draw_for_draw() {
         "  our per-round survivors (round: party/monsters at round end): {:?}",
         rounds
     );
+    if !trips.borrow().is_empty() {
+        eprintln!("\n  ⚠ STUBBED MECHANICS REACHED (unproven territory from the first trip on):");
+        for (draw, id, stub) in trips.borrow().iter() {
+            eprintln!("    draw ~#{draw}: combatant {id} tripped `{stub}`");
+        }
+    }
 
     // Draw-for-draw comparison over the equality surface (before, after).
     let max = ours.len().max(capture.len());
@@ -326,10 +357,19 @@ fn h4_melee_replays_the_bar_brawl_capture_draw_for_draw() {
     }
 
     // Every draw matched and the lengths are equal — H4 melee closes.
-    eprintln!(
-        "\nH4 MELEE CLOSED: {} draws matched draw-for-draw against the live bar-brawl capture.",
-        ours.len()
-    );
+    if trips.borrow().is_empty() {
+        eprintln!(
+            "\nH4 MELEE CLOSED: {} draws matched draw-for-draw against the live bar-brawl capture.",
+            ours.len()
+        );
+    } else {
+        eprintln!(
+            "\nH4 replay MATCHED {} draws draw-for-draw — but stubbed mechanics were reached \
+             (see the trip list above): the stream is proven, the mechanics behind those trips \
+             are not.",
+            ours.len()
+        );
+    }
     assert_eq!(
         ours.len(),
         capture.len(),

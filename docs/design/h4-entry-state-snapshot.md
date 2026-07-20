@@ -833,3 +833,62 @@ backstab, the 0-HD sweep, surrender's `Int>5` branch + `FleeCheck` morale ladder
 this capture exercised (its patrons never rout: `control_morale 0x80` seeds morale 0 and the
 area's `field_58C` keeps the ladder closed — a second capture in a rout-prone encounter would
 exercise it), XP/treasure, and the wilderness draw-bearing `SetupGroundTiles`.
+
+## 25. The four-capture matrix, stub tripwires, and the M5 capture runbook (2026-07-19, session 8 cont.)
+
+**A second fight closes.** All four bar-brawl captures in `~/goldbox-data/traces/` are the SAME
+encounter (verified: identical entry layout and party cells), so combat4's terrain — validated
+by its own 3075/3075 closure — is the room's true grid. Grafting it into the three older
+captures (local-only derived files `<name>+terrain4.gbxtrace`; combat2/combat3's own terrain
+fields are the §14 buggy-hook output) and replaying:
+
+| capture | seed | result |
+|---|---|---|
+| `combat4` | `0x80ee4cee` | **CLOSED 3075/3075** (§23) |
+| `combat3` + terrain4 | `0xebb7e796` | **CLOSED 3218/3218** — a second complete fight, different kill order; the engine is not overfit to combat4 |
+| `combat` + terrain4 | `0xb40d7505` | all 3,162 capture draws match (exact prefix), ours runs 218 longer — our replay downs a party member (round 6) |
+| `combat2` + terrain4 | `0x4b7e9837` | all 3,772 draws match (exact prefix), capture runs 488 longer — our replay downs TWO party members |
+
+The pattern is decisive: **both fights with zero party casualties close 100%; both fights
+where a PC drops match perfectly until a length divergence.** The downed-PC path —
+`damage_player`'s dying/unconscious + bleeding states, ally bandage turns, `CombatantKilled`'s
+`Tile_DownPlayer` ground swap — is the confirmed next residual (Phase-1 target #1). The old
+captures carry no board snapshots, so they cannot localize it; the next PC-down capture (with
+the current hook) will.
+
+**Stub tripwires.** Every deliberately-stubbed original mechanic now EMITS
+`ActionEvent::StubTripped` when a replay reaches it, so a capture that wanders into unmodeled
+territory names itself instead of silently diverging. Four wires:
+
+- `downed-pc` — `apply_damage` kills a party member (dying/bleeding/bandage/`Tile_DownPlayer`).
+- `memorized-spells` — a combatant with non-zero `spellList`@0x1E slots takes an AI turn
+  (`sub_3560B`'s inner selection draws, M5).
+- `0-hd-sweep` — `try_sweep_attack` meets a 0-HD target (the sweep path, M5).
+- `surrender-int5` — `flee_check` reaches the binary's `Int > 5` →
+  `RemoveFromCombat("Surrenders")` branch (coab ovr010.cs:803), which we neither decode Int for
+  nor model.
+
+Diagnostic-only: the oracle collector drops the event from `.gbxtrace` output; `h4_replay`
+prints each trip with its draw index (before any divergence diagnostic) and words its final
+line accordingly (`CLOSED` only when zero trips fired). Validated: combat3/combat4 close with
+zero trips; `combat` names `downed-pc` @~2288 (combatant 4); `combat2` names it twice
+(@~1904 c1, @~2884 c4) — the tripwires would have named the original §9 tail divergence
+instantly.
+
+**Capture runbook for the next staging session (Phase 1 — harden melee).** All fights
+dungeon/city (draw-free terrain) until wilderness `SetupGroundTiles` lands; current hook
+(terrain + `round_snapshot` + `turn_snapshot`) throughout:
+
+1. **A PC-down fight** — any melee where at least one party member drops (the bar brawl played
+   sloppy works). Localizes the downed-PC mechanics against snapshots. *Highest value: two
+   existing captures already diverge on exactly this.*
+2. **A rout-prone fight** — weak/low-morale enemies likely to flee or surrender. While in the
+   area, **read `area2 + 0x58C` live** (the morale threshold `field_58C`; combat4 only bounds
+   it ≥ 85) and note the value + the area in the capture notes. Drives the faithful
+   `FleeCheck_001` transliteration (per-actor `control_morale` seed, >102 clamp, `Int>5`
+   surrender) replacing our deviating stub.
+3. **An armed fight** — enemies or party with readied ranged weapons (and ideally a 3/2-attacks
+   fighter). Exercises bug #3's range table (`field_151` → `[field_2E]` → `@0x5D1C`), weapon
+   dice, ammo, and the FD-3 `attack2` profile.
+4. *(Optional, opens M5 proper)* **a caster fight** — a mage with memorized spells (and/or
+   enemy casters). Trips `memorized-spells` today; becomes the spell-subsystem driver.

@@ -211,6 +211,9 @@ impl ActionSink for CollectorActionSink {
                 roll,
                 failed: failed as u8,
             }),
+            // Stub tripwires are replay diagnostics, not `.gbxtrace` vocabulary
+            // (the capture side has no such event) — dropped from the trace.
+            ActionEvent::StubTripped { .. } => return,
         };
         self.events.borrow_mut().push(translated);
     }
