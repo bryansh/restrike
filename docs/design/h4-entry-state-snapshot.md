@@ -1085,3 +1085,118 @@ with the other non-entry states), `in_combat = false`, occupancy repaint, no til
   listing.
 - Full gates: workspace tests (parity recomputation only via the independent gbx-prng
   oracle), clippy `-D warnings`, fmt, wasm core+web, no-game-data guard. D10 throughout.
+
+## 29. LANDED — the faithful FleeCheck ladder; the rout FIRES but does not yet close (M5 slice 2, 2026-07-20)
+
+The §28 spec was implemented on branch `m5-fleecheck` (four commits). **Every §28
+site was re-verified against the IDA listing `coab_new.lst` before coding**, plus one
+site §28 did not name (`calc_enemy_health_percentage`) that the faithful gate-2 turned
+out to depend on. The rout now fires — bar-rout's monsters flee to the correct SE
+corner and the frontier moved from a stub that never routed to a real rout — but the
+capture does **not** fully close: a downstream targeting/flee-movement-order residual
+remains at draw ~2707, and the flee **heading** needs an input (`map_direction`) the
+capture does not carry.
+
+**What landed (four commits):**
+- **#1 harness honesty** — `h4_replay` now asserts **operand** equality (`n` vs
+  `ss_sp_words[3]`) on every draw both sides carry one, not just the `(before,after)`
+  chain (which is draw-COUNT-only for a pure LCG). `CombatEntryEvent` gained optional
+  `area2_field_58c: Option<u16>` (additive; writer omits when absent → goldens
+  byte-identical); both harnesses feed it into `CombatState.area_field_58c`, legacy
+  captures defaulting to 99.
+- **#2 the faithful `FleeCheck_001` ladder** (`sub_3637F` @`ovr010:137F`) — per-actor
+  morale reseed `(control_morale & 0x7F) << 1` every call (`:13F1`), `>0x66→0` (`:13FF`);
+  gate 1 signed `jl` (`:1446`); **gate 2 UNSIGNED 16-bit `jb`/`sub` (`:1481`/`:1473`) =
+  bug #12** (a unit test pins the `field_58C > 100` always-true underflow); speed fork
+  signed `jg` (`:14BE`). Decodes `control_morale@0xF7` + `Int@0x13`
+  (`stats2.Int.original`) onto `Combatant`. **Plus the `calc_enemy_health_percentage`
+  denominator fix** (`sub_40E00` @`ovr014:2E00`, coab `ovr014.cs:1674`): `maxTotal` sums
+  `hit_point_max` over **all** enemies incl. dead (`:2E4B`), `currentTotal` only over
+  `in_combat` (`:2E28`). Our previous `in_combat`-only denominator kept
+  `enemyHealthPercentage` too high, so the faithful gate 2 never crossed its threshold
+  and the rout never fired. Safe for the closed captures (a monster's advance
+  short-circuits on `|| team == Monster`, so this value only ever moves the flee gate,
+  closed at `field_58C = 99`) — empirically confirmed (all three stay CLOSED).
+- **#3 surrender + Got Away** (§28 item 7) — `remove_from_combat` (`sub_644A7`
+  @`ovr024:14A7`): `in_combat=false`, `health_status=status`, `hp=0` **unless**
+  `status==running` (`:151A`), occupancy repaint, `clear_actions`, no downed-tile stamp.
+  Surrender branch `Int>5 → RemoveFromCombat(unconscious)` + return true; `flee_battle`'s
+  Got-Away removal uses it with the new `HealthStatus::Running` (`Status.running=3`). The
+  `surrender-int5` wire kept, repurposed (fires on the surrender branch — unexercised by
+  the acceptance capture).
+- **#4 map_direction plumbing** — the flee heading (`sub_359D1` @`ovr010:0B14`) derives
+  from `gbl.mapDirection`; the capture omits it, so both harnesses read `RESTRIKE_MAP_DIR`
+  (trial knob), defaulting to the geometry-matched **2 (E)**.
+
+**Capture matrix (before → after, live, operand-exact assert):**
+
+| capture | before (§27/§28) | after |
+|---|---|---|
+| `combat4` | CLOSED 3075/3075 | **CLOSED 3075/3075** |
+| `combat3+terrain4` | CLOSED 3218/3218 | **CLOSED 3218/3218** |
+| `combat2+terrain4` | CLOSED 4260/4260 | **CLOSED 4260/4260** |
+| `combat+terrain4` | "CLOSED 3162/3162" (count-only) | **operand-diverges @368** (pre-existing) |
+| `bar-rout-58c50` | operand @2514 (never routs, Stalemate) | operand @2707, **routs** (PartyWins) |
+
+**The `map_direction` 4-way trial (live, bar-rout).** `gbl.mapDirection ∈ {0,2,4,6}`; the
+monster flee heading is `dir = md − (((md+2)%4)/2)` `% 8` (no `+4` for enemies), verified
+against `sub_359D1` @`ovr010:0B03-0B52`. **No value closes 3521/3521**, but the trial is
+decisive that **md=2 (E) is the correct heading**:
+
+| md | outcome | operand frontier | first divergent round |
+|---|---|---|---|
+| 0 | PartyWins | 2516 | round 8 (wrong flee corner) |
+| **2** | **PartyWins** | **2707** | **round 8, round-8 rout positions MATCH the capture (SE corner)** |
+| 4 | PartyWins | 2555 | round 1 (wrong) |
+| 6 | Stalemate | 2516 | round 8 (wrong flee corner) |
+
+Under md=2 the fleeing monsters land at the capture's exact SE cells (`[6]`→(39,17),
+`[7]`→(38,16), `[13]`→(39,18), `[15]`→(37,16)); rounds 0–7 are board-exact. So md=2 is
+pinned as the geometry-matched harness default, but **not** as a closure pin (per the
+"pin only if it closes" rule — none does). The coordinator's `md=4` geometry guess did not
+pan out empirically (md=4 diverges at round 1); the direction convention routes md=2's
+`dir=2` to the SE corner through the `DATA_2B8`/`can_move` transform.
+
+**The residual (draw ~2707, md=2) — a targeting/flee-movement-order divergence, NOT the
+ladder.** At draw 2706 both sides draw the same d20 to-hit (chain-identical); the capture
+**hits** (rolls damage) where ours **misses** — i.e. the same roll lands on a different
+target (different AC). Root: accumulated round-8 flee differences (monster `[11]` flees to
+(36,**14**) vs the capture's (36,**16**), and the party concentrates damage on `[6]`
+hp4 vs the capture's `[8]` hp2). This is the same species as the §17–§22 onion layers
+(near-target sort / movement-order) but exercised for the first time by the rout, and it
+is downstream of the (correct) heading and the (correct) enemy-health gate. It needs the
+same instrumented per-turn treatment those layers got; it is out of this slice's scope.
+
+**Findings / contradictions with §28 (reported, not forced):**
+1. **§28 missed `calc_enemy_health_percentage`.** The ladder alone is inert for the rout —
+   gate 2's input (`enemyHealthPercentage`) must count dead monsters in the denominator or
+   it never drops below the threshold. Binary-cited (`sub_40E00`), verified against coab,
+   and shown safe for the closed captures. This was the difference between "stub never
+   routs" and "rout fires at the right round/corner."
+2. **§28 item 7 vs the listing (hp write).** §28 says the surrender `RemoveFromCombat`
+   "hp 0 is NOT written here (health_status drives it)". The listing (`sub_644A7:1522-1525`)
+   writes `hp_current = 0` for **every** non-`running` status — only the `running`
+   (Got-Away) case skips it (`:151A cmp health_status, running; jz`). Implemented per the
+   **binary** (hp=0 for the unconscious surrender, skipped for running). Immaterial to
+   draws (a removed combatant feeds no draw) and the surrender branch is unexercised by
+   the acceptance capture (its 12-vs-12 speed tie always takes the flee fork).
+3. **§28's "the four closed captures were already operand-verified" is false for
+   `combat+terrain4`.** Under the stricter operand assert it diverges at draw **368 with
+   the engine unchanged** — a pre-existing targeting/terrain-graft residual in the oldest
+   capture (no board snapshots, grafted terrain, `field_58C=99` so unrelated to flee),
+   confirmed by the operand localizer (uniform floor @285, real terrain @368). It only
+   ever count-matched. `combat4`/`combat2`/`combat3` are genuinely operand-exact.
+4. **`Status.running = 3`** (`Classes/Enums.cs`), the Int byte at record `0x13`
+   (`:14FA`), the pushed status `4` (`:1507`), and the `jb`-vs-`jl` gate semantics
+   (`:1481` vs `:1446`) were all **confirmed** against the listing — no contradiction.
+
+**TODO (staging hook, the lead patches it separately — do NOT touch the dosbox repo here):**
+the hook should emit `map_direction` (`byte_1D53B`, half-encoded {0 N,2 E,4 S,6 W}) in
+`combat_entry`, so a rout replay uses the captured heading instead of the `RESTRIKE_MAP_DIR`
+default. Once emitted, drop the provisional md=2 default.
+
+**Status.** The faithful FleeCheck ladder + surrender/Got-Away + the enemy-health gate are
+landed and binary-cited; the four zero-rout captures stay CLOSED (combat+terrain4 excepted,
+pre-existing and unrelated); bar-rout **routs to the correct corner** but does not close —
+the residual at draw ~2707 is a downstream targeting/flee-movement-order layer, the next
+onion peel. Gates green; `.rsav` goldens and the other tripwires untouched; D10 preserved.
