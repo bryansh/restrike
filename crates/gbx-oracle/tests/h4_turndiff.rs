@@ -269,6 +269,13 @@ fn run(cap: &Capture, map: CombatMap) -> RunResult {
     let mut state = combat_state_from_records(&entries, map, &flavor).expect("records decode");
     // The faithful FleeCheck_001 gate-2 morale threshold (doc §28).
     state.area_field_58c = cap.field_58c;
+    // Flee HEADING input (`map_direction`, doc §28/§29) — the capture does not
+    // carry it; provisional default 2 (E — the geometry-matching heading, §29),
+    // `RESTRIKE_MAP_DIR` overrides for the trial.
+    state.map_direction = std::env::var("RESTRIKE_MAP_DIR")
+        .ok()
+        .and_then(|s| s.parse::<u8>().ok())
+        .unwrap_or(2);
 
     let tap = DrawTap::default();
     let draws = tap.draws.clone();

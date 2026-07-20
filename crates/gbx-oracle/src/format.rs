@@ -876,10 +876,7 @@ mod tests {
         });
         let line = serde_json::to_string(&with_58c).unwrap();
         assert!(line.contains(r#""area2_field_58c":50,"combatants":"#));
-        assert_eq!(
-            serde_json::from_str::<TraceEvent>(&line).unwrap(),
-            with_58c
-        );
+        assert_eq!(serde_json::from_str::<TraceEvent>(&line).unwrap(), with_58c);
     }
 
     /// A `combat_entry` record of the wrong hex length is a loud, located error.

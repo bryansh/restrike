@@ -209,6 +209,18 @@ fn h4_melee_replays_the_bar_brawl_capture_draw_for_draw() {
     // under which the natural rout is mathematically impossible → the four
     // closed captures stay closed).
     state.area_field_58c = entry.area2_field_58c.map(|v| v as i32).unwrap_or(99);
+    // `gbl.mapDirection` (the party's world facing, half-encoded {0 N, 2 E, 4 S,
+    // 6 W} per coab `Gbl.cs:354`, `byte_1D53B`) — the flee HEADING input
+    // (`moralFailureEscape`, `sub_359D1` @`ovr010:0B14`). The staging hook does not
+    // yet emit it (doc §29 TODO). **Provisional default 2 (E)**: of {0,2,4,6} it is
+    // the only heading whose round-8 rout positions match the capture (the SE
+    // corner) — but it does NOT fully close (a downstream targeting/flee-movement
+    // residual at draw ~2707 remains, §29), so this is a geometry-matched default,
+    // not a proven pin. `RESTRIKE_MAP_DIR` overrides.
+    state.map_direction = std::env::var("RESTRIKE_MAP_DIR")
+        .ok()
+        .and_then(|s| s.parse::<u8>().ok())
+        .unwrap_or(2);
 
     // Seed gbx-prng with the snapshot's rng_state and tap every draw.
     let tap = DrawTap::default();
