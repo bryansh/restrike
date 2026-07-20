@@ -3727,14 +3727,20 @@ impl CombatState {
         round: u16,
         surprise_mask: u8,
     ) {
-        // The draw-free Action reset (can_use, attack_idx = 2, guarding = false,
-        // the 3/2 attack count, the move budget). Scoped so its &mut borrow ends
-        // before the d6 draw and the Init emit.
+        // The draw-free Action reset (can_use, attack_idx = 2, the 3/2 attack
+        // count, the move budget). Scoped so its &mut borrow ends before the d6
+        // draw and the Init emit.
+        //
+        // §32 bug #15: `guarding` is NOT reset here. `sub_3E000` writes only
+        // `spell_id`/`can_cast`/`field_2`/`field_8`/`field_4`/`field_5`/
+        // `delay`/`move` (`ovr014:0017-011A`) — the guard flag survives the
+        // round boundary until the guard fires (`sub_3E65D`) or `Action.Clear`
+        // runs. Clearing it here disarmed every cross-round guard: a parked
+        // fleer's into-reach attack on an arriving PC never fired.
         let in_combat = {
             let f = &mut self.fighters[i];
             f.can_use = true;
             f.attack_idx = 2;
-            f.guarding = false;
             f.attack1_left = this_round_action_count(f.attacks_count as i32, round) as u8;
             f.attack2_left = 0;
             f.move_left = calc_moves(f.movement);

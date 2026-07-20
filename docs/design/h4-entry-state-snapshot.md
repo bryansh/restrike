@@ -1286,3 +1286,45 @@ residual at 2895: the capture has [11] — parked at (36,16) since its rout turn
 **into-reach d20** at MARK as he arrives; ours never fires it. [11] ends its rout turn
 `guarding=true` in ours too, but the flag does not survive to MARK's next-round arrival:
 the cross-round guard layer, the next peel (§32).
+
+## 32. Bug #15 — `guarding` survives `CalculateInitiative`; ★ BAR-ROUT CLOSED 3521/3521 ★ (2026-07-20, Fable)
+
+§31's residual named itself in one instrumented pass: [11] ends its rout turn via
+`TryGuarding` (delay 1 → `guarding = true`), exactly as the binary must — but our
+`calculate_initiative` cleared `guarding` at the next round boundary, so when MARK arrived
+adjacent one pass later, the into-reach attack (`sub_3E65D`: `guarding && !IsHeld`) had
+been disarmed.
+
+**The binary:** `sub_3E000` (`CalculateInitiative`) resets exactly `actions.spell_id`,
+`can_cast`, `field_2` (can_use), `field_8`, `field_4` (attackIdx = 2), `field_5`
+(attack2_AttacksLeft), `delay`, and `move` (`ovr014:0017-011A`) — **the guarding byte is
+never touched**. A guard armed in round N fires in round N+1 (or any later round) the
+moment an enemy steps into reach; only the firing itself (`sub_3E65D` clears the flag) or
+an `Action.Clear` disarms it. coab agrees (ovr014.cs:8-54 — no `guarding` write). Our
+`guarding = false` in the reset was an over-transliteration, invisible until the rout
+produced the first parked guard whose victim arrived in a later round.
+
+**Fix:** delete the reset. One line.
+
+**★ RESULT: `bar-rout-58c50` CLOSED — 3521/3521 operand-exact, equal length, zero stub
+trips ★** — [11]'s into-reach d20 fires at 2895 (miss), MARK's adjacent re-pick d1 lands at
+2896, his swing d20 at 2897 hits, the d2 damage at 2898 drops [11] to hp 10, and the
+remaining 623 draws replay draw-for-draw through the PartyWins exit. Manifest pin flipped
+to `Closed` in this commit; the guard holds 5/5 with the other four captures unshifted
+(guarding never survived a round boundary in the zero-rout captures — every guard there
+fired or was cleared within its own round).
+
+**The five-capture matrix after this slice:**
+
+| capture | status |
+|---|---|
+| `combat4` | CLOSED 3075/3075 |
+| `combat3+terrain4` | CLOSED 3218/3218 |
+| `combat2+terrain4` | CLOSED 4260/4260 |
+| `combat+terrain4` | frontier @368 (pre-existing, separate low-priority thread) |
+| `bar-rout-58c50` | **CLOSED 3521/3521** |
+
+The full flee subsystem — FleeCheck ladder (§29), behind-AC departure attacks (§30),
+departure-target restore (§31), cross-round guards (§32) — is now capture-proven end to
+end. The M5 peel loop's next targets: the armed/ranged capture, then the caster capture
+(poke-pattern staging as needed), then the affects substrate ahead of spells.
