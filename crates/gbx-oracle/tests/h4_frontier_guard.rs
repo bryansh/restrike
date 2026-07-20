@@ -1,6 +1,6 @@
 //! **The frontier-pin regression guard.** A committed manifest of the exact H4
 //! replay outcome for every local capture, so the two currently-open frontiers
-//! (`combat+terrain4` @368, `bar-rout-58c50` @2707) cannot silently drift and the
+//! (`combat+terrain4` @368, `bar-rout-58c50` @2894) cannot silently drift and the
 //! three closed captures cannot silently regress.
 //!
 //! ## The exact-pin rule (read before editing [`PINS`])
@@ -85,7 +85,7 @@ const PINS: &[Pin] = &[
         // The rout fires (monsters flee to the correct SE corner under md=2) but a
         // downstream targeting/flee-movement-order residual remains (doc §29).
         capture: "bar-rout-58c50.gbxtrace",
-        expect: Expect::Frontier(2707),
+        expect: Expect::Frontier(2894), // was 2707; behind-AC fix (§30) earned +187
         map_direction: 2,
     },
 ];

@@ -1213,3 +1213,37 @@ edit) fail the test loudly. It reuses the replay machinery and equality surface 
 `h4_replay` (a compact copy), and is local-tier: it loud-skips per-capture when a
 file is absent, so plain CI stays green. This is the tripwire that keeps
 "operand-exact" honest as the next onion layers land.
+
+## 30. Bug #13 — the departure opportunity attack hits the BEHIND AC (`sub_3F4EB` @ovr014:16F7) (2026-07-20, Fable)
+
+§29's draw-2707 residual named itself in one localization pass once `h4_locate_draw` gained
+the same `map_direction` knob as the other harnesses (it had been replaying an md=0 fight —
+NW flight — and misleading the peel; fixed here). With md=2, ours picks the same fleer ([8]),
+walks the same SE cells, fires the same opportunity attack with the same d20 at draw 2706 —
+and misses where the capture hits, with everything after identical shifted by one damage
+draw. Same roll, different to-hit math.
+
+**The binary:** `AttackTarget01` (`sub_3F4EB`) selects the to-hit AC by **indexing**
+`record[0x19A + behind]` (`ovr014:16F7-1700`: `add di, ax; mov al, es:[di+19Ah]`) — front AC
+@0x19A, `ac_behind`@0x19B — where `behind` = the `AttackTarget` `attackType` arg ≠ 0, OR the
+flanking heuristic (`AttacksReceived > 1 && facing && directionChanges > 4`, `:16BA-16E9`),
+with backstab reading `[0x19B] − 4` (`:169E-16A5`). **The departure opportunity attack is
+always behind** (`AttackTarget(null, 1, …)`, coab ovr014.cs:407) — a fleeing patron is hit in
+the back, where our engine used front AC everywhere and never decoded 0x19B. First exercised
+by the rout capture, because fleeing is what turns a target's back mid-swing.
+
+**Fix:** decode `ac_behind`@0x19B onto `Combatant` (synthetic constructors mirror `ac` —
+behavior-neutral for every existing test); thread `behind: bool` through `attack_target`
+(departure = true per ovr014.cs:407; into-reach and turn attacks = false per :245/normal);
+select the AC by the flag. The flanking heuristic and backstab's −4 stay cited-deferred (M5)
+— no capture exercises them.
+
+**Result: bar-rout frontier 2707 → 2894 (+187)** — the fleer takes its hit and the whole
+post-hit flee/chase sequence matches; the four closed captures are guard-verified unaffected
+(no departure attack in them ever had its outcome flipped). Manifest pinned to 2894 in this
+commit, per the guard's rule.
+
+**Next residual: draw 2894** — MARK ([4])'s retarget after his dead target (10) invalidates:
+ours draws `roll_dice(1)` (near-list of 1) where the capture draws `d6` (list of 6 = every
+live monster). A find_target reach/near-list-size divergence from (35,16) — likely the reach
+flood vs the binary's, or an upstream draw-free position difference. The next peel.

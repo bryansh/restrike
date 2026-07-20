@@ -193,6 +193,13 @@ pub struct Combatant {
     pub hp_max: i32,
     /// Raw on-disk AC (`Player.ac@0x19a`; display AC = `0x3C - ac`).
     pub ac: u8,
+    /// `Player.ac_behind@0x19b` — the rear armor class. `AttackTarget01`
+    /// (`sub_3F4EB` @`ovr014:16F7-1700`) selects the to-hit AC by INDEXING
+    /// `record[0x19A + behind]` (`add di, ax; mov al, es:[di+19Ah]`): front
+    /// 0x19A, behind 0x19B. A departure opportunity attack is always behind
+    /// (`AttackTarget(null, 1, …)`, coab ovr014.cs:407). Backstab reads
+    /// `[0x19B] − 4` (`ovr014:169E-16A5`) — deferred (M5) with backstab.
+    pub ac_behind: u8,
     /// `attacker.hitBonus@0x199` (THAC0-derived to-hit number).
     pub hit_bonus: i32,
     /// `HitDice` — `TrySweepAttack` only sweeps `HitDice == 0` targets.
@@ -290,6 +297,7 @@ impl Combatant {
             hp_current: 0,
             hp_max: 0,
             ac: 0,
+            ac_behind: 0,
             hit_bonus: 0,
             hit_dice: 0,
             movement: 0,
@@ -362,6 +370,7 @@ impl Combatant {
             hp_current: hp,
             hp_max: hp,
             ac,
+            ac_behind: ac,
             hit_bonus,
             hit_dice: 1,
             movement,
@@ -2979,7 +2988,19 @@ impl CombatState {
     /// `delay = 0` (via `clear_actions`) when the turn's attacks are spent, and
     /// returns `turnComplete`. Backstab/behind AC and the held-slay path are
     /// deferred (raw AC used).
-    fn attack_target(&mut self, rng: &mut EngineRng, actor: usize, target: usize) -> bool {
+    /// `behind`: `AttackTarget`'s `attackType` arg ≠ 0 (`BehindAttack`,
+    /// ovr014.cs:728). The departure opportunity attack passes 1
+    /// (ovr014.cs:407); the into-reach and normal turn attacks pass 0. The
+    /// `AttacksReceived>1 && facing && directionChanges>4` flanking heuristic
+    /// (`ovr014:16BA-16E9`) and backstab's `ac_behind − 4` (`:169E`) are
+    /// cited-deferred (M5) — no capture exercises them yet.
+    fn attack_target(
+        &mut self,
+        rng: &mut EngineRng,
+        actor: usize,
+        target: usize,
+        behind: bool,
+    ) -> bool {
         // §19: `AttackTarget` (`sub_3F9DB`, ovr014.cs:939) sets
         // `attacker.actions.target = target` — the attacked (possibly re-picked)
         // combatant becomes the persistent target, so next round's `find_target`
@@ -2990,7 +3011,13 @@ impl CombatState {
             self.clear_actions(actor);
             return true;
         }
-        let target_ac = self.fighters[target].ac;
+        // The binary selects the AC byte by indexing record[0x19A + behind]
+        // (`sub_3F4EB` @`ovr014:16F7-1700`): front @0x19A, behind @0x19B.
+        let target_ac = if behind {
+            self.fighters[target].ac_behind
+        } else {
+            self.fighters[target].ac
+        };
         let hit_bonus = self.fighters[actor].hit_bonus;
         let mut target_gone = false;
 
@@ -3155,7 +3182,7 @@ impl CombatState {
             if self.fighters[att].guarding {
                 self.fighters[att].guarding = false;
                 self.recalc_attacks_received(mover, att);
-                self.attack_target(rng, att, mover);
+                self.attack_target(rng, att, mover, false); // AttackTarget(null,0) — ovr014.cs:245
             }
         }
     }
@@ -3216,7 +3243,12 @@ impl CombatState {
                 } else if idx == 2 && self.fighters[att].attack2_left == 0 {
                     self.fighters[att].attack2_left = 1;
                 }
-                self.attack_target(rng, att, mover);
+                // AttackTarget(null, 1, mover, att) — ovr014.cs:407: the
+                // departure swing is ALWAYS a BehindAttack (the mover has
+                // turned its back), so it hits `ac_behind`@0x19B. This is the
+                // draw-2707 layer: same d20, rear AC — the bar-rout fleer is
+                // hit where front-AC math missed.
+                self.attack_target(rng, att, mover, true);
             }
         }
     }
@@ -3535,7 +3567,7 @@ impl CombatState {
                             self.clear_actions(actor);
                         } else {
                             self.recalc_attacks_received(t, actor);
-                            stop = self.attack_target(rng, actor, t);
+                            stop = self.attack_target(rng, actor, t, false);
                             if stop {
                                 delayed = false;
                             } else if !self.fighters[t].in_combat {
@@ -4052,6 +4084,7 @@ fn combatant_from_record(
     // Fields new_melee cannot carry from the record: max HP (may differ from
     // current), real hit dice, the DEX reaction adj, and the base attack count.
     c.hp_max = rec.hit_point_max as i32;
+    c.ac_behind = rec.ac_behind as u8; // @0x19b — the behind-AC index target
     c.hit_dice = rec.hit_dice;
     c.reaction_adj = reaction_adj;
     c.attacks_count = rec.attack_profile_base[0]; // attacksCount @0x11c
