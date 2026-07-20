@@ -1005,3 +1005,83 @@ goldens, the oracle format, and the other three tripwires untouched. D10 preserv
 
 **Left for M5 (cited, not built):** the downed-tile **restoration** on heal/pickup (spell
 subsystem), and `bandage`'s allied-non-team-NPC case (modeled as `team == Party`).
+
+## 28. SPEC — faithful FleeCheck_001 + surrender (M5 slice 2; Fable-scoped) (2026-07-20)
+
+**Goal.** Replace the deviating `flee_check` stub with the faithful `sub_3637F` ladder and
+close the rout capture `~/goldbox-data/traces/bar-rout-58c50.gbxtrace` (bar brawl, poked
+`field_58C = 50` via the hook's new `RESTRIKE_58C`; seed `0x804aa4d4`, 3,521 draws, 12 rounds;
+patrons rout from ~draw 2514, ≥2 escape at the map corner; two PCs go down — slice 1's
+mechanics are in the matched prefix). D10: local-only, as ever.
+
+**Context facts (measured live 2026-07-20):** the bar's real `field_58C` is **99** — with the
+health pct quantized to multiples of 5, the natural bar rout is impossible (gate needs < 1),
+which is why the four closed captures never exercised this ladder. The hook now emits
+`area2_field_58c` in every `combat_entry` and accepts a `RESTRIKE_58C` poke (both committed on
+the local `restrike-hook` branch).
+
+**The binary (`sub_3637F` @`ovr010:137F`, read this session; re-verify each site before
+coding):**
+
+1. `moral_failure = 0`; `RemoveAttackersAffects` (draw-free). `fleeing` (`actions.field_10`)
+   → `moral_failure = 1`, return false ("is forced to flee"). (`:1391-13DD`)
+2. `control_morale`@0xF7 `> 0x7F` else return false. Morale seed
+   `monster_morale = (control_morale & 0x7F) << 1` (`:13F1-13FC`); **`> 0x66` (102) → 0**
+   (`:13FF-1406`). `CheckAffectsEffect(Morale)` (0x11; draw-free, no affects). Per-actor,
+   EVERY call — our stub's process-lifetime scratch (stuck at 100 after the first turn) is
+   the deviation being replaced.
+3. **Gate 1** (`:143F-144D`): `morale < (100 − hp_cur·100/hp_max)` — **signed `jl`** — OR
+   `morale == 0`; else return false.
+4. `monster_morale = byte_1D903` (enemyHealthPercentage) (`:1458`); second
+   `CheckAffectsEffect(Morale)`.
+5. **Gate 2** (`:146C-1495`): `morale < (100 − area2.field_58C)` — ★ **UNSIGNED 16-bit `jb`
+   (`:1481`): coab ≠ binary bug #12.** `100 − field_58C` is computed in AX and compared
+   unsigned, so `field_58C > 100` underflows to ~0xFFxx and the gate is ALWAYS true; coab's
+   signed int makes it always false. Transliterate as `u16` wrapping subtraction. ★ — OR
+   `morale == 0` OR `combat_team == Party`; else return false.
+6. **Speed fork** (`:1498-14BE`): `MaxOppositionMoves > CalcMoves/2` — signed `jg` → the
+   surrender branch; **else** (`<=`) `moral_failure = 1` + `remove_affect(0x4A)` +
+   `remove_affect(0x4B)` (both no-ops, no affects; cite) (`:14C0-14F5`).
+7. **Surrender branch** (`:14F7-1529`): record byte **@0x13 (Int) `> 5`** else return false;
+   `RemoveFromCombat("Surrenders", status=4 unconscious, player)` (`sub_644A7` — sets
+   `in_combat = false`, hp 0 is NOT written here (health_status drives it), team-count
+   decrement, `CombatMap[idx].size = 0` + `sub_743E7` occupancy repaint, `clear_actions`;
+   **NO `Tile_DownPlayer` stamp** — that is `CombatantKilled` only, keep slice 1's stamp out
+   of this path); return **true** (turn over; `melee_ai_turn` step 2 already returns on it).
+
+**Flee outcome (already implemented, becomes capture-proven):** `moral_failure = 1` drives
+the existing `moral_failure_escape` flee path — per-step `d100` + flee-direction `d2` (the
+capture's visible rout signature from ~draw 2514) — and `flee_battle`'s escape ladder (the
+12-vs-12 speed tie draws its `d2` tiebreak). "Got Away" removal (`ovr014.cs:451`,
+`RemoveFromCombat(..., Status.running, ...)`): set `health_status` to a new `Running` variant
+(verify the enum value in `Classes/Enums.cs`; decode folds it to Okey on entry records as
+with the other non-entry states), `in_combat = false`, occupancy repaint, no tile stamp.
+
+**Engine/harness plumbing:**
+- Decode `control_morale` (raw byte, already decoded) and **Int @0x13** onto `Combatant`
+  (verify against `decode_char_record`'s stats block; the DEX `.original` convention).
+- `CombatEntryEvent` gains optional `area2_field_58c: Option<u16>` (additive; canonical
+  writer omits when absent — existing goldens byte-identical). Both harnesses
+  (`h4_replay`, `h4_turndiff`'s local parser) feed it into `CombatState.area_field_58c`;
+  legacy captures without the field default to **99** (the measured bar value; cite this
+  section).
+- **`h4_replay` operand equality (harness debt, found this session):** the `(before, after)`
+  chain advances identically whatever die is asked for, so chain equality is only
+  draw-COUNT equality (the §14 lesson resurfaced). Extend the equality surface: when both
+  sides carry an operand (`n` vs `ss_sp_words[3]`), a mismatch at draw i is a divergence.
+  The four closed captures were already operand-verified by the localizer and must stay
+  closed under the stricter assert.
+- The `surrender-int5` wire: **keep it**, repurposed — it now fires when the *implemented*
+  surrender branch executes, marking a capture that exercises a not-yet-capture-proven path
+  (the rout capture never surrenders: the 12-vs-12 speed tie always takes the flee fork).
+  Same for a new `got-away` reporting? No — the flee path IS exercised by the acceptance
+  capture; no wire needed.
+
+**Acceptance (all local-tier; before AND after):**
+- The four closed captures stay CLOSED under the faithful ladder + the stricter operand
+  assert (with `field_58C = 99` they mathematically cannot rout — a regression means a leak).
+- `bar-rout-58c50.gbxtrace` **closes 3521/3521 operand-exact**. If it does not, report the
+  frontier honestly and stop — no forcing, no assert-weakening, constants only from the
+  listing.
+- Full gates: workspace tests (parity recomputation only via the independent gbx-prng
+  oracle), clippy `-D warnings`, fmt, wasm core+web, no-game-data guard. D10 throughout.
