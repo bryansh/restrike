@@ -3248,7 +3248,18 @@ impl CombatState {
                 // turned its back), so it hits `ac_behind`@0x19B. This is the
                 // draw-2707 layer: same d20, rear AC — the bar-rout fleer is
                 // hit where front-AC math missed.
+                //
+                // §31 bug #14: the departure attack does NOT retarget the
+                // attacker — `sub_3E954` saves `actions.target` before the
+                // `AttackTarget` call (`ovr014:0C83-0C8E`) and restores it
+                // after (`:0CB3-0CC5`; coab's `backupTarget`, ovr014.cs:405/
+                // 410), so `attack_target`'s §19 write-back is transient
+                // here. Without the restore the attacker permanently switches
+                // to the fleer it punished, and its held target silently
+                // diverges for the rest of the fight.
+                let backup_target = self.fighters[att].target;
                 self.attack_target(rng, att, mover, true);
+                self.fighters[att].target = backup_target;
             }
         }
     }

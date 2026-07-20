@@ -82,10 +82,11 @@ const PINS: &[Pin] = &[
         map_direction: 2,
     },
     Pin {
-        // The rout fires (monsters flee to the correct SE corner under md=2) but a
-        // downstream targeting/flee-movement-order residual remains (doc §29).
+        // The rout fires and MARK's draw-2894 retarget now matches (the d6 over
+        // every live monster); the residual is the missing into-reach d20 at
+        // 2895 — the cross-round guard layer (doc §31).
         capture: "bar-rout-58c50.gbxtrace",
-        expect: Expect::Frontier(2894), // was 2707; behind-AC fix (§30) earned +187
+        expect: Expect::Frontier(2895), // was 2894; departure-attack target restore (§31 bug #14)
         map_direction: 2,
     },
 ];
