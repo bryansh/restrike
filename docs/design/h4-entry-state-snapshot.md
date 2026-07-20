@@ -959,3 +959,49 @@ restore-on-heal — is unreachable without spells, which have their own tripwire
   member drops and a teammate's turn follows now loses that turn's attack draws), clippy
   `-D warnings`, fmt, wasm core+web, no-game-data guard. D10 throughout: no capture bytes,
   no `~/goldbox-data` content, no derived graft files in the repo or tests' committed data.
+
+## 27. LANDED — the downed-PC path; all four captures CLOSE (2026-07-20, M5 slice 1)
+
+The §26 spec was implemented on branch `m5-downed-pc` (four commits, one mechanic each).
+**Every §26 coab citation was re-verified against the IDA listing `coab_new.lst` before
+coding** — the required (a)/(b)/(c) checks (`sub_35DB1` head @`ovr010:0DB1`, `bandage`
+@`ovr025:335F`, `battle01` bleed @`ovr009:0A05`) plus `damage_player`/`CombatantKilled`,
+and **no contradiction with §26 was found** at any point (the binary matches §26's rendering
+exactly, including the `Status` enum values `okey=0/animated=1/unconscious=4/dying=5/dead=6`
+from `Classes/Enums.cs`).
+
+**What landed (four commits):**
+- **#1 status ladder** — `HealthStatus{Okey,Animated,Unconscious,Dying,Dead}` + `bleeding` on
+  `Combatant`; entry status decoded from record `@0x195`; `apply_damage` rewritten to the
+  faithful `damage_player` ladder (`ovr025:23D5`). Behavior-neutral (nothing consumes the
+  status yet).
+- **#2 bandage turn** — `CombatState::bandage(apply)` (`ovr025:335F`) + the `sub_35DB1`-head
+  guard (`ovr010:0DE3-0DFF`): a Party actor with a dying ally spends its turn bandaging
+  (`delay = 0` → the move-attack loop never runs). **This is the mechanic that closes the
+  length-diverging captures.**
+- **#3 bleed tick** — `battle_round_checks` per-round-end `dying → bleeding+1 → dead@>9`
+  (`ovr009:0A05-0A2B`). Draw-free; fidelity (not exercised past 9 rounds in these captures).
+- **#4 downed tile + tripwire retirement** — `CombatantKilled`'s `Tile_DownPlayer` (0x1F)
+  ground swap for a downed party member unless `Tile_StinkingCloud` (0x1E) (`ovr033.cs:579`),
+  movement-/reach-neutral on a cost-1 floor; the `downed-pc` stub tripwire retired (the other
+  three stay).
+
+**Capture matrix (before → after):**
+
+| capture | before | after |
+|---|---|---|
+| `combat4` | CLOSED 3075/3075 | **CLOSED 3075/3075** (unchanged) |
+| `combat3+terrain4` | CLOSED 3218/3218 | **CLOSED 3218/3218** (unchanged) |
+| `combat2+terrain4` | 3772/4260 (exact prefix, 2× `downed-pc`) | **CLOSED 4260/4260** |
+| `combat+terrain4` | 3380 vs 3162 (exact prefix, ours longer, 1× `downed-pc`) | **CLOSED 3162/3162** |
+
+`combat+terrain4` was **not** a truncated capture — with the bandage turn built, ours ends at
+exactly the capture's 3162 draws (the pre-slice "ours runs longer" was the missing bandage
+turns letting our party out-damage the original). **All four captures now report `H4 MELEE
+CLOSED` with zero stub trips.** Gates 6/6 green (workspace tests 0 failed incl. the real-data
+`watch_a_real_data_fight` demo, clippy `-D warnings`, fmt, wasm core+web, no-game-data guard);
+no synthetic parity test needed recomputing (none exercises a dying-ally bandage). `.rsav`
+goldens, the oracle format, and the other three tripwires untouched. D10 preserved.
+
+**Left for M5 (cited, not built):** the downed-tile **restoration** on heal/pickup (spell
+subsystem), and `bandage`'s allied-non-team-NPC case (modeled as `team == Party`).
