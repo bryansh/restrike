@@ -788,12 +788,29 @@ impl CombatState {
         }
     }
 
-    /// `BattleRoundChecks` (`ovr009.cs:363`) reduced to its non-stubbed parts:
-    /// increment the round counter and decide the loop exit. `step_game_time`,
-    /// affect ticks, cloud damage, bleed, and bandage are RNG-free and gated on
-    /// systems not in this slice.
+    /// `BattleRoundChecks` (`ovr009.cs:363`, `battle01`) reduced to its
+    /// non-stubbed parts: increment the round counter, run the bleed tick, and
+    /// decide the loop exit. `step_game_time`, the per-member affect ticks
+    /// (`CheckAffectsEffect(Type_19)`), cloud damage (`in_poison_cloud`), the
+    /// display-only `bandage(false)` "Your Teammate is Dying" scan, and
+    /// `calc_enemy_health_percentage` (recomputed at `begin_round` instead, both
+    /// draw-free) are gated on systems not in this slice.
     fn battle_round_checks(&mut self) -> CombatStep {
         self.combat_round += 1; // ovr009.cs:366 — the byte_1D8B7 increment
+        // The bleed tick (§26.4, `ovr009:0A05-0A2B`, coab ovr009.cs:369-382;
+        // binary-verified against coab_new.lst this session): per round end, each
+        // TeamList member that is `dying` bleeds one more, and dies once
+        // `bleeding > 9` (the `cmp bleeding, 9; jbe` — dead only past 9). A dead
+        // (vs still-dying) ally is no longer bandageable, so this feeds §26.3.
+        // Draw-free.
+        for f in &mut self.fighters {
+            if f.health_status == HealthStatus::Dying {
+                f.bleeding += 1;
+                if f.bleeding > 9 {
+                    f.health_status = HealthStatus::Dead;
+                }
+            }
+        }
         let (party, monsters) = self.live_counts();
         let battle_over = party == 0 || monsters == 0 || self.combat_round >= self.no_action_limit;
         let round = self.combat_round;
