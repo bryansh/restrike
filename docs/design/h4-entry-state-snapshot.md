@@ -894,3 +894,68 @@ dungeon/city (draw-free terrain) until wilderness `SetupGroundTiles` lands; curr
    dice, ammo, and the FD-3 `attack2` profile.
 4. *(Optional, opens M5 proper)* **a caster fight** — a mage with memorized spells (and/or
    enemy casters). Trips `memorized-spells` today; becomes the spell-subsystem driver.
+
+## 26. SPEC — the downed-PC path (M5 slice 1; Fable-scoped, implementer-built) (2026-07-20)
+
+**Goal.** Replace the `downed-pc` stub with the faithful mechanics, and thereby (expected)
+close the two length-diverging captures: `combat2+terrain4` (ours 3,772 vs capture 4,260 — the
+real fight runs longer because party turns are spent bandaging, not attacking) and
+`combat+terrain4` (ours 3,380 vs capture 3,162). This slice is fully self-validating against
+existing local captures — no new staging needed.
+
+**The mechanics (coab-cited; each site MUST be re-verified against `coab_new.lst` before
+coding, per the session-7 discipline — the binary is the spec, coab the reference):**
+
+1. **`damage_player` status ladder** (`ovr025:23D5`, binary-verified §21-era read; coab
+   ovr025.cs:1160-1242). With `neg_hp = damage − hp_current` (0 when damage ≤ hp),
+   `new_hp = hp_current − damage` (0 when overkill):
+   - `neg_hp > 9` OR (`new_hp == 0` AND status == animated) → status **dead**;
+   - else `neg_hp > 0` → status **dying**, and (in combat) `actions.bleeding = neg_hp`;
+   - else `new_hp == 0` → status **unconscious**;
+   - status ∉ {okey, animated} → `in_combat = false`, `hp = 0`, team-count decrement,
+     `actions.delay = 0` (`ovr025:24BB`) — all as today, now with the status recorded.
+   New `Combatant` state: `health_status` (okey/animated/dying/unconscious/dead — minimal
+   enum; entry records are okey; decode from the record if the field exists there) and
+   `bleeding: u8`.
+
+2. **The bandage turn** (`sub_35DB1` head, coab ovr010.cs:516-522; binary `ovr010:0DB1`+):
+   after `CheckAffectsEffect(Type_14)` (draw-free), **if the actor's `combat_team == Ours`
+   AND `bandage(true)` → `actions.delay = 0`** — the turn is spent, the move-attack loop
+   (`delayed = delay != 0`) never runs: no movement, no attack, no draws beyond the turn
+   head (gate + two d7s + find_target). This is the draw-visible mechanic.
+
+3. **`bandage(applyBandage)`** (coab ovr025.cs:1628): scan `TeamList` in order for members
+   with `nonTeamMember == false && combat_team == Ours && health_status == dying`; return
+   whether any exists; when applying, convert the FIRST one to **unconscious**, zero its
+   `bleeding`, and stop applying (one bandage per call). Monsters never bandage and are
+   never bandaged.
+
+4. **The bleed tick** (`BattleRoundChecks`, coab ovr009.cs:369-382): per round end, for each
+   TeamList member with status dying: `bleeding += 1; if bleeding > 9 → status = dead`.
+   Draw-free. (The `bandage(false)` "Your Teammate is Dying" scan is display-only — skip.)
+
+5. **The downed tile** (`CombatantKilled`, coab ovr033.cs:579-590): for a downed
+   `nonTeamMember == false` member, swap the ground tile at its cell to `Tile_DownPlayer`
+   (0x1F) unless the cell is `Tile_StinkingCloud` (0x1E). Tile 0x1F has move_cost 1
+   (BackGroundTiles[31] = (1,1,0,0x27)) — movement-NEUTRAL on cost-1 floors (the bar), so
+   this is fidelity, not the divergence driver. Model `nonTeamMember == false` as
+   `team == Party` (cited simplification: allied non-team NPCs are out of this slice's
+   scope). Tile restoration (heal/pickup) is M5-spells; cite, don't build.
+
+**Retire the `downed-pc` tripwire** when these land (the remaining unmodeled piece —
+restore-on-heal — is unreachable without spells, which have their own tripwire).
+
+**Acceptance (all local-tier, run before AND after):**
+- `combat3+terrain4` and `combat4` **must remain CLOSED** (3218/3218, 3075/3075) — zero-
+  casualty fights are untouched by this slice (no one dies with 0 < overkill in them — if a
+  regression appears, a mechanic leaked into the wrong path).
+- `combat2+terrain4` — expected to **CLOSE 4260/4260**. If it does not, report the new
+  operand frontier + trips honestly and STOP (the finding scopes the next session; do NOT
+  weaken any assert or tune constants to force closure).
+- `combat+terrain4` — expected to close at 3162/3162; if it instead stays exact-prefix with
+  ours longer, report as a possible truncated capture — do not force.
+- Full gates: workspace tests (parity tests recomputed ONLY from the independent gbx-prng
+  oracle when a synthetic fight's stream legitimately changes — e.g. a fight where a party
+  member drops and a teammate's turn follows now loses that turn's attack draws), clippy
+  `-D warnings`, fmt, wasm core+web, no-game-data guard. D10 throughout: no capture bytes,
+  no `~/goldbox-data` content, no derived graft files in the repo or tests' committed data.
