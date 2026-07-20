@@ -128,6 +128,13 @@ pub enum HealthStatus {
     /// `dead` (6) — overkill > 9, or a `new_hp == 0` hit on an `animated`, or a
     /// bleed-out (`bleeding > 9`).
     Dead,
+    /// `running` (3) — a combatant that fled and **Got Away** (`flee_battle` →
+    /// `RemoveFromCombat(..., Status.running, ...)`, `ovr014:0D90`/`sub_644A7`).
+    /// Out of combat; unlike every other removal, `RemoveFromCombat` **skips** the
+    /// `hp_current = 0` write for a `running` combatant (`sub_644A7:151A`). Never
+    /// present on an entry record — [`decode_health_status`] folds a raw `3` to
+    /// [`HealthStatus::Okey`] as with the other non-entry states.
+    Running,
 }
 
 impl HealthStatus {
@@ -164,6 +171,17 @@ pub struct Combatant {
     /// per-step morale-advance d100** (`moralFailureEscape:387`); PCs short-circuit
     /// it. Also gates the `FleeCheck_001` morale block.
     pub npc: bool,
+    /// `control_morale@0xF7` (the raw byte). `FleeCheck_001` reseeds
+    /// `monster_morale = (control_morale & 0x7F) << 1` **per actor, every call**
+    /// (`sub_3637F` @`ovr010:13F1`, §28) — the deviation slice-2 replaces (the old
+    /// stub used a process-lifetime scratch). [`Combatant::npc`] is
+    /// `control_morale >= 0x80`, but the ladder needs the raw byte for the seed.
+    pub control_morale: u8,
+    /// `Intelligence@0x13` (`stats2.Int.original`, the record byte the FleeCheck
+    /// surrender branch reads: `sub_3637F` @`ovr010:14FA`, `cmp es:[di+13h], 5`).
+    /// A combatant reaching the surrender fork **surrenders only when `Int > 5`**
+    /// (§28 item 7). Default 0 (never surrenders) for synthetic combatants.
+    pub int_score: u8,
     /// Footprint size (`field_DE & 7`); combat uses 1 for single-cell combatants.
     pub size: u8,
     pub pos: GridPos,
@@ -264,6 +282,8 @@ impl Combatant {
             id,
             team,
             npc: false,
+            control_morale: 0,
+            int_score: 0,
             size: 1,
             pos: GridPos::new(0, 0),
             in_combat,
@@ -330,6 +350,12 @@ impl Combatant {
             id,
             team,
             npc,
+            // A synthetic melee combatant has no raw morale/Int decode; the
+            // faithful FleeCheck reseeds from `control_morale` (npc → 0x80 folds
+            // to seed 0, PCs stay 0), and `int_score` 0 never surrenders. Tests
+            // that exercise the ladder set these explicitly.
+            control_morale: if npc { 0x80 } else { 0 },
+            int_score: 0,
             size: 1,
             pos,
             in_combat: true,
@@ -2689,44 +2715,111 @@ impl CombatState {
         }
     }
 
-    /// `FleeCheck_001` (`ovr010.cs:760`) — draw-free. Sets `moral_failure`/`fleeing`
-    /// per the morale ladder; returns the surrender flag (`var_1`, the turn-ending
-    /// `RemoveFromCombat("Surrenders")` path). PCs (`!npc`, and not already fleeing)
-    /// skip the whole block. The morale d100 lives in the *move* path, not here.
+    /// `RemoveFromCombat(name, status, player)` (`sub_644A7` @`ovr024:14A7`) — drop
+    /// a combatant from combat with a given health status. A not-in-combat combatant
+    /// is a no-op (`:14C0`). Else: display (draw-free); `in_combat = false`
+    /// (`:1506`); `health_status = status` (`:1512`); and — **only when `status !=
+    /// running`** (`:151A`) — `hit_point_current = 0` (`:1525`); then
+    /// `CombatMap[idx].size = 0` + `sub_743E7` occupancy repaint (`:154A-154F`) and
+    /// `clear_actions` (`:155A`). **No `Tile_DownPlayer` stamp** — that is
+    /// `CombatantKilled` (the damage-death path) only. Draw-free.
+    ///
+    /// (Callers: the FleeCheck surrender branch with `Unconscious`, and
+    /// [`flee_battle`]'s Got-Away removal with [`HealthStatus::Running`].)
+    fn remove_from_combat(&mut self, actor: usize, status: HealthStatus) {
+        if !self.fighters[actor].in_combat {
+            return; // :14C0-14CB — already out of combat.
+        }
+        {
+            let f = &mut self.fighters[actor];
+            f.in_combat = false; // :1506
+            f.health_status = status; // :1512
+            if status != HealthStatus::Running {
+                f.hp_current = 0; // :1525 — skipped for `running` (the Got-Away case)
+            }
+        }
+        // :154A CombatMap[idx].size = 0 + :154F sub_743E7 occupancy repaint.
+        self.rebuild_occupancy();
+        // :155A clear_actions.
+        self.clear_actions(actor);
+    }
+
+    /// `FleeCheck_001` (`sub_3637F` @`ovr010:137F`, coab `ovr010.cs:760`) — the
+    /// faithful morale ladder, **draw-free**. Sets `moral_failure`/`fleeing` (the
+    /// flee outcome the move path acts on) and returns the surrender flag (`var_1`,
+    /// the turn-ending `RemoveFromCombat("Surrenders")` path — §28 item 7, built in
+    /// the next slice; here still the `surrender-int5` tripwire). Transliterated
+    /// site-by-site from the IDA listing (each `ovr010:` cited); re-verified against
+    /// `coab_new.lst` this session.
     fn flee_check(&mut self, actor: usize) -> bool {
+        // :1385 var_1 = 0 (the surrender return flag).
+        // :1391 actions.field_14 = 0 → moral_failure = false; RemoveAttackersAffects
+        // (:139C) is draw-free, no affects modeled.
         self.fighters[actor].moral_failure = false;
-        // RemoveAttackersAffects — draw-free, no affects modeled.
+        // :13A9 fleeing (actions.field_10) → moral_failure = 1, "is forced to
+        // flee", return false.
         if self.fighters[actor].fleeing {
             self.fighters[actor].moral_failure = true;
             return false;
         }
+        // :13E3 control_morale@0xF7 > 0x7F (unsigned `ja`) else return false —
+        // i.e. NPCs only (a PC short-circuits the whole block).
         if !self.fighters[actor].npc {
-            return false; // control_morale < NPC_Base
+            return false;
         }
-        // monster_morale = (control_morale & PC_Mask) << 1; we don't model the raw
-        // control byte, so use the caller-provided monster_morale as the scratch
-        // seed and follow the ladder. CheckAffectsEffect(Morale) is draw-free.
+        // :13F1-13FC per-actor morale seed = (control_morale & 0x7F) << 1, recomputed
+        // EVERY call (the deviation slice-2 replaces: the old stub used a process-
+        // lifetime scratch stuck at 100). :13FF `> 0x66` (102) → 0. Then
+        // CheckAffectsEffect(Morale=0x11) at :140B — draw-free.
+        let mut morale = ((self.fighters[actor].control_morale & 0x7F) as i32) << 1;
+        if morale > 0x66 {
+            morale = 0;
+        }
+        self.monster_morale = morale;
+
+        // Gate 1 (:143F-144D): morale < (100 − hp_cur·100/hp_max) SIGNED (`jl`)
+        // OR morale == 0; else return false.
         let hp_pct = (self.fighters[actor].hp_current * 100) / self.fighters[actor].hp_max.max(1);
         if self.monster_morale < (100 - hp_pct) || self.monster_morale == 0 {
+            // :1458 monster_morale = byte_1D903 (enemyHealthPercentage); second
+            // CheckAffectsEffect(Morale) at :145E — draw-free.
             self.monster_morale = self.enemy_health_pct;
-            if self.monster_morale < (100 - self.area_field_58c)
-                || self.monster_morale == 0
-                || self.fighters[actor].team == Team::Party
-            {
-                // MaxOppositionMoves / CalcMoves — draw-free.
+
+            // Gate 2 (:146C-1493): morale < (100 − area2.field_58C) — ★ bug #12:
+            // UNSIGNED 16-bit `jb` at :1481 over a 16-bit `sub` at :1473, so a
+            // `field_58C > 100` underflows `100 − field_58C` to ~0xFFxx and the gate
+            // is ALWAYS true (coab's signed int makes it always false). Transliterate
+            // as u16 wrapping subtraction + unsigned compare. — OR morale == 0 OR
+            // combat_team == Party (`:148D cmp combat_team, 0`).
+            let lhs = self.monster_morale as u16;
+            let rhs = 100u16.wrapping_sub(self.area_field_58c as u16);
+            if lhs < rhs || self.monster_morale == 0 || self.fighters[actor].team == Team::Party {
+                // Speed fork (:1498-14BE): MaxOppositionMoves > CalcMoves/2 SIGNED
+                // (`jg` at :14BE) → the surrender branch (loc_364F7); else (`<=`)
+                // moral_failure = 1 (:14C8) + remove_affect(0x4A)/remove_affect(0x4B)
+                // (:14DC/:14F0 — both no-ops here, no affects modeled).
                 let max_opp = self.max_opposition_moves(actor);
-                if max_opp <= calc_moves(self.fighters[actor].movement) / 2 {
-                    self.fighters[actor].moral_failure = true;
-                } else {
-                    // Tripwire: the binary's ELSE branch consults `Int > 5` and
-                    // `RemoveFromCombat("Surrenders", unconscious)` (coab
-                    // ovr010.cs:803) — an Int score we don't decode and a
-                    // surrender path we don't model (M5). Reaching here at all
-                    // means the replay is past the modeled ladder.
+                if max_opp > calc_moves(self.fighters[actor].movement) / 2 {
+                    // Surrender branch (loc_364F7, :14F7-1529, §28 item 7). The
+                    // `surrender-int5` wire (kept, repurposed) fires whenever this
+                    // implemented-but-capture-unproven branch executes — the rout
+                    // capture never reaches it (its 12-vs-12 speed tie always takes
+                    // the flee fork), so a firing marks an untested path.
                     self.emit(ActionEvent::StubTripped {
                         combatant_id: actor,
                         stub: "surrender-int5",
                     });
+                    // :14FA `cmp byte es:[di+13h], 5; jbe → return false` — surrender
+                    // only when `Int@0x13 > 5`.
+                    if self.fighters[actor].int_score > 5 {
+                        // :1501-1519 `RemoveFromCombat("Surrenders", status=4
+                        // unconscious)`; :1524 clear_actions; return true (turn
+                        // over — melee_ai_turn step 2 returns on it).
+                        self.remove_from_combat(actor, HealthStatus::Unconscious);
+                        return true;
+                    }
+                } else {
+                    self.fighters[actor].moral_failure = true;
                 }
             }
         }
@@ -3275,7 +3368,7 @@ impl CombatState {
 
     /// `flee_battle` (`ovr014.cs:426`): the escape check, drawing a `d2` tiebreak
     /// (`:443`) only when the fastest opponent exactly matches the fleer's speed.
-    /// Reached only from the flee path; removes the fleer on success.
+    /// Reached only from the flee path; removes the fleer on success (**Got Away**).
     fn flee_battle(&mut self, rng: &mut EngineRng, actor: usize) {
         let gets_away = if self.build_near(actor, 0xff, false).is_empty() {
             true
@@ -3289,12 +3382,15 @@ impl CombatState {
             }
         };
         if gets_away {
-            self.fighters[actor].in_combat = false;
-            // `RemoveFromCombat` (`sub_644A7` @`ovr024:154F`) calls `sub_743E7`
-            // right after dropping the fleer: the freed footprint is visible to
-            // every later `CanMove` this same round.
-            self.rebuild_occupancy();
+            // "Got Away" (`ovr014:0D90`): `RemoveFromCombat(..., Status.running=3,
+            // ...)` — the fleer leaves with `health_status = Running`; hp is NOT
+            // zeroed (the running special-case) and its footprint frees immediately
+            // (`sub_743E7`, visible to every later `CanMove` this same round). No
+            // downed-tile stamp.
+            self.remove_from_combat(actor, HealthStatus::Running);
         }
+        // `:0DBD func_end` — clear_actions unconditionally (idempotent after the
+        // removal's own clear_actions on the Got-Away path).
         self.clear_actions(actor);
     }
 
@@ -3540,14 +3636,29 @@ impl CombatState {
         (party, monsters)
     }
 
-    /// `calc_enemy_health_percentage` (`ovr014.cs:1674`): `((20·ΣcurHP)/ΣmaxHP)·5`
-    /// over the live **monster** team — the morale/advance input. Draw-free.
+    /// `calc_enemy_health_percentage` (`sub_40E00` @`ovr014:2E00`, coab
+    /// `ovr014.cs:1674`): `((20·ΣcurHP)/ΣmaxHP)·5` over the **monster** team —
+    /// the morale/flee input (`byte_1D903`). Draw-free.
+    ///
+    /// **The denominator counts DEAD monsters** (`maxTotal += hit_point_max`
+    /// runs for every enemy at `:2E4B`, reached whether or not `in_combat`),
+    /// while the numerator only sums live enemies (`currentTotal +=
+    /// hit_point_current` gated on `in_combat` at `:2E28`). So as a fight wears
+    /// on, `enemyHealthPercentage` decays past what the surviving fraction alone
+    /// would give — which is what drops it below `FleeCheck`'s gate-2 threshold
+    /// and triggers the rout (the previous `in_combat`-only denominator kept it
+    /// too high, so the faithful gate never fired). Binary-verified this session;
+    /// safe for the closed captures because a monster's advance short-circuits on
+    /// `|| team == Monster` (`moralFailureEscape`), so this value only ever moves
+    /// the flee gate, which is closed at `field_58C = 99`.
     fn recompute_enemy_health(&mut self) {
         let (mut cur, mut max) = (0i32, 0i32);
         for f in &self.fighters {
-            if f.team == Team::Monster && f.in_combat {
-                cur += f.hp_current;
-                max += f.hp_max;
+            if f.team == Team::Monster {
+                max += f.hp_max; // ALL enemies, dead included (:2E4B)
+                if f.in_combat {
+                    cur += f.hp_current; // live enemies only (:2E28)
+                }
             }
         }
         self.enemy_health_pct = if max > 0 {
@@ -3959,6 +4070,12 @@ fn combatant_from_record(
     // fresh combat snapshot). `bleeding` starts 0; `damage_player` seeds it.
     c.health_status = decode_health_status(rec.health_status);
     c.bleeding = 0;
+    // §28 the faithful FleeCheck ladder: the raw `control_morale@0xF7` (for the
+    // per-actor morale reseed `(control_morale & 0x7F) << 1`) and `Int@0x13`
+    // (`stats2.Int.original` — the `.original`/`.full` byte, as DEX above; the
+    // surrender branch's `Int > 5` gate). `npc` already folds control_morale.
+    c.control_morale = rec.control_morale;
+    c.int_score = rec.stats.int.original;
     c
 }
 
@@ -6165,11 +6282,14 @@ mod tests {
 
         // 3. surrender-int5: an NPC whose fastest opponent outruns half its own
         // moves lands in the binary's Int>5 surrender branch. Party fighter 0 is
-        // down, so make the survivor fast via a fresh party opponent.
+        // down, so make the survivor fast via a fresh party opponent. fighter 1 is
+        // an NPC (control_morale 0x80 → the faithful gate-2 seed is 0, so gate 1
+        // passes via `== 0`); enemy_health_pct 5 < 100 − field_58C(0) → gate 2
+        // passes; max_opp = calc_moves(48)/2 = 48 > calc_moves(12)/2 = 12 → the
+        // surrender fork.
         world.fighters[0].in_combat = true; // revive the opponent for the ladder
-        world.fighters[0].movement = 48; // max_opp 96 > calc_moves(12)/2 = 12
-        world.monster_morale = 0; // cond1 `== 0` passes
-        world.enemy_health_pct = 5; // cond2 `< 100 - 0` passes
+        world.fighters[0].movement = 48;
+        world.enemy_health_pct = 5;
         world.area_field_58c = 0;
         assert!(!world.flee_check(1));
 
@@ -6186,5 +6306,75 @@ mod tests {
         assert!(got.contains(&"0-hd-sweep"), "trips: {got:?}");
         assert!(got.contains(&"surrender-int5"), "trips: {got:?}");
         assert!(got.contains(&"memorized-spells"), "trips: {got:?}");
+    }
+
+    /// **Bug #12 pinned** — `FleeCheck_001`'s gate 2 is an UNSIGNED 16-bit `jb`
+    /// over `100 − area2.field_58C` computed as a 16-bit `sub` (`sub_3637F`
+    /// @`ovr010:1473`/`:1481`), so a `field_58C > 100` underflows the threshold to
+    /// ~0xFFxx and the gate is **always true** — where coab's signed int makes it
+    /// always false. This pins the always-true behavior: with a monster at 100%
+    /// enemy-health (a morale that a *signed* threshold `100 − 150 = −50` would
+    /// reject), a `field_58C = 150` still lets the ladder proceed to the speed fork
+    /// and set `moral_failure`. The `field_58C = 50` contrast (signed==unsigned in
+    /// range) rejects the same morale, proving it is the wrap, not the value.
+    #[test]
+    fn flee_check_gate2_field_58c_over_100_is_always_true_bug12() {
+        // fighter 0: a slow party opponent (so the speed fork takes the flee
+        // branch, not surrender). fighter 1: the acting NPC monster (control_morale
+        // 0x80 → morale seed 0 → gate 1 passes via `== 0`; full HP).
+        let slow = Fighter::new_melee(
+            0,
+            Team::Party,
+            false,
+            GridPos::new(25, 12),
+            30,
+            5,
+            20,
+            1,
+            (1, 4, 2),
+            5,
+            1,
+        );
+        let fast_npc = Fighter::new_melee(
+            1,
+            Team::Monster,
+            true,
+            GridPos::new(26, 12),
+            30,
+            5,
+            20,
+            96,
+            (1, 4, 2),
+            5,
+            1,
+        );
+        let mut world = CombatWorld::new(CombatMap::uniform(FLOOR), vec![slow, fast_npc]);
+        // 100% enemy health → after gate 1, monster_morale = 100. A *signed*
+        // `100 − field_58C` at field_58C > 100 is negative, so `100 < negative`
+        // would be false; the unsigned wrap makes it true.
+        world.enemy_health_pct = 100;
+
+        // field_58C = 150 (> 100): gate 2 is always-true (the underflow) → the
+        // speed fork sets moral_failure (max_opp = calc_moves(1)/2 = 1 ≤
+        // calc_moves(96)/2 = 96 → the flee branch).
+        world.area_field_58c = 150;
+        assert!(
+            !world.flee_check(1),
+            "the flee fork returns false (not surrender)"
+        );
+        assert!(
+            world.fighters[1].moral_failure,
+            "field_58C > 100 underflows gate 2 to always-true (bug #12), so the ladder \
+             proceeds and sets moral_failure even at 100% enemy health"
+        );
+
+        // Contrast: field_58C = 50 (≤ 100, signed == unsigned) rejects the same
+        // 100% morale at gate 2 (`100 < 100 − 50 = 50` is false) → no flee.
+        world.area_field_58c = 50;
+        assert!(!world.flee_check(1));
+        assert!(
+            !world.fighters[1].moral_failure,
+            "field_58C ≤ 100 gates normally: 100% enemy health does not rout"
+        );
     }
 }
