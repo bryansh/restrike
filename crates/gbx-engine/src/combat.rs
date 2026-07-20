@@ -2396,15 +2396,26 @@ pub fn build_near_targets(
     // tertiary key is 0 whenever directions are equal). Stable → roster order on
     // full ties.
     // §15 bug #5 — the near-target sort is the binary's `sub_73033` (ovr032:0033):
-    // a selection sort whose swap predicate is a PARTIAL order, not a clean key.
-    // Element `j` sorts before element `i` when `steps[j] < steps[i]`, OR
-    // (`steps` equal AND `dir[j] < dir[i]` AND `dir[j]%2 <= dir[i]%2`). Incomparable
-    // pairs keep build (roster) order — e.g. a `dir 1` (diagonal) and a `dir 2`
-    // (orthogonal) at equal steps are never swapped, so the binary keeps the
-    // roster-earlier one first. coab's `SortedCombatant.CompareTo` mis-orders this
-    // as a clean `(steps, direction)` key (it has the `%2` term only as an
-    // unreachable innermost tie-break); that gave the wrong `find_target` pick and
-    // the round-0 movement cascade.
+    // an EXCHANGE sort (swap-on-every-improvement) whose swap predicate is a
+    // PARTIAL order, not a clean key. Element `j` sorts before element `i` when
+    // `steps[j] < steps[i]`, OR (`steps` equal AND `dir[j] < dir[i]` AND
+    // `dir[j]%2 <= dir[i]%2`). Incomparable pairs keep build (roster) order —
+    // e.g. a `dir 1` (diagonal) and a `dir 2` (orthogonal) at equal steps are
+    // never swapped, so the binary keeps the roster-earlier one first.
+    //
+    // The swap PLACEMENT is load-bearing under a non-transitive predicate
+    // (exchange-in-inner-loop vs find-min-then-swap-once can order ties
+    // differently), and it is confirmed from the disassembly: the 3-byte triple
+    // swap at `ovr032:011A-0186` (temp←[i], [i]←[j], [j]←temp on the stride-3
+    // entries @6EAE) runs IMMEDIATELY inside the inner loop and falls into the
+    // inner-loop increment (`loc_7318B`); no min-index is tracked and the outer
+    // loop closure swaps nothing. `out.swap(i, j)` inside the inner loop below
+    // is therefore exact, not merely equivalent-on-total-orders.
+    //
+    // coab's `SortedCombatant.CompareTo` mis-orders this as a clean
+    // `(steps, direction)` key (it has the `%2` term only as an unreachable
+    // innermost tie-break); that gave the wrong `find_target` pick and the
+    // round-0 movement cascade.
     let n = out.len();
     for i in 0..n {
         for j in (i + 1)..n {

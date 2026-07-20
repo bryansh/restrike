@@ -570,7 +570,9 @@ north because she targeted monster **14** (`33,11`), while the capture targets *
 which means her **near-list order** differed. Her near-list has monster 6 (dir 2) and monster
 14 (dir 1) **tied on steps (18)**; our sort put 14 first, the binary keeps 6 first.
 
-**The binary (`sub_73033` @`ovr032:0033`) is a selection sort with a PARTIAL-order predicate**,
+**The binary (`sub_73033` @`ovr032:0033`) is an exchange sort (swap-on-every-improvement,
+confirmed at `ovr032:011A-0186`: the 3-byte triple swap runs inside the inner loop, no
+min-index tracked — review callout settled 2026-07-20) with a PARTIAL-order predicate**,
 not a clean key. Element `j` swaps before element `i` iff `steps[j] < steps[i]`, OR
 (`steps` equal AND `dir[j] < dir[i]` AND `dir[j]%2 <= dir[i]%2`). For a diagonal-vs-orthogonal
 tie (`dir 1` vs `dir 2`) **neither** swaps the other, so **build (roster) order is preserved**
