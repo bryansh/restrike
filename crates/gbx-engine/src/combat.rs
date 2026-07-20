@@ -3268,6 +3268,33 @@ impl CombatState {
         self.clear_actions(actor);
     }
 
+    /// `bandage(applyBandage)` (`ovr025:335F`, coab ovr025.cs:1628) — scan the
+    /// roster (`TeamList` order) for a bandageable ally: `nonTeamMember == false`
+    /// AND `combat_team == Ours` AND `health_status == dying`. Returns whether any
+    /// exists. When `apply_bandage`, the **first** such member is bandaged —
+    /// `dying → unconscious`, `bleeding = 0` — and no further member is bandaged
+    /// (one per call); the scan continues only to keep reporting `someoneBleeding`.
+    ///
+    /// `nonTeamMember == false && combat_team == Ours` is modeled as
+    /// `team == Party` (§26 cited simplification: allied non-team NPCs on the
+    /// party team are out of this slice's scope). Monsters are never bandaged.
+    /// Draw-free (the "is bandaged" status string, `ovr025:33D6`, is display-only).
+    fn bandage(&mut self, apply_bandage: bool) -> bool {
+        let mut someone_bleeding = false;
+        let mut apply = apply_bandage;
+        for f in &mut self.fighters {
+            if f.team == Team::Party && f.health_status == HealthStatus::Dying {
+                someone_bleeding = true;
+                if apply {
+                    f.health_status = HealthStatus::Unconscious;
+                    f.bleeding = 0;
+                    apply = false; // one bandage per call (ovr025:33E5)
+                }
+            }
+        }
+        someone_bleeding
+    }
+
     /// `sub_35DB1(actor)` (`ovr010.cs:511`) — the move-then-attack loop. Approaches
     /// the target one step per iteration (each NPC step drawing the morale d100)
     /// until adjacent, then attacks (`AttackTarget01`'s d20s + damage). Returns
@@ -3276,8 +3303,15 @@ impl CombatState {
     fn sub_35db1(&mut self, rng: &mut EngineRng, actor: usize) -> bool {
         let mut b1ab18 = 8i32;
         let mut b1ab19 = 0i32;
-        // CheckAffectsEffect(Type_14) / bandage(true) — both draw-free (party-only
-        // bandage of a dying ally; none modeled → no effect).
+        // CheckAffectsEffect(Type_14) (`ovr010:0DDB`) — draw-free, no affects
+        // modeled. Then the bandage turn (§26.2, `ovr010:0DE3-0DFF`): a Party
+        // actor whose team has a dying ally spends its whole turn bandaging —
+        // `bandage(true)` zeroes `actions.delay`, so `delayed` starts false and
+        // the move-attack loop below never runs (no movement, no attack, no draws
+        // beyond the turn head the caller already rolled). Draw-free itself.
+        if self.fighters[actor].team == Team::Party && self.bandage(true) {
+            self.fighters[actor].delay = 0; // ovr010:0DFF — actions.delay = 0
+        }
         let mut counter = 0;
         let mut stop = false;
         let mut delayed = self.fighters[actor].delay != 0;
