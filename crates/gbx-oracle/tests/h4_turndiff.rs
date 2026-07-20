@@ -730,6 +730,13 @@ fn h4_locate_draw() {
     )
     .expect("decode");
     state.area_field_58c = cap.field_58c;
+    // Same flee-heading knob as `run()` (§29) — without it this diagnostic
+    // replays a DIFFERENT fight (md=0 → NW flight) than the localize/replay
+    // paths and misleads the peel.
+    state.map_direction = std::env::var("RESTRIKE_MAP_DIR")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2);
     state.attach_action_sink(Box::new(Rec(count.clone(), log.clone())));
     let mut rng = EngineRng::new(cap.rng_state);
     rng.attach_sink(Box::new(Ctr(count.clone())));
