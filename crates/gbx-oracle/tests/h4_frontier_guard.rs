@@ -1,7 +1,8 @@
 //! **The frontier-pin regression guard.** A committed manifest of the exact H4
-//! replay outcome for every local capture, so the two currently-open frontiers
-//! (`combat+terrain4` @368, `bar-rout-58c50` @2894) cannot silently drift and the
-//! three closed captures cannot silently regress.
+//! replay outcome for every local capture, so the one currently-open frontier
+//! (`combat+terrain4` @368) cannot silently drift and the four closed captures
+//! (incl. the `bar-rout-58c50` rout, closed 3521/3521 — doc §32) cannot
+//! silently regress.
 //!
 //! ## The exact-pin rule (read before editing [`PINS`])
 //!
@@ -82,11 +83,11 @@ const PINS: &[Pin] = &[
         map_direction: 2,
     },
     Pin {
-        // The rout fires and MARK's draw-2894 retarget now matches (the d6 over
-        // every live monster); the residual is the missing into-reach d20 at
-        // 2895 — the cross-round guard layer (doc §31).
+        // ★ CLOSED 3521/3521 (doc §32): the rout capture replays operand-exact
+        // end to end — FleeCheck ladder, behind-AC, target restore (§31 bug
+        // #14), and the cross-round guard (§32 bug #15) all landed.
         capture: "bar-rout-58c50.gbxtrace",
-        expect: Expect::Frontier(2895), // was 2894; departure-attack target restore (§31 bug #14)
+        expect: Expect::Closed, // was Frontier(2895); guarding-survives-initiative (§32 bug #15)
         map_direction: 2,
     },
 ];
