@@ -1200,3 +1200,16 @@ landed and binary-cited; the four zero-rout captures stay CLOSED (combat+terrain
 pre-existing and unrelated); bar-rout **routs to the correct corner** but does not close —
 the residual at draw ~2707 is a downstream targeting/flee-movement-order layer, the next
 onion peel. Gates green; `.rsav` goldens and the other tripwires untouched; D10 preserved.
+
+**Addendum — the frontier-pin regression guard.** A committed manifest +
+test (`crates/gbx-oracle/tests/h4_frontier_guard.rs`) pins every local capture's
+exact H4 outcome: `combat4`/`combat3+terrain4`/`combat2+terrain4` **closed**
+(operand-exact, zero trips), `combat+terrain4` **frontier @368**, `bar-rout-58c50`
+**frontier @2707** (md=2 applied in-process). The **exact-pin rule**: a frontier
+moves ONLY via a deliberate manifest edit made in the *same commit* as the engine
+fix that earned it — both a regression (a closed capture diverging, a frontier
+shrinking) and an unexplained forward drift (a frontier growing without a manifest
+edit) fail the test loudly. It reuses the replay machinery and equality surface of
+`h4_replay` (a compact copy), and is local-tier: it loud-skips per-capture when a
+file is absent, so plain CI stays green. This is the tripwire that keeps
+"operand-exact" honest as the next onion layers land.
