@@ -1247,3 +1247,42 @@ commit, per the guard's rule.
 ours draws `roll_dice(1)` (near-list of 1) where the capture draws `d6` (list of 6 = every
 live monster). A find_target reach/near-list-size divergence from (35,16) — likely the reach
 flood vs the binary's, or an upstream draw-free position difference. The next peel.
+
+## 31. Bug #14 — the departure opportunity attack must RESTORE the attacker's target (`sub_3E954` @ovr014:0C83/0CB3) (2026-07-20, Fable)
+
+§30's draw-2894 residual (`d1` vs `d6`) was not a reach or near-list-size bug at all — the
+near-list machinery came through the RE clean end-to-end. `sub_733F1` (canReachTargetCalc)
+was re-read from the listing: on success it writes back **raw steps** through the by-ref
+range (`:0532-053A`), the budget test `steps > range·2+1` lives inside the walk loop
+(`:04DD-04E5`), and `sub_738D8` stores min-steps at the stride-3 record's `+1` (`:0AD7-0ADA`,
+`:0B1C-0B2C`) — §20's reading reconfirmed, ours == coab == binary.
+
+**The localization** (the capture's `turn_snapshot`s carry per-combatant `actions.target` —
+the first draw-free state channel this peel has had): capture-MARK holds target **10** from
+draw 1798 all the way to 2894; 10 is dead by then, so his turn-start `find_target`
+invalidates and draws the d6 over all six live monsters. Ours held **7** (alive) instead —
+held target, no retarget, walk, adjacent re-pick `d1`. The 1-vs-6 was pure downstream
+fallout of a *held-target* divergence.
+
+**Where ours drifted:** draw 2613 — MARK's **departure opportunity attack** on the fleeing
+[7] (d20 @2613 hit + d2 @2614, [7] hp 7→5, snapshot-confirmed). Our `attack_target` applies
+the §19 write-back (`actions.target = target`) unconditionally, so the opportunity attack
+permanently retargeted MARK onto the fleer. The capture's snapshots show the truth:
+t10 → **t7** (transiently, at the attack) → **t10** (immediately after).
+
+**The binary** (`sub_3E954`, the departure scan): `ovr014:0C83-0C8E` loads
+`actions.target` (offset+seg) into locals **before** the `AttackTarget` (`sub_3F9DB`) call
+at `:0CAC`, and `:0CB3-0CC5` writes it **back** after. coab renders it faithfully
+(`backupTarget`, ovr014.cs:405/410) — this was a transliteration miss on our side, not a
+coab≠binary bug. The §19 write-back is real but *transient* on this path.
+
+**Fix:** save/restore `fighters[att].target` around the departure `attack_target` call in
+`move_step_away_attack`. Draw-neutral at the attack itself; only the held target carried
+forward changes.
+
+**Result: bar-rout frontier 2894 → 2895.** MARK's retarget draws the capture's exact d6,
+picks [13] with the same roll, and walks the capture's exact path (27,14)→(35,16). The
+residual at 2895: the capture has [11] — parked at (36,16) since its rout turn — swing an
+**into-reach d20** at MARK as he arrives; ours never fires it. [11] ends its rout turn
+`guarding=true` in ours too, but the flag does not survive to MARK's next-round arrival:
+the cross-round guard layer, the next peel (§32).
