@@ -474,8 +474,9 @@ pub enum ActionEvent {
     /// matches. **Diagnostic only**: never part of the `.gbxtrace` vocabulary
     /// (the oracle collector drops it); the replay harnesses report it so a
     /// capture that wanders into a stub names itself instead of silently
-    /// diverging. `stub` is a short stable name: `"downed-pc"`,
-    /// `"memorized-spells"`, `"0-hd-sweep"`, `"surrender-int5"`.
+    /// diverging. `stub` is a short stable name: `"memorized-spells"`,
+    /// `"0-hd-sweep"`, `"surrender-int5"` (the `"downed-pc"` wire was retired
+    /// once the downed-PC path was built, §26/§27).
     StubTripped {
         combatant_id: usize,
         stub: &'static str,
@@ -796,7 +797,9 @@ impl CombatState {
     /// `calc_enemy_health_percentage` (recomputed at `begin_round` instead, both
     /// draw-free) are gated on systems not in this slice.
     fn battle_round_checks(&mut self) -> CombatStep {
-        self.combat_round += 1; // ovr009.cs:366 — the byte_1D8B7 increment
+        // ovr009.cs:366 — the byte_1D8B7 increment.
+        self.combat_round += 1;
+
         // The bleed tick (§26.4, `ovr009:0A05-0A2B`, coab ovr009.cs:369-382;
         // binary-verified against coab_new.lst this session): per round end, each
         // TeamList member that is `dying` bleeds one more, and dies once
@@ -1459,6 +1462,16 @@ pub fn size_footprint(size: u8, pos: GridPos) -> Vec<GridPos> {
 pub const PROVISIONAL_FLOOR: u8 = 0x17;
 /// A rock/obstacle tile (`move_cost 0xFF` → [`TilePassability::Wall`]).
 pub const PROVISIONAL_ROCK: u8 = 1;
+
+/// `gbl.Tile_DownPlayer` (`Gbl.cs:680`) — the ground tile `CombatantKilled`
+/// stamps at a downed party member's cell (§26.5). `BACKGROUND_MOVE_COST[0x1F]`,
+/// `TILE_HEIGHT[0x1F]`, `TILE_WALL_HEIGHT[0x1F]` all equal a cost-1 floor's
+/// (`1/1/0`), so the swap is movement- and reach-neutral on a cost-1 floor (the
+/// bar) — fidelity, not a divergence driver.
+pub const TILE_DOWN_PLAYER: u8 = 0x1F;
+/// `gbl.Tile_StinkingCloud` (`Gbl.cs:679`) — a cell already carrying a stinking
+/// cloud is **not** overwritten by the downed-player swap (`ovr033.cs:587`).
+pub const TILE_STINKING_CLOUD: u8 = 0x1E;
 
 /// **PROVISIONAL, draw-free combat terrain from an area's GEO wall topology**
 /// (M4 combat #6, the ECL `COMBAT`-opcode wiring's map hook).
@@ -2846,23 +2859,23 @@ impl CombatState {
         t.in_combat = false;
         t.delay = 0;
         let downed_party = t.team == Team::Party;
-        let id = t.id;
-        // `CombatantKilled` (`sub_74E6F`, `ovr033:534`→coab) ends with
-        // `CombatMap[idx].size = 0` + `sub_743E7` — the occupancy repaint happens
-        // AT removal, so a corpse's cells free up immediately (a later mover's
-        // `CanMove` must see them empty), not at the next position change.
-        self.rebuild_occupancy();
-        // Tripwire: a PARTY member dropping enters original mechanics not yet
-        // consumed at this commit — the bandage turn, the bleed tick, and the
-        // `Tile_DownPlayer` ground swap (following commits). Retired once those
-        // land. Both length-diverging bar-brawl captures (`combat`, `combat2`)
-        // reached exactly this.
-        if downed_party {
-            self.emit(ActionEvent::StubTripped {
-                combatant_id: id,
-                stub: "downed-pc",
-            });
+        let pos = t.pos;
+        // `CombatantKilled` (`sub_74E6F`, `ovr033:534`→coab): the removal path the
+        // damage caller reaches whenever `in_combat == false` (`ovr014.cs:214`),
+        // so it fires for dying/unconscious/dead alike. §26.5 — for a downed
+        // party member (`nonTeamMember == false`, modeled as `team == Party`),
+        // stamp `Tile_DownPlayer` at its cell unless a `Tile_StinkingCloud`
+        // already occupies it (`ovr033.cs:579-590`). Movement-/reach-neutral on a
+        // cost-1 floor (the tile constants match a floor's) — fidelity, and it
+        // must precede the occupancy repaint, matching coab's order.
+        if downed_party && self.map.ground_tile(pos) != TILE_STINKING_CLOUD {
+            self.map.set_tile(pos, TILE_DOWN_PLAYER);
         }
+        // `CombatantKilled` then zeroes `CombatMap[idx].size` + calls `sub_743E7`
+        // (`setup_mapToPlayerIndex_and_playerScreen`): the occupancy repaint
+        // happens AT removal, so a corpse's cells free up immediately (a later
+        // mover's `CanMove` must see them empty), not at the next position change.
+        self.rebuild_occupancy();
     }
 
     /// `AttackTarget → AttackTarget01` (`ovr014.cs:904/724`), melee core: for
@@ -6091,10 +6104,11 @@ mod tests {
 
     /// Every deliberately-stubbed original mechanic must EMIT when reached, so
     /// a replay that wanders into unmodeled territory produces a named finding
-    /// instead of a silent divergence. Four wires: `downed-pc` (apply_damage on
-    /// a party member), `0-hd-sweep` (try_sweep_attack vs hit_dice 0),
-    /// `surrender-int5` (flee_check's omitted Int branch), `memorized-spells`
-    /// (sub_3560B's unmodeled selection loop).
+    /// instead of a silent divergence. Three wires: `0-hd-sweep`
+    /// (try_sweep_attack vs hit_dice 0), `surrender-int5` (flee_check's omitted
+    /// Int branch), `memorized-spells` (sub_3560B's unmodeled selection loop).
+    /// The `downed-pc` wire was retired once the downed-PC path was built
+    /// (§26/§27); this test also pins that downing a party member no longer trips.
     #[test]
     fn stub_tripwires_fire_when_unmodeled_mechanics_are_reached() {
         #[derive(Clone, Default)]
@@ -6135,9 +6149,15 @@ mod tests {
         let trips = Trips::default();
         world.attach_action_sink(Box::new(trips.clone()));
 
-        // 1. downed-pc: lethal damage to the party member.
+        // 1. downing a party member: no longer trips (the downed-pc wire was
+        // retired, §26/§27). Overkill 99 ≫ 9 → dead, out of combat, tile stamped.
         world.apply_damage(0, 99);
         assert!(!world.fighters[0].in_combat);
+        assert_eq!(world.fighters[0].health_status, HealthStatus::Dead);
+        assert_eq!(
+            world.map.ground_tile(GridPos::new(25, 12)),
+            TILE_DOWN_PLAYER
+        );
 
         // 2. 0-hd-sweep: a 0-HD target reaches the stubbed sweep guard.
         world.fighters[2].hit_dice = 0;
@@ -6159,7 +6179,10 @@ mod tests {
         world.melee_ai_turn(&mut rng, 1);
 
         let got: Vec<&'static str> = trips.0.borrow().iter().map(|(_, s)| *s).collect();
-        assert!(got.contains(&"downed-pc"), "trips: {got:?}");
+        assert!(
+            !got.contains(&"downed-pc"),
+            "the downed-pc wire was retired (§26/§27): {got:?}"
+        );
         assert!(got.contains(&"0-hd-sweep"), "trips: {got:?}");
         assert!(got.contains(&"surrender-int5"), "trips: {got:?}");
         assert!(got.contains(&"memorized-spells"), "trips: {got:?}");
