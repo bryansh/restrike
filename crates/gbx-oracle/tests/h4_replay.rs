@@ -203,6 +203,12 @@ fn h4_melee_replays_the_bar_brawl_capture_draw_for_draw() {
         None => CombatMap::uniform(FLOOR),
     };
     let mut state = combat_state_from_records(&entries, map, &flavor).expect("records decode");
+    // `area2.field_58C` — the faithful FleeCheck_001 gate-2 morale threshold
+    // (doc §28). Captures that carry it (the rout capture pokes 50) use it;
+    // legacy captures without the field default to 99 (the measured bar value,
+    // under which the natural rout is mathematically impossible → the four
+    // closed captures stay closed).
+    state.area_field_58c = entry.area2_field_58c.map(|v| v as i32).unwrap_or(99);
 
     // Seed gbx-prng with the snapshot's rng_state and tap every draw.
     let tap = DrawTap::default();
@@ -273,12 +279,22 @@ fn h4_melee_replays_the_bar_brawl_capture_draw_for_draw() {
         }
     }
 
-    // Draw-for-draw comparison over the equality surface (before, after).
+    // Draw-for-draw comparison over the equality surface. `(before, after)`
+    // alone is only draw-COUNT equality for a pure LCG (the §14/§28 lesson: the
+    // chain advances identically whatever die is asked for), so the surface is
+    // ALSO the **operand**: when both sides carry one (`n` vs `ss_sp_words[3]`),
+    // a mismatch is a divergence — the same stricter metric the localizer uses.
     let max = ours.len().max(capture.len());
     for i in 0..max {
         match (ours.get(i), capture.get(i)) {
             (Some(o), Some(c)) => {
-                if o.before == c.before && o.after == c.after {
+                let operand_ok = match (o.n, c.operand) {
+                    (Some(a), Some(b)) => a == b,
+                    // One side lacks a recorded operand → fall back to
+                    // (before, after) only for this draw.
+                    _ => true,
+                };
+                if o.before == c.before && o.after == c.after && operand_ok {
                     continue;
                 }
                 // First divergence — print it in full and stop.
@@ -308,8 +324,10 @@ fn h4_melee_replays_the_bar_brawl_capture_draw_for_draw() {
                 );
                 let which = if o.before != c.before {
                     "before"
-                } else {
+                } else if o.after != c.after {
                     "after"
+                } else {
+                    "operand"
                 };
                 eprintln!(
                     "  field `{which}` differs; inferred mechanic (ours): {} | (capture): {}",

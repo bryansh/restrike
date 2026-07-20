@@ -75,6 +75,9 @@ type TurnRow = (u8, u8, u8, u8, u8);
 struct Capture {
     rng_state: u32,
     terrain: Vec<u8>,
+    /// `area2.field_58C` (the faithful FleeCheck_001 gate-2 threshold, doc §28);
+    /// legacy captures without the field default to 99 (the measured bar value).
+    field_58c: i32,
     entry: Vec<CapEntry>,
     /// post-`combat_entry` `rng` events.
     draws: Vec<Draw>,
@@ -87,6 +90,7 @@ struct Capture {
 fn parse_capture(text: &str) -> Capture {
     let mut rng_state = 0u32;
     let mut terrain = Vec::new();
+    let mut field_58c: i32 = 99; // §28 default for pre-field_58C captures
     let mut entry = Vec::new();
     let mut draws = Vec::new();
     let mut rounds = Vec::new();
@@ -108,6 +112,9 @@ fn parse_capture(text: &str) -> Capture {
                 rng_state = v["rng_state"].as_u64().unwrap() as u32;
                 if let Some(t) = v.get("terrain").and_then(|t| t.as_str()) {
                     terrain = hex_decode(t);
+                }
+                if let Some(f) = v.get("area2_field_58c").and_then(|f| f.as_u64()) {
+                    field_58c = f as i32;
                 }
                 for c in v["combatants"].as_array().unwrap() {
                     entry.push(CapEntry {
@@ -172,6 +179,7 @@ fn parse_capture(text: &str) -> Capture {
     Capture {
         rng_state,
         terrain,
+        field_58c,
         entry,
         draws,
         rounds,
@@ -259,6 +267,8 @@ fn run(cap: &Capture, map: CombatMap) -> RunResult {
     let rules = RuleSet::load();
     let flavor = Adnd1::new(&rules);
     let mut state = combat_state_from_records(&entries, map, &flavor).expect("records decode");
+    // The faithful FleeCheck_001 gate-2 morale threshold (doc §28).
+    state.area_field_58c = cap.field_58c;
 
     let tap = DrawTap::default();
     let draws = tap.draws.clone();
@@ -450,6 +460,7 @@ fn h4_first_turn_trace() {
         &flavor,
     )
     .expect("decode");
+    state.area_field_58c = cap.field_58c;
     state.attach_action_sink(Box::new(ActTl(timeline.clone())));
     let mut rng = EngineRng::new(cap.rng_state);
     rng.attach_sink(Box::new(DrawTl(timeline.clone())));
@@ -628,6 +639,7 @@ fn h4_round0_moves() {
         &flavor,
     )
     .expect("decode");
+    state.area_field_58c = cap.field_58c;
     state.attach_action_sink(Box::new(S(log.clone())));
     let mut rng = EngineRng::new(cap.rng_state);
     rng.attach_sink(Box::new(DrawTap::default()));
@@ -710,6 +722,7 @@ fn h4_locate_draw() {
         &flavor,
     )
     .expect("decode");
+    state.area_field_58c = cap.field_58c;
     state.attach_action_sink(Box::new(Rec(count.clone(), log.clone())));
     let mut rng = EngineRng::new(cap.rng_state);
     rng.attach_sink(Box::new(Ctr(count.clone())));

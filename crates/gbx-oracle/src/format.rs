@@ -326,6 +326,15 @@ pub struct CombatEntryEvent {
     /// it (and the canonical writer then omits the field).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub terrain: Option<String>,
+    /// `area2.field_58C` — the morale threshold the faithful `FleeCheck_001`
+    /// gate 2 reads (`sub_3637F` @`ovr010:1473`, doc §28). Captured live by the
+    /// staging hook (which can also poke it via `RESTRIKE_58C`). Optional and
+    /// additive: pre-`field_58C` captures omit it (and the canonical writer then
+    /// omits the field, keeping existing goldens byte-identical); the replay
+    /// harnesses default a missing value to **99** — the measured bar value (§28)
+    /// under which the natural rout is mathematically impossible.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub area2_field_58c: Option<u16>,
     /// The roster in `TeamList` (== initiative draw) order.
     pub combatants: Vec<CombatEntryCombatant>,
 }
@@ -801,6 +810,7 @@ mod tests {
         let event = TraceEvent::CombatEntry(CombatEntryEvent {
             rng_state: 0xdead_beef,
             terrain: None,
+            area2_field_58c: None,
             combatants: vec![
                 CombatEntryCombatant {
                     team: 0,
@@ -818,8 +828,14 @@ mod tests {
         });
 
         // Tag-first, `combat_entry`, records as 2·0x1A6 lowercase-hex chars.
+        // `terrain` and `area2_field_58c` are both absent → omitted (existing
+        // goldens stay byte-identical).
         let line = serde_json::to_string(&event).unwrap();
         assert!(line.starts_with(r#"{"e":"combat_entry","rng_state":3735928559,"combatants":[{"team":0,"x":26,"y":12,"record":"00010203"#));
+        assert!(
+            !line.contains("area2_field_58c"),
+            "the field is omitted when absent"
+        );
         // The two records serialize to exactly 2·0x1A6 hex chars each.
         assert_eq!(line.matches("\"record\":\"").count(), 2);
 
@@ -844,6 +860,26 @@ mod tests {
 
         // Canonical round-trip is a fixed point.
         assert_eq!(Trace::parse(&trace.to_canonical_string()).unwrap(), trace);
+
+        // When present, `area2_field_58c` is emitted (between `terrain` and
+        // `combatants`) and round-trips.
+        let with_58c = TraceEvent::CombatEntry(CombatEntryEvent {
+            rng_state: 1,
+            terrain: None,
+            area2_field_58c: Some(50),
+            combatants: vec![CombatEntryCombatant {
+                team: 0,
+                x: 1,
+                y: 2,
+                record: rec(0),
+            }],
+        });
+        let line = serde_json::to_string(&with_58c).unwrap();
+        assert!(line.contains(r#""area2_field_58c":50,"combatants":"#));
+        assert_eq!(
+            serde_json::from_str::<TraceEvent>(&line).unwrap(),
+            with_58c
+        );
     }
 
     /// A `combat_entry` record of the wrong hex length is a loud, located error.
