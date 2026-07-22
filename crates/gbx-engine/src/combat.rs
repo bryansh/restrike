@@ -1036,6 +1036,15 @@ impl CombatState {
             // combatant acts; otherwise clear_actions (draw-free) drops it so it
             // isn't re-picked (`run_combat_observed`'s old `if in_combat && delay>0`).
             TurnDriver::MeleeAi => {
+                // Turn head (`sub_33281` @`ovr009:028F-02A9`, coab ovr009.cs:105):
+                // the acting combatant's OWN `AttacksReceived`, `directionChanges`
+                // (added with its maintainer, next commit), and `guarding` reset
+                // to 0 — UNCONDITIONALLY, before the `delay > 0` turn body. A
+                // parked guard therefore clears at ITS OWN next turn (§32 bug
+                // #15: guards survive initiative, clear here), and the swarm
+                // `AttacksReceived` count restarts each turn.
+                self.fighters[idx].attacks_received = 0;
+                self.fighters[idx].guarding = false;
                 if self.fighters[idx].in_combat && self.fighters[idx].delay > 0 {
                     // Site 2 — the turn-head camera (`sub_33281` @`ovr009:02FA-0318`):
                     // the camera follows the acting combatant — `focus = (team ==
@@ -6727,6 +6736,30 @@ mod tests {
             })
             .collect();
         CombatState::new(CombatMap::uniform(FLOOR), fighters)
+    }
+
+    #[test]
+    fn turn_head_resets_the_actors_own_swarm_and_guard_state() {
+        // sub_33281 @028F-02A9: the acting combatant's own AttacksReceived and
+        // guarding zero at its turn head, before the body.
+        let mut s = camera_state(&[
+            (Team::Party, GridPos::new(20, 12)),
+            (Team::Monster, GridPos::new(21, 12)), // adjacent → attackable
+        ]);
+        s.combat_setup();
+        s.combat_setup_done = true;
+        s.fighters[0].attacks_received = 3; // stale swarm count
+        s.fighters[0].guarding = true; // a parked guard
+        s.fighters[0].delay = 5;
+        s.fighters[0].attack1_left = 1;
+        s.fighters[0].target = Some(1);
+        let mut rng = EngineRng::new(0x1234_5678);
+        s.take_turn(&mut rng, 0);
+        // Cleared at the head; the actor attacked (RecalcAttacksReceived bumps
+        // the TARGET, not the actor) so its own count stays 0 and it did not
+        // re-guard.
+        assert_eq!(s.fighters[0].attacks_received, 0);
+        assert!(!s.fighters[0].guarding);
     }
 
     #[test]
