@@ -937,7 +937,15 @@ impl CombatState {
         // `AttacksReceived`/`directionChanges` 0 (already the constructor state).
         // md = 2 (every capture) ⇒ HalfDirToIso[1] = 2 → party faces 2, enemies
         // face 6. Uses the harness-set `map_direction`.
-        let party_dir = HALF_DIR_TO_ISO[(self.map_direction as usize) / 2] as u8;
+        //
+        // `mapDirection` is half-encoded {0 N, 2 E, 4 S, 6 W}, so `/2` is always
+        // 0..3 for a well-formed heading and the binary's `unk_1660C[md/2]` is an
+        // unbounded table read. The `% 4` is a guard, not a semantic: it keeps a
+        // malformed capture field or a mistyped `RESTRIKE_MAP_DIR` (the §29/§30
+        // heading-sweep knob, which accepts any `u8`) from indexing out of the
+        // 4-entry table and panicking. Same idiom as the other three
+        // `HALF_DIR_TO_ISO` sites in this file.
+        let party_dir = HALF_DIR_TO_ISO[(self.map_direction as usize / 2) % 4] as u8;
         for f in &mut self.fighters {
             f.direction = if f.team == Team::Monster {
                 (party_dir + 4) % 8
@@ -7213,6 +7221,31 @@ mod tests {
         s.combat_setup();
         assert_eq!(s.fighters[0].direction, 7);
         assert_eq!(s.fighters[1].direction, 3);
+    }
+
+    #[test]
+    fn entry_init_facing_survives_an_out_of_range_map_direction() {
+        // `HalfDirToIso` has 4 entries and `map_direction` is a `pub u8` fed by a
+        // capture field or `RESTRIKE_MAP_DIR` (which parses any u8), so the
+        // `md / 2` index must be masked — an out-of-range heading must not panic.
+        for md in [8u8, 9, 200, 255] {
+            let mut s = camera_state(&[
+                (Team::Party, GridPos::new(26, 12)),
+                (Team::Monster, GridPos::new(34, 13)),
+            ]);
+            s.map_direction = md;
+            s.combat_setup(); // must not panic
+            let party = HALF_DIR_TO_ISO[(md as usize / 2) % 4] as u8;
+            assert_eq!(s.fighters[0].direction, party, "md={md}");
+            assert_eq!(s.fighters[1].direction, (party + 4) % 8, "md={md}");
+        }
+        // The four well-formed headings are unaffected by the mask.
+        for (md, want) in [(0u8, 7u8), (2, 2), (4, 3), (6, 6)] {
+            let mut s = camera_state(&[(Team::Party, GridPos::new(26, 12))]);
+            s.map_direction = md;
+            s.combat_setup();
+            assert_eq!(s.fighters[0].direction, want, "md={md}");
+        }
     }
 
     #[test]
