@@ -1328,3 +1328,55 @@ The full flee subsystem — FleeCheck ladder (§29), behind-AC departure attacks
 departure-target restore (§31), cross-round guards (§32) — is now capture-proven end to
 end. The M5 peel loop's next targets: the armed/ranged capture, then the caster capture
 (poke-pattern staging as needed), then the affects substrate ahead of spells.
+
+## 33. The memorized-spells wire, binary-verified — the "@0x71, not @0x1E" misread, and the real gates (2026-07-21, Fable)
+
+The staging session's save diff (one memorized Magic Missile → a single byte `0x00→0x0F`
+at record `0x71`) was read as "the memorized list is @0x71, NOT @0x1E — the tripwire reads
+the wrong offset." The binary says otherwise. `sub_3560B`'s collection loop
+(`ovr010:062A-065D`) reads `record[0x1E + i]` for `i = 1..=0x53`: **the memorized list IS
+the 84-byte array @0x1E** — it just **packs from the back**. coab's `SpellList.Save`
+(`Classes/SpellList.cs`) fills from index 83 down, so the FIRST memorized spell lands at
+`0x1E + 83 = 0x71` = `spell_list[83]`. Slot 0 (@0x1E itself) is never read — the loop is
+1-based — so the faithful `spells_count` window is `spell_list[1..]` (bytes `0x1F..0x71`).
+Capture records confirm: caster-bar PHILIPPE carries `{0x71: 0x0F}`; bar-fists-2 PHILIPPE
+carries `{0x70: 0x0F, 0x71: 0x0F}` — the "wrong save, no spells" capture actually has TWO
+memorized Magic Missiles.
+
+**The real defect was the wire's missing gates, not the offset.** The binary enters the
+selection loop — the DRAWS (3× `roll_dice(spells_count,1)` per priority pass under the
+unconditional d7 bound) — only when ALL of (`ovr010:0679-06A7`):
+
+1. `spells_count > 0` (collected under `actions.can_cast`, reset true each round by
+   `CalculateInitiative`);
+2. `control_morale >= 0x80` (NPC-controlled) **or** `AutoPCsCastMagic` (`byte_1D904`,
+   `ovr010:068D`; '2' toggles it, `BattleSetup` resets it false @ovr011.cs:1186);
+3. a live opponent exists (`friends_count`/`foe_count`, ovr010.cs:255).
+
+Capture-proof: **bar-fists-2 closes 3811/3811 with two memorized slots and zero spell
+draws** — magic was never toggled on, so a PC caster's slots are inert. The ungated wire
+fired 8× on that replay (a wolf-cry that would have blocked pinning it Closed); the gated
+wire is silent there and fires on caster-bar exactly where the unmodeled draws live.
+
+**Landed:** the gated wire + the `[1..]` slot window; `CombatState.auto_pcs_cast_magic`
+(input-only, default false = the BattleSetup reset); `RESTRIKE_AUTO_CAST=1` knob in
+`h4_replay`/`h4_turndiff`. Matrix: bar-fists-2 **CLOSED 3811/3811, zero trips**;
+caster-bar knob-off silent, diverges @453 unchanged; knob-on trips at PHILIPPE's turns and
+still diverges @453 (the flag feeds only the wire today); the four older captures carry
+empty spell windows and are untouched.
+
+**The toggle-window finding (matters for the future caster peel):** with the knob armed,
+the wire trips at PHILIPPE's ROUND-1 turn (draw ~83) — but the capture's first selection
+draws are @453, his ROUND-2 turn. So Bryan's '2' press landed BETWEEN PHILIPPE's round-1
+and round-2 turns (the staging note "before his first turn" is corrected by the capture
+itself). "On from entry" is draw-equivalent for the WIRE, but once the selection draws are
+modeled, a from-entry flag would draw 3× d1 at his round-1 turn and diverge @~83 — the
+caster slice must model the flip window (arm the flag after his round-1 turn), or the
+staging hook must emit toggle events.
+
+**Cited, not modeled (coab≠binary nuance):** the binary collects ANY non-zero slot byte
+(`cmp ..,0`/`jbe` ≡ `jz` @`ovr010:0637-063C`) — including high-bit "learning" entries
+(`id | 0x80`, memorization begun but rest not completed) — and would pass the raw byte to
+`ShouldCastSpellX`; coab's `LearntList()` filters `Learning` entries and masks `0x7F`
+(`SpellList.AddLearnt`). A caster who fights mid-memorization diverges between the two.
+No capture exercises it; the wire's any-non-zero count matches the binary.

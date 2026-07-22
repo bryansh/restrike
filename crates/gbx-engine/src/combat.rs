@@ -623,6 +623,13 @@ pub struct CombatState {
     /// `gbl.mapDirection` — the party's world facing, read only by the flee-move
     /// direction (`moralFailureEscape:401`).
     pub map_direction: u8,
+    /// `gbl.AutoPCsCastMagic` (`byte_1D904`) — the mid-combat "Magic On" toggle
+    /// ('2' key, `ovr010.cs:718-730` / `ovr009.cs:255`). `BattleSetup` resets it
+    /// **false** (`ovr011.cs:1186`), so `false` is the faithful entry state; a
+    /// PARTY caster's `sub_3560B` spell-selection draws are gated on it
+    /// (`ovr010:068D`) — an NPC's (`control_morale >= 0x80`) are not. Input-only
+    /// (the toggle key is UI, not modeled); replay harnesses set it per capture.
+    pub auto_pcs_cast_magic: bool,
     /// The optional action-trace observer (D-OR3). `None` in normal play.
     sink: Option<Box<dyn ActionSink>>,
 }
@@ -649,6 +656,7 @@ impl CombatState {
             monster_morale: 0,
             area_field_58c: 0,
             map_direction: 0,
+            auto_pcs_cast_magic: false,
             sink: None,
         };
         s.rebuild_occupancy();
@@ -676,6 +684,7 @@ impl CombatState {
             monster_morale: 0,
             area_field_58c: 0,
             map_direction: 0,
+            auto_pcs_cast_magic: false,
             sink: None,
         }
     }
@@ -3628,10 +3637,26 @@ impl CombatState {
         // 6. sub_3560B (ovr010.cs:74) — the UNCONDITIONAL memorized-spell d7 (:248).
         let _spell_priority = roll_dice(rng, 7, 1);
         // (spells_count==0 → the inner roll_dice(spells_count,1) loop never runs.)
-        // Tripwire: a combatant with memorized spells means the binary's inner
-        // selection loop WOULD draw (roll_dice(spells_count,1) + casting) — the
-        // whole spell subsystem is M5.
-        if self.fighters[actor].memorized_spells > 0 {
+        // Tripwire: the binary's inner selection loop draws (3×
+        // `roll_dice(spells_count,1)` per priority pass + the cast) only when ALL
+        // its gates pass (`ovr010:0679-06A7`): memorized slots exist, the caster
+        // is NPC-controlled (`control_morale >= 0x80`) **or** `AutoPCsCastMagic`
+        // is on, and an enemy is live (`friends_count`/`foe_count`,
+        // ovr010.cs:255). A PC with magic OFF draws NOTHING here —
+        // capture-proven: bar-fists-2 closes 3811/3811 with two memorized slots
+        // and zero spell draws (doc §33) — so the wire mirrors the binary's
+        // draw condition, not mere possession.
+        let live_opponent = {
+            let (party, monsters) = self.live_counts();
+            match self.fighters[actor].team {
+                Team::Party => monsters > 0,
+                Team::Monster => party > 0,
+            }
+        };
+        if self.fighters[actor].memorized_spells > 0
+            && (self.fighters[actor].npc || self.auto_pcs_cast_magic)
+            && live_opponent
+        {
             self.emit(ActionEvent::StubTripped {
                 combatant_id: actor,
                 stub: "memorized-spells",
@@ -4113,9 +4138,15 @@ fn combatant_from_record(
         Some(p) => p.iter().all(|&b| b == 0),
         None => true, // full 0x1A6 records always carry it; missing → treat as null
     };
-    // The `memorized-spells` tripwire input: non-zero spellList@0x1E slots ≈
-    // coab's `player.spells.Count` (sub_3560B's inner selection draws, M5).
-    c.memorized_spells = rec.spell_list.iter().filter(|&&b| b != 0).count() as u8;
+    // The `memorized-spells` tripwire input — `sub_3560B`'s spells_count. The
+    // collection loop (`ovr010:062A-065D`) reads `record[0x1E + i]` for
+    // i = 1..=0x53 (bytes 0x1F..0x71): slot 0 @0x1E is NEVER read, and the list
+    // packs from the BACK (`SpellList.Save` fills from index 83 down — the first
+    // memorized spell lands @0x71; doc §33's save-diff). ANY non-zero byte
+    // counts (`cmp ..,0`/`jbe` ≡ `jz` @`ovr010:0637-063C`), so high-bit
+    // "learning" entries collect too — coab's `LearntList()` filters them, a
+    // cited coab≠binary nuance no capture exercises.
+    c.memorized_spells = rec.spell_list[1..].iter().filter(|&&b| b != 0).count() as u8;
     // §26.1 the downed-PC ladder: the entry `health_status@0x195` (okey in a
     // fresh combat snapshot). `bleeding` starts 0; `damage_player` seeds it.
     c.health_status = decode_health_status(rec.health_status);
@@ -6343,10 +6374,35 @@ mod tests {
         world.area_field_58c = 0;
         assert!(!world.flee_check(1));
 
-        // 4. memorized-spells: a caster with memorized slots runs a turn.
+        // 4. memorized-spells: an NPC caster with memorized slots runs a turn
+        // (the `control_morale >= 0x80` arm of the sub_3560B gate).
         world.fighters[1].memorized_spells = 2;
         let mut rng = EngineRng::new(SEED);
         world.melee_ai_turn(&mut rng, 1);
+
+        // 4b. the sub_3560B PC gates (`ovr010:0682-0692`): a PARTY caster with
+        // memorized slots draws nothing while `AutoPCsCastMagic` is off
+        // (capture-proven: bar-fists-2 closes with two memorized slots and zero
+        // spell draws, doc §33) — the wire stays silent; the toggle arms it.
+        let pc_trips = |trips: &Trips| {
+            trips
+                .0
+                .borrow()
+                .iter()
+                .filter(|(id, s)| *id == 0 && *s == "memorized-spells")
+                .count()
+        };
+        // Fighter 1's turn above re-killed the negative-hp fighter 0 — restore
+        // him to a real live PC before running HIS turns.
+        world.fighters[0].in_combat = true;
+        world.fighters[0].hp_current = 30;
+        world.fighters[0].health_status = HealthStatus::Okey;
+        world.fighters[0].memorized_spells = 1;
+        world.melee_ai_turn(&mut rng, 0);
+        assert_eq!(pc_trips(&trips), 0, "PC + magic OFF must not trip");
+        world.auto_pcs_cast_magic = true;
+        world.melee_ai_turn(&mut rng, 0);
+        assert_eq!(pc_trips(&trips), 1, "PC + magic ON must trip");
 
         let got: Vec<&'static str> = trips.0.borrow().iter().map(|(_, s)| *s).collect();
         assert!(

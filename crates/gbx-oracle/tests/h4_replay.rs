@@ -221,6 +221,15 @@ fn h4_melee_replays_the_bar_brawl_capture_draw_for_draw() {
         .ok()
         .and_then(|s| s.parse::<u8>().ok())
         .unwrap_or(2);
+    // `gbl.AutoPCsCastMagic` (`byte_1D904`) — `BattleSetup` resets it false
+    // (`ovr011.cs:1186`); the '2' key toggles it mid-fight. Not in the capture
+    // snapshot (staging-hook TODO), so `RESTRIKE_AUTO_CAST=1` arms it for fights
+    // where the player did (caster-bar: pressed in round 1 BEFORE the first
+    // caster turn — "on from entry" is draw-equivalent for that capture, doc
+    // §33). Default false = the faithful entry state.
+    state.auto_pcs_cast_magic = std::env::var("RESTRIKE_AUTO_CAST")
+        .map(|v| v == "1")
+        .unwrap_or(false);
 
     // Seed gbx-prng with the snapshot's rng_state and tap every draw.
     let tap = DrawTap::default();

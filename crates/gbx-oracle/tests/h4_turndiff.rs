@@ -276,6 +276,11 @@ fn run(cap: &Capture, map: CombatMap) -> RunResult {
         .ok()
         .and_then(|s| s.parse::<u8>().ok())
         .unwrap_or(2);
+    // `AutoPCsCastMagic` knob, same contract as `h4_replay` (doc §33):
+    // `RESTRIKE_AUTO_CAST=1` arms PC casting for captures where the player did.
+    state.auto_pcs_cast_magic = std::env::var("RESTRIKE_AUTO_CAST")
+        .map(|v| v == "1")
+        .unwrap_or(false);
 
     let tap = DrawTap::default();
     let draws = tap.draws.clone();
@@ -737,6 +742,10 @@ fn h4_locate_draw() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(2);
+    // Same `AutoPCsCastMagic` knob as `run()` (doc §33).
+    state.auto_pcs_cast_magic = std::env::var("RESTRIKE_AUTO_CAST")
+        .map(|v| v == "1")
+        .unwrap_or(false);
     state.attach_action_sink(Box::new(Rec(count.clone(), log.clone())));
     let mut rng = EngineRng::new(cap.rng_state);
     rng.attach_sink(Box::new(Ctr(count.clone())));
