@@ -162,7 +162,10 @@ impl ItemDataTable {
         for i in 0..ITEM_TYPE_COUNT {
             let off = ITEMS_HEADER_SIZE + i * ITEM_ENTRY_SIZE;
             // Zero-fill entries the file does not cover (coab's zeroed buffer).
-            let slice = bytes.get(off..off + ITEM_ENTRY_SIZE).unwrap_or(&[]);
+            // coab reads the whole file into a zeroed 0x810 buffer, so a short
+            // file keeps its partial trailing bytes (zero-filled beyond EOF) —
+            // take the open-ended tail, not all-or-nothing per entry.
+            let slice = bytes.get(off..).unwrap_or(&[]);
             entries.push(ItemData::from_bytes(slice));
         }
         Ok(ItemDataTable { entries })
@@ -181,15 +184,6 @@ impl ItemDataTable {
     /// The full entry slice (`0x81` entries), for tooling / inspection.
     pub fn entries(&self) -> &[ItemData] {
         &self.entries
-    }
-}
-
-impl std::ops::Index<u8> for ItemDataTable {
-    type Output = ItemData;
-    fn index(&self, item_type: u8) -> &ItemData {
-        // Types beyond the table are never readied in practice; a debug build
-        // still bounds-checks, so index inside the fixed 0x81 window.
-        &self.entries[item_type as usize]
     }
 }
 

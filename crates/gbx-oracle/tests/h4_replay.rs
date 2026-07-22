@@ -240,13 +240,19 @@ fn h4_melee_replays_the_bar_brawl_capture_draw_for_draw() {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
+    // A ranged capture cannot replay without the ITEMS table — without this
+    // loud skip a missing game file surfaces as a baffling divergence at draw
+    // ~58 (the guard already skips the same way).
+    let item_data = common::load_item_data();
+    if common::capture_has_loadout(&capture_name) && item_data.is_none() {
+        eprintln!(
+            "SKIPPED (ITEMS absent, D10): {capture_name} carries a ranged loadout \
+             and needs the local game data (~/goldbox-data/cotab/ITEMS or GBX_ITEMS_FILE)"
+        );
+        return;
+    }
     let records: Vec<&[u8]> = entries.iter().map(|e| e.record).collect();
-    common::apply_loadouts(
-        &mut state,
-        &capture_name,
-        &records,
-        common::load_item_data(),
-    );
+    common::apply_loadouts(&mut state, &capture_name, &records, item_data);
 
     // Seed gbx-prng with the snapshot's rng_state and tap every draw.
     let tap = DrawTap::default();

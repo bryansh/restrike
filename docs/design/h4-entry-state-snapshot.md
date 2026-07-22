@@ -1511,6 +1511,10 @@ tripwire (`items-selection-secondary`) since every loadout here has ≤1 weapon 
   again → +3; LongBow: +2 beyond 7, +5 beyond 14); the swing loop @`:1743-1878`: `for
   idx = actions.attackIdx down to 1: while rec[0x19B+idx] > 0 && !targetGone: dec cell,
   bytes_1D900[idx]++, PC_CanHitTarget(target_ac) → hit: sub_3E192(idx) + affects hooks`.
+  The `bytes_1D900`/`bytes_1D2C9` counters are ZEROED in `sub_3F4EB`'s prologue
+  (`ovr014:14FE-1512`: `byte_1D2CA/1D2CB/1D901/1D902 ← 0` every call), so the swing
+  count the ammo write-back subtracts is per-`AttackTarget01`-call — a call-local
+  counter is the faithful model (review finding #10, cited).
 - `sub_3E192` (@`ovr014:0192`): **damage = `roll_dice(size@rec[0x19F+idx],
   count@rec[0x19D+idx]) + (sbyte)rec[0x1A1+idx]`, clamped ≥0** (idx 1 → the 0x19E/0x1A0/
   0x1A2 profile our decode already carries; idx 2 → 0x19F/0x1A1/0x1A3). Then the thief
@@ -1613,8 +1617,10 @@ transliterations and needs its own slice.
    switches him to fists and **changes the draw stream**. Ammo 40 (no depletion) diverges
    at 1910 (TRAVIS shoots where the capture shows him out of arrows and approaching);
    ammo 10 carries to 2019 (9 depletes a turn early → @1575; 11 never depletes in time →
-   @1910 — a sharp optimum, so 10 is the real quiver). MATHEW fires few enough (§34.1: 6)
-   that 40 holds. The loadout table pins TRAVIS at 10 with the deviation noted.
+   @1910 — a sharp optimum **under the current model**; 10 is an empirical FIT, not a
+   derived quantity, and if the facing slice moves TRAVIS's shot count by one, 10 moves
+   with it — revisit then). MATHEW fires few enough (§34.1: 6) that 40 holds. The
+   loadout table pins TRAVIS at 10 with the fit flagged at the constant.
 5. **`field_DE = 0x01` for the patrons** (capture-decoded) — so the backstab size gate
    `(field_DE & 0x7F) <= 1` passes, and the large-target dice substitution
    (`> 0x80 || (& 7) > 1`) stays off (man-sized), as §34.6 assumed.
@@ -1649,3 +1655,27 @@ update also fires on `draw_74B3F` at each icon redraw, not only the one AttackTa
 and validated step-by-step against the five closed captures (the canary) BEFORE the
 flanking/backstab land, since both read it. Until then the reverted engine holds all five
 closed captures and armed-bar at the true `Frontier(2019)`.
+
+**Review fixes (PR #6 review, 2026-07-22).** All ten findings addressed in one commit:
+`set_loadout` now snapshots `entry_dice` from the live profile (a hand-built combatant
+survives the unready→re-ready round trip; capture path unchanged — the values were
+already equal); the panicking `Index<u8>` impl on `ItemDataTable` is deleted (zero
+consumers; `get()` is the untrusted-input path); the write-only `direction_changes`
+field is dropped (it described an accumulator nothing maintained — the facing slice
+re-adds it WITH its maintainer), and `field_de`/`thief_skill_level` are marked
+**unread until the facing slice** (record-derived, kept); `weapon_range` drops the
+mis-ported i32 `0xFF` arm (the binary's byte-space sanitize is exactly `{0, −1}` in
+i32; table range 255 would legitimately give 254); the ammo write-back now also
+decrements a self-launching weapon's own count, with a new **`self-weapon-depleted`**
+tripwire naming the unmodeled depletion (primary nulls at once; ranged-melee
+clone-drop `ovr014:1BD4-1C54`); the §34.8(3) `items-selection-secondary` tripwire is
+**closed out as moot** — `Loadout` holds one weapon by construction, so the deferred
+secondary/shield branches are unreachable until a multi-weapon loadout exists (the
+wire lands with that loadout); `h4_replay` loud-skips a loadout-bearing capture when
+`ITEMS` is absent (mirroring the guard) instead of asserting bafflingly at draw ~58;
+the duplicated `(flags & 0x14) == 0x14` collapses into `candidate_ranged_melee`
+(type-level, shared by the actor predicate and the candidate scan); TRAVIS's
+`ammo_count: 10` is flagged **FITTED, not derived** here and at the constant; and the
+`bytes_1D900` per-call zeroing is now cited (`ovr014:14FE-1512`) — the call-local
+swing counter was an assumption, now a citation. Guard 8/8 after all of it; armed-bar
+exactly @2019.

@@ -309,7 +309,9 @@ pub struct Combatant {
     /// `field_DE@0xde` (raw) — icon dimensions / footprint. The large-target
     /// dice-substitution gate (`> 0x80 || (&7) > 1`, deferred) and
     /// `CanBackStabTarget`'s size gate (`(& 0x7F) <= 1`, doc §34.6) read it.
-    /// `0x01` (man-sized single cell) for synthetic combatants.
+    /// `0x01` (man-sized single cell) for synthetic combatants. UNREAD until
+    /// the facing slice (both consumers were reverted, §35) — decoded now
+    /// because it is record-derived and the next slice consumes it.
     pub field_de: u8,
     /// The attack-2 profile (`dice_count`, `dice_size`, `damage_bonus`
     /// @0x19F/0x1A1/0x1A3) — `sub_3E192`'s idx-2 damage cells (doc §34.6). All
@@ -319,16 +321,14 @@ pub struct Combatant {
     /// folds through `ThisRoundActionCount` into `attack2_left` (doc §34.3).
     /// `0` in this party (so attack-2 stays 0).
     pub base_half_moves: u8,
-    /// `SkillLevel(SkillType.Thief)` precomputed from the record (`ClassLevel[6]
-    /// + ClassLevelsOld[6] * DualClassExceedsPreviousLevel`, coab `Player.cs:492`
-    /// / `sub_6B3D1`) — the backstab-multiplier and `CanBackStabTarget` input
-    /// (doc §34.6). Constant during a fight. `0` for synthetic combatants.
+    /// `SkillLevel(SkillType.Thief)` precomputed from the record — the sum
+    /// `ClassLevel[6] + ClassLevelsOld[6] * DualClassExceedsPreviousLevel`
+    /// (coab `Player.cs:492` / `sub_6B3D1`) — the backstab-multiplier and
+    /// `CanBackStabTarget` input (doc §34.6). Constant during a fight. `0` for
+    /// synthetic combatants. UNREAD until the facing slice (backstab was
+    /// reverted, §35) — decoded now because it is record-derived and the next
+    /// slice consumes it.
     pub thief_skill_level: i32,
-    /// `action.directionChanges@0x0E` — the running facing-change accumulator
-    /// `RecalcAttacksReceived` (`sub_3F94D`) maintains; read by the flanking
-    /// heuristic (deferred) and (indirectly, via `direction`) backstab facing.
-    /// `0` at entry.
-    pub direction_changes: u8,
     /// The **base** attack-1 profile (`attack1_DiceCountBase`@0x11E /
     /// `attack1_DiceSizeBase`@0x120 / `attack1_DamageBonusBase`@0x122) — the
     /// raw dice with no STR adjustment. `CalcItemPowerRating`'s baseline
@@ -435,7 +435,6 @@ impl Combatant {
             attack2_dice: (0, 0, 0),
             base_half_moves: 0,
             thief_skill_level: 0,
-            direction_changes: 0,
             base_dice: (0, 0, 0),
         }
     }
@@ -520,7 +519,6 @@ impl Combatant {
             attack2_dice: (0, 0, 0),
             base_half_moves: 0,
             thief_skill_level: 0,
-            direction_changes: 0,
             base_dice: (0, 0, 0),
         }
     }
@@ -835,6 +833,11 @@ impl CombatState {
         f.weapon_readied = true;
         f.ammo = loadout.ammo_count;
         f.ammo_item_lost = false;
+        // Snapshot the readied attack-1 profile as the re-ready target HERE, so
+        // a hand-built combatant (whose constructors default `entry_dice` to
+        // zeros) survives an unready→re-ready round trip; for the capture path
+        // this equals the record profile `combatant_from_record` already set.
+        f.entry_dice = (f.dice_count, f.dice_size, f.damage_bonus);
     }
 
     /// Sets the initial per-round surprise mask (`area2_ptr.field_596`) — a
@@ -3234,20 +3237,30 @@ impl CombatState {
 
         // Ammo write-back (`sub_3F9DB` @`ovr014:1BB3-1BC7`, coab≠binary #16 —
         // the binary SUBTRACTS `byte_1D901`, coab assigns): `if (item.count > 0)
-        // item.count -= swings_attack1`. Only for a real ammo item (a launcher's
-        // arrows/quarrels); a null item (sling / opportunity attack) skips it.
-        if ranged_item == AttackItemRef::Ammo {
+        // item.count -= swings_attack1`. The decremented count is the FOUND
+        // item's own (@item+0x39): a launcher's arrows/quarrels, or a
+        // self-launching weapon's own count (our single `ammo` cell serves
+        // both). A null item (sling / opportunity attack) skips it.
+        if matches!(ranged_item, AttackItemRef::Ammo | AttackItemRef::SelfWeapon) {
             if self.fighters[actor].ammo > 0 {
                 self.fighters[actor].ammo -= swings_attack1;
             }
-            // Depletion (`:1BC7-`): count hits 0 → the arrows item is lost
-            // (`lose_item`; bows are not ranged-melee, so no clone-drop). A
-            // depleted bowman then finds no ammo (`GetCurrentAttackItem` false)
-            // and punches. Unexercised by armed-bar (ammo ≥ usage); cheap. The
-            // `reclac_player_values` profile recompute is cited-deferred.
+            // Depletion (`:1BC7-`): count hits 0 → the item is lost. For plain
+            // ammo (arrows/quarrels) that is a straight `lose_item` — modeled
+            // (capture-proven by TRAVIS's quiver). For a SELF-LAUNCHING weapon
+            // the lost item IS the primary (`field_151` nulls at once — ours
+            // stays readied until items_selection), and a ranged-melee one
+            // additionally clone-drops an unreadied copy (`ovr014:1BD4-1C54`) —
+            // both unmodeled: the tripwire names the territory.
             if self.fighters[actor].ammo <= 0 {
                 self.fighters[actor].ammo = 0;
                 self.fighters[actor].ammo_item_lost = true;
+                if ranged_item == AttackItemRef::SelfWeapon {
+                    self.emit(ActionEvent::StubTripped {
+                        combatant_id: actor,
+                        stub: "self-weapon-depleted",
+                    });
+                }
             }
         }
 
@@ -4011,22 +4024,30 @@ impl CombatState {
         }
     }
 
+    /// The ranged-melee FLAG test for a candidate weapon TYPE (readied or not):
+    /// its table flags carry both `flag_10 | melee` — a thrown weapon also
+    /// usable in hand (HandAxe 0x14 yes; Dart 0x1A no). The type-level half of
+    /// `offset_equals_20`, shared by [`Self::is_weapon_ranged_melee`] (the
+    /// readied-actor predicate) and `ai_items_selection` (which evaluates the
+    /// candidate before it is readied).
+    fn candidate_ranged_melee(&self, item_type: u8) -> bool {
+        const RANGED_MELEE: u8 =
+            gbx_formats::items::flags::FLAG_10 | gbx_formats::items::flags::MELEE;
+        match self.item_data.as_ref() {
+            Some(items) => (items.get(item_type).flags & RANGED_MELEE) == RANGED_MELEE,
+            None => false,
+        }
+    }
+
     /// `is_weapon_ranged_melee` (`offset_equals_20` @`ovr025:3027`, coab
-    /// `ovr025.cs:1570`): [`is_weapon_ranged`] AND the weapon's flags carry both
-    /// `flag_10 | melee` (`& 0x14 == 0x14`) — a thrown weapon also usable in hand
-    /// (HandAxe 0x14 yes; Dart 0x1A no). None of armed-bar's bows qualify.
+    /// `ovr025.cs:1570`): [`is_weapon_ranged`] AND [`Self::candidate_ranged_melee`]
+    /// on the readied primary. None of armed-bar's bows qualify.
     fn is_weapon_ranged_melee(&self, actor: usize) -> bool {
         if !self.is_weapon_ranged(actor) {
             return false;
         }
         let l = self.fighters[actor].loadout.expect("ranged ⇒ loadout");
-        let flags = self
-            .item_data
-            .as_ref()
-            .expect("ranged ⇒ items")
-            .get(l.primary_type)
-            .flags;
-        (flags & 0x14) == 0x14
+        self.candidate_ranged_melee(l.primary_type)
     }
 
     /// The readied primary weapon's [`gbx_formats::items::ItemData`], or `None`
@@ -4096,13 +4117,17 @@ impl CombatState {
 
     /// The AI turn's attack range (`ovr010.cs:562-572`, doc §34.4): `range =
     /// table[primary.type].range - 1` when a primary weapon is readied
-    /// (`field_151` non-null), else 1; sanitize `{0, 0xFF, -1} → 1`. LongBow
-    /// (22) → 21, ShortBow (16) → 15.
+    /// (`field_151` non-null), else 1; sanitize to 1. The binary sanitizes the
+    /// BYTE values `{0, 0xFF}` — table range 1 and table range 0 (whose `0 − 1`
+    /// wraps to `0xFF`) — which in i32 space are exactly `r == 0` and `r == -1`;
+    /// an i32 `r == 0xFF` arm would instead catch table range 255, which the
+    /// binary leaves at 254 (review finding #4). LongBow (22) → 21, ShortBow
+    /// (16) → 15.
     fn weapon_range(&self, actor: usize) -> i32 {
         match self.primary_item(actor) {
             Some(it) => {
                 let r = it.range as i32 - 1;
-                if r == 0 || r == 0xFF || r == -1 {
+                if r == 0 || r == -1 {
                     1
                 } else {
                     r
@@ -4242,10 +4267,10 @@ impl CombatState {
         }
         // var_1F = the bow's ammo is available.
         let ammo_avail = self.candidate_attack_found(actor, l.primary_type);
-        // ranged_melee(var_4) — a thrown weapon usable in hand.
-        let flags = self.item_data.as_ref().unwrap().get(l.primary_type).flags;
+        // ranged_melee(var_4) — a thrown weapon usable in hand (the candidate
+        // may be unreadied, so this is the type-level test, not the actor one).
         let ranged_of_bow = self.item_data.as_ref().unwrap().get(l.primary_type).range as i32 > 1;
-        let ranged_melee = ranged_of_bow && (flags & 0x14) == 0x14;
+        let ranged_melee = ranged_of_bow && self.candidate_ranged_melee(l.primary_type);
         let no_adjacent = self.build_near(actor, 1, false).is_empty();
 
         // The bow wins the primary slot iff rating dominates the base, ammo is
@@ -5225,7 +5250,8 @@ mod tests {
                 unarmed_profile: (1, 2, 6),
             },
         );
-        state.fighters[0].entry_dice = (1, 6, 0);
+        // (`set_loadout` snapshots `entry_dice` from the live profile — no
+        // hand-set needed; the re-ready below proves it.)
         assert!(state.is_weapon_ranged(0));
 
         // Adjacent enemy → unready to fists.

@@ -53,7 +53,11 @@ pub fn loadout_for(capture: &str, name: &str) -> Option<Loadout> {
         }),
         ("armed-bar.gbxtrace", "TRAVIS") => Some(Loadout {
             primary_type: 44,
-            ammo_count: 10, // the capture-pinned quiver — TRAVIS depletes and punches
+            // FITTED, not derived: 10 is the best value under the CURRENT model
+            // (9 → diverge @1575, 11 → @1910) — the only loadout entry that is
+            // neither binary- nor record-derivable. Revisit when the facing
+            // slice lands (a one-shot change in TRAVIS's stream moves it).
+            ammo_count: 10,
             unarmed_profile: (1, 2, 3),
         }),
         _ => None,
