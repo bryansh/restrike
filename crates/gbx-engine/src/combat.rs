@@ -7461,6 +7461,99 @@ mod tests {
         );
     }
 
+    /// Two combatants at the given cells with the window at `top_left`, for
+    /// exercising [`CombatState::draw_missile_camera`] directly.
+    fn missile_state(a: GridPos, t: GridPos, top_left: GridPos) -> CombatState {
+        let mut s = camera_state(&[(Team::Party, a), (Team::Monster, t)]);
+        s.map_screen_top_left = top_left;
+        s
+    }
+
+    #[test]
+    fn missile_camera_returns_early_on_a_short_path() {
+        // `ovr025.cs:910-915`: `var_B0 = var_AF − 2 < 2` (or `var_AF < 2`) →
+        // return before any scroll. Adjacent cells span 3 pixels → var_AF = 4 →
+        // var_B0 = 2, which does NOT early-return; the same cell gives var_AF = 1.
+        // Use a same-cell shot for the guaranteed early return, and assert the
+        // window is untouched even though one endpoint is off-screen.
+        let mut s = missile_state(
+            GridPos::new(30, 12),
+            GridPos::new(30, 12),
+            GridPos::new(0, 0),
+        );
+        assert!(
+            !s.on_screen_pos(GridPos::new(30, 12)),
+            "off-screen endpoint"
+        );
+        s.draw_missile_camera(0, 1);
+        assert_eq!(
+            s.map_screen_top_left,
+            GridPos::new(0, 0),
+            "a short path scrolls nothing"
+        );
+    }
+
+    #[test]
+    fn missile_camera_is_a_no_op_when_both_endpoints_are_on_screen() {
+        // `ovr025.cs:934-940`: both on-screen ⇒ `center1` = the current centre, so
+        // the force-recenter resolves to the window it already has.
+        let mut s = missile_state(
+            GridPos::new(18, 10),
+            GridPos::new(22, 14),
+            GridPos::new(17, 9),
+        );
+        assert!(s.on_screen(0) && s.on_screen(1));
+        s.draw_missile_camera(0, 1);
+        assert_eq!(s.map_screen_top_left, GridPos::new(17, 9));
+    }
+
+    #[test]
+    fn missile_camera_force_scrolls_to_the_midpoint_on_a_short_span() {
+        // `ovr025.cs:922-926/940`: an off-screen endpoint with |Δ| ≤ 6 on both
+        // axes ⇒ force-scroll to `center1 = Δ/2 + attacker`. Attacker (10,12),
+        // target (16,12) → Δ=(6,0) → centre (13,12) → top-left (10,9).
+        let mut s = missile_state(
+            GridPos::new(10, 12),
+            GridPos::new(16, 12),
+            GridPos::new(4, 9),
+        );
+        assert!(!s.on_screen(1), "the target starts off-screen");
+        s.draw_missile_camera(0, 1);
+        assert_eq!(s.map_screen_top_left, GridPos::new(10, 9), "centre (13,12)");
+        assert!(s.on_screen(0) && s.on_screen(1), "both now in the window");
+    }
+
+    #[test]
+    fn missile_camera_anchors_the_target_on_a_long_span() {
+        // `ovr025.cs:1010-1032`: an off-screen endpoint with a span > 6 ⇒ the
+        // missile leaves the screen first, so the animation force-scrolls to a
+        // target-anchored centre that brings the TARGET into the window.
+        let mut s = missile_state(
+            GridPos::new(3, 12),
+            GridPos::new(40, 12),
+            GridPos::new(0, 9),
+        );
+        assert!(!s.on_screen(1));
+        s.draw_missile_camera(0, 1);
+        assert!(
+            s.on_screen(1),
+            "a long shot ends with the target on-screen, not the midpoint"
+        );
+        // Near the map's right edge the target anchor is pushed back in-bounds by
+        // `var_CE`, and `ScreenMapCheck`'s clamp holds the centre at x ≤ 46.
+        let mut s = missile_state(
+            GridPos::new(3, 12),
+            GridPos::new(49, 12),
+            GridPos::new(0, 9),
+        );
+        s.draw_missile_camera(0, 1);
+        assert!(
+            s.map_screen_top_left.x + SCREEN_HALF < MAP_W - SCREEN_HALF,
+            "the centre stays inside ScreenMapCheck's clamp (x <= 46)"
+        );
+        assert!(s.on_screen(1), "an edge target still lands in the window");
+    }
+
     #[test]
     fn missile_path_pixel_steps_counts_stepping_path_iterations() {
         // A 2-cell horizontal shot spans 6 pixels; Step() moves x 0→6 (6 steps)
