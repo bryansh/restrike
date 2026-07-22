@@ -1,8 +1,9 @@
 //! **The frontier-pin regression guard.** A committed manifest of the exact H4
-//! replay outcome for every local capture, so the one currently-open frontier
-//! (`combat+terrain4` @368) cannot silently drift and the four closed captures
-//! (incl. the `bar-rout-58c50` rout, closed 3521/3521 — doc §32) cannot
-//! silently regress.
+//! replay outcome for every local capture, so the open frontiers
+//! (`combat+terrain4` @368, `armed-bar` @58 — the ranged slice's driver,
+//! `caster-bar` @453 — the spell subsystem's driver) cannot silently drift and
+//! the five closed captures (incl. the `bar-rout-58c50` rout 3521/3521 — doc
+//! §32 — and `bar-fists-2` 3811/3811 — doc §33) cannot silently regress.
 //!
 //! ## The exact-pin rule (read before editing [`PINS`])
 //!
@@ -46,14 +47,18 @@ enum Expect {
     Frontier(usize),
 }
 
-/// One manifest row: capture basename, its pinned outcome, and the flee heading
-/// (`map_direction`) to apply in-process. Only `bar-rout-58c50` routs, so the
-/// heading is load-bearing there (md=2, the geometry-matched value, doc §29); for
-/// the non-routing captures it is inert but set uniformly for clarity.
+/// One manifest row: capture basename, its pinned outcome, the flee heading
+/// (`map_direction`) to apply in-process, and the `AutoPCsCastMagic` entry state
+/// (`auto_cast`, doc §33). Only `bar-rout-58c50` routs, so the heading is
+/// load-bearing there (md=2, the geometry-matched value, doc §29); for the
+/// non-routing captures it is inert but set uniformly for clarity. `auto_cast`
+/// today feeds only the `memorized-spells` wire (no draws), but the manifest
+/// carries each fight's true input state so the caster peel inherits it.
 struct Pin {
     capture: &'static str,
     expect: Expect,
     map_direction: u8,
+    auto_cast: bool,
 }
 
 /// **The manifest.** Current truth (doc §29). Edit ONLY alongside the fix that
@@ -63,16 +68,19 @@ const PINS: &[Pin] = &[
         capture: "combat4.gbxtrace",
         expect: Expect::Closed,
         map_direction: 2,
+        auto_cast: false,
     },
     Pin {
         capture: "combat3+terrain4.gbxtrace",
         expect: Expect::Closed,
         map_direction: 2,
+        auto_cast: false,
     },
     Pin {
         capture: "combat2+terrain4.gbxtrace",
         expect: Expect::Closed,
         map_direction: 2,
+        auto_cast: false,
     },
     Pin {
         // Pre-existing operand divergence in the oldest capture (no board
@@ -81,6 +89,7 @@ const PINS: &[Pin] = &[
         capture: "combat+terrain4.gbxtrace",
         expect: Expect::Frontier(368),
         map_direction: 2,
+        auto_cast: false,
     },
     Pin {
         // ★ CLOSED 3521/3521 (doc §32): the rout capture replays operand-exact
@@ -89,6 +98,38 @@ const PINS: &[Pin] = &[
         capture: "bar-rout-58c50.gbxtrace",
         expect: Expect::Closed, // was Frontier(2895); guarding-survives-initiative (§32 bug #15)
         map_direction: 2,
+        auto_cast: false,
+    },
+    Pin {
+        // The armed-slice driver (doc §25 runbook item 3): MATHEW's first turn
+        // fires two long-bow shots from range (d20/d6/d20) where our range=1
+        // stub (FD-29) walks him across the bar — the divergence IS the slice.
+        capture: "armed-bar.gbxtrace",
+        expect: Expect::Frontier(58),
+        map_direction: 2,
+        auto_cast: false,
+    },
+    Pin {
+        // The caster driver: PHILIPPE's round-2 turn enters sub_3560B's
+        // selection loop (3× roll_dice(1), spells_count=1) — unmodeled until
+        // the spell subsystem lands (after the affects substrate). auto_cast
+        // documents the fight's magic-on state (§33; today it arms only the
+        // memorized-spells wire — no draws — so the frontier is knob-invariant.
+        // NOTE §33's flip-window: the toggle went on BETWEEN his round-1 and
+        // round-2 turns; a from-entry flag overdraws once selection is modeled).
+        capture: "caster-bar.gbxtrace",
+        expect: Expect::Frontier(453),
+        map_direction: 2,
+        auto_cast: true,
+    },
+    Pin {
+        // A third independent fist seed, free from the caster staging (doc
+        // §33): two memorized-but-inert slots (magic off) — also the
+        // capture-proof that the gated memorized-spells wire stays silent.
+        capture: "bar-fists-2.gbxtrace",
+        expect: Expect::Closed,
+        map_direction: 2,
+        auto_cast: false,
     },
 ];
 
@@ -166,7 +207,7 @@ fn capture_draws(text: &str) -> Vec<(u32, u32, Option<u16>)> {
 /// `None` divergence == closed (all draws equal on `(before, after, operand)` and
 /// equal length). The comparison is `h4_replay`'s: `(before, after)` always, plus
 /// the operand when both sides carry one.
-fn replay(path: &Path, map_direction: u8) -> (Option<usize>, usize) {
+fn replay(path: &Path, map_direction: u8, auto_cast: bool) -> (Option<usize>, usize) {
     let text = std::fs::read_to_string(path).expect("capture readable");
     let trace = Trace::parse(&text).expect("capture parses");
     let entry = trace
@@ -196,6 +237,7 @@ fn replay(path: &Path, map_direction: u8) -> (Option<usize>, usize) {
     let mut state = combat_state_from_records(&entries, map, &flavor).expect("records decode");
     state.area_field_58c = entry.area2_field_58c.map(|v| v as i32).unwrap_or(99);
     state.map_direction = map_direction;
+    state.auto_pcs_cast_magic = auto_cast;
 
     let tap = DrawTap::default();
     let draws = tap.draws.clone();
@@ -260,7 +302,7 @@ fn h4_frontier_pins_hold() {
             continue;
         }
         checked += 1;
-        let (frontier, trips) = replay(&path, pin.map_direction);
+        let (frontier, trips) = replay(&path, pin.map_direction, pin.auto_cast);
         match pin.expect {
             Expect::Closed => {
                 assert_eq!(
