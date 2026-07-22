@@ -30,9 +30,20 @@ pub fn load_item_data() -> Option<ItemDataTable> {
 /// The per-capture ranged loadout table (doc §34.1), keyed by capture basename
 /// and combatant name. `None` for every combatant not listed = today's melee
 /// behaviour. Only `armed-bar` carries loadouts: MATHEW a long bow (43) with a
-/// `1d2+6` fist, TRAVIS a short bow (44) with a `1d2+3` fist; ammo 40 each (any
-/// count ≥ shots-fired replays identically). MARK/LEDERA's swords act through
-/// their record profile exactly as in the closed fist captures.
+/// `1d2+6` fist, TRAVIS a short bow (44) with a `1d2+3` fist. MARK/LEDERA's
+/// swords act through their record profile exactly as in the closed fist
+/// captures.
+///
+/// **Ammo (deviation from §34.1).** §34.1 called ammo "a free parameter — any
+/// count ≥ shots-fired replays identically." The capture disproves it for
+/// TRAVIS: he empties a **10-arrow** quiver mid-fight, and the depletion path
+/// (`lose_item` → `GetCurrentAttackItem` false → `AI_items_selection` unreadies
+/// the bow, `var_1F` false) switches him to fists and CHANGES the draw stream —
+/// with ammo 40 (no depletion) the replay diverges at draw 1910 (TRAVIS shoots
+/// where the capture shows him out of arrows and approaching); ammo 10 (the
+/// empirically-pinned quiver — 9 depletes a turn early → diverge @1575, 11 never
+/// depletes in time → diverge @1910) carries it to 2019. MATHEW fires few enough
+/// (§34.1: 6) that his count is genuinely free; 40 holds.
 pub fn loadout_for(capture: &str, name: &str) -> Option<Loadout> {
     match (capture, name) {
         ("armed-bar.gbxtrace", "MATHEW") => Some(Loadout {
@@ -42,7 +53,7 @@ pub fn loadout_for(capture: &str, name: &str) -> Option<Loadout> {
         }),
         ("armed-bar.gbxtrace", "TRAVIS") => Some(Loadout {
             primary_type: 44,
-            ammo_count: 40,
+            ammo_count: 10, // the capture-pinned quiver — TRAVIS depletes and punches
             unarmed_profile: (1, 2, 3),
         }),
         _ => None,

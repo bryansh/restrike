@@ -736,11 +736,13 @@ fn h4_locate_draw() {
     let cap = parse_capture(&text);
 
     let count = Rc::new(RefCell::new(0usize));
+    let our_ops: Rc<RefCell<Vec<Option<u16>>>> = Rc::new(RefCell::new(Vec::new()));
     let log: Rc<RefCell<Vec<(usize, String)>>> = Rc::new(RefCell::new(Vec::new()));
-    struct Ctr(Rc<RefCell<usize>>);
+    struct Ctr(Rc<RefCell<usize>>, Rc<RefCell<Vec<Option<u16>>>>);
     impl RngSink for Ctr {
-        fn on_draw(&mut self, _d: RngDraw) {
+        fn on_draw(&mut self, d: RngDraw) {
             *self.0.borrow_mut() += 1;
+            self.1.borrow_mut().push(d.n);
         }
     }
     struct Rec(Rc<RefCell<usize>>, Rc<RefCell<Vec<(usize, String)>>>);
@@ -773,8 +775,11 @@ fn h4_locate_draw() {
     apply_capture_knobs(&mut state, &cap);
     state.attach_action_sink(Box::new(Rec(count.clone(), log.clone())));
     let mut rng = EngineRng::new(cap.rng_state);
-    rng.attach_sink(Box::new(Ctr(count.clone())));
+    rng.attach_sink(Box::new(Ctr(count.clone(), our_ops.clone())));
     let mut guard = 0;
+    // Snapshot our roster the moment the draw count first reaches `target` — the
+    // state just after the turn that owns the divergent draw.
+    let mut roster_at_target: Option<Vec<String>> = None;
     loop {
         guard += 1;
         if guard > 1_000_000 || *count.borrow() > target + 30 {
@@ -784,6 +789,37 @@ fn h4_locate_draw() {
             CombatStep::Ended => break,
             CombatStep::RoundEnded { battle_over, .. } if battle_over => break,
             _ => {}
+        }
+        if roster_at_target.is_none() && *count.borrow() >= target {
+            roster_at_target = Some(
+                state
+                    .roster()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| {
+                        let team = if f.team == Team::Party { 'P' } else { 'M' };
+                        format!(
+                            "[{i:2}] {team} ({:2},{:2}) ic={} hp{:>3} ready={} dice={}d{}+{} ammo={} tgt={}",
+                            f.pos.x,
+                            f.pos.y,
+                            f.in_combat as u8,
+                            f.hp_current,
+                            f.weapon_readied as u8,
+                            f.dice_count,
+                            f.dice_size,
+                            f.damage_bonus,
+                            f.ammo,
+                            f.target.map(|t| t as i64).unwrap_or(-1),
+                        )
+                    })
+                    .collect(),
+            );
+        }
+    }
+    if let Some(rows) = &roster_at_target {
+        eprintln!("=== our roster when draw count first reached {target} ===");
+        for r in rows {
+            eprintln!("  {r}");
         }
     }
     eprintln!("=== our events near draw {target} (draw#: event) ===");
@@ -799,12 +835,18 @@ fn h4_locate_draw() {
             eprintln!("  d{dc}: {e}");
         }
     }
+    let lo = target.saturating_sub(6);
+    let hi = target + 6;
     eprintln!(
-        "\ncapture operands {}-{}: {:?}",
-        target.saturating_sub(6),
-        target + 6,
-        (target.saturating_sub(6)..=target + 6)
+        "\ncapture operands {lo}-{hi}: {:?}",
+        (lo..=hi)
             .filter_map(|i| cap.draws.get(i).map(|d| d.2))
+            .collect::<Vec<_>>()
+    );
+    eprintln!(
+        "our     operands {lo}-{hi}: {:?}",
+        (lo..=hi)
+            .map(|i| our_ops.borrow().get(i).copied().flatten())
             .collect::<Vec<_>>()
     );
 }

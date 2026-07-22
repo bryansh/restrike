@@ -107,10 +107,12 @@ const PINS: &[Pin] = &[
         // fires two long-bow shots from range (d20/d6/d20) where our range=1
         // stub (FD-29) walks him across the bar — the divergence IS the slice.
         capture: "armed-bar.gbxtrace",
-        // §34.4/34.5 landed: the cornered weapon swap (step-7 items_selection
-        // unreadies the bow → 1d2+STR punch) + TryGuarding's ranged clear carry
-        // the frontier deep into the fight; the residual @1910 is a later peel.
-        expect: Expect::Frontier(1910),
+        // §34.4/34.5 landed the cornered weapon swap; the ammo-depletion finding
+        // (TRAVIS's 10-arrow quiver empties → he punches, doc §34 deviation)
+        // carries the frontier to 2019. The residual @2019 is the flanking
+        // heuristic (a swarmed target hit on its BEHIND AC via directionChanges,
+        // §30 cited-deferred) — the facing subsystem, the next peel.
+        expect: Expect::Frontier(2019),
         map_direction: 2,
         auto_cast: false,
     },
