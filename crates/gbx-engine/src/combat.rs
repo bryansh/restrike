@@ -3973,6 +3973,17 @@ impl CombatState {
             .filter(|i| !dest_ids.contains(i))
             .collect();
         for att in departed {
+            // Site 7 (departure attack) — `sub_3E954` @`ovr014:0AE0-0AE5` sets
+            // `byte_1D90F = 1` and `byte_1D910 = 1` (`focusCombatAreaOnPlayer`)
+            // at the TOP of each candidate iteration: after the loop's re-test of
+            // the MOVER's `in_combat` (@`0AD2-0ADD`), but BEFORE the candidate is
+            // even fetched (@`0AF5-0B0B`) and before every per-candidate filter
+            // (`sub_66BDB` @`0B14`, `sub_3F143` @`0B2D`, the two `find_affect`s).
+            // So a candidate that is later skipped STILL leaves focus on — which
+            // is why this is not folded into the `continue` below. The camera is
+            // then live for the step that follows (`sub_3E748`'s focus-gated
+            // scrolls) even for an off-screen monster mover.
+            self.focus = true;
             if !self.fighters[att].in_combat || !self.can_see_target(mover) {
                 continue;
             }
@@ -7322,6 +7333,35 @@ mod tests {
         s.draw_74b3f(0, 2);
         assert!(!s.on_screen(0));
         assert_eq!(s.fighters[0].direction, 2);
+    }
+
+    #[test]
+    fn departure_attack_turns_focus_on_per_candidate() {
+        // Site 7 (`sub_3E954` @`ovr014:0AE5`): each candidate iteration of the
+        // departure-attack loop sets `focusCombatAreaOnPlayer = 1`. Without it an
+        // off-screen monster mover keeps focus off and the step that follows
+        // (`sub_3E748`) skips its focus-gated scrolls.
+        let mut s = camera_state(&[
+            (Team::Party, GridPos::new(20, 12)),   // mover (idx 0)
+            (Team::Monster, GridPos::new(19, 12)), // adjacent, will be departed
+        ]);
+        s.map_screen_top_left = GridPos::new(40, 20); // both off-screen
+        s.focus = false;
+        assert!(!s.on_screen(0));
+        let mut rng = EngineRng::new(SEED);
+        // Step EAST (2) to (21,12): distance to (19,12) becomes 2 → departed.
+        s.move_step_away_attack(&mut rng, 0, 2);
+        assert!(s.focus, "a departure candidate turns the camera focus on");
+
+        // Control: no adjacent enemy → the loop never runs → focus untouched.
+        let mut s = camera_state(&[
+            (Team::Party, GridPos::new(20, 12)),
+            (Team::Monster, GridPos::new(30, 12)), // far away
+        ]);
+        s.focus = false;
+        let mut rng = EngineRng::new(SEED);
+        s.move_step_away_attack(&mut rng, 0, 2);
+        assert!(!s.focus, "no candidates → no focus write");
     }
 
     #[test]
