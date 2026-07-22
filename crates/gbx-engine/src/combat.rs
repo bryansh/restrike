@@ -260,6 +260,12 @@ pub struct Combatant {
     pub direction: u8,
     /// `action.AttacksReceived@0x0F` — attacks taken since the last move.
     pub attacks_received: u8,
+    /// `action.directionChanges@0x12` — the accumulated facing-swing count, mod 8.
+    /// `RecalcAttacksReceived` (`sub_3F94D` @`ovr014:19C2-19D1`) folds each swing's
+    /// `dirDiff` in `(direction_changes + dirDiff) % 8`; reset to 0 at the turn head
+    /// (`ovr009:029C`) and every movement step (`ovr014:090F`). Read ONLY by the
+    /// flanking heuristic (`> 4`, `ovr014:16BA`). Values only ever 0..7.
+    pub direction_changes: u8,
     /// The count of non-zero `spellList`@0x1E slots on the source record — an
     /// approximation of coab's `player.spells.Count`, decoded ONLY to drive the
     /// `memorized-spells` stub tripwire (`sub_3560B`'s inner spell-selection
@@ -422,6 +428,7 @@ impl Combatant {
             can_use: true,
             direction: 0,
             attacks_received: 0,
+            direction_changes: 0,
             memorized_spells: 0,
             health_status: HealthStatus::Okey,
             bleeding: 0,
@@ -506,6 +513,7 @@ impl Combatant {
             can_use: true,
             direction: 0,
             attacks_received: 0,
+            direction_changes: 0,
             memorized_spells: 0,
             health_status: HealthStatus::Okey,
             bleeding: 0,
@@ -1037,13 +1045,14 @@ impl CombatState {
             // isn't re-picked (`run_combat_observed`'s old `if in_combat && delay>0`).
             TurnDriver::MeleeAi => {
                 // Turn head (`sub_33281` @`ovr009:028F-02A9`, coab ovr009.cs:105):
-                // the acting combatant's OWN `AttacksReceived`, `directionChanges`
-                // (added with its maintainer, next commit), and `guarding` reset
-                // to 0 — UNCONDITIONALLY, before the `delay > 0` turn body. A
-                // parked guard therefore clears at ITS OWN next turn (§32 bug
-                // #15: guards survive initiative, clear here), and the swarm
-                // `AttacksReceived` count restarts each turn.
+                // the acting combatant's OWN `AttacksReceived` (@`028F`),
+                // `directionChanges` (@`029C`), and `guarding` (@`02A9`) reset to 0
+                // — UNCONDITIONALLY, before the `delay > 0` turn body. A parked
+                // guard therefore clears at ITS OWN next turn (§32 bug #15: guards
+                // survive initiative, clear here), and the swarm/facing counts
+                // restart each turn.
                 self.fighters[idx].attacks_received = 0;
+                self.fighters[idx].direction_changes = 0;
                 self.fighters[idx].guarding = false;
                 if self.fighters[idx].in_combat && self.fighters[idx].delay > 0 {
                     // Site 2 — the turn-head camera (`sub_33281` @`ovr009:02FA-0318`):
@@ -3627,12 +3636,30 @@ impl CombatState {
         adj
     }
 
-    /// `RecalcAttacksReceived` (`ovr014.cs:887`) — bump the target's received-attack
-    /// counter and directional bookkeeping. Draw-free; the direction math is
-    /// only read by backstab (deferred), so only the counter is tracked.
-    fn recalc_attacks_received(&mut self, target: usize, _attacker: usize) {
+    /// `RecalcAttacksReceived` (`sub_3F94D` @`ovr014:194D-19D8`, coab
+    /// ovr014.cs:887-901) — bump the target's received-attack counter and accumulate
+    /// its facing-swing count. Draw-free. Called immediately before `AttackTarget`
+    /// on every attack path (AI turn, guard into-reach, sweep per-target).
+    ///
+    /// `AttacksReceived++` (@`195B`); then `dirDiff = ((getTargetDirection(attacker,
+    /// target) − direction) + 8) % 8` (@`1987-1993`) — the bearing from the target
+    /// toward its attacker minus the target's current facing — folded `> 4 → 8 −
+    /// dirDiff` (@`1996-19A8`, `jbe 4` keeps ≤4 unchanged); then `directionChanges =
+    /// (directionChanges + dirDiff) % 8` (@`19C0-19D1`). Mod 8, so values only ever
+    /// 0..7 and the accumulator wraps.
+    fn recalc_attacks_received(&mut self, target: usize, attacker: usize) {
         self.fighters[target].attacks_received =
             self.fighters[target].attacks_received.saturating_add(1);
+        // getTargetDirection(attacker, target) = target_direction(target, attacker)
+        // = bearing from the target toward its attacker (§36.2).
+        let bearing = target_direction(self.fighters[target].pos, self.fighters[attacker].pos);
+        let mut dir_diff =
+            (bearing as i32 - self.fighters[target].direction as i32 + 8).rem_euclid(8);
+        if dir_diff > 4 {
+            dir_diff = 8 - dir_diff;
+        }
+        self.fighters[target].direction_changes =
+            ((self.fighters[target].direction_changes as i32 + dir_diff) % 8) as u8;
     }
 
     /// `TrySweepAttack` (`ovr014.cs:530`): a melee sweep vs. `HitDice == 0` targets.
@@ -3735,7 +3762,11 @@ impl CombatState {
             to_y: new.y,
             cost,
         });
+        // sub_3E748 @`ovr014:0902-090F`: the mover's own swarm state zeroes after
+        // the pos write — `AttacksReceived = 0` (@`0902`) and `directionChanges = 0`
+        // (@`090F`). Swarm/facing bookkeeping is per-position.
         self.fighters[actor].attacks_received = 0;
+        self.fighters[actor].direction_changes = 0;
         self.move_step_into_attack(rng, actor);
         if !self.fighters[actor].in_combat {
             self.fighters[actor].move_left = 0;
@@ -6740,8 +6771,9 @@ mod tests {
 
     #[test]
     fn turn_head_resets_the_actors_own_swarm_and_guard_state() {
-        // sub_33281 @028F-02A9: the acting combatant's own AttacksReceived and
-        // guarding zero at its turn head, before the body.
+        // sub_33281 @028F-02A9: the acting combatant's own AttacksReceived (@028F),
+        // directionChanges (@029C), and guarding (@02A9) zero at its turn head,
+        // before the body.
         let mut s = camera_state(&[
             (Team::Party, GridPos::new(20, 12)),
             (Team::Monster, GridPos::new(21, 12)), // adjacent → attackable
@@ -6749,6 +6781,7 @@ mod tests {
         s.combat_setup();
         s.combat_setup_done = true;
         s.fighters[0].attacks_received = 3; // stale swarm count
+        s.fighters[0].direction_changes = 5; // stale facing accumulator
         s.fighters[0].guarding = true; // a parked guard
         s.fighters[0].delay = 5;
         s.fighters[0].attack1_left = 1;
@@ -6759,7 +6792,65 @@ mod tests {
         // the TARGET, not the actor) so its own count stays 0 and it did not
         // re-guard.
         assert_eq!(s.fighters[0].attacks_received, 0);
+        assert_eq!(s.fighters[0].direction_changes, 0);
         assert!(!s.fighters[0].guarding);
+    }
+
+    #[test]
+    fn recalc_accumulates_direction_changes_mod_8() {
+        // sub_3F94D @194D-19D8: each swing bumps AttacksReceived and folds a
+        // dirDiff into directionChanges = (directionChanges + dirDiff) % 8.
+        // Target at (20,12) faces EAST (direction 2); attacker adjacent due WEST
+        // at (19,12). At distance 1 the fixed-point octant classifier floors due
+        // west to SW=5 (`lo(1)` = 0), so bearing target→attacker = 5. dirDiff =
+        // (5 − 2 + 8) % 8 = 3 (≤ 4, no fold). Three swings: 3, 6, then 9 % 8 = 1.
+        let mut s = camera_state(&[
+            (Team::Party, GridPos::new(19, 12)), // attacker (idx 0), due west
+            (Team::Monster, GridPos::new(20, 12)), // target (idx 1)
+        ]);
+        assert_eq!(
+            target_direction(s.fighters[1].pos, s.fighters[0].pos),
+            5,
+            "adjacent-west classifies SW at distance 1"
+        );
+        s.fighters[1].direction = 2; // faces east
+        s.fighters[1].direction_changes = 0;
+        s.fighters[1].attacks_received = 0;
+
+        s.recalc_attacks_received(1, 0);
+        assert_eq!(s.fighters[1].attacks_received, 1);
+        assert_eq!(s.fighters[1].direction_changes, 3, "first: (0 + 3) % 8");
+
+        s.recalc_attacks_received(1, 0);
+        assert_eq!(s.fighters[1].attacks_received, 2);
+        assert_eq!(s.fighters[1].direction_changes, 6, "second: (3 + 3) % 8");
+
+        s.recalc_attacks_received(1, 0);
+        assert_eq!(
+            s.fighters[1].direction_changes, 1,
+            "third: (6 + 3) % 8 = 9 % 8 wraps"
+        );
+    }
+
+    #[test]
+    fn recalc_direction_diff_folds_above_four() {
+        // dirDiff > 4 folds to 8 − dirDiff (@1996-19A8). Target faces N (0);
+        // attacker at bearing SW (5) from the target → raw dirDiff = (5 − 0 + 8)
+        // % 8 = 5, folded to 3.
+        let mut s = camera_state(&[
+            (Team::Party, GridPos::new(5, 15)), // attacker (idx 0): SW of target
+            (Team::Monster, GridPos::new(10, 10)), // target (idx 1)
+        ]);
+        // Sanity: bearing target→attacker is SW (5).
+        assert_eq!(
+            target_direction(s.fighters[1].pos, s.fighters[0].pos),
+            5,
+            "SW"
+        );
+        s.fighters[1].direction = 0; // faces north
+        s.fighters[1].direction_changes = 0;
+        s.recalc_attacks_received(1, 0);
+        assert_eq!(s.fighters[1].direction_changes, 3, "folded 5 → 8 − 5 = 3");
     }
 
     #[test]
