@@ -335,6 +335,15 @@ pub struct CombatEntryEvent {
     /// under which the natural rout is mathematically impossible.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub area2_field_58c: Option<u16>,
+    /// `gbl.mapDirection` (`byte_1D53B`, half-encoded {0 N, 2 E, 4 S, 6 W}) —
+    /// the party's world facing at combat entry, the flee-HEADING input
+    /// (`sub_359D1` @`ovr010:0B14`, doc §29). Optional and additive: captures
+    /// from hooks predating the emission (pre-8ab275e) omit it (and the
+    /// canonical writer then omits the field, keeping existing goldens
+    /// byte-identical); harnesses fall back to the provisional geometry-matched
+    /// default 2 (E) or the `RESTRIKE_MAP_DIR` override.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub map_direction: Option<u8>,
     /// The roster in `TeamList` (== initiative draw) order.
     pub combatants: Vec<CombatEntryCombatant>,
 }
@@ -811,6 +820,7 @@ mod tests {
             rng_state: 0xdead_beef,
             terrain: None,
             area2_field_58c: None,
+            map_direction: None,
             combatants: vec![
                 CombatEntryCombatant {
                     team: 0,
@@ -861,12 +871,14 @@ mod tests {
         // Canonical round-trip is a fixed point.
         assert_eq!(Trace::parse(&trace.to_canonical_string()).unwrap(), trace);
 
-        // When present, `area2_field_58c` is emitted (between `terrain` and
-        // `combatants`) and round-trips.
+        // When present, `area2_field_58c` and `map_direction` are emitted (in
+        // struct order, before `combatants` — the staging hook's field order)
+        // and round-trip.
         let with_58c = TraceEvent::CombatEntry(CombatEntryEvent {
             rng_state: 1,
             terrain: None,
             area2_field_58c: Some(50),
+            map_direction: Some(2),
             combatants: vec![CombatEntryCombatant {
                 team: 0,
                 x: 1,
@@ -875,7 +887,7 @@ mod tests {
             }],
         });
         let line = serde_json::to_string(&with_58c).unwrap();
-        assert!(line.contains(r#""area2_field_58c":50,"combatants":"#));
+        assert!(line.contains(r#""area2_field_58c":50,"map_direction":2,"combatants":"#));
         assert_eq!(serde_json::from_str::<TraceEvent>(&line).unwrap(), with_58c);
     }
 

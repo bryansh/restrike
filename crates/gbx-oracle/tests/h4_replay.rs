@@ -211,15 +211,16 @@ fn h4_melee_replays_the_bar_brawl_capture_draw_for_draw() {
     state.area_field_58c = entry.area2_field_58c.map(|v| v as i32).unwrap_or(99);
     // `gbl.mapDirection` (the party's world facing, half-encoded {0 N, 2 E, 4 S,
     // 6 W} per coab `Gbl.cs:354`, `byte_1D53B`) — the flee HEADING input
-    // (`moralFailureEscape`, `sub_359D1` @`ovr010:0B14`). The staging hook does not
-    // yet emit it (doc §29 TODO). **Provisional default 2 (E)**: of {0,2,4,6} it is
-    // the only heading whose round-8 rout positions match the capture (the SE
-    // corner) — but it does NOT fully close (a downstream targeting/flee-movement
-    // residual at draw ~2707 remains, §29), so this is a geometry-matched default,
-    // not a proven pin. `RESTRIKE_MAP_DIR` overrides.
+    // (`moralFailureEscape`, `sub_359D1` @`ovr010:0B14`). Precedence:
+    // `RESTRIKE_MAP_DIR` (explicit trial override) > the capture's emitted
+    // `map_direction` (hooks from 8ab275e on; the armed/caster staging captures
+    // carry it, closing the §29 TODO) > the provisional geometry-matched
+    // default 2 (E — the heading whose bar-rout positions match, §29/§30, now
+    // capture-CONFIRMED by armed-bar's emitted md=2 from the same room).
     state.map_direction = std::env::var("RESTRIKE_MAP_DIR")
         .ok()
         .and_then(|s| s.parse::<u8>().ok())
+        .or(entry.map_direction)
         .unwrap_or(2);
     // `gbl.AutoPCsCastMagic` (`byte_1D904`) — `BattleSetup` resets it false
     // (`ovr011.cs:1186`); the '2' key toggles it mid-fight. Not in the capture

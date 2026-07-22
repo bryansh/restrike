@@ -78,6 +78,9 @@ struct Capture {
     /// `area2.field_58C` (the faithful FleeCheck_001 gate-2 threshold, doc §28);
     /// legacy captures without the field default to 99 (the measured bar value).
     field_58c: i32,
+    /// `gbl.mapDirection` when the hook emitted it (post-8ab275e captures);
+    /// `None` for legacy captures (harnesses then default to 2, doc §29).
+    map_direction: Option<u8>,
     entry: Vec<CapEntry>,
     /// post-`combat_entry` `rng` events.
     draws: Vec<Draw>,
@@ -91,6 +94,7 @@ fn parse_capture(text: &str) -> Capture {
     let mut rng_state = 0u32;
     let mut terrain = Vec::new();
     let mut field_58c: i32 = 99; // §28 default for pre-field_58C captures
+    let mut map_direction: Option<u8> = None;
     let mut entry = Vec::new();
     let mut draws = Vec::new();
     let mut rounds = Vec::new();
@@ -115,6 +119,9 @@ fn parse_capture(text: &str) -> Capture {
                 }
                 if let Some(f) = v.get("area2_field_58c").and_then(|f| f.as_u64()) {
                     field_58c = f as i32;
+                }
+                if let Some(m) = v.get("map_direction").and_then(|m| m.as_u64()) {
+                    map_direction = Some(m as u8);
                 }
                 for c in v["combatants"].as_array().unwrap() {
                     entry.push(CapEntry {
@@ -180,11 +187,31 @@ fn parse_capture(text: &str) -> Capture {
         rng_state,
         terrain,
         field_58c,
+        map_direction,
         entry,
         draws,
         rounds,
         turns,
     }
+}
+
+/// Apply the capture's entry-state knobs uniformly — the §30 lesson: every
+/// replay/diagnostic in this file must share the SAME input knobs, or an
+/// instrument replays a DIFFERENT fight than the localizer and misleads the
+/// peel. Flee-heading precedence: `RESTRIKE_MAP_DIR` (explicit trial override),
+/// then the capture's emitted `map_direction` (hooks from 8ab275e on), then the
+/// provisional geometry-matched default 2 (E, doc §29). `RESTRIKE_AUTO_CAST=1`
+/// arms `AutoPCsCastMagic` (doc §33) for captures where the player did.
+fn apply_capture_knobs(state: &mut gbx_engine::combat::CombatState, cap: &Capture) {
+    state.area_field_58c = cap.field_58c;
+    state.map_direction = std::env::var("RESTRIKE_MAP_DIR")
+        .ok()
+        .and_then(|s| s.parse::<u8>().ok())
+        .or(cap.map_direction)
+        .unwrap_or(2);
+    state.auto_pcs_cast_magic = std::env::var("RESTRIKE_AUTO_CAST")
+        .map(|v| v == "1")
+        .unwrap_or(false);
 }
 
 #[derive(Clone, Default)]
@@ -267,20 +294,7 @@ fn run(cap: &Capture, map: CombatMap) -> RunResult {
     let rules = RuleSet::load();
     let flavor = Adnd1::new(&rules);
     let mut state = combat_state_from_records(&entries, map, &flavor).expect("records decode");
-    // The faithful FleeCheck_001 gate-2 morale threshold (doc §28).
-    state.area_field_58c = cap.field_58c;
-    // Flee HEADING input (`map_direction`, doc §28/§29) — the capture does not
-    // carry it; provisional default 2 (E — the geometry-matching heading, §29),
-    // `RESTRIKE_MAP_DIR` overrides for the trial.
-    state.map_direction = std::env::var("RESTRIKE_MAP_DIR")
-        .ok()
-        .and_then(|s| s.parse::<u8>().ok())
-        .unwrap_or(2);
-    // `AutoPCsCastMagic` knob, same contract as `h4_replay` (doc §33):
-    // `RESTRIKE_AUTO_CAST=1` arms PC casting for captures where the player did.
-    state.auto_pcs_cast_magic = std::env::var("RESTRIKE_AUTO_CAST")
-        .map(|v| v == "1")
-        .unwrap_or(false);
+    apply_capture_knobs(&mut state, cap);
 
     let tap = DrawTap::default();
     let draws = tap.draws.clone();
@@ -472,7 +486,7 @@ fn h4_first_turn_trace() {
         &flavor,
     )
     .expect("decode");
-    state.area_field_58c = cap.field_58c;
+    apply_capture_knobs(&mut state, &cap);
     state.attach_action_sink(Box::new(ActTl(timeline.clone())));
     let mut rng = EngineRng::new(cap.rng_state);
     rng.attach_sink(Box::new(DrawTl(timeline.clone())));
@@ -651,7 +665,7 @@ fn h4_round0_moves() {
         &flavor,
     )
     .expect("decode");
-    state.area_field_58c = cap.field_58c;
+    apply_capture_knobs(&mut state, &cap);
     state.attach_action_sink(Box::new(S(log.clone())));
     let mut rng = EngineRng::new(cap.rng_state);
     rng.attach_sink(Box::new(DrawTap::default()));
@@ -734,18 +748,7 @@ fn h4_locate_draw() {
         &flavor,
     )
     .expect("decode");
-    state.area_field_58c = cap.field_58c;
-    // Same flee-heading knob as `run()` (§29) — without it this diagnostic
-    // replays a DIFFERENT fight (md=0 → NW flight) than the localize/replay
-    // paths and misleads the peel.
-    state.map_direction = std::env::var("RESTRIKE_MAP_DIR")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(2);
-    // Same `AutoPCsCastMagic` knob as `run()` (doc §33).
-    state.auto_pcs_cast_magic = std::env::var("RESTRIKE_AUTO_CAST")
-        .map(|v| v == "1")
-        .unwrap_or(false);
+    apply_capture_knobs(&mut state, &cap);
     state.attach_action_sink(Box::new(Rec(count.clone(), log.clone())));
     let mut rng = EngineRng::new(cap.rng_state);
     rng.attach_sink(Box::new(Ctr(count.clone())));

@@ -236,7 +236,9 @@ fn replay(path: &Path, map_direction: u8, auto_cast: bool) -> (Option<usize>, us
     };
     let mut state = combat_state_from_records(&entries, map, &flavor).expect("records decode");
     state.area_field_58c = entry.area2_field_58c.map(|v| v as i32).unwrap_or(99);
-    state.map_direction = map_direction;
+    // The capture's own emitted heading wins (hooks from 8ab275e on); the pin's
+    // value covers legacy captures without the field.
+    state.map_direction = entry.map_direction.unwrap_or(map_direction);
     state.auto_pcs_cast_magic = auto_cast;
 
     let tap = DrawTap::default();
