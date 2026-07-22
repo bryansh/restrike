@@ -1870,3 +1870,107 @@ Discipline unchanged: re-verify every cited site against `coab_new.lst` before
 coding (`LC_ALL=C grep -a`); one mechanic per commit, binary-cited; instrument
 then revert; never weaken an assert; workspace tests + clippy `-D warnings` + fmt +
 guard 8/8 per commit; doc §37 landing note + manifest edits ride their commits.
+
+## 37. LANDED — the facing subsystem; armed-bar 2019 → CLOSED 2749/2749; the last H4 bar-fight frontier (M5 facing slice, 2026-07-22)
+
+The §36 spec was implemented on branch `m5-facing-impl` off the spec commit
+(`6ffb129`). **Every §36 site was re-verified against `coab_new.lst` before
+coding**; the §36 prediction held — coab agrees at every verified site, so the §35
+regressions were OUR transliteration losing the on-screen draw overwrite, not
+coab≠binary. `armed-bar.gbxtrace` moved from `Frontier(2019)` to **CLOSED
+2749/2749**; the other seven pins held unshifted at every commit. The two §35
+blockers (combat4 @618 flanking-on, @1053 backstab-only) are resolved by the
+substrate — the reads now fire ONLY where the binary's do.
+
+**What cracked it (§36.1).** `AttackTarget` (`sub_3F9DB`) stores the target's
+"face-away" (`direction = (bearing target→attacker + 4) % 8`, @`1A35`), then — on
+the shared tail, when the target is on-screen — `draw_74B3F` **overwrites** it with
+the raw bearing (@`1A9F`), so an on-screen (i.e. almost every melee) target ends up
+**FACING its attacker**. The facing-equality read `getTargetDirection(target,
+attacker) == target.direction` therefore FAILS for that attacker's next swing, and
+flanking/backstab don't fire where §35's face-away-only ports made them. The draw
+is a state mutator; the camera model (`797e09b`) supplies the on-screen test it is
+gated on.
+
+**What landed (seven commits, one mechanic each):**
+- **`797e09b`** — the combat camera: `mapScreenTopLeft` + `focus`,
+  `ScreenMapCheck`/`redrawCombatArea`/`draw_74B3F` persistent-state effects, all
+  §36.3 census scroll sites, rendering stubbed. 8/8 (camera reads nothing yet).
+- **`8bda3b0`** — entry-init facing: `direction = HalfDirToIso[md/2]`
+  (`unk_1660C = {7,2,3,6}`), enemies `+4 % 8` (`ovr011:1162-118E`). 8/8.
+- **`b7ecac5`** — turn-head resets: the actor's own `AttacksReceived`/`guarding`
+  (and, next commit, `directionChanges`) zero at the turn head, before the
+  `delay>0` body (`sub_33281` @`ovr009:028F-02A9`). 8/8.
+- **`b4045f0`** — the `direction_changes` field WITH its maintainer:
+  `RecalcAttacksReceived` (`sub_3F94D` @`ovr014:194D-19D8`) accumulates
+  `directionChanges = (directionChanges + dirDiff) % 8`, and the field zeroes at
+  the turn head + every movement step. 8/8 (read by nothing yet).
+- **`0d4aad2`** — the AttackTarget direction update (§36.1, `sub_3F9DB`
+  @`ovr014:19FE-1AD2`): the target-side face-away/flip store + the on-screen draw
+  overwrite + the attacker-always-faces-target draw. 8/8 EXACTLY — the crux, still
+  read by nothing.
+- **`1ef5610`** — **flanking ON** (`AttackTarget01` @`ovr014:16AD-16E9`):
+  `AttacksReceived>1 && target_direction(attacker,target)==direction &&
+  directionChanges>4 → ac_behind`. **2019 → 2517** (manifest edit rode the commit).
+- **`e5d0478`** — **backstab ON** (`CanBackStabTarget` `sub_408D7`
+  @`ovr014:28D7-29B9`): thief + listed weapon + swarmed + man-sized + back-turned →
+  `ac_behind − 4`, damage × `((SkillLevel(Thief)−1)/4)+2`. **2517 → CLOSED**.
+
+**Capture matrix (§35 end → §37):**
+
+| capture | before | after |
+|---|---|---|
+| `combat4` | CLOSED 3075/3075 | **CLOSED** (unchanged) |
+| `combat3+terrain4` | CLOSED 3218/3218 | **CLOSED** (unchanged) |
+| `combat2+terrain4` | CLOSED 4260/4260 | **CLOSED** (unchanged) |
+| `combat+terrain4` | frontier @368 | **@368** (unchanged) |
+| `bar-rout-58c50` | CLOSED 3521/3521 | **CLOSED** (unchanged) |
+| `armed-bar` | frontier @2019 | **CLOSED 2749/2749** |
+| `caster-bar` | frontier @453 | **@453** (unchanged) |
+| `bar-fists-2` | CLOSED 3811/3811 | **CLOSED** (unchanged) |
+
+**Findings (binary-cited):**
+1. **No coab≠binary in §36** — as §36 predicted, coab renders every verified site
+   faithfully (`ovr014.cs:913-936` facing, `782-784` flanking, `1433-1457`
+   backstab, `887-901` recalc, `ovr009.cs:105-107` turn head). The §35 failures
+   were the dropped draw overwrite alone.
+2. **`sub_409BC` push-order convention settled** — by the operands at the known
+   sites, `sub_409BC[A pushed first, B pushed second] = target_direction(A.pos,
+   B.pos)` (bearing A→B). So the flanking/backstab facing test
+   (`getTargetDirection(target, attacker) == direction`, @`16C9-16D4` /
+   @`298B-29A3`, attacker pushed first) is
+   `target_direction(attacker.pos, target.pos) == target.direction` (the target's
+   back is to the attacker); the recalc bearing (`getTargetDirection(attacker,
+   target)`, @`196C`) is `target_direction(target.pos, attacker.pos)` (bearing
+   target→attacker) — the OPPOSITE argument order. Both coded from the stated
+   semantics, then cross-checked against the push order.
+3. **Distance-1 octant quirk (faithful, documented)** — the ported `target_direction`
+   (`sub_409BC`) classifies a purely-west adjacent vector as **SW (5)**, not W (6),
+   because `lo(1) = (0x6A·1)/0x100` floors to 0 so the SW octant test solves first.
+   This is exact binary behaviour (the fixed-point tangents), and it is the common
+   melee-adjacency case — the recalc/facing math consumes it as-is.
+4. **`can_backstab` weapon = null ⟺ `!weapon_readied`** — the binary reads
+   `attacker.primaryWeapon` (`field_151`); our model maps null (bare hands, e.g. a
+   depleted/unreadied loadout) to `weapon_readied == false`. Only `armed-bar`
+   carries loadouts, and the guard holds 8/8 (no closed capture shifts), so no
+   no-loadout thief spuriously backstabs — the mapping is capture-validated.
+   TRAVIS's kill at 2517 is his bare-handed punch (quiver empty), T5 → ×3.
+5. **The 2517 divergence localized** — a `d2 → d?` damage-roll divergence on
+   combatant `[14]` (`h4_turndiff`): the capture deals more (hp7 vs our hp11), the
+   ×3 backstab multiplier; flanking alone stalled exactly there.
+6. **TRAVIS ammo re-fit after backstab: still 10** — 9 → diverge @1575, 11 →
+   @1910, 10 → CLOSED 2749/2749. The facing subsystem did **not** move his shot
+   count; the §35 fit-may-move caveat is discharged. The loadout comment records
+   the re-fit.
+
+**Deferred / tripwired (unchanged territory):** the size>1 (`PlayerOnScreen`
+all-cells) path, the ranged-melee clone-drop at depletion (`self-weapon-depleted`),
+the 0-HD sweep, and the manual-UI facing sites (`sub_33B26`/`ovr009:608`/
+`ovr014:1833`, out of §36 scope) all remain tripwired, none exercised by the eight
+captures. The caster peel (§33 toggle-window) and the affects substrate are the
+next slices; `caster-bar` @453 and `combat+terrain4` @368 are their frontiers.
+
+With this slice **every H4 bar-fight capture that does not need magic or a ranged
+size>1 loadout is CLOSED**: combat4, combat3, combat2, bar-rout, bar-fists-2, and
+armed-bar — six operand-exact closes; the two open frontiers are the caster (@453)
+and the terrain/wilderness driver (@368).
