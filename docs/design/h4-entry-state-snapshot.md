@@ -1546,3 +1546,106 @@ picks, d6 punches) are unchanged from the closed fist captures.
    (#16), cornered swap (unready → punch profile → re-ready), TryGuarding ranged clear.
 5. Localizer: `GBX_DRAW=<n> GBX_H4_TURNDIFF=.../armed-bar.gbxtrace cargo test -p
    gbx-oracle --test h4_turndiff h4_locate_draw -- --nocapture`.
+
+## 35. LANDED — faithful ranged combat, armed-bar 58 → 2019; the facing subsystem is the residual (M5 armed slice, 2026-07-22)
+
+The §34 spec was implemented on branch `m5-ranged` off `main` (5ff9cfb). **Every §34
+site was re-verified against `coab_new.lst` before coding**; the three flagged
+own-reads — `sub_408D7`/`sub_6B3D1` (backstab) and coab≠binary #17 — were read from
+the listing and are settled below. `armed-bar.gbxtrace` moved from `Frontier(58)` to
+**`Frontier(2019)`** (of 2749); the other seven pins held unshifted at every commit
+(loadout `None` is draw-identical). It did **not** close — the residual is the
+facing/direction subsystem (below), which regresses the closed captures under two
+transliterations and needs its own slice.
+
+**What landed (six commits, one mechanic each):**
+- **#1 `7fe2326`** — `gbx-formats` `ITEMS` parser (`ItemDataTable`): 2-byte header +
+  0x81 × 16-byte entries, zero-filling the tail; synthetic units + a local-tier test
+  over Bryan's real `ITEMS` verifying the §34.1 rows.
+- **#2 `4340624`** — plumbing: `Loadout` + the per-combatant ranged fields on
+  `Combatant`, `CombatState.item_data` + `set_loadout`, `skill_level_thief`; the shared
+  harness loadout table (`tests/common/mod.rs`) wired into all three harnesses (the §30
+  shared-knobs rule). All 8 pins unchanged.
+- **#3 `13ddf9a`** — predicates (`is_weapon_ranged`/`_melee`, `GetCurrentAttackItem`,
+  incl. the Sling 0x0A null-item find), `weapon_range` (LongBow 21/ShortBow 15,
+  sanitize), and `reclac_attacks` (natk floor → 2 shots/round, ammo cap, field_8 gate);
+  `CalculateInitiative` now calls `reclac_attacks` + resets `field_8`. **58 → 493.**
+- **#4 `78c9532`** — the ranged attack: `RangedDefenseBonus` on every path, ammo
+  subtract + depletion, idx-indexed damage cells, `field_8 = true`. **493 (held —
+  round-0 shots already correct; RangedDefenseBonus is exercised there).**
+- **#5 `d1c4de0`** — `AI_items_selection` (the cornered swap: `CalcItemPowerRating` vs
+  the base profile, ammo availability, adjacency → bow-vs-fists), wired at step-7 + the
+  cornered re-pick block; `TryGuarding`'s ranged clear. **493 → 1910.**
+- **#6 `39d876a`** — the TRAVIS ammo-depletion finding (below) + the `h4_locate_draw`
+  diagnostic (prints our operands beside the capture's, dumps our roster at the divergent
+  draw). **1910 → 2019.**
+
+**Capture matrix (before → after):**
+
+| capture | before | after |
+|---|---|---|
+| `combat4` | CLOSED 3075/3075 | **CLOSED** (unchanged) |
+| `combat3+terrain4` | CLOSED 3218/3218 | **CLOSED** (unchanged) |
+| `combat2+terrain4` | CLOSED 4260/4260 | **CLOSED** (unchanged) |
+| `combat+terrain4` | frontier @368 | **@368** (unchanged) |
+| `bar-rout-58c50` | CLOSED 3521/3521 | **CLOSED** (unchanged) |
+| `armed-bar` | frontier @58 | **frontier @2019** |
+| `caster-bar` | frontier @453 | **@453** (unchanged) |
+| `bar-fists-2` | CLOSED 3811/3811 | **CLOSED** (unchanged) |
+
+**Deviations found (binary-cited):**
+1. **coab≠binary #16 CONFIRMED** — `ovr014:1BBD-1BC3` (`mov al, byte_1D901; sub
+   es:[di+item.count], al`): the binary **subtracts** the attack-1 swing count from
+   `item.count`; coab assigns (`count = bytes_1D900[1]`, ovr014.cs:970). Implemented as
+   subtract.
+2. **coab≠binary #17 CONFIRMED (dead)** — `ovr010:1176` re-assigns `byte_1D90E =
+   GetCurrentAttackItem(...)` but nothing re-reads it before the unconditional
+   `sub_3F9DB` at `:11BF` (and it is reset to 0 at each loop top), so the attack proceeds
+   regardless. Our transliteration uses only the returned item, ignoring its boolean —
+   draw-equivalent.
+3. **ITEMS entry count** — the spec (and coab, `ItemData.cs:52`) build **0x81** entries;
+   Bryan's shipped `ITEMS` is **0x802 bytes = 2-byte header + 0x80 entries**, so entry
+   `0x80` (`Type_128`) is a zero-fill in both coab (reads 0x810 into a zeroed buffer) and
+   our parser. No behavioural effect (types in play are ≤ 73).
+4. **§34.1 "ammo is a free parameter" is WRONG for TRAVIS** — the capture proves he
+   empties a **10-arrow** quiver mid-fight; depletion (`lose_item` →
+   `GetCurrentAttackItem` false → `AI_items_selection` unreadies the bow, `var_1F` false)
+   switches him to fists and **changes the draw stream**. Ammo 40 (no depletion) diverges
+   at 1910 (TRAVIS shoots where the capture shows him out of arrows and approaching);
+   ammo 10 carries to 2019 (9 depletes a turn early → @1575; 11 never depletes in time →
+   @1910 — a sharp optimum, so 10 is the real quiver). MATHEW fires few enough (§34.1: 6)
+   that 40 holds. The loadout table pins TRAVIS at 10 with the deviation noted.
+5. **`field_DE = 0x01` for the patrons** (capture-decoded) — so the backstab size gate
+   `(field_DE & 0x7F) <= 1` passes, and the large-target dice substitution
+   (`> 0x80 || (& 7) > 1`) stays off (man-sized), as §34.6 assumed.
+6. **The backstab factors settled** (own read, `ovr014:01F9-021F`): `multiplier =
+   ((SkillLevel(Thief) − 1) / 4) + 2` with `SkillLevel(Thief) = rec[0x10F] (ClassLevel[6])
+   + rec[0x117] (ClassLevelsOld[6]) * sub_6B3D1`; `sub_6B3D1 =
+   DualClassExceedsPreviousLevel` (0/1). TRAVIS is Fighter 4 / Thief 5 → SkillLevel 5 →
+   ×3. `CanBackStabTarget` (`sub_408D7`) weapon list = {null, Club 7, Dagger 8,
+   BroadSword 35, LongSword 36, ShortSword 37, DrowLongSword 97}. Transliterated (see
+   the deferred note) but not landed — it over-fires (below).
+
+**The residual @2019 and the facing-subsystem blocker (STOP-and-report).** At draw 2019,
+patron [14] attacks MARK: the capture draws `d6` (a hit → damage), ours draws the next
+selection `d100` (a miss) — same `d20` @2018, different to-hit AC. MARK is swarmed
+(`AttacksReceived > 1`); the capture hits his **behind AC 48** where ours uses front 53.
+This is the **flanking heuristic** (`ovr014.cs:782`: `AttacksReceived > 1 &&
+getTargetDirection(target, attacker) == direction && directionChanges > 4 → BehindAttack`)
+— cited-deferred in §30, but armed-bar **exercises** it. The next residual (~2496) is
+TRAVIS's cornered-punch **backstab** kill (§34.7). **Both need faithful `target.direction`
+tracking**, and two transliterations of it — (a) the `sub_3F9DB` @913-927 attack-turn
+update + `sub_3F94D` `directionChanges` + the flanking test + `CanBackStabTarget`; (b) the
+same with the flanking test disabled — **each regresses the closed captures** (combat4
+@618 with flanking, @1053 with only the backstab reading `direction`). The cause: the
+post-attack "face away" update (`direction = (getTargetDirection(attacker,target)+4)%8`)
+makes the facing check `getTargetDirection(target,attacker) == direction` pass on the very
+next same-attacker hit — so the backstab/flanking fire where the real game (whose captures
+close **without** them) did not. coab renders the same algorithm, so this is a
+transliteration bug in the direction bookkeeping (candidate misses: the target-direction
+update also fires on `draw_74B3F` at each icon redraw, not only the one AttackTarget site;
+`PlayerMapPos` vs our grid pos; or the `AttacksReceived`-parity timing vs
+`RecalcAttacksReceived`). **The facing subsystem is the next slice** — it must be built
+and validated step-by-step against the five closed captures (the canary) BEFORE the
+flanking/backstab land, since both read it. Until then the reverted engine holds all five
+closed captures and armed-bar at the true `Frontier(2019)`.
