@@ -3149,6 +3149,7 @@ impl CombatState {
         actor: usize,
         target: usize,
         behind: bool,
+        ranged_item: AttackItemRef,
     ) -> bool {
         // §19: `AttackTarget` (`sub_3F9DB`, ovr014.cs:939) sets
         // `attacker.actions.target = target` — the attacked (possibly re-picked)
@@ -3156,19 +3157,29 @@ impl CombatState {
         // keeps it draw-free. Draw-free; only the *held target* carried into later
         // rounds changes (the §18 re-pick correctly writes only a local `chosen`).
         self.fighters[actor].target = Some(target);
+        // `AttackTarget01` sets `actions.field_8 = true` (`ovr014.cs:738`) — the
+        // "attacked this round" flag `reclac_attacks`'s write-back gate reads
+        // (§34.3); `CalculateInitiative` resets it each round.
+        self.fighters[actor].field_8 = true;
         if self.fighters[actor].attack1_left == 0 && self.fighters[actor].attack2_left == 0 {
             self.clear_actions(actor);
             return true;
         }
         // The binary selects the AC byte by indexing record[0x19A + behind]
-        // (`sub_3F4EB` @`ovr014:16F7-1700`): front @0x19A, behind @0x19B.
-        let target_ac = if behind {
+        // (`sub_3F4EB` @`ovr014:16F7-1700`): front @0x19A, behind @0x19B. Then
+        // `target_ac += RangedDefenseBonus` on EVERY path (`ovr014.cs:799`) — a
+        // distant target is harder to hit with a bow (§34.6).
+        let base_ac = if behind {
             self.fighters[target].ac_behind
         } else {
             self.fighters[target].ac
-        };
+        } as i32;
+        let target_ac = (base_ac + self.ranged_defense_bonus(actor, target)).clamp(0, 255) as u8;
         let hit_bonus = self.fighters[actor].hit_bonus;
         let mut target_gone = false;
+        // `bytes_1D900[1]` — the attack-1 swing count (each swing, hit or miss),
+        // the ammo the write-back subtracts (§34.6, coab≠binary #16).
+        let mut swings_attack1: i32 = 0;
 
         let start = self.fighters[actor].attack_idx;
         for attack_idx in (1..=start).rev() {
@@ -3183,6 +3194,7 @@ impl CombatState {
                 }
                 if attack_idx == 1 {
                     self.fighters[actor].attack1_left -= 1;
+                    swings_attack1 += 1; // bytes_1D900[1] += 1
                 } else {
                     self.fighters[actor].attack2_left -= 1;
                 }
@@ -3190,17 +3202,43 @@ impl CombatState {
 
                 let th = pc_can_hit_target(rng, target_ac, hit_bonus, 0); // one d20
                 if th.hit {
-                    let (dc, ds, db) = (
-                        self.fighters[actor].dice_count,
-                        self.fighters[actor].dice_size,
-                        self.fighters[actor].damage_bonus,
-                    );
+                    // `sub_3E192(idx)` damage cells (§34.6): idx 1 = @0x19E/0x1A0/
+                    // 0x1A2 (our decoded profile-1), idx 2 = @0x19F/0x1A1/0x1A3
+                    // (`attack2_dice`, all zero in this party).
+                    let (dc, ds, db) = if attack_idx == 1 {
+                        (
+                            self.fighters[actor].dice_count,
+                            self.fighters[actor].dice_size,
+                            self.fighters[actor].damage_bonus,
+                        )
+                    } else {
+                        self.fighters[actor].attack2_dice
+                    };
                     let dmg = roll_damage(rng, ds, dc, db, None);
                     self.apply_damage(target, dmg.amount);
                     if !self.fighters[target].in_combat {
                         target_gone = true;
                     }
                 }
+            }
+        }
+
+        // Ammo write-back (`sub_3F9DB` @`ovr014:1BB3-1BC7`, coab≠binary #16 —
+        // the binary SUBTRACTS `byte_1D901`, coab assigns): `if (item.count > 0)
+        // item.count -= swings_attack1`. Only for a real ammo item (a launcher's
+        // arrows/quarrels); a null item (sling / opportunity attack) skips it.
+        if ranged_item == AttackItemRef::Ammo {
+            if self.fighters[actor].ammo > 0 {
+                self.fighters[actor].ammo -= swings_attack1;
+            }
+            // Depletion (`:1BC7-`): count hits 0 → the arrows item is lost
+            // (`lose_item`; bows are not ranged-melee, so no clone-drop). A
+            // depleted bowman then finds no ammo (`GetCurrentAttackItem` false)
+            // and punches. Unexercised by armed-bar (ammo ≥ usage); cheap. The
+            // `reclac_player_values` profile recompute is cited-deferred.
+            if self.fighters[actor].ammo <= 0 {
+                self.fighters[actor].ammo = 0;
+                self.fighters[actor].ammo_item_lost = true;
             }
         }
 
@@ -3211,6 +3249,33 @@ impl CombatState {
             return true;
         }
         false
+    }
+
+    /// `RangedDefenseBonus(target, attacker)` (`sub_3FCED` @`ovr014:1CED`, coab
+    /// `ovr014.cs:1012`; doc §34.6): a to-hit AC penalty that grows with distance
+    /// for a ranged attacker. `oneThird = (table[type].range − 1) / 3`; the
+    /// current `getTargetRange` climbs two bands — `> oneThird` adds +2, again
+    /// adds +3 (LongBow: +2 beyond 7, +5 beyond 14). `0` for a non-ranged
+    /// attacker (the `else` return). Draw-free.
+    fn ranged_defense_bonus(&self, attacker: usize, target: usize) -> i32 {
+        if !self.is_weapon_ranged(attacker) {
+            return 0;
+        }
+        let one_third = (self.primary_item(attacker).expect("ranged ⇒ item").range as i32 - 1) / 3;
+        let mut range = get_target_range(
+            &self.map,
+            self.fighters[target].pos,
+            self.fighters[attacker].pos,
+        ) as i32;
+        let mut adj = 0;
+        if range > one_third {
+            range -= one_third;
+            adj += 2;
+        }
+        if range > one_third {
+            adj += 3;
+        }
+        adj
     }
 
     /// `RecalcAttacksReceived` (`ovr014.cs:887`) — bump the target's received-attack
@@ -3331,7 +3396,9 @@ impl CombatState {
             if self.fighters[att].guarding {
                 self.fighters[att].guarding = false;
                 self.recalc_attacks_received(mover, att);
-                self.attack_target(rng, att, mover, false); // AttackTarget(null,0) — ovr014.cs:245
+                // AttackTarget(null,0) — the guard's into-reach swing carries no
+                // ranged item (ovr014.cs:245).
+                self.attack_target(rng, att, mover, false, AttackItemRef::None);
             }
         }
     }
@@ -3407,7 +3474,9 @@ impl CombatState {
                 // to the fleer it punished, and its held target silently
                 // diverges for the rest of the fight.
                 let backup_target = self.fighters[att].target;
-                self.attack_target(rng, att, mover, true);
+                // AttackTarget(null,1) — the departure opportunity attack carries
+                // no ranged item (ovr014.cs:407).
+                self.attack_target(rng, att, mover, true, AttackItemRef::None);
                 self.fighters[att].target = backup_target;
             }
         }
@@ -3728,7 +3797,29 @@ impl CombatState {
                             self.clear_actions(actor);
                         } else {
                             self.recalc_attacks_received(t, actor);
-                            stop = self.attack_target(rng, actor, t, false);
+                            // §34.4 attack execution: for a ranged attacker,
+                            // resolve the ammo item (`GetCurrentAttackItem`); a
+                            // ranged-melee weapon at reach 1 passes null (thrown
+                            // as melee, `ovr010.cs:655-664`). coab≠binary #17: the
+                            // `byte_1D90E = GetCurrentAttackItem` re-assign at
+                            // `ovr010:1176` is dead (verified) — only the item is
+                            // used, the attack proceeds unconditionally.
+                            let ranged_item = if self.is_weapon_ranged(actor) {
+                                let mut item = self.get_current_attack_item(actor).item;
+                                if self.is_weapon_ranged_melee(actor)
+                                    && get_target_range(
+                                        &self.map,
+                                        self.fighters[t].pos,
+                                        self.fighters[actor].pos,
+                                    ) == 1
+                                {
+                                    item = AttackItemRef::None;
+                                }
+                                item
+                            } else {
+                                AttackItemRef::None
+                            };
+                            stop = self.attack_target(rng, actor, t, false, ranged_item);
                             if stop {
                                 delayed = false;
                             } else if !self.fighters[t].in_combat {
@@ -3895,9 +3986,6 @@ impl CombatState {
     /// `ovr025.cs:1570`): [`is_weapon_ranged`] AND the weapon's flags carry both
     /// `flag_10 | melee` (`& 0x14 == 0x14`) — a thrown weapon also usable in hand
     /// (HandAxe 0x14 yes; Dart 0x1A no). None of armed-bar's bows qualify.
-    /// (Consumed by the cornered re-pick block and the ranged attack execution,
-    /// doc §34.4/34.6 — landing in the next commits.)
-    #[allow(dead_code)]
     fn is_weapon_ranged_melee(&self, actor: usize) -> bool {
         if !self.is_weapon_ranged(actor) {
             return false;
@@ -4822,6 +4910,127 @@ mod tests {
         // gate: !field_8(F) || 2<1(F) || (T && 2<2 && !ranged=F) → F ⇒ keep the
         // attacksCount write (2) from the head of reclac.
         assert_eq!(state.fighters[0].attack1_left, 2);
+    }
+
+    #[test]
+    fn ammo_subtracts_by_swing_count_not_assigned() {
+        // coab≠binary #16: the binary SUBTRACTS the attack-1 swing count from
+        // `item.count`; coab assigns. Two swings from ammo 40 → 38 (not 2).
+        let bowman = Combatant::new_melee(
+            0,
+            Team::Party,
+            false,
+            GridPos::new(0, 0),
+            30,
+            40,
+            40, // hit_bonus high — swings land, but the count is what matters
+            12,
+            (1, 6, 0),
+            5,
+            2, // attack1_left = 2
+        );
+        let target = Combatant::new_melee(
+            1,
+            Team::Monster,
+            true,
+            GridPos::new(3, 0),
+            200, // survives both swings so the loop runs fully
+            40,
+            0,
+            12,
+            (1, 2, 0),
+            5,
+            1,
+        );
+        let mut state = CombatState::new(CombatMap::uniform(0x17), vec![bowman, target]);
+        state.item_data = Some(synth_item_table());
+        state.set_loadout(
+            0,
+            Loadout {
+                primary_type: 43,
+                ammo_count: 40,
+                unarmed_profile: (1, 2, 6),
+            },
+        );
+        assert_eq!(state.fighters[0].attack1_left, 2);
+        let mut rng = EngineRng::new(SEED);
+        state.attack_target(&mut rng, 0, 1, false, AttackItemRef::Ammo);
+        assert_eq!(state.fighters[0].ammo, 38); // 40 − 2, SUBTRACT not assign
+        assert!(!state.fighters[0].ammo_item_lost);
+    }
+
+    #[test]
+    fn ranged_defense_bonus_bands() {
+        // LongBow (range 22) → oneThird = 7: range ≤ 7 → 0, 8..14 → +2,
+        // > 14 → +5. Validate the wiring reproduces the piecewise formula over
+        // `get_target_range`, and that a far target actually reaches +5.
+        let mk = |tx: i32| -> CombatState {
+            let bowman = Combatant::new_melee(
+                0,
+                Team::Party,
+                false,
+                GridPos::new(0, 0),
+                30,
+                40,
+                0,
+                12,
+                (1, 6, 0),
+                5,
+                2,
+            );
+            let target = Combatant::new_melee(
+                1,
+                Team::Monster,
+                true,
+                GridPos::new(tx, 0),
+                30,
+                40,
+                0,
+                12,
+                (1, 2, 0),
+                5,
+                1,
+            );
+            let mut state = CombatState::new(CombatMap::uniform(0x17), vec![bowman, target]);
+            state.item_data = Some(synth_item_table());
+            state.set_loadout(
+                0,
+                Loadout {
+                    primary_type: 43,
+                    ammo_count: 40,
+                    unarmed_profile: (1, 2, 6),
+                },
+            );
+            state
+        };
+        let band = |r: i32| -> i32 {
+            let one_third = 7;
+            let mut adj = 0;
+            let mut rr = r;
+            if rr > one_third {
+                rr -= one_third;
+                adj += 2;
+                if rr > one_third {
+                    adj += 3;
+                }
+            }
+            adj
+        };
+        let mut saw_plus5 = false;
+        for tx in [1, 8, 20, 40] {
+            let state = mk(tx);
+            let r =
+                get_target_range(&state.map, state.fighters[1].pos, state.fighters[0].pos) as i32;
+            assert_eq!(state.ranged_defense_bonus(0, 1), band(r), "tx={tx} r={r}");
+            if state.ranged_defense_bonus(0, 1) == 5 {
+                saw_plus5 = true;
+            }
+        }
+        assert!(saw_plus5, "a far target must reach the +5 band");
+        // A non-ranged attacker (bow unreadied) → 0.
+        let mut melee = mk(40);
+        melee.fighters[0].weapon_readied = false;
+        assert_eq!(melee.ranged_defense_bonus(0, 1), 0);
     }
 
     // --- pure selection logic (the two-if tie-break) -----------------------
