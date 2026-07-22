@@ -759,6 +759,23 @@ pub struct CombatState {
     /// combatant fights melee exactly as before); a harness with a ranged
     /// capture loads it and applies per-combatant [`Loadout`]s.
     pub item_data: Option<gbx_formats::items::ItemDataTable>,
+    /// `gbl.mapToBackGroundTile.mapScreenTopLeft` — the combat camera (doc
+    /// §36.3): the map cell at the top-left of the 7×7 combat window, which
+    /// spans `[topLeft, topLeft + (6,6)]`. Initialized at [`combat_setup`] to
+    /// `TeamList[0].pos − (3,3)` (`ovr011.cs:1209`) and moved by the census
+    /// scroll sites. Read ONLY through [`on_screen`](CombatState::on_screen) /
+    /// [`on_screen_pos`](CombatState::on_screen_pos); its sole draw-affecting
+    /// consumer is `AttackTarget`'s on-screen facing branch (§36.1) — the
+    /// camera is state, not draws.
+    map_screen_top_left: GridPos,
+    /// `gbl.focusCombatAreaOnPlayer` (`byte_1D910`) — the camera-follow flag
+    /// (doc §36.3). Gates the focus-dependent scrolls (turn head, movement, the
+    /// `draw_74B3F` recenter, `RemoveFromCombat`). Written at census sites 2/4/7.
+    focus: bool,
+    /// One-time `BattleSetup` guard: entry-init facing (`ovr011.cs:803`) + the
+    /// setup camera (`ovr011.cs:1209`) run once, at the first [`step`], after
+    /// the harness has set [`map_direction`](CombatState::map_direction).
+    combat_setup_done: bool,
     /// The optional action-trace observer (D-OR3). `None` in normal play.
     sink: Option<Box<dyn ActionSink>>,
 }
@@ -787,6 +804,9 @@ impl CombatState {
             map_direction: 0,
             auto_pcs_cast_magic: false,
             item_data: None,
+            map_screen_top_left: GridPos::new(0, 0),
+            focus: false,
+            combat_setup_done: false,
             sink: None,
         };
         s.rebuild_occupancy();
@@ -816,6 +836,9 @@ impl CombatState {
             map_direction: 0,
             auto_pcs_cast_magic: false,
             item_data: None,
+            map_screen_top_left: GridPos::new(0, 0),
+            focus: false,
+            combat_setup_done: false,
             sink: None,
         }
     }
@@ -883,10 +906,28 @@ impl CombatState {
     /// — that is exactly what [`run_combat`](Self::run_combat) is. See
     /// [`CombatStep`].
     pub fn step(&mut self, rng: &mut EngineRng) -> CombatStep {
+        if !self.combat_setup_done {
+            self.combat_setup();
+            self.combat_setup_done = true;
+        }
         match self.phase {
             Phase::Ended => CombatStep::Ended,
             Phase::RoundStart => self.begin_round(rng),
             Phase::Selecting => self.select_or_end(rng),
+        }
+    }
+
+    /// `BattleSetup`'s once-per-fight state seeding (`sub_380E0`/`ovr011.cs`),
+    /// the parts the QuickFight draw stream reads — run at the first [`step`],
+    /// after the harness has set [`map_direction`](CombatState::map_direction)
+    /// and the loadouts. Draw-free. Rendering (`RedrawCombatScreen`) is stubbed.
+    fn combat_setup(&mut self) {
+        // Site 1 — the setup camera (`ovr011.cs:1208-1209`): centre the window
+        // on `TeamList[0]` (roster index 0), no clamp. An empty roster can't
+        // enter combat, so index 0 is always present here.
+        if let Some(first) = self.fighters.first() {
+            let p = first.pos;
+            self.map_screen_top_left = GridPos::new(p.x - SCREEN_HALF, p.y - SCREEN_HALF);
         }
     }
 
@@ -981,6 +1022,16 @@ impl CombatState {
             // isn't re-picked (`run_combat_observed`'s old `if in_combat && delay>0`).
             TurnDriver::MeleeAi => {
                 if self.fighters[idx].in_combat && self.fighters[idx].delay > 0 {
+                    // Site 2 — the turn-head camera (`sub_33281` @`ovr009:02FA-0318`):
+                    // the camera follows the acting combatant — `focus = (team ==
+                    // Ours) || PlayerOnScreen(actor)` — and a focus-on turn scrolls
+                    // to it (`RedrawCombatIfFocusOn(true, 2, actor)` =
+                    // focus-gated `redrawCombatArea(8, 2, actor.pos)`).
+                    self.focus = self.fighters[idx].team == Team::Party || self.on_screen(idx);
+                    if self.focus {
+                        let p = self.fighters[idx].pos;
+                        self.redraw_combat_area(8, 2, p);
+                    }
                     self.melee_ai_turn(rng, idx);
                 } else {
                     self.clear_actions(idx);
@@ -1407,6 +1458,14 @@ pub fn resolve_attack(
 pub const MAP_W: i32 = 50;
 /// Combat-map height in cells (`Point.MapMaxY`, `Gbl.cs:112`).
 pub const MAP_H: i32 = 25;
+/// `Point.MapMinX`/`MapMinY` (`Gbl.cs:113-114`) — the low map bound.
+pub const MAP_MIN: i32 = 0;
+/// `Point.ScreenMaxX`/`ScreenMaxY` (`Gbl.cs:116-117`) — the combat window is
+/// `0..=6` on both axes (a 7×7 icon grid).
+pub const SCREEN_MAX: i32 = 6;
+/// `Point.ScreenHalfX`/`ScreenHalfY` (`Gbl.cs:118-119`) = `ScreenMax / 2` — the
+/// window's centre offset (`Point.ScreenCenter = (3, 3)`, `Gbl.cs:120`).
+pub const SCREEN_HALF: i32 = SCREEN_MAX / 2;
 
 /// A cell in the 50×25 combat map (coab's `Point`, `Gbl.cs:106`). `y` increases
 /// **downward** (screen space), which the facing/octant math below depends on.
@@ -2279,6 +2338,52 @@ pub fn deduct_move(remaining: i32, cost: i32) -> i32 {
     }
 }
 
+/// The `SteppingPath` iteration count (`var_AF`) for a missile from `attacker`
+/// to `target` over the **×3 pixel grid** (`ovr025.cs:896-908`): `Step()`
+/// (`sub_7324C`) is called until it takes no step (the current cell reaches the
+/// target on both axes), counting each call — including the terminal no-step
+/// one, since `var_AF` post-increments past it. Draw-free; used only by the
+/// missile camera (site 5, [`CombatState::draw_missile_camera`]).
+fn missile_path_pixel_steps(attacker: GridPos, target: GridPos) -> usize {
+    let (ax, ay) = (attacker.x * 3, attacker.y * 3);
+    let (tx, ty) = (target.x * 3, target.y * 3);
+    let diff_x = (tx - ax).abs();
+    let diff_y = (ty - ay).abs();
+    let sign_x = (tx - ax).signum();
+    let sign_y = (ty - ay).signum();
+    let (mut cx, mut cy) = (ax, ay);
+    let mut delta_count = 0i32;
+    let mut count = 0usize;
+    loop {
+        // one Step() (SteppingPath.cs:38-88).
+        let mut step_made = false;
+        if diff_x >= diff_y {
+            if cx != tx {
+                cx += sign_x;
+                delta_count += diff_y * 2;
+                if delta_count >= diff_x {
+                    cy += sign_y;
+                    delta_count -= diff_x * 2;
+                }
+                step_made = true;
+            }
+        } else if cy != ty {
+            cy += sign_y;
+            delta_count += diff_x * 2;
+            if delta_count >= diff_y {
+                cx += sign_x;
+                delta_count -= diff_y * 2;
+            }
+            step_made = true;
+        }
+        count += 1; // var_AF++ (ovr025.cs:907)
+        if !step_made {
+            break;
+        }
+    }
+    count
+}
+
 /// `getTargetDirection(playerB, playerA)` (`ovr014.cs:1460`, `sub_409BC`): the iso
 /// heading (0..7) **from `from` toward `to`**, an octant classifier over the cell
 /// vector. Pure geometry, draw-free.
@@ -2867,6 +2972,159 @@ impl CombatState {
         )
     }
 
+    // --- the combat camera (doc §36.3) -------------------------------------
+    //
+    // `mapScreenTopLeft` + `focusCombatAreaOnPlayer` are pure display state:
+    // the ONLY consumer that changes a draw is `AttackTarget`'s on-screen
+    // facing branch (§36.1), so these ports carry ONLY each display function's
+    // persistent-state effect — the tile/icon/overlay rendering is stubbed.
+
+    /// `CoordOnScreen(pos)` (`ovr033.cs:213`) for a screen-space cell (already
+    /// `map − mapScreenTopLeft`): inside the 7×7 window `0..=6` on both axes.
+    fn coord_on_screen(screen_x: i32, screen_y: i32) -> bool {
+        (0..=SCREEN_MAX).contains(&screen_x) && (0..=SCREEN_MAX).contains(&screen_y)
+    }
+
+    /// Is map cell `p` inside the current combat window? (`CoordOnScreen(p −
+    /// mapScreenTopLeft)`.) The size-1 form of `PlayerOnScreen` for a cell,
+    /// independent of a combatant's `in_combat`/`size` — used at the
+    /// `CombatantKilled` scroll, which tests the victim while it is still
+    /// present (`ovr033.cs:550`, before `size = 0`).
+    fn on_screen_pos(&self, p: GridPos) -> bool {
+        Self::coord_on_screen(
+            p.x - self.map_screen_top_left.x,
+            p.y - self.map_screen_top_left.y,
+        )
+    }
+
+    /// `PlayerOnScreen(_, combatant)` (`ovr033.cs:227`) for a **size-1**
+    /// combatant (every combatant in every capture; a size>1 loadout tripwires
+    /// elsewhere): `size == 0` (a removed combatant) ⇒ off-screen, else the
+    /// single cell's [`on_screen_pos`]. The `AllOnScreen` arg is irrelevant for
+    /// one cell, so both `PlayerOnScreen(false, …)` and `PlayerOnScreen(true,
+    /// …)` map here.
+    fn on_screen(&self, idx: usize) -> bool {
+        self.fighters[idx].in_combat && self.on_screen_pos(self.fighters[idx].pos)
+    }
+
+    /// `ScreenMapCheck(radius, pos)` (`ovr033.cs:266`, `sub_749DD`'s scroll
+    /// primitive) reduced to its persistent effect on `mapScreenTopLeft`: if
+    /// forced (`radius == 0xFF`) or `pos` lies outside the ±`radius` box around
+    /// the current screen centre, step the centre coordinate-wise toward `pos`
+    /// — each axis clamped to `[MapMin + 3, MapMax − 3 − 1]` (`x ∈ [3, 46]`,
+    /// `y ∈ [3, 21]`) — and rewrite `mapScreenTopLeft = centre − (3,3)`. Returns
+    /// whether it scrolled. The 7×7 tile redraw + `calculatePlayerScreenPositions`
+    /// are display (screenPos is derived live here). Binary-cited: the box test
+    /// + clamp bounds, `ovr033.cs:278-314`.
+    fn screen_map_check(&mut self, radius: i32, pos: GridPos) -> bool {
+        let mut cx = self.map_screen_top_left.x + SCREEN_HALF;
+        let mut cy = self.map_screen_top_left.y + SCREEN_HALF;
+        let var2 = if radius == 0xFF { 0 } else { radius };
+        let (min_x, max_x) = (cx - var2, cx + var2);
+        let (min_y, max_y) = (cy - var2, cy + var2);
+        if radius == 0xFF || pos.x < min_x || pos.x > max_x || pos.y < min_y || pos.y > max_y {
+            if pos.x < min_x {
+                while pos.x < cx && cx > MAP_MIN + SCREEN_HALF {
+                    cx -= 1;
+                }
+            } else if pos.x > max_x {
+                while pos.x > cx && cx < MAP_W - SCREEN_HALF - 1 {
+                    cx += 1;
+                }
+            }
+            if pos.y < min_y {
+                while pos.y < cy && cy > MAP_MIN + SCREEN_HALF {
+                    cy -= 1;
+                }
+            } else if pos.y > max_y {
+                while pos.y > cy && cy < MAP_H - SCREEN_HALF - 1 {
+                    cy += 1;
+                }
+            }
+            self.map_screen_top_left = GridPos::new(cx - SCREEN_HALF, cy - SCREEN_HALF);
+            return true;
+        }
+        false
+    }
+
+    /// `redrawCombatArea(dir, radius, map)` (`ovr033.cs:344`) reduced to its
+    /// sole persistent effect: `ScreenMapCheck(radius, map + delta[dir])` (`dir
+    /// == 8` ⇒ probe `map` in place). The per-icon repaint loop + `RedrawPosition`
+    /// + the `MapBoundaryTrunc` local are display-only.
+    fn redraw_combat_area(&mut self, dir: u8, radius: i32, map: GridPos) {
+        let probe = map.stepped(dir);
+        self.screen_map_check(radius, probe);
+    }
+
+    /// `draw_74B3F(arg0, iconState, direction, combatant)` (`ovr033.cs:376`)
+    /// reduced to its two persistent effects (§36.1): (1) the focus-gated
+    /// off-screen **recenter** — `redrawCombatArea(8, 3, combatant.pos)` when
+    /// the combatant is not fully on-screen and `focus` is on (`ovr033.cs:380`)
+    /// — and (2) the **unconditional** `combatant.direction = direction` store
+    /// (`ovr033.cs:396`), which is why the on-screen draw overwrites the target's
+    /// facing. The background/icon repaints (`arg0`/`iconState`-gated) are display.
+    fn draw_74b3f(&mut self, idx: usize, direction: u8) {
+        if !self.on_screen(idx) && self.focus {
+            let p = self.fighters[idx].pos;
+            self.redraw_combat_area(8, 3, p);
+        }
+        self.fighters[idx].direction = direction;
+    }
+
+    /// Site 5 — the persistent `mapScreenTopLeft` effect of a ranged shot's
+    /// missile animation (`draw_missile_attack`, `sub_67AA4`, `ovr025.cs:882-1010`).
+    /// The pixel-by-pixel overlay animation is display and draw-free, so only
+    /// the scroll skeleton is ported:
+    /// - the `SteppingPath` over the ×3 pixel grid gives `var_AF`; if `var_B0 =
+    ///   var_AF − 2 < 2` (a very short path) the routine returns before any
+    ///   scroll (`ovr025.cs:910-915`);
+    /// - both endpoints on-screen ⇒ `center1 = current centre` ⇒
+    ///   `redrawCombatArea(8, 0xFF, center1)` is a force-recenter no-op
+    ///   (`ovr025.cs:934-940`);
+    /// - either endpoint off-screen with `|Δ| ≤ 6` on both axes ⇒ force-scroll
+    ///   to the midpoint `center1 = Δ/2 + attacker` (`ovr025.cs:922-926/940`);
+    /// - either endpoint off-screen with a span > 6 ⇒ the missile leaves the
+    ///   screen before reaching the target, so the animation force-scrolls to a
+    ///   target-anchored centre `center2 = target + clamp` that brings the
+    ///   target on-screen (`ovr025.cs:1010-1032`).
+    fn draw_missile_camera(&mut self, attacker: usize, target: usize) {
+        let a = self.fighters[attacker].pos;
+        let t = self.fighters[target].pos;
+        let var_af = missile_path_pixel_steps(a, t);
+        let var_b0 = var_af as i32 - 2;
+        if var_b0 < 2 || (var_af as i32) < 2 {
+            return; // ovr025.cs:912 — `var_B0 < 2 || var_AF < 2` early return.
+        }
+        let a_on = self.on_screen_pos(a);
+        let t_on = self.on_screen_pos(t);
+        if a_on && t_on {
+            return; // center1 = current centre → force-recenter is a no-op.
+        }
+        let diff = GridPos::new(t.x - a.x, t.y - a.y);
+        if diff.x.abs() <= 6 && diff.y.abs() <= 6 {
+            // center1 = midpoint (ovr025.cs:926).
+            let center = GridPos::new(diff.x / 2 + a.x, diff.y / 2 + a.y);
+            self.screen_map_check(0xFF, center);
+        } else {
+            // center2 (ovr025.cs:1010-1030): anchor the window on the target,
+            // pushed back in-bounds by var_CE/var_D0.
+            let mut var_ce = 0;
+            if t.x + SCREEN_HALF > MAP_W {
+                var_ce = t.x - MAP_W;
+            } else if t.x < SCREEN_HALF {
+                var_ce = SCREEN_HALF - t.x;
+            }
+            let mut var_d0 = 0;
+            if t.y + SCREEN_HALF > MAP_H {
+                var_d0 = t.y - MAP_H;
+            } else if t.y < SCREEN_HALF {
+                var_d0 = SCREEN_HALF - t.y;
+            }
+            let center = GridPos::new(t.x + var_ce, t.y + var_d0);
+            self.screen_map_check(0xFF, center);
+        }
+    }
+
     /// `clear_actions` → `Action.Clear` (`Classes/Action.cs`): zero `delay`,
     /// `guarding`, and `move` — but **keep** `field_15`/`target`/morale (persistent).
     fn clear_actions(&mut self, actor: usize) {
@@ -2904,6 +3162,13 @@ impl CombatState {
     fn remove_from_combat(&mut self, actor: usize, status: HealthStatus) {
         if !self.fighters[actor].in_combat {
             return; // :14C0-14CB — already out of combat.
+        }
+        // Site 6 (flee/surrender path) — `RedrawCombatIfFocusOn(false, 3, player)`
+        // (`ovr024.cs:624`, `sub_75356`): a focus-on removal scrolls the camera
+        // to the leaver (radius 3) BEFORE `size = 0`.
+        if self.focus {
+            let p = self.fighters[actor].pos;
+            self.redraw_combat_area(8, 3, p);
         }
         {
             let f = &mut self.fighters[actor];
@@ -3122,12 +3387,23 @@ impl CombatState {
             return;
         }
 
-        // Removed from combat (ovr025.cs:1220-1240).
+        // Removed from combat (ovr025.cs:1220-1240). Site 6 (death path) —
+        // `CombatantKilled` (`sub_74E6F` @`ovr033:550`) FIRST scrolls the
+        // camera to the victim if it is off-screen: `if (PlayerOnScreen(true,
+        // victim) == false) redrawCombatArea(8, 3, victim.pos)`, evaluated while
+        // the victim is still present (before `size = 0`). **Deviation:** the
+        // spec's site 6 cites `RemoveFromCombat`'s FOCUS-gated scroll, but the
+        // damage-death path is `CombatantKilled`, ON-SCREEN-gated (bring an
+        // off-screen death into view) — a distinct gate (binary `sub_74E6F`).
+        let pos = self.fighters[target].pos;
+        if !self.on_screen_pos(pos) {
+            self.redraw_combat_area(8, 3, pos);
+        }
+        let t = &mut self.fighters[target];
         t.hp_current = 0;
         t.in_combat = false;
         t.delay = 0;
         let downed_party = t.team == Team::Party;
-        let pos = t.pos;
         // `CombatantKilled` (`sub_74E6F`, `ovr033:534`→coab): the removal path the
         // damage caller reaches whenever `in_combat == false` (`ovr014.cs:214`),
         // so it fires for dying/unconscious/dead alike. §26.5 — for a downed
@@ -3168,12 +3444,31 @@ impl CombatState {
         behind: bool,
         ranged_item: AttackItemRef,
     ) -> bool {
+        // AttackTarget (`sub_3F9DB` @`ovr014:19DB`) head: focus the camera on
+        // the attacker (`ovr014.cs:908`). [The target-side facing update
+        // (§36.1, `ovr014:19FE-1A9F`) lands with the AttackTarget-update
+        // mechanic.] Then the attacker ALWAYS faces its target and recenters if
+        // off-screen — `draw_74B3F(false, Attack, getTargetDirection(target,
+        // attacker), attacker)` @`ovr014:1AC2` (the camera commit performs the
+        // recenter with a no-op store; the face-target store lands with the
+        // AttackTarget update).
+        self.focus = true;
+        self.draw_74b3f(actor, self.fighters[actor].direction);
         // §19: `AttackTarget` (`sub_3F9DB`, ovr014.cs:939) sets
         // `attacker.actions.target = target` — the attacked (possibly re-picked)
         // combatant becomes the persistent target, so next round's `find_target`
         // keeps it draw-free. Draw-free; only the *held target* carried into later
         // rounds changes (the §18 re-pick correctly writes only a local `chosen`).
         self.fighters[actor].target = Some(target);
+        // Site 5 — the ranged missile camera (`ovr014.cs:945` → `draw_missile_attack`,
+        // `sub_67AA4`): a bow/thrown shot animates the missile across the board
+        // and scrolls the camera toward the target. Draw-free; only its
+        // `mapScreenTopLeft` effect is ported ([`draw_missile_camera`]). A
+        // null-item swing (melee / sling primary — the sling missile draw is
+        // itself draw-free, §34.6) fires no missile.
+        if matches!(ranged_item, AttackItemRef::Ammo | AttackItemRef::SelfWeapon) {
+            self.draw_missile_camera(actor, target);
+        }
         // `AttackTarget01` sets `actions.field_8 = true` (`ovr014.cs:738`) — the
         // "attacked this round" flag `reclac_attacks`'s write-back gate reads
         // (§34.3); `CalculateInitiative` resets it each round.
@@ -3395,8 +3690,19 @@ impl CombatState {
         } else {
             self.fighters[actor].move_left -= cost;
         }
+        // Site 7 (movement step) — sub_3E748's camera (`ovr014.cs:285-310`). In
+        // QuickFight (radius 3): if the destination is off-screen and focus is
+        // on, first scroll to the OLD cell (`redrawCombatArea(8, 2, oldPos)`,
+        // @294) using the pre-move window; then, after the pos write, scroll to
+        // the NEW cell (`redrawCombatArea(8, 3, newPos)`, @309) if focus.
+        if !self.on_screen_pos(new) && self.focus {
+            self.redraw_combat_area(8, 2, old);
+        }
         self.fighters[actor].pos = new;
         self.rebuild_occupancy();
+        if self.focus {
+            self.redraw_combat_area(8, 3, new);
+        }
         self.emit(ActionEvent::Move {
             combatant_id: actor,
             from_x: old.x,
@@ -3424,6 +3730,11 @@ impl CombatState {
         for n in near {
             let att = n.idx;
             if self.fighters[att].guarding {
+                // Site 7 (guard fire) — `move_step_into_attack` scrolls to the
+                // entering mover before the swing: `redrawCombatArea(8, 2,
+                // target.pos)` (`ovr014.cs:239`).
+                let mp = self.fighters[mover].pos;
+                self.redraw_combat_area(8, 2, mp);
                 self.fighters[att].guarding = false;
                 self.recalc_attacks_received(mover, att);
                 // AttackTarget(null,0) — the guard's into-reach swing carries no
@@ -3643,9 +3954,15 @@ impl CombatState {
             return;
         }
 
-        // Face the step direction (draw_74B3F sets actions.direction), take
-        // opportunity attacks for leaving, then step.
-        self.fighters[actor].direction = var_2 as u8;
+        // Site 7 (approach/flee step) — the camera follows the mover before it
+        // steps (`ovr010.cs:474`): `focus = (byte_1D90E || PlayerOnScreen(mover)
+        // || team == Ours)`, and `byte_1D90E` is provably false on this path
+        // (reset @`ovr010:561`, only set true once a target is reached). Then
+        // `draw_74B3F(false, Normal, var_2, mover)` (@476) recenters an
+        // off-screen mover and sets `actions.direction = var_2` (the step
+        // heading — the store our engine already carried).
+        self.focus = self.on_screen(actor) || self.fighters[actor].team == Team::Party;
+        self.draw_74b3f(actor, var_2 as u8);
         self.move_step_away_attack(rng, actor, var_2 as u8);
         if !self.fighters[actor].in_combat {
             self.clear_actions(actor);
@@ -3837,6 +4154,14 @@ impl CombatState {
 
                     if reachable {
                         let t = chosen.unwrap();
+                        // Site 3 — the AI pre-attack camera (`ovr010.cs:637-639`,
+                        // gated on `byte_1D90E == reachable`): scroll one step
+                        // from the actor toward the target, radius 2. Fires before
+                        // both TrySweepAttack and RecalcAttacksReceived.
+                        let cam_dir =
+                            target_direction(self.fighters[actor].pos, self.fighters[t].pos);
+                        let ap = self.fighters[actor].pos;
+                        self.redraw_combat_area(cam_dir, 2, ap);
                         if self.try_sweep_attack(t, actor) {
                             stop = true;
                             self.clear_actions(actor);
@@ -6361,6 +6686,124 @@ mod tests {
         assert_eq!(target_direction(o, GridPos::new(5, 15)), 5, "SW");
         assert_eq!(target_direction(o, GridPos::new(5, 10)), 6, "W");
         assert_eq!(target_direction(o, GridPos::new(5, 5)), 7, "NW");
+    }
+
+    // --- the combat camera (doc §36.3) -------------------------------------
+
+    /// A minimal melee roster over an open floor for exercising camera state.
+    fn camera_state(positions: &[(Team, GridPos)]) -> CombatState {
+        let fighters = positions
+            .iter()
+            .enumerate()
+            .map(|(i, (team, pos))| {
+                Combatant::new_melee(
+                    i,
+                    *team,
+                    *team == Team::Monster,
+                    *pos,
+                    10,
+                    10,
+                    0,
+                    12,
+                    (1, 6, 0),
+                    5,
+                    1,
+                )
+            })
+            .collect();
+        CombatState::new(CombatMap::uniform(FLOOR), fighters)
+    }
+
+    #[test]
+    fn camera_setup_centres_the_window_on_teamlist0() {
+        // BattleSetup (ovr011.cs:1209): mapScreenTopLeft = TeamList[0].pos − (3,3).
+        let mut s = camera_state(&[
+            (Team::Party, GridPos::new(26, 12)),
+            (Team::Monster, GridPos::new(34, 13)),
+        ]);
+        s.combat_setup();
+        assert_eq!(s.map_screen_top_left, GridPos::new(23, 9));
+        // The 7×7 window is [23,29]×[9,15]: the party member is on-screen; the
+        // monster at x=34 (as in combat4) starts off-screen — the camera matters.
+        assert!(s.on_screen(0));
+        assert!(!s.on_screen(1));
+    }
+
+    #[test]
+    fn coord_on_screen_is_the_seven_by_seven_window() {
+        assert!(CombatState::coord_on_screen(0, 0));
+        assert!(CombatState::coord_on_screen(6, 6));
+        assert!(!CombatState::coord_on_screen(-1, 3));
+        assert!(!CombatState::coord_on_screen(7, 3));
+        assert!(!CombatState::coord_on_screen(3, 7));
+    }
+
+    #[test]
+    fn screen_map_check_clamps_the_centre_to_the_map_interior() {
+        // The clamp bounds (ovr033.cs:286-311): centre.x ∈ [3,46], centre.y ∈ [3,21].
+        let mut s = camera_state(&[(Team::Party, GridPos::new(10, 10))]);
+        s.map_screen_top_left = GridPos::new(0, 0); // centre (3,3)
+        assert!(s.screen_map_check(0xFF, GridPos::new(90, 90)));
+        let centre = GridPos::new(
+            s.map_screen_top_left.x + SCREEN_HALF,
+            s.map_screen_top_left.y + SCREEN_HALF,
+        );
+        assert_eq!(centre, GridPos::new(46, 21), "clamps to the far corner");
+        assert!(s.screen_map_check(0xFF, GridPos::new(-50, -50)));
+        let centre = GridPos::new(
+            s.map_screen_top_left.x + SCREEN_HALF,
+            s.map_screen_top_left.y + SCREEN_HALF,
+        );
+        assert_eq!(centre, GridPos::new(3, 3), "clamps to the near corner");
+    }
+
+    #[test]
+    fn screen_map_check_box_test_gates_the_scroll() {
+        let mut s = camera_state(&[(Team::Party, GridPos::new(20, 12))]);
+        s.map_screen_top_left = GridPos::new(17, 9); // centre (20,12)
+                                                     // Inside the radius-2 box → no scroll.
+        assert!(!s.screen_map_check(2, GridPos::new(21, 13)));
+        assert_eq!(s.map_screen_top_left, GridPos::new(17, 9));
+        // Outside the box → the centre steps all the way to `pos` (the while
+        // loops chase `pos`, not merely back within radius).
+        assert!(s.screen_map_check(2, GridPos::new(24, 12)));
+        assert_eq!(s.map_screen_top_left, GridPos::new(21, 9)); // centre (24,12)
+    }
+
+    #[test]
+    fn draw_74b3f_recenters_an_offscreen_combatant_and_stores_direction() {
+        let mut s = camera_state(&[(Team::Party, GridPos::new(40, 20))]);
+        s.map_screen_top_left = GridPos::new(0, 0); // (40,20) is far off-screen
+        s.focus = true;
+        assert!(!s.on_screen(0));
+        s.draw_74b3f(0, 5);
+        assert!(s.on_screen(0), "the recenter brings it on-screen");
+        assert_eq!(
+            s.fighters[0].direction, 5,
+            "direction stored unconditionally"
+        );
+        // With focus off, an off-screen combatant is NOT chased (only the store).
+        s.map_screen_top_left = GridPos::new(0, 0);
+        s.focus = false;
+        s.draw_74b3f(0, 2);
+        assert!(!s.on_screen(0));
+        assert_eq!(s.fighters[0].direction, 2);
+    }
+
+    #[test]
+    fn missile_path_pixel_steps_counts_stepping_path_iterations() {
+        // A 2-cell horizontal shot spans 6 pixels; Step() moves x 0→6 (6 steps)
+        // then the 7th call takes none → var_AF = 7 (var_B0 = 5).
+        assert_eq!(
+            missile_path_pixel_steps(GridPos::new(0, 0), GridPos::new(2, 0)),
+            7
+        );
+        // A zero-length shot: the first Step() takes none → var_AF = 1 (var_B0 =
+        // −1 < 2 ⇒ the missile camera early-returns).
+        assert_eq!(
+            missile_path_pixel_steps(GridPos::new(5, 5), GridPos::new(5, 5)),
+            1
+        );
     }
 
     #[test]
