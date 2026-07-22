@@ -3512,6 +3512,28 @@ impl CombatState {
         self.draw_74b3f(attacker, face);
     }
 
+    /// The flanking heuristic (`AttackTarget01` @`ovr014:16AD-16E9`, coab
+    /// ovr014.cs:782-784, §36.4): a swarmed target whose back is turned to this
+    /// attacker is hit on its **behind** AC. All three must hold:
+    /// - `AttacksReceived > 1` (@`16B5`, `jbe` skips ≤ 1) — the target has taken
+    ///   more than one swing since its last move (swarmed this turn);
+    /// - `getTargetDirection(target, attacker) == direction` (@`16C9-16D4`) =
+    ///   `target_direction(attacker, target) == target.direction` — the attacker's
+    ///   bearing toward the target equals the target's facing, i.e. the target
+    ///   faces AWAY from the attacker (the attacker is behind it);
+    /// - `directionChanges > 4` (@`16E2`, `jbe` skips ≤ 4) — the target has been
+    ///   spun enough this turn.
+    ///
+    /// Guarded by `!CanBackStabTarget` in the binary (the `else` at `loc_3F6AD`);
+    /// backstab preempts with `ac_behind − 4` and lands next commit, so here
+    /// CanBackStab is treated as false and the gate is vacuously satisfied.
+    fn is_flanking(&self, target: usize, attacker: usize) -> bool {
+        self.fighters[target].attacks_received > 1
+            && target_direction(self.fighters[attacker].pos, self.fighters[target].pos)
+                == self.fighters[target].direction
+            && self.fighters[target].direction_changes > 4
+    }
+
     /// `AttackTarget → AttackTarget01` (`ovr014.cs:904/724`), melee core: for
     /// `attackIdx` counting down from `attack_idx`, drain `AttacksLeft(attackIdx)`
     /// swings — each **one d20** to-hit ([`pc_can_hit_target`]); **on a hit only**,
@@ -3569,11 +3591,14 @@ impl CombatState {
             self.clear_actions(actor);
             return true;
         }
-        // The binary selects the AC byte by indexing record[0x19A + behind]
-        // (`sub_3F4EB` @`ovr014:16F7-1700`): front @0x19A, behind @0x19B. Then
+        // AttackTarget01's AC selection (`sub_3F4EB` @`ovr014:1683-1708`, §36.4):
+        // the AC byte is record[0x19A + behindIdx] — front @0x19A, behind @0x19B.
+        // The behind index is set when `var_13 != 0` (@`16ED-16F3`): the caller's
+        // `attackType != 0` (`behind`) OR the flanking heuristic fires. Then
         // `target_ac += RangedDefenseBonus` on EVERY path (`ovr014.cs:799`) — a
         // distant target is harder to hit with a bow (§34.6).
-        let base_ac = if behind {
+        let behind_attack = behind || self.is_flanking(target, actor);
+        let base_ac = if behind_attack {
             self.fighters[target].ac_behind
         } else {
             self.fighters[target].ac
@@ -7017,6 +7042,45 @@ mod tests {
             "subsequent off-screen: unchanged"
         );
         assert_eq!(s.fighters[0].direction, 4);
+    }
+
+    #[test]
+    fn flanking_fires_only_when_swarmed_turned_and_backs_the_attacker() {
+        // §36.4 (ovr014:16AD-16E9): AttacksReceived>1 && the target's back is to
+        // the attacker (target_direction(attacker,target) == target.direction) &&
+        // directionChanges>4. Attacker (idx 0) due north of target (idx 1) → the
+        // attacker's bearing toward the target is S (4); the target faces S (4) to
+        // present its back.
+        let mut s = camera_state(&[
+            (Team::Party, GridPos::new(20, 10)), // attacker (idx 0), due north
+            (Team::Monster, GridPos::new(20, 12)), // target (idx 1)
+        ]);
+        assert_eq!(
+            target_direction(GridPos::new(20, 10), GridPos::new(20, 12)),
+            4
+        );
+        // All three satisfied → flanking.
+        s.fighters[1].attacks_received = 2;
+        s.fighters[1].direction = 4; // back turned to the attacker
+        s.fighters[1].direction_changes = 5;
+        assert!(s.is_flanking(1, 0));
+
+        // Only one swing this turn → not swarmed.
+        s.fighters[1].attacks_received = 1;
+        assert!(!s.is_flanking(1, 0), "AttacksReceived must be > 1");
+        s.fighters[1].attacks_received = 2;
+
+        // Target faces the attacker (N=0), not away → not behind.
+        s.fighters[1].direction = 0;
+        assert!(
+            !s.is_flanking(1, 0),
+            "target must face away from the attacker"
+        );
+        s.fighters[1].direction = 4;
+
+        // Not spun enough this turn.
+        s.fighters[1].direction_changes = 4;
+        assert!(!s.is_flanking(1, 0), "directionChanges must be > 4");
     }
 
     #[test]
