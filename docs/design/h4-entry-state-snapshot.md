@@ -1380,3 +1380,169 @@ staging hook must emit toggle events.
 `ShouldCastSpellX`; coab's `LearntList()` filters `Learning` entries and masks `0x7F`
 (`SpellList.AddLearnt`). A caster who fights mid-memorization diverges between the two.
 No capture exercises it; the wire's any-non-zero count matches the binary.
+
+## 34. SPEC — faithful ranged combat (M5 armed slice; Fable-scoped, implementer-built) (2026-07-21)
+
+**Goal: `armed-bar.gbxtrace` CLOSED 2749/2749** (guard pin flipped in the closing commit),
+all other pins unshifted. The capture's fight: MATHEW (long bow) and TRAVIS (short bow)
+shoot from range; patrons swarm; MATHEW is cornered rounds 1–6 and punches; the bows come
+back out when the room clears (round 7+). Everything below is binary-cited; coab is
+reference only. Two coab≠binary bugs found at spec time are flagged **(#16)** and **(#17)**.
+
+### 34.1 The input model — per-combatant loadout + the ITEMS table
+
+The capture's records carry runtime far pointers for the readied weapon (`field_151`
+@0x151), the items list (`itemsPtr` @0x14D), and the ammo slots (`player_ptr_03` @0x17D =
+arrows, `player_ptr_04` @0x181 = quarrels — `sub_6906C` reads exactly these two), so item
+identity/ammo counts are NOT recoverable from a snapshot. Two additive inputs:
+
+1. **`ItemDataTable`** — the game file `ITEMS` (`<gamedir>/ITEMS`, 2-byte header + 0x81
+   entries × 16 bytes; resident copy `seg600:5D10` = `unk_1C020`). Entry layout (all
+   binary-verified read sites): `[0]` item_slot, `[1]` handsCount, `[2]/[3]` diceCount/
+   diceSizeLarge, `[4]` bonusLarge (sbyte), `[5]` numberAttacks (HALF-attacks),
+   `[9]/[0xA]` diceCount/diceSizeNormal, `[0xB]` bonusNormal (sbyte), `[0xC]` range,
+   `[0xD]` classFlags, `[0xE]` flags. Flags: `0x01` arrows, `0x02` flag_02, `0x04` melee,
+   `0x08` launcher, `0x10` self-launching, `0x80` quarrels. New `gbx-formats` parser +
+   harness loads it from the local game dir (D10: the file itself stays local; unit tests
+   use synthetic entries). Rows in play (from Bryan's GOG `ITEMS`):
+
+   | type | name | hands | large | natk | normal | range | flags |
+   |---|---|---|---|---|---|---|---|
+   | 43 | LongBow | 2 | 1d6+0 | **4** | 1d6+0 | **22** | 0x0B |
+   | 44 | ShortBow | 2 | 1d6+0 | 4 | 1d6+0 | **16** | 0x0B |
+   | 73 | Arrow | slot 10 | 1d6 | 0 | 1d6+0 | 0 | 0x00 |
+   | 47 | Sling | 1 | 1d6+1 | 2 | 1d4+1 | 21 | **0x0A** |
+   | 36 | LongSword | 1 | 1d12 | 0 | 1d8+0 | 0 | 0x04 |
+
+2. **Per-combatant loadout** (committed per capture in the harness, like the guard's
+   `PINS`; `None` = today's behavior — range-1 melee, record profile as-is, items_selection
+   inert): `{ primary_type, ammo_count, unarmed_profile: (count,size,bonus) }`. armed-bar:
+   MATHEW `{43, 40, (1,2,6)}`, TRAVIS `{44, 40, (1,2,3)}`, all others `None` (MARK/LEDERA's
+   swords act through their record profile exactly as in the closed fist captures).
+   The readied (entry) profile comes from the record (@0x19E/0x1A0/0x1A2); the unarmed
+   profile = base dice @0x11E/0x120 + the STR damage adj — pinned empirically by the same
+   characters' fist captures (MATHEW +6, TRAVIS/MARK/LEDERA +3, SHARA +1, PHILIPPE +2).
+   Ammo 40 is a free parameter: no in-capture depletion (MATHEW fires 6, TRAVIS ≤20);
+   any count ≥ shots-fired replays identically.
+
+### 34.2 The predicates (`ovr025`)
+
+- **`is_weapon_ranged`** (`offset_above_1` @`ovr025:2FE4`): `field_151 != null &&
+  ItemDataTable[type].range > 1` (reads the TABLE range byte, `jbe` → false on ≤1).
+- **`is_weapon_ranged_melee`** (`offset_equals_20` @`ovr025:3027`): the above AND
+  `(flags & 0x14) == 0x14` (self-launching + melee: HandAxe 0x14 yes; Dart 0x1A no).
+- **`GetCurrentAttackItem`** (`sub_6906C` @`ovr025:306C`): from the primary's flags:
+  `0x10` → the item itself; `0x08` → `0x01`→arrows slot / `0x80`→quarrels slot; returns
+  `found != null || flags == 0x0A` — **a Sling/StaffSling (flags 0x0A) "finds" a null
+  item and still shoots** (no ammo consumed; the staging note's "slings need no ammo").
+
+### 34.3 Attack counts (`sub_3EDD4` @`ovr014:0DD4`, called by CalcInit + items_selection)
+
+Faithful transliteration (coab ovr014.cs:462 is accurate here):
+`orig = rec[0x19C]; rec[0x19C] = rec[0x11C];` then if ranged && GetCurrentAttackItem:
+`half = max(2, table[type].natk)` else `half = rec[0x19C]`. `attacks =
+ThisRoundActionCount(half)` (`sub_3EF0D`: `(half + (combat_round & 1)) / 2`). Ammo cap:
+`cap = max(1, item.count); if cap < attacks && item.count > 0 → attacks = cap` (item.count
+@item+0x39; skipped entirely for a null item — slings). Write-back gate: write `rec[0x19C]
+= attacks` iff `!field_8 || attacks < orig || (field_8 && attacks < orig*2 && !ranged)`.
+LongBow natk 4 → 2 shots every round (`(4+parity)/2`). **CalcInit tail** (`sub_3E000`
+@`:0041-0073`): `rec[0x19D] = ThisRoundActionCount(rec[0x11D])` — attack2's half-count is
+record @0x11D (all zero in this party → attack2 never swings here); `actions.field_5
+(maxSweapTargets) = rec[0xDD]`. The attacks-left cells are RECORD-resident: `rec[0x19B+idx]`
+(idx 1 → 0x19C, idx 2 → 0x19D) — `sub_3F4EB`'s loop reads/decrements exactly those.
+
+### 34.4 The AI turn (`sub_35DB1` @`ovr010:0DB1`) — range, near list, adjacency
+
+- **Range** (@`:0EE0-0F0E`): `range = table[primary.type].range − 1` when `field_151`
+  non-null, else 1; sanitize `{0, 0xFF} → 1`. LongBow → 21, ShortBow → 15.
+- The held-target reach test and `BuildNearTargets` both use THIS range (a bowman's near
+  list spans the room — the round-0 `d10` @57 is find_target's, and his re-pick lists are
+  weapon-range wide).
+- **The cornered re-pick block** (near-pick branch only): picked target + `is_weapon_ranged
+  && !ranged_melee && BuildNearTargets(1).Count > 0` → `AI_items_selection` + stop (no
+  attack this turn). A held-and-reachable target does NOT consult this block — the swap
+  happens via step-7 items_selection the next turn.
+- **Attack execution**: if ranged → `GetCurrentAttackItem(out item)`; if `ranged_melee &&
+  targetRange == 1` → `item = null` (thrown weapon used as melee). Then
+  `AttackTarget(item, 0, target, player)`.
+- **`TryGuarding`** (`sub_361F7` @`ovr010:11F7`): `IsHeld || is_weapon_ranged ||
+  delay == 0` → `clear_actions` (a ranged attacker NEVER parks a guard); else `guarding`.
+
+### 34.5 The weapon-selection AI (`sub_36673` @`ovr010:1673` + `sub_36535`)
+
+Runs every AI turn (step 7, ovr010.cs:79) and inside the cornered block. Faithful scope
+for this slice = the PRIMARY path over the loadout (candidates: the loadout weapon vs
+bare hands); the secondary/shield branches and multi-item lists are cited-deferred with a
+tripwire (`items-selection-secondary`) since every loadout here has ≤1 weapon + ammo.
+
+- `CalcItemPowerRating` (`sub_36535`): `rating = dsN*dcN + plus*8 (if >0) + bonusN*2 (if
+  >0) + (flag_08 ? (natk−1)*2 : 0) + (hands ≤ 1 ? 3 : 0)`; zero if hands+used > 3 /
+  cursed / (affect cases cited). LongBow: 6+6=12. Baseline `var_16` = base profile
+  `dsB*dcB (+2*bonusB if >0)` = 2.
+- Decision: ranged candidate wins iff `rating > var_16>>1 && ammo-available && (ranged_melee
+  || BuildNearTargets(1).Count == 0)`; else best melee candidate (None here → bare hands).
+- Ready/unready via `ready_Item` toggle + `reclac_player_values` + `reclac_attacks` at the
+  tail — the observable: **cornered bowman unreadies the bow → attack-1 profile becomes
+  the unarmed profile; clear again → re-readies, profile restored.** This is exactly
+  armed-bar MATHEW: rounds 1–6 single d2+6 punches (`4 7 7 | 20 2` turns), round 7+
+  double d6 shots again (@2350: `d3` retarget, `20 6 20 6` kills patron 8).
+- Our engine models the swap as: profile1 := loadout.unarmed_profile on unready; := the
+  saved entry profile on re-ready; attacks recomputed via §34.3 both times.
+  (`reclac_player_values`/`sub_66C20` full transliteration stays deferred.)
+
+### 34.6 The attack (`sub_3F9DB` @`ovr014:19DB` → `sub_3F4EB` @`ovr014:14EB` → `sub_3E192`)
+
+- `sub_3F9DB`: missile animation (item, plus Sling 0x2F/StaffSling 0x65 drawing the
+  primary, @`:1B14-1B4F` — draw-free); gate `rec[0x19C] > 0 || rec[0x19D] > 0`; call
+  `sub_3F4EB`; then **ammo write-back @`:1BB3-1BC7`: `if (item.count > 0) item.count -=
+  byte_1D901`** (the attack-1 swing count; punches never decrement) — **coab≠binary #16:
+  coab ASSIGNS `count = bytes_1D900[1]` (ovr014.cs:968) where the binary SUBTRACTS.**
+  Depletion (`count == 0`): ranged_melee && `affect_3 != 0x89` → clone-unreadied into the
+  dropped-items list + `lose_item`; else plain `lose_item` (the arrows item vanishes);
+  then `reclac_player_values(attacker)` — a depleted bowman punches from the next swing
+  batch on. Unexercised by armed-bar (counts ≥ usage) — implement (it is cheap), no wire.
+- `sub_3F4EB` (per doc §30 plus this session's full read): held-target auto-slay branch
+  (@`:153E-15E0`, cited-deferred — no held targets here); large-target dice substitution
+  (@`:15E3-1665`, `field_DE > 0x80 || (field_DE & 7) > 1` → table large dice/bonus swap,
+  cited-deferred — patrons are man-sized); `CanBackStabTarget` (`sub_408D7`) → `target_ac
+  = ac_behind − 4`; else flanking heuristic (§30) → BehindAttack; **`target_ac +=
+  RangedDefenseBonus` BY REFERENCE on every path** (`sub_3FCED` @`ovr014:1CED`:
+  `third = ranged ? (table.range−1)/3 : targetRange`; two bands: `range > third` → +2,
+  again → +3; LongBow: +2 beyond 7, +5 beyond 14); the swing loop @`:1743-1878`: `for
+  idx = actions.attackIdx down to 1: while rec[0x19B+idx] > 0 && !targetGone: dec cell,
+  bytes_1D900[idx]++, PC_CanHitTarget(target_ac) → hit: sub_3E192(idx) + affects hooks`.
+- `sub_3E192` (@`ovr014:0192`): **damage = `roll_dice(size@rec[0x19F+idx],
+  count@rec[0x19D+idx]) + (sbyte)rec[0x1A1+idx]`, clamped ≥0** (idx 1 → the 0x19E/0x1A0/
+  0x1A2 profile our decode already carries; idx 2 → 0x19F/0x1A1/0x1A3). Then the thief
+  **backstab multiplier** (@`:01F3-0229`, exact factors from `sub_6B3D1` + rec[0x117]/
+  rec[0x10F] — implementer reads both): armed-bar EXERCISES it — TRAVIS (Fighter/Thief)
+  @d2496: `20 2` punch kills a 9-hp patron (d2+3 ≤ 5 unmultiplied — the ×2-at-his-level
+  backstab is the only fit). `CanBackStabTarget` (`sub_408D7`) is therefore IN scope.
+- **coab≠binary #17 (flag, verify during implementation):** coab re-assigns `byte_1D90E =
+  GetCurrentAttackItem(...)` before `AttackTarget` in sub_35DB1 but never re-checks it —
+  confirm the binary's exact use (an out-of-ammo bowman's swing path) when transliterating.
+
+### 34.7 Capture walk (what closes when this lands)
+
+Round 0 (@53): MATHEW `8 4 7 7 | 10 | 20 6 [11 −1] 20` — two shots, hit+miss, from
+(26,12) with no move. Rounds 1–6: cornered — step-7 items_selection unreadies (adjacent
+patron), one `20 2` punch per round on the held target ([11] 15→7→0 across rounds 1–2).
+TRAVIS shoots 2/round from dist 2 (e.g. @709 `20 6 20 6`). Round 7 (@2344): room clear →
+re-ready, `d3` retarget, `20 6 20 6` kills 8. Round 8 (@2514): `1` pick, `20 20 6`.
+TRAVIS round 8 (@2492): cornered punch **backstab** kill. Patron paths (walk d100s, `d6`
+picks, d6 punches) are unchanged from the closed fist captures.
+
+### 34.8 Acceptance + discipline
+
+1. `armed-bar` **CLOSED 2749/2749** (operand-exact, equal length, zero trips) — flip its
+   pin in the same commit; guard 8/8 (all others unshifted — loadout `None` must be
+   draw-identical to today's engine, which the 6 non-armed pins prove).
+2. Workspace tests + clippy `-D warnings` + fmt + guard before every commit; one
+   mechanic per commit, binary-cited; never weaken an assert; doc § notes ride along.
+3. New tripwire `items-selection-secondary` (a loadout with a secondary/shield or >1
+   candidate weapon reaches the deferred branches). Existing wires untouched.
+4. Unit tests: reclac ranged counts (natk floor/parity/ammo cap/field_8 tail), predicates
+   (incl. sling 0x0A), range sanitize, RangedDefenseBonus bands, ammo subtract-not-assign
+   (#16), cornered swap (unready → punch profile → re-ready), TryGuarding ranged clear.
+5. Localizer: `GBX_DRAW=<n> GBX_H4_TURNDIFF=.../armed-bar.gbxtrace cargo test -p
+   gbx-oracle --test h4_turndiff h4_locate_draw -- --nocapture`.
