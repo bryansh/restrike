@@ -329,6 +329,12 @@ pub struct Combatant {
     /// heuristic (deferred) and (indirectly, via `direction`) backstab facing.
     /// `0` at entry.
     pub direction_changes: u8,
+    /// The **base** attack-1 profile (`attack1_DiceCountBase`@0x11E /
+    /// `attack1_DiceSizeBase`@0x120 / `attack1_DamageBonusBase`@0x122) — the
+    /// raw dice with no STR adjustment. `CalcItemPowerRating`'s baseline
+    /// (`var_16`, doc §34.5) reads it: `dsB*dcB (+2*bonusB if >0)`. Distinct
+    /// from the loadout's `unarmed_profile` (which folds in the STR adj).
+    pub base_dice: (u8, u8, u8),
 }
 
 /// Which item a ranged swing draws from — the `out item` of
@@ -430,6 +436,7 @@ impl Combatant {
             base_half_moves: 0,
             thief_skill_level: 0,
             direction_changes: 0,
+            base_dice: (0, 0, 0),
         }
     }
 
@@ -514,6 +521,7 @@ impl Combatant {
             base_half_moves: 0,
             thief_skill_level: 0,
             direction_changes: 0,
+            base_dice: (0, 0, 0),
         }
     }
 }
@@ -2860,12 +2868,13 @@ impl CombatState {
         f.move_left = 0;
     }
 
-    /// `TryGuarding` (`ovr010.cs:685`): for a melee combatant (not held, not
-    /// ranged), `guarding()` = `Action.Clear` (zeroes `delay`) **then** sets
-    /// `guarding = true` (`ovr025.cs`); a `delay == 0` combatant just clears. Either
-    /// way `delay` ends 0, so it is not re-picked. Draw-free.
+    /// `TryGuarding` (`sub_361F7` @`ovr010:11F7`, coab `ovr010.cs:685`): `IsHeld ||
+    /// is_weapon_ranged || delay == 0` → `Action.Clear` (a ranged attacker NEVER
+    /// parks a guard, §34.4); else `guarding()` = clear then set `guarding =
+    /// true`. Either way `delay` ends 0, so it is not re-picked. `IsHeld` (a held
+    /// affect) is not modeled → false. Draw-free.
     fn try_guarding(&mut self, actor: usize) {
-        if self.fighters[actor].delay == 0 {
+        if self.is_weapon_ranged(actor) || self.fighters[actor].delay == 0 {
             self.clear_actions(actor);
         } else {
             self.clear_actions(actor);
@@ -3781,11 +3790,26 @@ impl CombatState {
                             let roll = roll_dice(rng, near.len() as u16, 1);
                             let picked = near[(roll - 1) as usize].idx;
                             chosen = Some(picked);
-                            let tp = self.fighters[picked].pos;
-                            if get_target_range(&self.map, tp, self.fighters[actor].pos) == 1
-                                || self.can_see_target(picked)
+                            // §34.4 cornered re-pick: a still-ranged (non-ranged-
+                            // melee) attacker with an adjacent enemy unreadies via
+                            // items_selection and STOPS — no attack this turn
+                            // (ovr010.cs:622-628). Step-7 usually unreadied
+                            // already (so is_weapon_ranged is false here and the
+                            // else-if fires the punch); this covers the case a
+                            // bowman is still readied at the near-pick.
+                            if self.is_weapon_ranged(actor)
+                                && !self.is_weapon_ranged_melee(actor)
+                                && !self.build_near(actor, 1, false).is_empty()
                             {
-                                reachable = true;
+                                self.ai_items_selection(actor);
+                                stop = true;
+                            } else {
+                                let tp = self.fighters[picked].pos;
+                                if get_target_range(&self.map, tp, self.fighters[actor].pos) == 1
+                                    || self.can_see_target(picked)
+                                {
+                                    reachable = true;
+                                }
                             }
                         }
                     }
@@ -3895,7 +3919,12 @@ impl CombatState {
             });
         }
 
-        // 7. AI_items_selection (ovr010.cs:79) — draw-free (weapon-only no-op).
+        // 7. AI_items_selection (ovr010.cs:79) — the cornered weapon swap
+        // (§34.5): a bowman with an adjacent enemy unreadies to bare hands here,
+        // at the TOP of the turn (before find_target / the move-attack loop), so
+        // the swing below is a punch; the room clearing re-readies the bow.
+        // Draw-free; inert without a loadout.
+        self.ai_items_selection(actor);
         // 8. process_input again — draw-free.
 
         // 9. the target/move-attack loop (ovr010.cs:82-95).
@@ -4129,6 +4158,119 @@ impl CombatState {
         if !field_8 || attacks < orig || (field_8 && attacks < orig * 2 && !ranged) {
             self.fighters[actor].attack1_left = attacks as u8;
         }
+    }
+
+    /// `CalcItemPowerRating(item, player)` (`sub_36535` @`ovr010:1535`, coab
+    /// `ovr010.cs:817`; doc §34.5) for the loadout's primary weapon type:
+    /// `rating = dsN*dcN + item.plus*8(if>0) + bonusN*2(if>0) +
+    /// (flag_08 ? (natk−1)*2 : 0) + (hands ≤ 1 ? 3 : 0)`. The loadout carries no
+    /// magic plus (mundane weapons → `plus = 0`); the cursed / affect / hands+used
+    /// zeroing branches are cited-deferred (a single non-cursed weapon). LongBow:
+    /// `6 + 6 = 12`.
+    fn calc_item_power_rating(&self, item_type: u8) -> i32 {
+        let it = self
+            .item_data
+            .as_ref()
+            .expect("rating ⇒ items")
+            .get(item_type);
+        let mut rating = it.dice_size_normal as i32 * it.dice_count_normal as i32;
+        // item.plus not modeled (mundane loadout weapons) → the +plus*8 term is 0.
+        if it.bonus_normal > 0 {
+            rating += it.bonus_normal as i32 * 2;
+        }
+        if it.flags & gbx_formats::items::flags::FLAG_08 != 0 {
+            rating += (it.number_attacks as i32 - 1) * 2;
+        }
+        if it.hands_count <= 1 {
+            rating += 3;
+        }
+        rating
+    }
+
+    /// Whether the loadout's primary weapon would "find" an attack item — the
+    /// `var_1F` ammo-availability test in `AI_items_selection` (coab
+    /// `ovr010.cs:943-970`): the ammo slot present (not depleted) for a launcher,
+    /// the weapon itself for a self-launcher, or the `flag_08|flag_02` (0x0A)
+    /// sling special. Evaluated for the CANDIDATE weapon regardless of whether it
+    /// is currently readied (unlike [`Self::get_current_attack_item`]).
+    fn candidate_attack_found(&self, actor: usize, item_type: u8) -> bool {
+        let Some(items) = self.item_data.as_ref() else {
+            return false;
+        };
+        let flags = items.get(item_type).flags;
+        let mut found = false;
+        if flags & gbx_formats::items::flags::FLAG_10 != 0 {
+            found = true;
+        }
+        if flags & gbx_formats::items::flags::FLAG_08 != 0
+            && flags & (gbx_formats::items::flags::ARROWS | gbx_formats::items::flags::QUARRELS)
+                != 0
+        {
+            found = !self.fighters[actor].ammo_item_lost;
+        }
+        found || flags == (gbx_formats::items::flags::FLAG_08 | gbx_formats::items::flags::FLAG_02)
+    }
+
+    /// `AI_items_selection(player)` (`sub_36673` @`ovr010:1673`, coab
+    /// `ovr010.cs:875`; doc §34.5) — the cornered weapon swap, faithful over the
+    /// loadout's single weapon (the secondary/shield/multi-item branches are
+    /// cited-deferred, tripwired). The primary candidate `var_4` = the loadout
+    /// bow (`rating = var_15`); the melee candidate `var_8` = bare hands here
+    /// (`None`). The bow wins iff `rating > (var_16 >> 1)` (`var_16` = the base
+    /// profile rating) AND ammo is available AND (ranged-melee OR no adjacent
+    /// enemy). Otherwise bare hands. The observable swap (§34.5): unready → the
+    /// attack-1 profile becomes the unarmed profile; re-ready → the saved entry
+    /// profile; attacks recomputed via [`Self::reclac_attacks`] both ways.
+    /// Inert without a loadout (weapon-only no-op). Draw-free.
+    fn ai_items_selection(&mut self, actor: usize) {
+        let Some(l) = self.fighters[actor].loadout else {
+            return; // no loadout → nothing to select (today's melee no-op).
+        };
+        if self.item_data.is_none() {
+            return;
+        }
+        // var_15 = CalcItemPowerRating(bow); var_16 = the base profile rating
+        // (dsB*dcB (+2*bonusB if >0)).
+        let var_15 = self.calc_item_power_rating(l.primary_type);
+        let (dcb, dsb, dbb) = self.fighters[actor].base_dice;
+        let mut var_16 = dsb as i32 * dcb as i32;
+        if dbb as i32 > 0 {
+            var_16 += dbb as i32 * 2;
+        }
+        // var_1F = the bow's ammo is available.
+        let ammo_avail = self.candidate_attack_found(actor, l.primary_type);
+        // ranged_melee(var_4) — a thrown weapon usable in hand.
+        let flags = self.item_data.as_ref().unwrap().get(l.primary_type).flags;
+        let ranged_of_bow = self.item_data.as_ref().unwrap().get(l.primary_type).range as i32 > 1;
+        let ranged_melee = ranged_of_bow && (flags & 0x14) == 0x14;
+        let no_adjacent = self.build_near(actor, 1, false).is_empty();
+
+        // The bow wins the primary slot iff rating dominates the base, ammo is
+        // available, and (ranged-melee or no adjacent enemy).
+        let use_bow = var_15 > (var_16 >> 1) && ammo_avail && (ranged_melee || no_adjacent);
+
+        let currently_readied = self.fighters[actor].weapon_readied;
+        if use_bow && !currently_readied {
+            // Re-ready the bow: primaryWeapon := bow, attack-1 profile := the
+            // saved entry profile; recompute the ranged attack count.
+            self.fighters[actor].weapon_readied = true;
+            let (dc, ds, db) = self.fighters[actor].entry_dice;
+            self.fighters[actor].dice_count = dc;
+            self.fighters[actor].dice_size = ds;
+            self.fighters[actor].damage_bonus = db;
+            self.reclac_attacks(actor);
+        } else if !use_bow && currently_readied {
+            // Unready the bow: primaryWeapon := null, attack-1 profile := the
+            // bare-hands profile; recompute the melee attack count.
+            self.fighters[actor].weapon_readied = false;
+            let (dc, ds, db) = l.unarmed_profile;
+            self.fighters[actor].dice_count = dc;
+            self.fighters[actor].dice_size = ds;
+            self.fighters[actor].damage_bonus = db;
+            self.reclac_attacks(actor);
+        }
+        // else: already in the desired state — no swap, no recompute (coab's
+        // `replace_weapon = false` fast path).
     }
 
     /// `CalculateInitiative(i)` (`sub_3E000` @`ovr014.cs:8`) on the rich model:
@@ -4578,6 +4720,11 @@ fn combatant_from_record(
         rec.attack_profile_current[7], // a2 dmg_bonus  @0x1a3
     );
     c.base_half_moves = rec.attack_profile_base[1]; // baseHalfMoves @0x11d
+    c.base_dice = (
+        rec.attack_profile_base[2], // attack1_DiceCountBase @0x11e
+        rec.attack_profile_base[4], // attack1_DiceSizeBase  @0x120
+        rec.attack_profile_base[6], // attack1_DamageBonusBase @0x122
+    );
     c.field_de = rec.field_de; // @0xde
     c.thief_skill_level = skill_level_thief(rec);
     c
@@ -5031,6 +5178,93 @@ mod tests {
         let mut melee = mk(40);
         melee.fighters[0].weapon_readied = false;
         assert_eq!(melee.ranged_defense_bonus(0, 1), 0);
+    }
+
+    #[test]
+    fn cornered_swap_unready_then_reready() {
+        // A bowman with an adjacent enemy unreadies to the unarmed profile;
+        // clearing the enemy re-readies the bow and restores the entry profile.
+        let bowman = Combatant::new_melee(
+            0,
+            Team::Party,
+            false,
+            GridPos::new(0, 0),
+            30,
+            40,
+            40,
+            12,
+            (1, 6, 0), // entry bow profile
+            5,
+            2,
+        );
+        let patron = Combatant::new_melee(
+            1,
+            Team::Monster,
+            true,
+            GridPos::new(1, 0), // adjacent
+            16,
+            40,
+            0,
+            12,
+            (1, 2, 0),
+            5,
+            1,
+        );
+        let mut state = CombatState::new(CombatMap::uniform(0x17), vec![bowman, patron]);
+        state.item_data = Some(synth_item_table());
+        state.set_loadout(
+            0,
+            Loadout {
+                primary_type: 43,
+                ammo_count: 40,
+                unarmed_profile: (1, 2, 6),
+            },
+        );
+        state.fighters[0].entry_dice = (1, 6, 0);
+        assert!(state.is_weapon_ranged(0));
+
+        // Adjacent enemy → unready to fists.
+        state.ai_items_selection(0);
+        assert!(!state.fighters[0].weapon_readied);
+        assert_eq!(
+            (
+                state.fighters[0].dice_count,
+                state.fighters[0].dice_size,
+                state.fighters[0].damage_bonus
+            ),
+            (1, 2, 6)
+        );
+        assert!(!state.is_weapon_ranged(0));
+
+        // Clear the enemy → re-ready the bow, restore the entry profile.
+        state.fighters[1].in_combat = false;
+        state.rebuild_occupancy();
+        state.ai_items_selection(0);
+        assert!(state.fighters[0].weapon_readied);
+        assert_eq!(
+            (
+                state.fighters[0].dice_count,
+                state.fighters[0].dice_size,
+                state.fighters[0].damage_bonus
+            ),
+            (1, 6, 0)
+        );
+        assert!(state.is_weapon_ranged(0));
+    }
+
+    #[test]
+    fn try_guarding_ranged_clears_never_guards() {
+        // A ranged attacker never parks a guard (§34.4): clear, no guard flag.
+        let mut state = ranged_state(43, 2, 40);
+        state.fighters[0].delay = 5;
+        state.try_guarding(0);
+        assert!(!state.fighters[0].guarding);
+        assert_eq!(state.fighters[0].delay, 0);
+        // Unreadied (melee) with delay > 0 → guards as before.
+        state.fighters[0].weapon_readied = false;
+        state.fighters[0].delay = 5;
+        state.try_guarding(0);
+        assert!(state.fighters[0].guarding);
     }
 
     // --- pure selection logic (the two-if tie-break) -----------------------
