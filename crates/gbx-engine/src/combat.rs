@@ -827,6 +827,11 @@ impl CombatState {
     /// this is the only entry point that arms the ranged path; the harness calls
     /// it per capture, like the guard's pins. `entry_dice` is already the
     /// record's decoded profile ([`combatant_from_record`]).
+    ///
+    /// **Setup-time only**: call before any combat turn runs. It snapshots the
+    /// combatant's *current* attack-1 profile as the re-ready target, so calling
+    /// it after a turn has unreadied the weapon would snapshot the fist profile
+    /// instead.
     pub fn set_loadout(&mut self, id: usize, loadout: Loadout) {
         let f = &mut self.fighters[id];
         f.loadout = Some(loadout);
@@ -3248,11 +3253,14 @@ impl CombatState {
             // Depletion (`:1BC7-`): count hits 0 → the item is lost. For plain
             // ammo (arrows/quarrels) that is a straight `lose_item` — modeled
             // (capture-proven by TRAVIS's quiver). For a SELF-LAUNCHING weapon
-            // the lost item IS the primary (`field_151` nulls at once — ours
-            // stays readied until items_selection), and a ranged-melee one
+            // the lost item IS the primary (`field_151` nulls at once; ours
+            // keeps the ready flag but the found-gates treat it as lost, so it
+            // degrades exactly like arrows), and a ranged-melee one
             // additionally clone-drops an unreadied copy (`ovr014:1BD4-1C54`) —
-            // both unmodeled: the tripwire names the territory.
-            if self.fighters[actor].ammo <= 0 {
+            // that drop is unmodeled: the tripwire names the territory. Gated
+            // on the edge so the trip fires ONCE at depletion, not on every
+            // later re-observation of the already-lost item.
+            if self.fighters[actor].ammo <= 0 && !self.fighters[actor].ammo_item_lost {
                 self.fighters[actor].ammo = 0;
                 self.fighters[actor].ammo_item_lost = true;
                 if ranged_item == AttackItemRef::SelfWeapon {
@@ -4078,7 +4086,10 @@ impl CombatState {
         let flags = item.flags;
         let f = &self.fighters[actor];
         let mut found_item = AttackItemRef::None;
-        if flags & gbx_formats::items::flags::FLAG_10 != 0 {
+        // A depleted self-launching weapon is LOST in the binary (`field_151`
+        // nulls at depletion), so it no longer finds itself — same degradation
+        // as a depleted ammo slot.
+        if flags & gbx_formats::items::flags::FLAG_10 != 0 && !f.ammo_item_lost {
             found_item = AttackItemRef::SelfWeapon;
         }
         if flags & gbx_formats::items::flags::FLAG_08 != 0 {
@@ -4227,8 +4238,10 @@ impl CombatState {
         };
         let flags = items.get(item_type).flags;
         let mut found = false;
+        // Mirrors `get_current_attack_item`: a depleted self-launcher is a
+        // lost item in the binary and cannot be re-found by the selection scan.
         if flags & gbx_formats::items::flags::FLAG_10 != 0 {
-            found = true;
+            found = !self.fighters[actor].ammo_item_lost;
         }
         if flags & gbx_formats::items::flags::FLAG_08 != 0
             && flags & (gbx_formats::items::flags::ARROWS | gbx_formats::items::flags::QUARRELS)

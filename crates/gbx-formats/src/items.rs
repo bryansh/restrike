@@ -300,6 +300,28 @@ mod tests {
     }
 
     #[test]
+    fn a_file_ending_mid_entry_keeps_its_partial_bytes() {
+        // A file ending mid-entry keeps its partial bytes (coab reads a short
+        // file into a zeroed buffer, so the truncated entry's leading bytes
+        // survive), rather than zeroing the whole entry.
+        let img = {
+            let mut v = synth([1, 2], &[[7u8; 16]]);
+            v.extend_from_slice(&[9, 9, 9]);
+            v
+        };
+        let t = ItemDataTable::parse(&img).unwrap();
+        assert_eq!(
+            (
+                t.get(1).item_slot,
+                t.get(1).hands_count,
+                t.get(1).dice_count_large
+            ),
+            (9, 9, 9)
+        );
+        assert_eq!(t.get(1).dice_size_large, 0); // zero-filled beyond EOF
+    }
+
+    #[test]
     fn rejects_a_file_shorter_than_the_header() {
         assert!(matches!(
             ItemDataTable::parse(&[0x00]),
