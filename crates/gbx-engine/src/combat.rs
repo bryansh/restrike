@@ -922,6 +922,21 @@ impl CombatState {
     /// after the harness has set [`map_direction`](CombatState::map_direction)
     /// and the loadouts. Draw-free. Rendering (`RedrawCombatScreen`) is stubbed.
     fn combat_setup(&mut self) {
+        // Entry-init facing (`sub_380E0` @`ovr011:1162-118E`, coab ovr011.cs:803):
+        // each combatant faces `HalfDirToIso[mapDirection / 2]` (`unk_1660C =
+        // {7,2,3,6}`), and an ENEMY additionally turns to face back at the party
+        // (`+4 % 8`, @`ovr011:1185-118E`). Fresh `Action`s start with
+        // `AttacksReceived`/`directionChanges` 0 (already the constructor state).
+        // md = 2 (every capture) ⇒ HalfDirToIso[1] = 2 → party faces 2, enemies
+        // face 6. Uses the harness-set `map_direction`.
+        let party_dir = HALF_DIR_TO_ISO[(self.map_direction as usize) / 2] as u8;
+        for f in &mut self.fighters {
+            f.direction = if f.team == Team::Monster {
+                (party_dir + 4) % 8
+            } else {
+                party_dir
+            };
+        }
         // Site 1 — the setup camera (`ovr011.cs:1208-1209`): centre the window
         // on `TeamList[0]` (roster index 0), no clamp. An empty roster can't
         // enter combat, so index 0 is always present here.
@@ -6712,6 +6727,28 @@ mod tests {
             })
             .collect();
         CombatState::new(CombatMap::uniform(FLOOR), fighters)
+    }
+
+    #[test]
+    fn entry_init_facing_faces_the_party_heading_enemies_reversed() {
+        // ovr011.cs:803-807: direction = HalfDirToIso[md/2]; enemies +4%8.
+        let mut s = camera_state(&[
+            (Team::Party, GridPos::new(26, 12)),
+            (Team::Monster, GridPos::new(34, 13)),
+        ]);
+        s.map_direction = 2; // md/2 = 1 → HalfDirToIso[1] = 2.
+        s.combat_setup();
+        assert_eq!(s.fighters[0].direction, 2, "party faces the heading");
+        assert_eq!(s.fighters[1].direction, 6, "enemy faces back (+4)");
+        // md = 0 → HalfDirToIso[0] = 7; enemy 3.
+        let mut s = camera_state(&[
+            (Team::Party, GridPos::new(26, 12)),
+            (Team::Monster, GridPos::new(34, 13)),
+        ]);
+        s.map_direction = 0;
+        s.combat_setup();
+        assert_eq!(s.fighters[0].direction, 7);
+        assert_eq!(s.fighters[1].direction, 3);
     }
 
     #[test]
