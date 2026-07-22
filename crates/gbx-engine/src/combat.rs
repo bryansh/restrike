@@ -4152,10 +4152,13 @@ impl CombatState {
             }
         }
 
-        // Write-back gate (`ovr014.cs:508`): !field_8 || attacks < orig ||
-        // (field_8 && attacks < orig*2 && !ranged).
+        // Write-back gate (`ovr014:0EBE-0EFC`, coab `ovr014.cs:508`): !field_8
+        // || attacks < orig || (field_8 && attacks < orig*2 && !foundRanged).
+        // The third clause tests `var_5` = **foundRanged** (`:0EF6`, ranged AND
+        // the attack item found), not mere is_weapon_ranged — the two differ for
+        // a readied launcher whose ammo item is gone (audit fix).
         let field_8 = self.fighters[actor].field_8;
-        if !field_8 || attacks < orig || (field_8 && attacks < orig * 2 && !ranged) {
+        if !field_8 || attacks < orig || (field_8 && attacks < orig * 2 && !found_ranged) {
             self.fighters[actor].attack1_left = attacks as u8;
         }
     }
@@ -4252,25 +4255,27 @@ impl CombatState {
         let currently_readied = self.fighters[actor].weapon_readied;
         if use_bow && !currently_readied {
             // Re-ready the bow: primaryWeapon := bow, attack-1 profile := the
-            // saved entry profile; recompute the ranged attack count.
+            // saved entry profile.
             self.fighters[actor].weapon_readied = true;
             let (dc, ds, db) = self.fighters[actor].entry_dice;
             self.fighters[actor].dice_count = dc;
             self.fighters[actor].dice_size = ds;
             self.fighters[actor].damage_bonus = db;
-            self.reclac_attacks(actor);
         } else if !use_bow && currently_readied {
             // Unready the bow: primaryWeapon := null, attack-1 profile := the
-            // bare-hands profile; recompute the melee attack count.
+            // bare-hands profile.
             self.fighters[actor].weapon_readied = false;
             let (dc, ds, db) = l.unarmed_profile;
             self.fighters[actor].dice_count = dc;
             self.fighters[actor].dice_size = ds;
             self.fighters[actor].damage_bonus = db;
-            self.reclac_attacks(actor);
         }
-        // else: already in the desired state — no swap, no recompute (coab's
-        // `replace_weapon = false` fast path).
+        // The tail (`ovr010:1AB0-1AC6`, coab ovr010.cs:1018-1020) runs
+        // `reclac_player_values` + `reclac_attacks` UNCONDITIONALLY — both the
+        // replace path and the `replace_weapon = false` skip land on the same
+        // merge point (audit fix: the recompute is not gated on a swap; the
+        // §34.3 write-back gate is what makes the always-recompute safe).
+        self.reclac_attacks(actor);
     }
 
     /// `CalculateInitiative(i)` (`sub_3E000` @`ovr014.cs:8`) on the rich model:
