@@ -109,10 +109,12 @@ const PINS: &[Pin] = &[
         capture: "armed-bar.gbxtrace",
         // §34.4/34.5 landed the cornered weapon swap; the ammo-depletion finding
         // (TRAVIS's 10-arrow quiver empties → he punches, doc §34 deviation)
-        // carries the frontier to 2019. The residual @2019 is the flanking
-        // heuristic (a swarmed target hit on its BEHIND AC via directionChanges,
-        // §30 cited-deferred) — the facing subsystem, the next peel.
-        expect: Expect::Frontier(2019),
+        // carried the frontier to 2019. Flanking ON (§36.4, ovr014:16AD-16E9)
+        // carries it to 2517 — the swarmed-target behind-AC hits between 2019 and
+        // 2517 now land. The residual @2517 is TRAVIS's cornered-punch BACKSTAB
+        // damage draw (a d2 → d? damage divergence on [14]; the capture applies
+        // the ×3 multiplier for hp7 vs our hp11) — the next peel.
+        expect: Expect::Frontier(2517),
         map_direction: 2,
         auto_cast: false,
     },
