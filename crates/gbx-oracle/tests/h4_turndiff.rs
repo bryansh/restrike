@@ -27,6 +27,8 @@ use gbx_engine::rng::{EngineRng, RngDraw, RngSink};
 use gbx_rules::adnd1::flavor_impl::Adnd1;
 use gbx_rules::pack::RuleSet;
 
+mod common;
+
 const DEFAULT_CAPTURE: &str = "goldbox-data/traces/combat4.gbxtrace";
 
 fn capture_path() -> Option<PathBuf> {
@@ -35,6 +37,15 @@ fn capture_path() -> Option<PathBuf> {
     }
     let home = std::env::var_os("HOME")?;
     Some(PathBuf::from(home).join(DEFAULT_CAPTURE))
+}
+
+/// The capture's basename (`armed-bar.gbxtrace`, …) — the loadout-table key
+/// (doc §34.1). Every replay site here reads the single `capture_path()`, so
+/// the basename is uniform.
+fn capture_basename() -> String {
+    capture_path()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_default()
 }
 
 fn hex_decode(s: &str) -> Vec<u8> {
@@ -212,6 +223,17 @@ fn apply_capture_knobs(state: &mut gbx_engine::combat::CombatState, cap: &Captur
     state.auto_pcs_cast_magic = std::env::var("RESTRIKE_AUTO_CAST")
         .map(|v| v == "1")
         .unwrap_or(false);
+    // §34.1: the ITEMS table + per-capture ranged loadouts (one shared place,
+    // `common`) — applied here so EVERY replay/diagnostic in this file shares
+    // the same ranged inputs (the §30 lesson). `None` loadouts are melee-
+    // identical; armed-bar arms MATHEW/TRAVIS's bows.
+    let records: Vec<&[u8]> = cap.entry.iter().map(|c| c.record.as_slice()).collect();
+    common::apply_loadouts(
+        state,
+        &capture_basename(),
+        &records,
+        common::load_item_data(),
+    );
 }
 
 #[derive(Clone, Default)]

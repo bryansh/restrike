@@ -29,6 +29,8 @@
 
 use std::path::{Path, PathBuf};
 
+mod common;
+
 use gbx_engine::combat::{
     combat_state_from_records, CombatMap, GridPos, RecordCombatant, Team, DEFAULT_NO_ACTION_LIMIT,
 };
@@ -207,7 +209,12 @@ fn capture_draws(text: &str) -> Vec<(u32, u32, Option<u16>)> {
 /// `None` divergence == closed (all draws equal on `(before, after, operand)` and
 /// equal length). The comparison is `h4_replay`'s: `(before, after)` always, plus
 /// the operand when both sides carry one.
-fn replay(path: &Path, map_direction: u8, auto_cast: bool) -> (Option<usize>, usize) {
+fn replay(
+    path: &Path,
+    capture: &str,
+    map_direction: u8,
+    auto_cast: bool,
+) -> (Option<usize>, usize) {
     let text = std::fs::read_to_string(path).expect("capture readable");
     let trace = Trace::parse(&text).expect("capture parses");
     let entry = trace
@@ -240,6 +247,11 @@ fn replay(path: &Path, map_direction: u8, auto_cast: bool) -> (Option<usize>, us
     // value covers legacy captures without the field.
     state.map_direction = entry.map_direction.unwrap_or(map_direction);
     state.auto_pcs_cast_magic = auto_cast;
+    // §34.1: the ITEMS table + per-capture ranged loadouts (one shared place,
+    // `common`). `None` loadouts leave a combatant melee-identical, so the six
+    // non-armed pins are unshifted; armed-bar arms MATHEW/TRAVIS's bows.
+    let records: Vec<&[u8]> = entries.iter().map(|e| e.record).collect();
+    common::apply_loadouts(&mut state, capture, &records, common::load_item_data());
 
     let tap = DrawTap::default();
     let draws = tap.draws.clone();
@@ -303,8 +315,14 @@ fn h4_frontier_pins_hold() {
             eprintln!("SKIPPED (absent, D10): {}", pin.capture);
             continue;
         }
+        // A ranged capture needs the ITEMS table; without it (D10) the replay
+        // would fall back to melee and the pin cannot hold — skip loudly.
+        if common::capture_has_loadout(pin.capture) && common::load_item_data().is_none() {
+            eprintln!("SKIPPED (ITEMS absent, D10): {}", pin.capture);
+            continue;
+        }
         checked += 1;
-        let (frontier, trips) = replay(&path, pin.map_direction, pin.auto_cast);
+        let (frontier, trips) = replay(&path, pin.capture, pin.map_direction, pin.auto_cast);
         match pin.expect {
             Expect::Closed => {
                 assert_eq!(

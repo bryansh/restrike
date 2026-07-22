@@ -30,6 +30,8 @@ use gbx_rules::pack::RuleSet;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+mod common;
+
 /// The canonical local-only capture (D10): the `combat4` bar brawl (16
 /// combatants, seed `0x80ee4cee`, 3,075 draws, real terrain + board snapshots).
 /// Overridable with `GBX_H4_CAPTURE`; otherwise the `~/goldbox-data/traces/`
@@ -231,6 +233,20 @@ fn h4_melee_replays_the_bar_brawl_capture_draw_for_draw() {
     state.auto_pcs_cast_magic = std::env::var("RESTRIKE_AUTO_CAST")
         .map(|v| v == "1")
         .unwrap_or(false);
+    // §34.1: the ITEMS table + per-capture ranged loadouts (one shared place,
+    // `common`). `None` loadouts leave a combatant melee-identical; armed-bar
+    // arms MATHEW/TRAVIS's bows.
+    let capture_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let records: Vec<&[u8]> = entries.iter().map(|e| e.record).collect();
+    common::apply_loadouts(
+        &mut state,
+        &capture_name,
+        &records,
+        common::load_item_data(),
+    );
 
     // Seed gbx-prng with the snapshot's rng_state and tap every draw.
     let tap = DrawTap::default();

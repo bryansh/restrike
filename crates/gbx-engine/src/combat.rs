@@ -275,6 +275,79 @@ pub struct Combatant {
     /// tick adds 1/round and kills at `> 9`; a bandage zeroes it. `0` for a
     /// combatant that is not dying.
     pub bleeding: u8,
+
+    // --- the armed/ranged loadout (M5 armed slice, doc §34) ----------------
+    /// The additive per-combatant ranged loadout (doc §34.1). `None` = today's
+    /// behaviour — range-1 melee, the record's readied profile as-is, weapon
+    /// selection inert. `Some` supplies the readied primary-weapon type
+    /// (`field_151`), the launcher's ammo, and the bare-hands profile the AI
+    /// swaps to when cornered.
+    pub loadout: Option<Loadout>,
+    /// `player.activeItems.primaryWeapon != null` — is the loadout's primary
+    /// weapon currently readied (`field_151` non-null)? Starts `true` when a
+    /// loadout is applied; the cornered weapon-selection AI toggles it (unready
+    /// → bare hands, re-ready → the bow). Always `false` without a loadout, so
+    /// the ranged predicates read melee (doc §34.2).
+    pub weapon_readied: bool,
+    /// The launcher's ammo count (`item.count`@item+0x39, doc §34.3/§34.6) — the
+    /// arrows/quarrels remaining. Decremented by the swing count each ranged
+    /// attack (coab≠binary #16: the binary SUBTRACTS). `0` without a loadout.
+    pub ammo: i32,
+    /// `false` once the launcher's ammo item has been lost to depletion
+    /// (`item.count == 0` → `lose_item`, doc §34.6) — `GetCurrentAttackItem`
+    /// then finds no ammo. Unexercised by armed-bar (ammo ≥ usage); cheap.
+    pub ammo_item_lost: bool,
+    /// The saved readied attack-1 profile (`dice_count`, `dice_size`,
+    /// `damage_bonus` @0x19E/0x1A0/0x1A2 at entry) — what re-readying the bow
+    /// restores after a cornered unready swapped in the bare-hands profile
+    /// (doc §34.5). Set to the record's decoded profile at construction.
+    pub entry_dice: (u8, u8, u8),
+    /// `action.field_8@0x08` — set `true` by `AttackTarget01` (`ovr014.cs:738`),
+    /// reset by `CalculateInitiative` (`sub_3E000`, §32). Gates the
+    /// `reclac_attacks` write-back (doc §34.3). `false` at entry.
+    pub field_8: bool,
+    /// `field_DE@0xde` (raw) — icon dimensions / footprint. The large-target
+    /// dice-substitution gate (`> 0x80 || (&7) > 1`, deferred) and
+    /// `CanBackStabTarget`'s size gate (`(& 0x7F) <= 1`, doc §34.6) read it.
+    /// `0x01` (man-sized single cell) for synthetic combatants.
+    pub field_de: u8,
+    /// The attack-2 profile (`dice_count`, `dice_size`, `damage_bonus`
+    /// @0x19F/0x1A1/0x1A3) — `sub_3E192`'s idx-2 damage cells (doc §34.6). All
+    /// zero in this party (attack-2 never swings); decoded for fidelity.
+    pub attack2_dice: (u8, u8, u8),
+    /// `baseHalfMoves@0x11D` — the attack-2 half-count `CalculateInitiative`
+    /// folds through `ThisRoundActionCount` into `attack2_left` (doc §34.3).
+    /// `0` in this party (so attack-2 stays 0).
+    pub base_half_moves: u8,
+    /// `SkillLevel(SkillType.Thief)` precomputed from the record (`ClassLevel[6]
+    /// + ClassLevelsOld[6] * DualClassExceedsPreviousLevel`, coab `Player.cs:492`
+    /// / `sub_6B3D1`) — the backstab-multiplier and `CanBackStabTarget` input
+    /// (doc §34.6). Constant during a fight. `0` for synthetic combatants.
+    pub thief_skill_level: i32,
+    /// `action.directionChanges@0x0E` — the running facing-change accumulator
+    /// `RecalcAttacksReceived` (`sub_3F94D`) maintains; read by the flanking
+    /// heuristic (deferred) and (indirectly, via `direction`) backstab facing.
+    /// `0` at entry.
+    pub direction_changes: u8,
+}
+
+/// The additive per-combatant ranged loadout (doc §34.1) — the entry-state
+/// snapshot cannot recover item identity/ammo (they live behind runtime far
+/// pointers the capture does not chase), so a fight with readied ranged weapons
+/// supplies them here, committed per capture in the harness like the guard's
+/// pins. `None` reproduces today's melee behaviour exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Loadout {
+    /// The readied primary weapon's item type (`field_151` weapon), indexing
+    /// the [`crate::combat::CombatState`]'s `ItemDataTable`.
+    pub primary_type: u8,
+    /// The launcher's initial ammo count (a free parameter — any count ≥
+    /// shots-fired replays identically; doc §34.1).
+    pub ammo_count: i32,
+    /// The bare-hands attack-1 profile (`dice_count`, `dice_size`,
+    /// `damage_bonus`) the AI swaps to when cornered — base dice @0x11E/0x120
+    /// plus the STR damage adjustment, pinned empirically (doc §34.1).
+    pub unarmed_profile: (u8, u8, u8),
 }
 
 impl Combatant {
@@ -324,6 +397,17 @@ impl Combatant {
             memorized_spells: 0,
             health_status: HealthStatus::Okey,
             bleeding: 0,
+            loadout: None,
+            weapon_readied: false,
+            ammo: 0,
+            ammo_item_lost: false,
+            entry_dice: (0, 0, 0),
+            field_8: false,
+            field_de: 0x01,
+            attack2_dice: (0, 0, 0),
+            base_half_moves: 0,
+            thief_skill_level: 0,
+            direction_changes: 0,
         }
     }
 
@@ -397,6 +481,17 @@ impl Combatant {
             memorized_spells: 0,
             health_status: HealthStatus::Okey,
             bleeding: 0,
+            loadout: None,
+            weapon_readied: false,
+            ammo: 0,
+            ammo_item_lost: false,
+            entry_dice: (0, 0, 0),
+            field_8: false,
+            field_de: 0x01,
+            attack2_dice: (0, 0, 0),
+            base_half_moves: 0,
+            thief_skill_level: 0,
+            direction_changes: 0,
         }
     }
 }
@@ -630,6 +725,12 @@ pub struct CombatState {
     /// (`ovr010:068D`) — an NPC's (`control_morale >= 0x80`) are not. Input-only
     /// (the toggle key is UI, not modeled); replay harnesses set it per capture.
     pub auto_pcs_cast_magic: bool,
+    /// The resident `ITEMS` data table (`gbl.ItemDataTable`, doc §34.1) — the
+    /// weapon dice/range/attack-count/flags the ranged mechanics index by a
+    /// readied weapon's type. `None` = no ranged loadouts in play (every
+    /// combatant fights melee exactly as before); a harness with a ranged
+    /// capture loads it and applies per-combatant [`Loadout`]s.
+    pub item_data: Option<gbx_formats::items::ItemDataTable>,
     /// The optional action-trace observer (D-OR3). `None` in normal play.
     sink: Option<Box<dyn ActionSink>>,
 }
@@ -657,6 +758,7 @@ impl CombatState {
             area_field_58c: 0,
             map_direction: 0,
             auto_pcs_cast_magic: false,
+            item_data: None,
             sink: None,
         };
         s.rebuild_occupancy();
@@ -685,8 +787,24 @@ impl CombatState {
             area_field_58c: 0,
             map_direction: 0,
             auto_pcs_cast_magic: false,
+            item_data: None,
             sink: None,
         }
+    }
+
+    /// Applies a ranged [`Loadout`] to one combatant (doc §34.1) — records the
+    /// primary weapon type, marks it readied (`field_151` non-null), seeds the
+    /// ammo count, and saves the combatant's entry attack-1 profile as the
+    /// re-ready target. Without a loadout a combatant fights melee unchanged, so
+    /// this is the only entry point that arms the ranged path; the harness calls
+    /// it per capture, like the guard's pins. `entry_dice` is already the
+    /// record's decoded profile ([`combatant_from_record`]).
+    pub fn set_loadout(&mut self, id: usize, loadout: Loadout) {
+        let f = &mut self.fighters[id];
+        f.loadout = Some(loadout);
+        f.weapon_readied = true;
+        f.ammo = loadout.ammo_count;
+        f.ammo_item_lost = false;
     }
 
     /// Sets the initial per-round surprise mask (`area2_ptr.field_596`) — a
@@ -4157,7 +4275,49 @@ fn combatant_from_record(
     // surrender branch's `Int > 5` gate). `npc` already folds control_morale.
     c.control_morale = rec.control_morale;
     c.int_score = rec.stats.int.original;
+    // §34 the armed/ranged slice. The saved readied attack-1 profile (for the
+    // cornered unready→re-ready swap, §34.5) is the record's decoded `dice`;
+    // the attack-2 profile is @0x19F/0x1A1/0x1A3 (idx-2 damage, §34.6 — all
+    // zero in this party); `baseHalfMoves`@0x11D folds into `attack2_left`
+    // (§34.3); `field_DE`@0xde drives the large-target and backstab size gates;
+    // and `SkillLevel(Thief)` is precomputed for the backstab multiplier (§34.6).
+    c.entry_dice = dice;
+    c.attack2_dice = (
+        rec.attack_profile_current[3], // a2 dice_count @0x19f
+        rec.attack_profile_current[5], // a2 dice_size  @0x1a1
+        rec.attack_profile_current[7], // a2 dmg_bonus  @0x1a3
+    );
+    c.base_half_moves = rec.attack_profile_base[1]; // baseHalfMoves @0x11d
+    c.field_de = rec.field_de; // @0xde
+    c.thief_skill_level = skill_level_thief(rec);
     c
+}
+
+/// `SkillLevel(SkillType.Thief)` (coab `Player.cs:492`): `ClassLevel[Thief] +
+/// ClassLevelsOld[Thief] * DualClassExceedsPreviousLevel()`. The binary reads
+/// `rec[0x10F]` (`ClassLevel[6]`) and `rec[0x117]` (`ClassLevelsOld[6]`) and
+/// multiplies the latter by `sub_6B3D1` (`ovr014:01F9-021F`, verified this
+/// session). `DualClassExceedsPreviousLevel` (`sub_6B3D1`, `Player.cs:800`) =
+/// `DuelClassCurrentLevel() > multiclassLevel ? 1 : 0`, where
+/// `DuelClassCurrentLevel` (`Player.cs:812`) returns 0 for non-humans, else the
+/// first non-zero `ClassLevel[0..7]` (or `ClassLevel[7]` if `0..7` are all 0).
+/// Constant during a fight — precomputed at decode.
+fn skill_level_thief(rec: &CharRecord) -> i32 {
+    const THIEF: usize = 6; // SkillType.Thief (Classes/Enums.cs:64)
+    const HUMAN: u8 = 7; // Race.human (Classes/Enums.cs:54)
+    let dual = {
+        let current = if rec.race != HUMAN {
+            0
+        } else {
+            let mut i = 0;
+            while i < 7 && rec.class_level[i] == 0 {
+                i += 1;
+            }
+            rec.class_level[i] as i32
+        };
+        i32::from(current > rec.multiclass_level as i32)
+    };
+    rec.class_level[THIEF] as i32 + rec.class_levels_old[THIEF] as i32 * dual
 }
 
 /// Build a [`CombatState`] from a captured combat entry-state snapshot (H4,
