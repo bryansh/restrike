@@ -3625,10 +3625,29 @@ impl CombatState {
         // Site 5 — the ranged missile camera (`ovr014.cs:945` → `draw_missile_attack`,
         // `sub_67AA4`): a bow/thrown shot animates the missile across the board
         // and scrolls the camera toward the target. Draw-free; only its
-        // `mapScreenTopLeft` effect is ported ([`draw_missile_camera`]). A
-        // null-item swing (melee / sling primary — the sling missile draw is
-        // itself draw-free, §34.6) fires no missile.
+        // `mapScreenTopLeft` effect is ported ([`draw_missile_camera`]). A plain
+        // melee swing (null item) fires no missile.
         if matches!(ranged_item, AttackItemRef::Ammo | AttackItemRef::SelfWeapon) {
+            self.draw_missile_camera(actor, target);
+        }
+        // ...and `sub_3F9DB` fires `sub_40BF1` a SECOND time, with the readied
+        // primary itself as the missile, when that primary is a **Sling (0x2F)**
+        // or **StaffSling (0x65)** (@`ovr014:1B14-1B4C`). This is the branch that
+        // gives a sling its missile: `GetCurrentAttackItem` returns a
+        // found-but-NULL item for flags `0x0A` (§34.2), so the item-gated call
+        // above does not fire for it. Draw-free like the first — but the camera
+        // scroll is exactly the state the §36.1 on-screen facing branch reads, so
+        // "draw-free" is not a reason to skip it. The binary dereferences
+        // `field_151` here with no null check (UB for bare hands); we gate on the
+        // primary actually being readied. No capture carries a sling loadout.
+        const ITEM_SLING: u8 = 0x2F;
+        const ITEM_STAFF_SLING: u8 = 0x65;
+        let sling_primary = self.fighters[actor].weapon_readied
+            && matches!(
+                self.fighters[actor].loadout.map(|l| l.primary_type),
+                Some(ITEM_SLING) | Some(ITEM_STAFF_SLING)
+            );
+        if sling_primary {
             self.draw_missile_camera(actor, target);
         }
         // `AttackTarget01` sets `actions.field_8 = true` (`ovr014.cs:738`) — the
@@ -7362,6 +7381,84 @@ mod tests {
         let mut rng = EngineRng::new(SEED);
         s.move_step_away_attack(&mut rng, 0, 2);
         assert!(!s.focus, "no candidates → no focus write");
+    }
+
+    /// Attacker (idx 0) on-screen at the window centre, target (idx 1) far
+    /// off-screen to the east, window at (0,0). The attacker readies
+    /// `primary_type`. Only the missile camera can move the window here: the
+    /// attacker-side `draw_74b3f` recenter needs an OFF-screen attacker, the
+    /// target-side draw needs an ON-screen target, and the target survives.
+    fn sling_state(primary_type: u8) -> CombatState {
+        let attacker = Combatant::new_melee(
+            0,
+            Team::Party,
+            false,
+            GridPos::new(3, 3),
+            30,
+            40,
+            0,
+            12,
+            (1, 2, 0),
+            5,
+            1,
+        );
+        let target = Combatant::new_melee(
+            1,
+            Team::Monster,
+            true,
+            GridPos::new(30, 3),
+            200, // survives the swing, so no CombatantKilled scroll
+            40,
+            0,
+            12,
+            (1, 2, 0),
+            5,
+            1,
+        );
+        let mut s = CombatState::new(CombatMap::uniform(FLOOR), vec![attacker, target]);
+        s.item_data = Some(synth_item_table());
+        s.set_loadout(
+            0,
+            Loadout {
+                primary_type,
+                ammo_count: 40,
+                unarmed_profile: (1, 2, 0),
+            },
+        );
+        s.combat_setup_done = true; // skip the lazy setup's camera/facing seed
+        s.map_screen_top_left = GridPos::new(0, 0);
+        s
+    }
+
+    #[test]
+    fn a_sling_primary_fires_the_missile_camera_despite_its_null_item() {
+        // `sub_3F9DB` @`ovr014:1B14-1B4C`: a Sling (0x2F) / StaffSling (0x65)
+        // primary fires a SECOND `sub_40BF1` with the primary itself as the
+        // missile. `GetCurrentAttackItem` hands a sling a found-but-NULL item
+        // (flags 0x0A, §34.2), so the item-gated first call does not fire for it —
+        // without this branch a sling would scroll no camera at all.
+        let mut s = sling_state(47); // Sling
+        assert!(s.on_screen(0), "attacker on-screen: no attacker recenter");
+        assert!(!s.on_screen(1), "target off-screen: no target-side draw");
+        let before = s.map_screen_top_left;
+        let mut rng = EngineRng::new(SEED);
+        // A sling resolves to a null attack item — the melee-shaped call.
+        s.attack_target(&mut rng, 0, 1, false, AttackItemRef::None);
+        assert_ne!(
+            s.map_screen_top_left, before,
+            "the sling's own missile scrolls the camera toward the target"
+        );
+
+        // Control: a plain range-1 melee primary (type 30) fires no missile, so
+        // the window is untouched by an otherwise identical swing.
+        let mut s = sling_state(30);
+        let before = s.map_screen_top_left;
+        let mut rng = EngineRng::new(SEED);
+        s.attack_target(&mut rng, 0, 1, false, AttackItemRef::None);
+        assert_eq!(
+            s.map_screen_top_left, before,
+            "a melee primary fires no missile camera"
+        );
     }
 
     #[test]
