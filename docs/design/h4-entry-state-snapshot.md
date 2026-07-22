@@ -1679,3 +1679,194 @@ the duplicated `(flags & 0x14) == 0x14` collapses into `candidate_ranged_melee`
 `bytes_1D900` per-call zeroing is now cited (`ovr014:14FE-1512`) — the call-local
 swing counter was an assumption, now a citation. Guard 8/8 after all of it; armed-bar
 exactly @2019.
+
+## 36. SPEC — the facing subsystem: direction bookkeeping + the combat camera (M5 facing slice; Fable-scoped, implementer-built) (2026-07-22)
+
+`armed-bar` sits at `Frontier(2019)`: patron [14] hits swarmed MARK's **behind AC 48**
+(the flanking heuristic) where ours uses front 53; the next residual (~2496) is
+TRAVIS's cornered-punch backstab kill. Both read the target's `actions.direction` —
+and §35 records that two straight transliterations of the direction update REGRESS
+combat4 (@618 flanking-on, @1053 backstab-only). This section is the RE that cracks
+that contradiction, and the spec for the substrate that fixes it. Every site below
+was read in `coab_new.lst` (binary = spec); coab agrees at every verified site — the
+§35 failures were OUR transliteration losing a store, not coab≠binary.
+
+### 36.1 The crack — why "face away" over-fires
+
+`AttackTarget` (`sub_3F9DB`) updates the **target's** facing like this (binary
+@`ovr014:19FE-1A9F`, coab ovr014.cs:913-931):
+
+1. `AttacksReceived < 2 && attackType == 0` (@`19FE-1A09`): `var_9 =
+   getTargetDirection(attacker, target)` — the bearing **from the target toward the
+   attacker** — then store `direction = (var_9 + 4) % 8` (**face away**, @`1A35`).
+2. else if target on-screen (@`1A3B-1A79`): `var_9 = direction`; if `attackType ==
+   0`, store `(var_9 + 4) % 8` — a 180° flip.
+3. **Shared tail** (@`1A7D-1A9F`): if target on-screen, `draw_74B3F(false, Normal,
+   var_9, target)` — and `sub_74B3F` stores its direction argument
+   **unconditionally** (@`ovr033:0BCC-0BD7`, after the focus-gated recenter). The
+   draw is a state mutator.
+
+Net semantics (melee `attackType == 0`):
+
+| case | target's resulting `direction` |
+|---|---|
+| 1st attack since reset, target **on-screen** | bearing target→attacker (**faces the attacker** — the draw overwrites the face-away store) |
+| 1st attack since reset, target **off-screen** | bearing+4 (**faces away** — the store stands, no draw) |
+| 2nd+ attack, on-screen | unchanged (flip stored, then draw restores the old value) |
+| 2nd+ attack, off-screen | unchanged (no store, no draw) |
+| any `attackType != 0` (departure/behind) | unchanged |
+
+Then the **attacker always faces its target**: `draw_74B3F(false, Attack,
+getTargetDirection(target, attacker), attacker)` @`1AC2-1AD2` — unconditional call,
+unconditional store.
+
+The §35 attempts implemented only the face-away store. In melee the target is
+almost always on-screen, so the real engine leaves the target **facing** its
+attacker — and the flanking/backstab facing test `getTargetDirection(target,
+attacker) == target.direction` ("the attacker is directly behind the target")
+**fails** for that same attacker's next swing. With only face-away modeled, the
+test passes — flanking/backstab fire where the binary's don't. combat4 @618/@1053
+explained.
+
+### 36.2 The facing state — fields, offsets, every write site
+
+Action offsets (Classes/Action.cs, listing-confirmed): `direction`@0x09,
+`AttacksReceived`@0x0F, `directionChanges`@0x12, actions ptr @`charStruct+0x18D`.
+
+Writes/resets (QuickFight-exercised; manual-UI sites `sub_33B26`/`ovr009:608`/
+`ovr014:1833` are out of scope):
+
+- **Entry** (`sub_380E0` @`ovr011:1162-116E`, coab ovr011.cs:803-807): `direction =
+  HalfDirToIso[map_direction/2]`, `HalfDirToIso = {7,2,3,6}` (`unk_1660C`); enemies
+  `+4 % 8` (@`1185`+). md=2 → party 2, enemies 6. `AttacksReceived`/`directionChanges`
+  start 0 (fresh Action).
+- **Turn head** (`sub_33281` @`ovr009:028F-02A9`, coab ovr009.cs:105-107): the
+  acting combatant's OWN `AttacksReceived = 0`, `directionChanges = 0`, `guarding =
+  false` — before the delay>0 turn body. (Our engine has NO turn-head resets today —
+  they land here. Consistent with §32/bug #15: guards clear at their own next turn.)
+- **Every movement step** (`sub_3E748` @`ovr014:0902-090F`, coab ovr014.cs:312-313):
+  the mover's `AttacksReceived = 0` and `directionChanges = 0`, after the pos write
+  (ours has the first; the second lands now). Swarm state is per-position.
+- **Every step's heading** (ovr010.cs:476): `draw_74B3F(false, Normal, step_dir,
+  mover)` → `direction = step_dir` (already in our engine at the same point).
+- **`RecalcAttacksReceived`** (`sub_3F94D` @`ovr014:194D-19D8`, coab 887-901):
+  `AttacksReceived++` (@`195B`); `dirDiff = ((getTargetDirection(attacker, target) −
+  direction) + 8) % 8` (bearing target→attacker vs current facing), folded `> 4 → 8 −
+  dirDiff` (@`1996-19A8`); **`directionChanges = (directionChanges + dirDiff) % 8`**
+  (@`19C2-19D1`) — the accumulator is mod 8, values only ever 0..7. Called
+  IMMEDIATELY BEFORE `AttackTarget` on every path: AI turn (ovr010.cs:651), guard
+  into-reach (ovr014.cs:243), sweep per-sweeptarget (ovr014.cs:556). Ours increments
+  at the right times but ignores the attacker — the accumulate lands now
+  (`_attacker` becomes used).
+- **AttackTarget's update** — §36.1's table (both stores + the draw overwrites).
+- **`clear_actions` does NOT touch facing** (`Action.Clear` = delay/spell_id/
+  guarding/move only) — `direction`, `AttacksReceived`, `directionChanges` survive.
+- `direction_changes` returns as a `Combatant` field WITH its maintainer (the §35
+  review dropped the write-only field; this slice is the maintainer).
+
+`getTargetDirection` = `sub_409BC` — already ported bit-exact as
+`target_direction(from, to)` (combat.rs), octant scan with the 0x26A/0x6A
+fixed-point tangents. `getTargetDirection(B, A)` = `target_direction(A.pos, B.pos)`
+(bearing from A toward B); positions are `CombatMap[i].pos` = our grid pos (all
+size-1 in every capture).
+
+### 36.3 The combat camera — required by the on-screen branch
+
+`PlayerOnScreen` = is the combatant's cell inside the 7×7 map window at
+`mapScreenTopLeft` (`CoordOnScreen`: screen coords 0..6 both axes; map 50×25;
+`ScreenCenter = (3,3)`). Two variants: any-cell (arg 0) and all-cells (arg 1) —
+identical for size-1, which is every combatant in every capture (tripwire a size>1
+loadout). The camera never draws into the PRNG stream — it enters the draw stream
+ONLY through §36.1's on-screen branch — but it is path-dependent state and must be
+replayed exactly.
+
+**`ScreenMapCheck(radius, pos)`** (ovr033.cs:296-341, the scroll primitive under
+`redrawCombatArea(dir, radius, map)` where the probe is `map +
+MapDirectionDelta[dir]`, dir 8 = in place): if `radius == 0xff` (force) or `pos`
+outside the ±radius box around the current screen centre → step the centre
+coordinate-wise all the way to `pos`, clamped to `centre.x ∈ [MapMinX+3,
+MapMaxX−4]`, `centre.y ∈ [MapMinY+3, MapMaxY−4]`; write `mapScreenTopLeft = centre
+− (3,3)`. Port this exactly (both the box test and the clamp bounds).
+
+**Camera event census (QuickFight paths)** — each with its trigger; port the
+control flow of each site, stub the rendering:
+
+1. **Combat setup** (ovr011.cs:1208-1209): `mapScreenTopLeft = TeamList[0].pos −
+   (3,3)` after placement (no clamp — verify vs listing at implementation).
+2. **Turn head** (ovr009.cs, sub_33281 tail): `focus := (team == Ours ||
+   PlayerOnScreen(actor))` (@`02FA-0318` region); `RedrawCombatIfFocusOn(true, 2,
+   actor)` (`sub_75356`) = focus-gated `redrawCombatArea(8, 2, actor.pos)`.
+3. **AI pre-attack** (ovr010.cs:639, gated on the attack actually proceeding):
+   `redrawCombatArea(getTargetDirection(target, actor), 2, actor.pos)` — probe one
+   step from the actor toward the target, radius 2. NOT focus-gated.
+4. **AttackTarget** (`sub_3F9DB` @`19E1`): `focus := true`; the target-side
+   `draw_74B3F` is only CALLED when the target is on-screen → its internal recenter
+   can't fire for size-1; the attacker-side `draw_74B3F(…, attacker)` @`1AC2` is
+   unconditional → internal recenter `(8, 3, attacker.pos)` if attacker fully
+   off-screen && focus (@`ovr033:0B52-0B87`). Post-attack pair (ovr014.cs:1004-1005):
+   `draw_74B3F(true, Attack, dir, attacker)` + `(false, Normal, dir, attacker)` —
+   same recenter check, direction stores are no-ops (same value).
+5. **Ranged shots** (`sub_40BF1` → `draw_missile_attack` `sub_67AA4`, ovr025.cs:
+   882-1010): port the control-flow skeleton exactly — early-return on short paths
+   (`var_AF − 2 < 2`); if either endpoint off-screen: span ≤ 6 both axes →
+   `redrawCombatArea(8, 0xff, midpoint)` (force-scroll), else animate until the
+   missile exits the screen-pixel box then `redrawCombatArea(8, 3, target.pos)` if
+   the target is off-screen; both-on-screen → force-redraw at current centre
+   (no-op scroll). Fires for the primary `item != null` AND again for
+   Sling/StaffSling primaries (@`1B14-1B4C`).
+6. **Kill/flee removal** (`RemoveFromCombat` `sub_644A7`, ovr024.cs:624):
+   `RedrawCombatIfFocusOn(false, 3, victim)` — focus-gated scroll to every
+   combatant leaving combat, BEFORE `size = 0`.
+7. **Movement**, per step (ovr010.cs:474-488 + `sub_3E748` @ovr014.cs:289-309):
+   `focus := (byte_1D90E || PlayerOnScreen(mover) || team == Ours)`; the step's
+   `draw_74B3F` internal recenter (mover fully off-screen && focus → `(8,3,mover)`);
+   `move_step_away_attack` head sets `focus := true` (ovr014.cs:361-362) per
+   candidate attacker; inside `sub_3E748`: QuickFight && new pos off-screen && focus
+   → `(8, 2, old_pos)`; after the pos write, focus → `(8, 3, new_pos)` (QuickFight
+   radius 3); `move_step_into_attack` on a guard firing: `(8, 2, mover.pos)`
+   (ovr014.cs:239).
+8. **End of round** (ovr009.cs:393): `(8, 0xff, current centre)` — scroll no-op.
+   Flee/rout movement uses the shared step machinery (7). The caster path's
+   `MagicAttackDisplay` scroll is the caster peel's, not this slice's.
+
+`focusCombatAreaOnPlayer` (`byte_1D910`) writers in scope: sites 2, 4, 7 above.
+
+### 36.4 The reads (flip on one at a time, in this order)
+
+1. **Departure-attack gate** — already faithful in our engine (cone `direction+6..
+   +10` + `AttacksReceived == 0` + `delay > 0` disjunction, `ovr014:0BC0`); it now
+   reads the NEW bookkeeping. No code change; the canary validates it.
+2. **Flanking heuristic** (`AttackTarget01` @`ovr014:16BA-16E9`, coab 782-784):
+   `!CanBackStabTarget && AttacksReceived > 1 && getTargetDirection(target,
+   attacker) == target.direction && directionChanges > 4` → to-hit AC =
+   `ac_behind`. (`BehindAttack` init = `attackType != 0` @`ovr014:14EB+29`.)
+3. **Backstab** (`CanBackStabTarget` `sub_408D7`, coab 1425-1454 + @`169E-16A5`):
+   attacker is a thief-classed party member with weapon ∈ {null, Club, Dagger,
+   BroadSword, LongSword, ShortSword, DrowLongSword} (§35), `AttacksReceived > 1 &&
+   (field_DE & 0x7F) <= 1 && getTargetDirection(target, attacker) ==
+   target.direction` → AC = `ac_behind − 4`, damage × `((SkillLevel(Thief)−1)/4)+2`
+   (TRAVIS ×3). Re-verify the full head of `sub_408D7` (class/team gates) before
+   coding — §35 settled the factors, not the whole predicate.
+
+### 36.5 Build order + acceptance (the canary discipline)
+
+The five closed captures close WITHOUT flanking/backstab — they pin the substrate.
+
+1. **Substrate commit(s)**: camera model + entry-init facing + turn-head resets +
+   step `directionChanges` reset + Recalc accumulate + AttackTarget update sites —
+   flanking/backstab still OFF. Guard must hold **8/8 EXACTLY** (closed stay
+   closed; @368, @2019, @453 exact). Any shift = a bookkeeping bug or a listing
+   misread; localize with `h4_locate_draw` at the shifted draw before proceeding.
+2. **Flanking ON** (one commit): closed captures unmoved; armed-bar MUST advance
+   past 2019 (expect into the ~2496 backstab region). Manifest edit rides the
+   commit.
+3. **Backstab ON** (one commit): closed captures unmoved; armed-bar toward
+   **2749/2749 CLOSED** (flip the pin in the closing commit). **Re-check TRAVIS's
+   FITTED ammo_count 10** (§35: if facing changes his shot count by one, the fit
+   moves — 9 → @1575, 11 → @1910 under the old model).
+4. Bank at a named boundary if a residual appears; do not force it.
+
+Discipline unchanged: re-verify every cited site against `coab_new.lst` before
+coding (`LC_ALL=C grep -a`); one mechanic per commit, binary-cited; instrument
+then revert; never weaken an assert; workspace tests + clippy `-D warnings` + fmt +
+guard 8/8 per commit; doc §37 landing note + manifest edits ride their commits.
