@@ -53,10 +53,10 @@ pub fn loadout_for(capture: &str, name: &str) -> Option<Loadout> {
         }),
         ("armed-bar.gbxtrace", "TRAVIS") => Some(Loadout {
             primary_type: 44,
-            // FITTED, not derived: 10 is the best value under the CURRENT model
-            // (9 → diverge @1575, 11 → @1910) — the only loadout entry that is
-            // neither binary- nor record-derivable. Revisit when the facing
-            // slice lands (a one-shot change in TRAVIS's stream moves it).
+            // FITTED, not derived: 10 CLOSES the capture (2749/2749) — the only
+            // loadout entry that is neither binary- nor record-derivable. The
+            // facing slice (§36) did NOT move his shot count: re-fitted after
+            // backstab landed, 9 still → diverge @1575, 11 → @1910, 10 → CLOSED.
             ammo_count: 10,
             unarmed_profile: (1, 2, 3),
         }),

@@ -3534,6 +3534,46 @@ impl CombatState {
             && self.fighters[target].direction_changes > 4
     }
 
+    /// `CanBackStabTarget(target, attacker)` (`sub_408D7` @`ovr014:28D7-29B9`, coab
+    /// ovr014.cs:1433-1457, §36.4). All must hold:
+    /// - **class** (@`291C-293C`): `attacker.SkillLevel(Thief) > 0` — our decoded
+    ///   `thief_skill_level` (the inlined `field_10F`/`field_117`/`sub_6B3D1`
+    ///   dual-class fold, `Player.cs:492`);
+    /// - **weapon** (@`293E-2962`): the attacker's `primaryWeapon` (`field_151`)
+    ///   is null (bare hands — an unreadied loadout, `weapon_readied == false`) OR
+    ///   its type ∈ {Club 7, Dagger 8, BroadSword 35, LongSword 36, ShortSword 37,
+    ///   DrowLongSword 97};
+    /// - **swarm** (@`2976`, `jbe ≤1`): `target.AttacksReceived > 1`;
+    /// - **size** (@`2980-2989`): `(target.field_DE & 0x7F) <= 1` (man-sized);
+    /// - **facing** (@`298B-29A3`): `getTargetDirection(target, attacker) ==
+    ///   target.direction` = `target_direction(attacker, target) ==
+    ///   target.direction` (the target's back is to the attacker — same test as
+    ///   flanking).
+    ///
+    /// Fires `ac_behind − 4` (@`169E-16A5`) and the damage multiplier
+    /// `((SkillLevel(Thief) − 1) / 4) + 2` ([`backstab_multiplier`], `sub_3E192`
+    /// @`ovr014.cs:96`). Preempts the flanking heuristic (the binary's `else`).
+    fn can_backstab(&self, target: usize, attacker: usize) -> bool {
+        if self.fighters[attacker].thief_skill_level <= 0 {
+            return false;
+        }
+        // `weapon == null` ⟺ the primary is not readied (a depleted/unreadied
+        // loadout → bare hands, or no loadout at all → `weapon_readied == false`).
+        let weapon_ok = if self.fighters[attacker].weapon_readied {
+            match &self.fighters[attacker].loadout {
+                Some(l) => matches!(l.primary_type, 7 | 8 | 35 | 36 | 37 | 97),
+                None => false, // readied with no loadout is unreachable, but be safe
+            }
+        } else {
+            true // null primaryWeapon → bare hands → backstab-capable
+        };
+        weapon_ok
+            && self.fighters[target].attacks_received > 1
+            && (self.fighters[target].field_de & 0x7F) <= 1
+            && target_direction(self.fighters[attacker].pos, self.fighters[target].pos)
+                == self.fighters[target].direction
+    }
+
     /// `AttackTarget → AttackTarget01` (`ovr014.cs:904/724`), melee core: for
     /// `attackIdx` counting down from `attack_idx`, drain `AttacksLeft(attackIdx)`
     /// swings — each **one d20** to-hit ([`pc_can_hit_target`]); **on a hit only**,
@@ -3591,18 +3631,24 @@ impl CombatState {
             self.clear_actions(actor);
             return true;
         }
-        // AttackTarget01's AC selection (`sub_3F4EB` @`ovr014:1683-1708`, §36.4):
-        // the AC byte is record[0x19A + behindIdx] — front @0x19A, behind @0x19B.
-        // The behind index is set when `var_13 != 0` (@`16ED-16F3`): the caller's
-        // `attackType != 0` (`behind`) OR the flanking heuristic fires. Then
-        // `target_ac += RangedDefenseBonus` on EVERY path (`ovr014.cs:799`) — a
-        // distant target is harder to hit with a bow (§34.6).
-        let behind_attack = behind || self.is_flanking(target, actor);
-        let base_ac = if behind_attack {
-            self.fighters[target].ac_behind
+        // AttackTarget01's AC selection (`sub_3F4EB` @`ovr014:1683-1708`, §36.4).
+        // Backstab preempts (the binary's `if CanBackStabTarget` @`1694`, `else`
+        // the flanking/behind path @`16AD`): `ac_behind − 4` (@`169E-16A5`).
+        // Otherwise the AC byte is record[0x19A + behindIdx] — front @0x19A,
+        // behind @0x19B — with behindIdx set when `var_13 != 0` (@`16ED-16F3`):
+        // the caller's `attackType != 0` (`behind`) OR the flanking heuristic.
+        // Then `target_ac += RangedDefenseBonus` on EVERY path (`ovr014.cs:799`).
+        let can_backstab = self.can_backstab(target, actor);
+        let base_ac = if can_backstab {
+            self.fighters[target].ac_behind as i32 - 4
         } else {
-            self.fighters[target].ac
-        } as i32;
+            let behind_attack = behind || self.is_flanking(target, actor);
+            (if behind_attack {
+                self.fighters[target].ac_behind
+            } else {
+                self.fighters[target].ac
+            }) as i32
+        };
         let target_ac = (base_ac + self.ranged_defense_bonus(actor, target)).clamp(0, 255) as u8;
         let hit_bonus = self.fighters[actor].hit_bonus;
         let mut target_gone = false;
@@ -3643,7 +3689,16 @@ impl CombatState {
                     } else {
                         self.fighters[actor].attack2_dice
                     };
-                    let dmg = roll_damage(rng, ds, dc, db, None);
+                    // sub_3E192 @ovr014.cs:94-96: on a backstab, `damage *=
+                    // ((SkillLevel(Thief)−1)/4)+2`. CanBackStabTarget's inputs
+                    // (facing/AttacksReceived/direction) are stable across the
+                    // swing loop, so the AC-time result carries.
+                    let backstab = if can_backstab {
+                        Some(backstab_multiplier(self.fighters[actor].thief_skill_level))
+                    } else {
+                        None
+                    };
+                    let dmg = roll_damage(rng, ds, dc, db, backstab);
                     self.apply_damage(target, dmg.amount);
                     if !self.fighters[target].in_combat {
                         target_gone = true;
@@ -7081,6 +7136,61 @@ mod tests {
         // Not spun enough this turn.
         s.fighters[1].direction_changes = 4;
         assert!(!s.is_flanking(1, 0), "directionChanges must be > 4");
+    }
+
+    #[test]
+    fn can_backstab_needs_a_thief_a_listed_weapon_a_swarmed_manzised_turned_target() {
+        // §36.4 (ovr014:28D7-29B9): SkillLevel(Thief)>0 && weapon∈list &&
+        // AttacksReceived>1 && (field_DE&0x7F)<=1 && back turned. Same geometry as
+        // flanking: attacker (idx 0) due north → back-turned target faces S (4).
+        let mut s = camera_state(&[
+            (Team::Party, GridPos::new(20, 10)),   // attacker (idx 0)
+            (Team::Monster, GridPos::new(20, 12)), // target (idx 1)
+        ]);
+        s.fighters[0].thief_skill_level = 5; // TRAVIS's T5
+        s.fighters[0].weapon_readied = false; // punching → null weapon → capable
+        s.fighters[1].attacks_received = 2;
+        s.fighters[1].field_de = 0x01; // man-sized
+        s.fighters[1].direction = 4; // back turned
+        assert!(s.can_backstab(1, 0), "thief, bare hands, swarmed, turned");
+
+        // Not a thief.
+        s.fighters[0].thief_skill_level = 0;
+        assert!(!s.can_backstab(1, 0), "SkillLevel(Thief) must be > 0");
+        s.fighters[0].thief_skill_level = 5;
+
+        // Large target (field_DE & 0x7F > 1).
+        s.fighters[1].field_de = 0x02;
+        assert!(!s.can_backstab(1, 0), "(field_DE & 0x7F) must be <= 1");
+        s.fighters[1].field_de = 0x01;
+
+        // Only one swing this turn.
+        s.fighters[1].attacks_received = 1;
+        assert!(!s.can_backstab(1, 0), "AttacksReceived must be > 1");
+        s.fighters[1].attacks_received = 2;
+
+        // A readied weapon NOT in the list (short bow 44) fails; a dagger (8) is
+        // in the list.
+        s.fighters[0].weapon_readied = true;
+        s.fighters[0].loadout = Some(Loadout {
+            primary_type: 44, // short bow — not a backstab weapon
+            ammo_count: 10,
+            unarmed_profile: (1, 2, 3),
+        });
+        assert!(!s.can_backstab(1, 0), "a readied short bow can't backstab");
+        s.fighters[0].loadout = Some(Loadout {
+            primary_type: 8, // dagger — in the list
+            ammo_count: 0,
+            unarmed_profile: (1, 2, 3),
+        });
+        assert!(s.can_backstab(1, 0), "a readied dagger can backstab");
+
+        // Back NOT turned (faces the attacker, N=0).
+        s.fighters[1].direction = 0;
+        assert!(
+            !s.can_backstab(1, 0),
+            "the target's back must be to the attacker"
+        );
     }
 
     #[test]

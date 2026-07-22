@@ -105,16 +105,15 @@ const PINS: &[Pin] = &[
     Pin {
         // The armed-slice driver (doc §25 runbook item 3): MATHEW's first turn
         // fires two long-bow shots from range (d20/d6/d20) where our range=1
-        // stub (FD-29) walks him across the bar — the divergence IS the slice.
+        // stub (FD-29) walked him across the bar. §34.4/34.5 landed the cornered
+        // weapon swap + ammo depletion (TRAVIS's 10-arrow quiver empties → he
+        // punches), carrying the frontier to 2019. The facing subsystem (§36)
+        // closed the rest: flanking (ovr014:16AD-16E9) landed the swarmed-target
+        // behind-AC hits to 2517, and backstab (CanBackStabTarget, ovr014:28D7)
+        // landed TRAVIS's cornered-punch kill at 2517 (ac_behind−4, ×3 damage).
+        // CLOSED, operand-exact — the last H4 bar-fight frontier.
         capture: "armed-bar.gbxtrace",
-        // §34.4/34.5 landed the cornered weapon swap; the ammo-depletion finding
-        // (TRAVIS's 10-arrow quiver empties → he punches, doc §34 deviation)
-        // carried the frontier to 2019. Flanking ON (§36.4, ovr014:16AD-16E9)
-        // carries it to 2517 — the swarmed-target behind-AC hits between 2019 and
-        // 2517 now land. The residual @2517 is TRAVIS's cornered-punch BACKSTAB
-        // damage draw (a d2 → d? damage divergence on [14]; the capture applies
-        // the ×3 multiplier for hp7 vs our hp11) — the next peel.
-        expect: Expect::Frontier(2517),
+        expect: Expect::Closed,
         map_direction: 2,
         auto_cast: false,
     },
