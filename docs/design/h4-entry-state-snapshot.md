@@ -1974,3 +1974,73 @@ With this slice **every H4 bar-fight capture that does not need magic or a range
 size>1 loadout is CLOSED**: combat4, combat3, combat2, bar-rout, bar-fists-2, and
 armed-bar — six operand-exact closes; the two open frontiers are the caster (@453)
 and the terrain/wilderness driver (@368).
+
+### 37.1 PR #7 review fixes — three landed, two cleared from the listing (2026-07-22)
+
+Six review findings; **all five site questions were re-read in `coab_new.lst` before
+acting**, and two of them turned out to be non-issues — recorded here with their
+citations so they are not re-raised.
+
+**Landed (four commits, one mechanic each; guard 8/8 verified at every one):**
+
+1. **`HALF_DIR_TO_ISO` index bound.** `combat_setup` indexed the 4-entry table with
+   `map_direction / 2` unmasked, so any heading ≥ 8 panicked (`index out of bounds: the
+   len is 4 but the index is 4`) — reproduced with `RESTRIKE_MAP_DIR=8`. Since
+   `map_direction` is a `pub u8` fed by the capture field or by the §29/§30 heading-sweep
+   knob (which parses any `u8`), the trial knob that *found* md=2 had a landmine one step
+   past the valid range. `% 4` added as a guard (the binary's `unk_1660C[md/2]` is an
+   unbounded table read; md is always half-encoded {0,2,4,6}), matching the idiom at the
+   other three `HALF_DIR_TO_ISO` sites.
+2. **§36.3 site 7's departure-attack focus write.** `sub_3E954` sets `byte_1D90F = 1` and
+   `byte_1D910 = 1` at `ovr014:0AE0-0AE5` — at the top of **each candidate iteration**,
+   after the loop re-tests the MOVER's `in_combat` (@`0AD2-0ADD`) but **before** the
+   candidate is fetched (@`0AF5-0B0B`) and before every per-candidate filter (`sub_66BDB`
+   @`0B14`, `sub_3F143` @`0B2D`, the two `find_affect`s). A skipped candidate still leaves
+   focus on, so it is not foldable into the `continue`. Without it an off-screen monster
+   mover kept `focus == false` through its step, so `sub_3E748`'s post-write `(8, 3,
+   new_pos)` scroll and `draw_74B3F`'s recenter were skipped where the binary's fire.
+3. **§36.3 site 5's Sling/StaffSling second missile.** After the item-gated `sub_40BF1`
+   (@`ovr014:1B11`), `sub_3F9DB` tests the readied primary's type at `:1B1C` (0x2F Sling)
+   and `:1B2B` (0x65 StaffSling) and on either fires `sub_40BF1` **again** with the primary
+   itself as the missile (`:1B32-1B4C`). That branch is the whole point for a sling:
+   `GetCurrentAttackItem` hands flags `0x0A` a found-but-NULL item (§34.2), so the
+   item-gated call never fires for one — a sling scrolled no camera at all. The old comment
+   defended the omission with "the sling missile draw is itself draw-free"; draw-freeness is
+   precisely *why* the camera was ported, since `mapScreenTopLeft` is what §36.1's on-screen
+   branch reads. (The binary dereferences `field_151` with no null check here — UB for bare
+   hands; we gate on the primary actually being readied.)
+4. **`draw_missile_camera` branch tests** — the one camera site with nontrivial arithmetic
+   (the `var_CE`/`var_D0` target anchor against `ScreenMapCheck`'s [3,46] clamp) had only
+   its step-counting helper tested. Four tests now pin short-path early return, both-on-screen
+   no-op, midpoint force-scroll, and long-span target anchoring incl. the map edge.
+
+**Cleared — verified NOT defects (do not re-raise):**
+
+5. **The post-attack `draw_74B3F` pair (`ovr014:1CAB-1CE7`) is correctly omitted.** §36.3
+   site 4 lists it, and it is genuinely absent from our port — but it is gated on
+   `sub_74761(0, attacker)` (@`1CA2`, `jz func_end`), and `sub_74761` is `PlayerOnScreen`
+   (`ovr033:0761`: `size == 0 → false`, then the per-cell window scan). `draw_74B3F`'s only
+   two persistent effects are the **off-screen** focus-gated recenter — unreachable under an
+   on-screen gate — and the direction store, which passes the attacker's *current*
+   `actions.field_9` (@`1CB9`/`1CD7`) and is therefore a no-op. Net camera and facing effect:
+   nothing. Omitting it is exact, not an oversight.
+6. **`CanBackStabTarget` has no team gate.** §36.4 specified "a thief-classed **party
+   member**" and flagged the head for re-verification. The head (`ovr014:28DD-293C`) is
+   purely: read `field_151`/`field_2E`; `ClassLevel[6] > 0` (@`291C`, `jg`) **or**
+   (`ClassLevelsOld[6] > 0` (@`2927`, `jle` fail) **and** `sub_6B3D1` non-zero (@`293C`)).
+   No `combat_team` compare anywhere in `sub_408D7`. Our `thief_skill_level > 0` is
+   equivalent for every realistic level (the binary's compares are signed, so a ≥ 0x80 class
+   level would differ — unreachable). The weapon test (@`293E-2962`) is confirmed as
+   `{null, 0x61, 7, 8}` plus the range `0x23..0x25` ⇒ exactly `{null, 97, 7, 8, 35, 36, 37}`,
+   and the facing test (@`298B-29A3`) pushes `arg_4` (attacker) first and `arg_0` (target)
+   second ⇒ `target_direction(attacker.pos, target.pos) == target.direction`, matching the
+   port. §36.4's "party member" was a spec overstatement; the code is right.
+
+**Observed while verifying, NOT landed (for the next slice).** The departure-attack loop in
+`sub_3E954` re-tests the **mover's** `in_combat` at the top of every candidate iteration
+(@`0AD2-0ADD`, falling through to `loc_3ECEF` = loop exit); our `move_step_away_attack`
+tests it once before the loop and then only tests each candidate's. So if a departure swing
+kills the mover, the binary stops and we keep swinging at a dead mover. Pre-existing (it
+predates §36), unexercised by the eight captures, and out of this slice's scope — flagged
+rather than changed, since it alters attack counts and belongs in its own canary-checked
+commit.
