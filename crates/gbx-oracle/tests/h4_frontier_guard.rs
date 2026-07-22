@@ -107,7 +107,11 @@ const PINS: &[Pin] = &[
         // fires two long-bow shots from range (d20/d6/d20) where our range=1
         // stub (FD-29) walks him across the bar — the divergence IS the slice.
         capture: "armed-bar.gbxtrace",
-        expect: Expect::Frontier(58),
+        // §34.2/34.3 landed: the readied-bow range (LongBow 21, ShortBow 15) and
+        // the ranged attack count (natk 4 → 2 shots/round) move the frontier past
+        // the round-0 shot; the residual @493 is the ranged attack-execution
+        // detail (RangedDefenseBonus, ammo, the cornered swap) — the next peels.
+        expect: Expect::Frontier(493),
         map_direction: 2,
         auto_cast: false,
     },

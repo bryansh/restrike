@@ -331,6 +331,28 @@ pub struct Combatant {
     pub direction_changes: u8,
 }
 
+/// Which item a ranged swing draws from — the `out item` of
+/// `GetCurrentAttackItem` (`sub_6906C`, doc §34.2), mapped onto our single-ammo
+/// model. `None` = the item is null (nothing found, or a Sling's found-but-null
+/// item — no ammo decrement); `Ammo` = the launcher's arrows/quarrels slot
+/// (decrement the combatant's `ammo`); `SelfWeapon` = a self-launching weapon
+/// (its own count, unmodeled in armed-bar).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttackItemRef {
+    None,
+    Ammo,
+    SelfWeapon,
+}
+
+/// The `GetCurrentAttackItem` result: whether an attack item was `found`
+/// (`item_found`, the `reclac_attacks` gate) and which [`AttackItemRef`] the
+/// swing draws / decrements.
+#[derive(Debug, Clone, Copy)]
+struct CurrentAttackItem {
+    found: bool,
+    item: AttackItemRef,
+}
+
 /// The additive per-combatant ranged loadout (doc §34.1) — the entry-state
 /// snapshot cannot recover item identity/ammo (they live behind runtime far
 /// pointers the capture does not chase), so a fight with readied ranged weapons
@@ -3637,12 +3659,13 @@ impl CombatState {
 
                 if !stop {
                     let mut reachable = false;
-                    // TODO(M5, FD-29): §15 bug #3 — the binary (`sub_35DB1`
-                    // @`ovr010:0ED1`) derives `var_4` (attack range) from the
-                    // readied weapon: `field_151` → `[field_2E]` → table `@0x5D1C`
-                    // → `<<4 − 1`, default 1. We hardcode 1 (no ranged weapon
-                    // modeled); harmless for the unarmed brawl (range 1).
-                    let range = 1i32;
+                    // Attack range (`ovr010.cs:562-572`, doc §34.4): the readied
+                    // weapon's table range less one, sanitized. LongBow (22) →
+                    // 21, ShortBow (16) → 15; a melee combatant (no loadout)
+                    // stays range 1. The held-target reach test and every
+                    // `BuildNearTargets` below use THIS range, so a bowman's near
+                    // list spans the room.
+                    let range = self.weapon_range(actor);
 
                     // The binary's `player01` local (ovr010:0F12-0F46): load
                     // actions.target, then null the LOCAL if the target is out
@@ -3854,15 +3877,179 @@ impl CombatState {
         };
     }
 
-    /// `CalculateInitiative(i)` (`ovr014.cs:8`) on the rich model: reset the Action
-    /// (`can_use`, `attack_idx = 2`, `guarding = false`), refresh the per-round
-    /// attack count and move budget, and roll `delay = clamp(d6 + reaction_adj)`
-    /// with the surprise `-6`. One d6 per in-combat fighter — the exact initiative
-    /// draw of the audit-accepted [`CombatState`] slice.
-    ///
-    /// (`attack2_left` is kept 0 — the profile-2/movement-half-action semantics of
-    /// coab's `attack2_AttacksLeft = ThisRoundActionCount(baseHalfMoves)` are the
-    /// unresolved FD-3 question, so a single melee profile is used; flagged.)
+    // === the ranged predicates + weapon table (M5 armed slice, doc §34.2/34.3) ===
+
+    /// `is_weapon_ranged` (`offset_above_1` @`ovr025:2FE4`, coab `ovr025.cs:1578`):
+    /// the readied primary weapon (`field_151`) is non-null AND its table range
+    /// is `> 1` (`jbe` → false on `<= 1`). Without a loadout / item table a
+    /// combatant is never ranged — today's melee behaviour.
+    fn is_weapon_ranged(&self, actor: usize) -> bool {
+        let f = &self.fighters[actor];
+        match (f.weapon_readied, f.loadout, self.item_data.as_ref()) {
+            (true, Some(l), Some(items)) => items.get(l.primary_type).range as i32 > 1,
+            _ => false,
+        }
+    }
+
+    /// `is_weapon_ranged_melee` (`offset_equals_20` @`ovr025:3027`, coab
+    /// `ovr025.cs:1570`): [`is_weapon_ranged`] AND the weapon's flags carry both
+    /// `flag_10 | melee` (`& 0x14 == 0x14`) — a thrown weapon also usable in hand
+    /// (HandAxe 0x14 yes; Dart 0x1A no). None of armed-bar's bows qualify.
+    /// (Consumed by the cornered re-pick block and the ranged attack execution,
+    /// doc §34.4/34.6 — landing in the next commits.)
+    #[allow(dead_code)]
+    fn is_weapon_ranged_melee(&self, actor: usize) -> bool {
+        if !self.is_weapon_ranged(actor) {
+            return false;
+        }
+        let l = self.fighters[actor].loadout.expect("ranged ⇒ loadout");
+        let flags = self
+            .item_data
+            .as_ref()
+            .expect("ranged ⇒ items")
+            .get(l.primary_type)
+            .flags;
+        (flags & 0x14) == 0x14
+    }
+
+    /// The readied primary weapon's [`gbx_formats::items::ItemData`], or `None`
+    /// when no loadout weapon is readied. A convenience over the `(loadout,
+    /// item_data)` pair the predicates share.
+    fn primary_item(&self, actor: usize) -> Option<gbx_formats::items::ItemData> {
+        let f = &self.fighters[actor];
+        match (f.weapon_readied, f.loadout, self.item_data.as_ref()) {
+            (true, Some(l), Some(items)) => Some(items.get(l.primary_type)),
+            _ => None,
+        }
+    }
+
+    /// `GetCurrentAttackItem(out item, player)` (`sub_6906C` @`ovr025:306C`, coab
+    /// `ovr025.cs:1590`): from the readied primary's flags, resolve which item
+    /// the attack draws (arrows/quarrels slot for a launcher `flag_08`, the
+    /// weapon itself for a self-launcher `flag_10`), and whether one was
+    /// "found" (`item != null` OR `flags == flag_08|flag_02` == 0x0A — a
+    /// Sling/StaffSling finds a null item and still shoots, no ammo consumed).
+    fn get_current_attack_item(&self, actor: usize) -> CurrentAttackItem {
+        let Some(item) = self.primary_item(actor) else {
+            // primaryWeapon == null → item stays null, flags None → not found.
+            return CurrentAttackItem {
+                found: false,
+                item: AttackItemRef::None,
+            };
+        };
+        let flags = item.flags;
+        let f = &self.fighters[actor];
+        let mut found_item = AttackItemRef::None;
+        if flags & gbx_formats::items::flags::FLAG_10 != 0 {
+            found_item = AttackItemRef::SelfWeapon;
+        }
+        if flags & gbx_formats::items::flags::FLAG_08 != 0 {
+            // The arrows / quarrels ammo slot — null once depleted (`lose_item`).
+            let ammo_slot = if f.ammo_item_lost {
+                AttackItemRef::None
+            } else {
+                AttackItemRef::Ammo
+            };
+            if flags & gbx_formats::items::flags::ARROWS != 0 {
+                found_item = ammo_slot;
+            }
+            if flags & gbx_formats::items::flags::QUARRELS != 0 {
+                found_item = ammo_slot;
+            }
+        }
+        // item_found = (found_item != null) || flags == (flag_08 | flag_02).
+        let found = !matches!(found_item, AttackItemRef::None)
+            || flags == (gbx_formats::items::flags::FLAG_08 | gbx_formats::items::flags::FLAG_02);
+        CurrentAttackItem {
+            found,
+            item: found_item,
+        }
+    }
+
+    /// The ammo `count` of the `GetCurrentAttackItem` result (item+0x39), or
+    /// `None` when the item is null (a Sling's found-but-null item — no ammo
+    /// cap). A launcher counts the combatant's `ammo`; a self-launching weapon's
+    /// own count is unmodeled (armed-bar has none) and treated as `ammo`.
+    fn attack_item_count(&self, actor: usize, item: &CurrentAttackItem) -> Option<i32> {
+        match item.item {
+            AttackItemRef::None => None,
+            AttackItemRef::Ammo | AttackItemRef::SelfWeapon => Some(self.fighters[actor].ammo),
+        }
+    }
+
+    /// The AI turn's attack range (`ovr010.cs:562-572`, doc §34.4): `range =
+    /// table[primary.type].range - 1` when a primary weapon is readied
+    /// (`field_151` non-null), else 1; sanitize `{0, 0xFF, -1} → 1`. LongBow
+    /// (22) → 21, ShortBow (16) → 15.
+    fn weapon_range(&self, actor: usize) -> i32 {
+        match self.primary_item(actor) {
+            Some(it) => {
+                let r = it.range as i32 - 1;
+                if r == 0 || r == 0xFF || r == -1 {
+                    1
+                } else {
+                    r
+                }
+            }
+            None => 1,
+        }
+    }
+
+    /// `reclac_attacks(player)` (`sub_3EDD4` @`ovr014:0DD4`, coab `ovr014.cs:462`;
+    /// doc §34.3). Sets `attack1_left` for the round: `attacksCount` half-actions
+    /// for melee, or — with a readied ranged weapon whose ammo is found —
+    /// `max(2, table[type].numberAttacks)` (LongBow 4 → 2 shots/round), capped by
+    /// remaining ammo. The write-back is gated so a mid-turn recompute cannot
+    /// inflate the count. Draw-free; called by `CalculateInitiative` and the
+    /// cornered weapon-selection AI.
+    fn reclac_attacks(&mut self, actor: usize) {
+        let orig = self.fighters[actor].attack1_left as i32;
+        // rec[0x19C] = rec[0x11C] (attack1_left := attacksCount).
+        self.fighters[actor].attack1_left = self.fighters[actor].attacks_count;
+
+        let ranged = self.is_weapon_ranged(actor);
+        let item = self.get_current_attack_item(actor);
+        let found_ranged = ranged && item.found;
+
+        let half = if found_ranged {
+            let natk = self
+                .primary_item(actor)
+                .map(|it| it.number_attacks as i32)
+                .unwrap_or(0);
+            natk.max(2)
+        } else {
+            self.fighters[actor].attack1_left as i32
+        };
+
+        let mut attacks = this_round_action_count(half, self.combat_round);
+
+        // Ammo cap (only for a found ranged item that is non-null — a Sling's
+        // null item is skipped): cap = max(1, count); if cap < attacks &&
+        // count > 0 → attacks = cap.
+        if found_ranged {
+            if let Some(count) = self.attack_item_count(actor, &item) {
+                let cap = count.max(1);
+                if cap < attacks && count > 0 {
+                    attacks = cap;
+                }
+            }
+        }
+
+        // Write-back gate (`ovr014.cs:508`): !field_8 || attacks < orig ||
+        // (field_8 && attacks < orig*2 && !ranged).
+        let field_8 = self.fighters[actor].field_8;
+        if !field_8 || attacks < orig || (field_8 && attacks < orig * 2 && !ranged) {
+            self.fighters[actor].attack1_left = attacks as u8;
+        }
+    }
+
+    /// `CalculateInitiative(i)` (`sub_3E000` @`ovr014.cs:8`) on the rich model:
+    /// reset the Action scalars (`can_use`, `attack_idx = 2`, `field_8`; NOT
+    /// `guarding`, §32), refresh the per-round attack counts (`reclac_attacks`
+    /// for attack-1, `ThisRoundActionCount(baseHalfMoves)` for attack-2) and the
+    /// move budget, and roll `delay = clamp(d6 + reaction_adj)` with the surprise
+    /// `-6`. One d6 per in-combat fighter — the exact initiative draw of the
+    /// audit-accepted [`CombatState`] slice.
     fn calculate_initiative(
         &mut self,
         rng: &mut EngineRng,
@@ -3880,12 +4067,27 @@ impl CombatState {
         // round boundary until the guard fires (`sub_3E65D`) or `Action.Clear`
         // runs. Clearing it here disarmed every cross-round guard: a parked
         // fleer's into-reach attack on an arriving PC never fired.
-        let in_combat = {
+        // The draw-free head (`sub_3E000`, `ovr014.cs:12-16`): reset the Action
+        // scalars. `field_8` (set by `AttackTarget01`) resets false HERE, so the
+        // `reclac_attacks` write-back gate below sees a clean `!field_8` on the
+        // per-round recompute (doc §34.3).
+        {
             let f = &mut self.fighters[i];
             f.can_use = true;
             f.attack_idx = 2;
-            f.attack1_left = this_round_action_count(f.attacks_count as i32, round) as u8;
-            f.attack2_left = 0;
+            f.field_8 = false;
+        }
+        // `reclac_attacks(player)` (`ovr014.cs:18`) sets `attack1_left` — the
+        // ranged-aware per-round count (§34.3): a readied bow yields
+        // `max(2, table[type].numberAttacks)` half-actions (LongBow 4 → 2
+        // shots/round), a melee combatant its `attacksCount`. Draw-free.
+        self.reclac_attacks(i);
+        // CalcInit tail (`ovr014.cs:19-27`): attack-2 = ThisRoundActionCount of
+        // `baseHalfMoves`@0x11D (0 in this party → attack-2 never swings). The
+        // `maxSweapTargets = attackLevel` write is deferred with the 0-HD sweep.
+        let in_combat = {
+            let f = &mut self.fighters[i];
+            f.attack2_left = this_round_action_count(f.base_half_moves as i32, round) as u8;
             f.move_left = calc_moves(f.movement);
             f.in_combat
         };
@@ -4432,6 +4634,194 @@ mod tests {
             delay = 0;
         }
         delay as i8
+    }
+
+    // === the armed/ranged slice (doc §34) test support + units ==============
+
+    /// A synthetic `ITEMS` table with the rows the ranged tests exercise (doc
+    /// §34.1) plus a natk-1 launcher (type 45) for the floor test and a range-1
+    /// weapon (type 30) for the range sanitize test.
+    fn synth_item_table() -> gbx_formats::items::ItemDataTable {
+        let mut bytes = vec![0u8; 2 + 0x81 * 0x10];
+        let mut set = |t: usize, e: [u8; 16]| {
+            let off = 2 + t * 0x10;
+            bytes[off..off + 16].copy_from_slice(&e);
+        };
+        // 43 LongBow: range 22, natk 4, 1d6 normal, flags 0x0B (arrows|02|08).
+        set(
+            43,
+            [0, 2, 1, 6, 0, 4, 0, 1, 0x80, 1, 6, 0, 22, 0xC8, 0x0B, 0],
+        );
+        // 47 Sling: range 21, flags 0x0A (flag_08|flag_02), 1d4+1 normal.
+        set(
+            47,
+            [0, 1, 1, 6, 1, 2, 0, 0x80, 0x80, 1, 4, 1, 21, 0xDC, 0x0A, 0],
+        );
+        // 45 (a natk-1 launcher): range 5, natk 1, flags 0x0B.
+        set(
+            45,
+            [0, 2, 1, 8, 0, 1, 0, 1, 0x80, 1, 8, 0, 5, 0xC8, 0x0B, 0],
+        );
+        // 30 (a range-1 melee weapon): range 1, flags 0x04.
+        set(
+            30,
+            [0, 1, 1, 8, 0, 0, 0, 0, 0x80, 1, 8, 0, 1, 0xCC, 0x04, 0],
+        );
+        gbx_formats::items::ItemDataTable::parse(&bytes).unwrap()
+    }
+
+    /// A one-combatant state with `primary_type` readied over the synthetic
+    /// table; `attacks_count` seeds the melee half-action count. `ammo` sets the
+    /// launcher ammo.
+    fn ranged_state(primary_type: u8, attacks_count: u8, ammo: i32) -> CombatState {
+        let mut c = Combatant::new_melee(
+            0,
+            Team::Party,
+            false,
+            GridPos::new(0, 0),
+            10,
+            40,
+            0,
+            12,
+            (1, 6, 0),
+            5,
+            2,
+        );
+        c.attacks_count = attacks_count;
+        let mut state = CombatState::new(CombatMap::uniform(0x17), vec![c]);
+        state.item_data = Some(synth_item_table());
+        state.set_loadout(
+            0,
+            Loadout {
+                primary_type,
+                ammo_count: ammo,
+                unarmed_profile: (1, 2, 6),
+            },
+        );
+        state
+    }
+
+    #[test]
+    fn ranged_predicate_and_current_attack_item() {
+        let mut state = ranged_state(43, 2, 40); // LongBow
+        assert!(state.is_weapon_ranged(0));
+        assert!(!state.is_weapon_ranged_melee(0)); // bow has no melee/flag_10
+        let it = state.get_current_attack_item(0);
+        assert!(it.found);
+        assert_eq!(it.item, AttackItemRef::Ammo);
+        assert_eq!(state.attack_item_count(0, &it), Some(40));
+        // Unreadying the bow → not ranged, no attack item found.
+        state.fighters[0].weapon_readied = false;
+        assert!(!state.is_weapon_ranged(0));
+        assert!(!state.get_current_attack_item(0).found);
+        // No loadout at all → melee.
+        state.fighters[0].loadout = None;
+        state.fighters[0].weapon_readied = true;
+        assert!(!state.is_weapon_ranged(0));
+    }
+
+    #[test]
+    fn ranged_predicate_sling_finds_null_item() {
+        // Sling (flags 0x0A) "finds" a null item and still shoots (doc §34.2).
+        let state = ranged_state(47, 2, 40);
+        assert!(state.is_weapon_ranged(0)); // range 21 > 1
+        let it = state.get_current_attack_item(0);
+        assert!(it.found); // the flag_08|flag_02 == 0x0A special case
+        assert_eq!(it.item, AttackItemRef::None); // no ammo item
+        assert_eq!(state.attack_item_count(0, &it), None); // no ammo cap
+    }
+
+    #[test]
+    fn weapon_range_sanitizes() {
+        let mut state = ranged_state(43, 2, 40); // LongBow 22 → 21
+        assert_eq!(state.weapon_range(0), 21);
+        // A range-1 weapon → r = 0 → sanitized to 1.
+        state.set_loadout(
+            0,
+            Loadout {
+                primary_type: 30,
+                ammo_count: 0,
+                unarmed_profile: (1, 2, 6),
+            },
+        );
+        assert_eq!(state.weapon_range(0), 1);
+        // No readied weapon → 1.
+        state.fighters[0].weapon_readied = false;
+        assert_eq!(state.weapon_range(0), 1);
+    }
+
+    #[test]
+    fn reclac_melee_matches_this_round_action_count() {
+        // No loadout: attack1_left = ThisRoundActionCount(attacksCount) — the
+        // pre-slice behaviour, both parities.
+        let mut c = Combatant::new_melee(
+            0,
+            Team::Party,
+            false,
+            GridPos::new(0, 0),
+            10,
+            40,
+            0,
+            12,
+            (1, 6, 0),
+            5,
+            2,
+        );
+        c.attacks_count = 3;
+        let mut state = CombatState::new(CombatMap::uniform(0x17), vec![c]);
+        state.combat_round = 0;
+        state.fighters[0].field_8 = false;
+        state.reclac_attacks(0);
+        assert_eq!(state.fighters[0].attack1_left, 1); // (3+0)/2
+        state.combat_round = 1;
+        state.fighters[0].field_8 = false;
+        state.reclac_attacks(0);
+        assert_eq!(state.fighters[0].attack1_left, 2); // (3+1)/2
+    }
+
+    #[test]
+    fn reclac_ranged_natk_floor_and_parity() {
+        // LongBow natk 4 → 2 shots both parities ((4+0)/2, (4+1)/2 == 2).
+        let mut state = ranged_state(43, 2, 40);
+        state.combat_round = 0;
+        state.fighters[0].field_8 = false;
+        state.reclac_attacks(0);
+        assert_eq!(state.fighters[0].attack1_left, 2);
+        state.combat_round = 1;
+        state.fighters[0].field_8 = false;
+        state.reclac_attacks(0);
+        assert_eq!(state.fighters[0].attack1_left, 2);
+        // A natk-1 launcher floors to 2 half-actions → 1 shot even, 1 odd.
+        let mut s2 = ranged_state(45, 2, 40);
+        s2.combat_round = 0;
+        s2.fighters[0].field_8 = false;
+        s2.reclac_attacks(0);
+        assert_eq!(s2.fighters[0].attack1_left, 1); // max(2,1)=2 → (2+0)/2
+    }
+
+    #[test]
+    fn reclac_ranged_ammo_cap() {
+        // Ammo 1 caps the 2-shot round to 1.
+        let mut state = ranged_state(43, 2, 1);
+        state.combat_round = 0;
+        state.fighters[0].field_8 = false;
+        state.reclac_attacks(0);
+        assert_eq!(state.fighters[0].attack1_left, 1);
+    }
+
+    #[test]
+    fn reclac_field_8_writeback_gate() {
+        // With field_8 set (mid-turn recompute) and a ranged weapon, the gate
+        // `attacks < orig` blocks a re-inflation: orig 1 < attacks 2, ranged, so
+        // the count is NOT overwritten and stays at attacksCount.
+        let mut state = ranged_state(43, 2, 40);
+        state.combat_round = 0;
+        state.fighters[0].attack1_left = 1; // orig
+        state.fighters[0].field_8 = true;
+        state.reclac_attacks(0);
+        // gate: !field_8(F) || 2<1(F) || (T && 2<2 && !ranged=F) → F ⇒ keep the
+        // attacksCount write (2) from the head of reclac.
+        assert_eq!(state.fighters[0].attack1_left, 2);
     }
 
     // --- pure selection logic (the two-if tie-break) -----------------------
