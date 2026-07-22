@@ -3455,6 +3455,63 @@ impl CombatState {
         self.rebuild_occupancy();
     }
 
+    /// `AttackTarget`'s direction bookkeeping (`sub_3F9DB` @`ovr014:19FE-1AD2`,
+    /// coab ovr014.cs:913-936, §36.1). Draw-free bookkeeping — the camera scroll
+    /// never enters the PRNG stream, and the target-side draw fires only when the
+    /// target is on-screen so its off-screen recenter can't run.
+    ///
+    /// The **target's** facing (`attack_type_nonzero` = the caller's `attackType
+    /// != 0`):
+    /// - **Branch 1** (@`19FE-1A39`) — `AttacksReceived < 2 && attackType == 0`:
+    ///   `var_9 = getTargetDirection(attacker, target)` = `target_direction(target,
+    ///   attacker)` = the bearing from the target toward its attacker; store the
+    ///   **face-away** `(var_9 + 4) % 8` (@`1A35`, unconditional).
+    /// - **Branch 2** (`loc_3FA3B` @`1A3B-1A79`) — else: only touch facing if the
+    ///   target is on-screen; then `var_9 = direction`, and if `attackType == 0`
+    ///   store the 180° flip `(var_9 + 4) % 8` (@`1A79`).
+    /// - **Shared tail** (`loc_3FA7D` @`1A7D-1A9F`): if the target is on-screen,
+    ///   `draw_74B3F(false, Normal, var_9, target)` stores `var_9`
+    ///   **unconditionally** — the on-screen **draw overwrite**. Branch 1 → the
+    ///   target ends up FACING its attacker (`var_9` = bearing, overwrites the
+    ///   face-away store: the §35 crack). Branch 2 → `var_9` = the old direction,
+    ///   so the flip is restored → net no-op.
+    ///
+    /// Then the **attacker ALWAYS faces its target** (`loc_3FAA4` @`1AA4-1AD2`):
+    /// `draw_74B3F(false, Attack, getTargetDirection(target, attacker), attacker)`
+    /// = `target_direction(attacker, target)`, an unconditional store.
+    ///
+    /// Net (melee `attackType == 0`): 1st attack on-screen → target faces the
+    /// attacker; 1st off-screen → faces away; 2nd+ → unchanged; `attackType != 0`
+    /// → unchanged. The facing-equality reads (flanking/backstab) therefore see a
+    /// target FACING its attacker in melee — which is why the §35 face-away-only
+    /// transliterations over-fired.
+    fn attack_target_facing(&mut self, target: usize, attacker: usize, attack_type_nonzero: bool) {
+        let tgt_on_screen = self.on_screen(target);
+        let var_9: u8 = if self.fighters[target].attacks_received < 2 && !attack_type_nonzero {
+            // Branch 1 (@1A0B-1A39): var_9 = bearing target→attacker; store
+            // face-away unconditionally (the tail draw overwrites it on-screen).
+            let bearing = target_direction(self.fighters[target].pos, self.fighters[attacker].pos);
+            self.fighters[target].direction = (bearing + 4) % 8; // @1A35
+            bearing
+        } else {
+            // Branch 2 (loc_3FA3B @1A3B): the binary reads `direction` only after
+            // the on-screen gate; reading it unconditionally is harmless because
+            // `var_9` feeds only the on-screen-gated tail draw.
+            let old = self.fighters[target].direction; // @1A55
+            if tgt_on_screen && !attack_type_nonzero {
+                self.fighters[target].direction = (old + 4) % 8; // @1A79 flip
+            }
+            old
+        };
+        // Shared tail (loc_3FA7D @1A7D): the on-screen draw overwrite (@1A9F).
+        if tgt_on_screen {
+            self.draw_74b3f(target, var_9);
+        }
+        // loc_3FAA4 @1AA4-1AD2: the attacker always faces its target.
+        let face = target_direction(self.fighters[attacker].pos, self.fighters[target].pos);
+        self.draw_74b3f(attacker, face);
+    }
+
     /// `AttackTarget → AttackTarget01` (`ovr014.cs:904/724`), melee core: for
     /// `attackIdx` counting down from `attack_idx`, drain `AttacksLeft(attackIdx)`
     /// swings — each **one d20** to-hit ([`pc_can_hit_target`]); **on a hit only**,
@@ -3478,15 +3535,17 @@ impl CombatState {
         ranged_item: AttackItemRef,
     ) -> bool {
         // AttackTarget (`sub_3F9DB` @`ovr014:19DB`) head: focus the camera on
-        // the attacker (`ovr014.cs:908`). [The target-side facing update
-        // (§36.1, `ovr014:19FE-1A9F`) lands with the AttackTarget-update
-        // mechanic.] Then the attacker ALWAYS faces its target and recenters if
-        // off-screen — `draw_74B3F(false, Attack, getTargetDirection(target,
-        // attacker), attacker)` @`ovr014:1AC2` (the camera commit performs the
-        // recenter with a no-op store; the face-target store lands with the
-        // AttackTarget update).
+        // the attacker (`ovr014.cs:908`).
         self.focus = true;
-        self.draw_74b3f(actor, self.fighters[actor].direction);
+        // §36.1 direction bookkeeping (`sub_3F9DB` @`ovr014:19FE-1AD2`): the
+        // target-side facing store + the on-screen draw overwrite, then the
+        // attacker ALWAYS faces its target. `behind` here is the caller's
+        // `attackType != 0` (departure/behind attacks pass 1) — `attackType != 0`
+        // leaves the target's facing untouched. Draw-free (the camera scroll
+        // never enters the PRNG stream; the target-side draw fires only on-screen
+        // so its recenter can't). The AC-select `behind` decision is derived from
+        // this same flag today; the flanking/backstab heuristics diverge it later.
+        self.attack_target_facing(target, actor, behind);
         // §19: `AttackTarget` (`sub_3F9DB`, ovr014.cs:939) sets
         // `attacker.actions.target = target` — the attacked (possibly re-picked)
         // combatant becomes the persistent target, so next round's `find_target`
@@ -6851,6 +6910,113 @@ mod tests {
         s.fighters[1].direction_changes = 0;
         s.recalc_attacks_received(1, 0);
         assert_eq!(s.fighters[1].direction_changes, 3, "folded 5 → 8 − 5 = 3");
+    }
+
+    /// A roster for the AttackTarget facing table: attacker (idx 0) due NORTH of
+    /// target (idx 1), two cells apart → bearing target→attacker = N (0), attacker
+    /// faces target = S (4). `on_screen` picks whether the target is inside the
+    /// 7×7 window.
+    fn facing_state(target_on_screen: bool) -> CombatState {
+        let mut s = camera_state(&[
+            (Team::Party, GridPos::new(20, 10)), // attacker (idx 0), due north
+            (Team::Monster, GridPos::new(20, 12)), // target (idx 1)
+        ]);
+        s.fighters[0].in_combat = true;
+        s.fighters[1].in_combat = true;
+        s.focus = false; // isolate the direction stores from any recenter
+        s.map_screen_top_left = if target_on_screen {
+            GridPos::new(17, 9) // window x17..23, y9..15 → both on-screen
+        } else {
+            GridPos::new(40, 20) // window x40..46 → target (20,12) off-screen
+        };
+        // Sanity on the geometry.
+        assert_eq!(
+            target_direction(GridPos::new(20, 12), GridPos::new(20, 10)),
+            0
+        );
+        assert_eq!(
+            target_direction(GridPos::new(20, 10), GridPos::new(20, 12)),
+            4
+        );
+        s
+    }
+
+    #[test]
+    fn attack_target_facing_first_attack_on_screen_faces_the_attacker() {
+        // Table row 1 (§36.1): AttacksReceived<2, attackType 0, on-screen — the
+        // face-away store is overwritten by the on-screen draw → target FACES its
+        // attacker (bearing target→attacker = 0). Attacker faces target (4).
+        let mut s = facing_state(true);
+        assert!(s.on_screen(1));
+        s.fighters[1].attacks_received = 1; // < 2 (post-Recalc bump)
+        s.fighters[1].direction = 3; // arbitrary prior facing
+        s.attack_target_facing(1, 0, false);
+        assert_eq!(s.fighters[1].direction, 0, "target faces its attacker");
+        assert_eq!(s.fighters[0].direction, 4, "attacker faces its target");
+    }
+
+    #[test]
+    fn attack_target_facing_first_attack_off_screen_faces_away() {
+        // Table row 2: AttacksReceived<2, attackType 0, off-screen — no draw, so
+        // the face-away store stands → (bearing + 4) % 8 = 4.
+        let mut s = facing_state(false);
+        assert!(!s.on_screen(1));
+        s.fighters[1].attacks_received = 1;
+        s.fighters[1].direction = 3;
+        s.attack_target_facing(1, 0, false);
+        assert_eq!(s.fighters[1].direction, 4, "target faces away");
+        assert_eq!(
+            s.fighters[0].direction, 4,
+            "attacker still faces its target"
+        );
+    }
+
+    #[test]
+    fn attack_target_facing_subsequent_attack_on_screen_is_a_no_op() {
+        // Table row 3: AttacksReceived>=2, attackType 0, on-screen — the 180° flip
+        // is stored then the draw restores the old value → unchanged.
+        let mut s = facing_state(true);
+        s.fighters[1].attacks_received = 2; // not < 2
+        s.fighters[1].direction = 3;
+        s.attack_target_facing(1, 0, false);
+        assert_eq!(
+            s.fighters[1].direction, 3,
+            "subsequent on-screen: unchanged"
+        );
+        assert_eq!(s.fighters[0].direction, 4);
+    }
+
+    #[test]
+    fn attack_target_facing_behind_attack_never_changes_the_target() {
+        // Table row 5: attackType != 0 (a departure/behind swing) — branch 2, no
+        // flip stored (attackType-gated), draw restores → target unchanged, even
+        // on the first attack and on-screen.
+        let mut s = facing_state(true);
+        s.fighters[1].attacks_received = 1; // would be branch 1 if attackType 0
+        s.fighters[1].direction = 3;
+        s.attack_target_facing(1, 0, true);
+        assert_eq!(
+            s.fighters[1].direction, 3,
+            "attackType != 0: target unchanged"
+        );
+        assert_eq!(
+            s.fighters[0].direction, 4,
+            "but the attacker still faces it"
+        );
+    }
+
+    #[test]
+    fn attack_target_facing_subsequent_attack_off_screen_is_a_no_op() {
+        // Table row 4: AttacksReceived>=2, off-screen — no store, no draw.
+        let mut s = facing_state(false);
+        s.fighters[1].attacks_received = 2;
+        s.fighters[1].direction = 3;
+        s.attack_target_facing(1, 0, false);
+        assert_eq!(
+            s.fighters[1].direction, 3,
+            "subsequent off-screen: unchanged"
+        );
+        assert_eq!(s.fighters[0].direction, 4);
     }
 
     #[test]
