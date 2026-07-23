@@ -2866,10 +2866,34 @@ pub struct NearTarget {
     pub steps: u16,
 }
 
-/// `BuildNearTargets(max_range, player)` → `Rebuild_SortedCombatantList`
-/// (`ovr025.cs:1290`, `ovr032.cs:221-280`): the opposite-team combatants reachable
-/// from `attacker_idx` within `max_range` tiles, **sorted nearest-first** (the
-/// `SortedCombatant.CompareTo` order: `steps` asc, then `direction` asc). Draw-free.
+/// `BuildNearTargets(max_range, player)` = `near_enermy` (`ovr025:25E0`, coab
+/// `ovr025.cs:1290`): the opposite-team combatants reachable from `attacker_idx`
+/// within `max_range` tiles, sorted nearest-first. Draw-free.
+///
+/// **coab≠binary #20 — the team filter runs AFTER the sort, not during the
+/// build.** The binary's `near_enermy` first calls `sub_738D8` (@`ovr025:261B`),
+/// which builds and exchange-sorts over **every** `size > 0` combatant — both
+/// teams AND the attacker itself (its only gate is `cmp [di+66C0h], 0` @
+/// `ovr032:096D-0972`; there is no team test anywhere in `sub_738D8`, and the
+/// self-entry reaches at steps 0). Only then does `near_enermy` filter-compact
+/// the sorted stride-3 list to the opposite team (`player_array[entry]
+/// .combat_team == on_our_team(attacker)` @`ovr025:264F-2678`, with
+/// `on_our_team` = `combat_team == 0` @`ovr025:256D-2573`; the keeper
+/// `Move(&6EAE[3j], &6EAE[3k], 3)` compaction @`ovr025:26A7` preserves sorted
+/// order). coab hoisted the filter into the build loop as a predicate
+/// (`Rebuild_SortedCombatantList`'s `filter(...)`, `ovr032.cs:238`) — identical
+/// under a total order, but the `sub_73033` swap predicate is a NON-TRANSITIVE
+/// partial order (bug #5), so the interleaved other-team entries change which
+/// same-team pairs get compared and swapped: sort-then-filter ≠ filter-then-sort.
+/// Caster-bar draw 2174 is the pin: [13]'s 5-party tie sorts `[1],[4],[0],[3],[5]`
+/// through the full-list dance (capture picks [3] at roll 4) but
+/// `[1],[0],[3],[4],[5]` when party-only (we picked [4]) — the @2176 fork.
+///
+/// (`find_target` = `sub_41E44` reaches this via `near_enermy` @`ovr014:3F0E`,
+/// as do the `sub_35DB1` re-picks and `ShouldCastSpellX`; the raw un-filtered
+/// `sub_738D8` callers — the spell area shapes in `ovr014.target` @`24C9`/`2589`
+/// and the `sub_352AF` save-scan @`ovr010:02F7` — are not modeled yet and will
+/// need the pre-filter list when they land.)
 ///
 /// **§20 bug #8 — the best-pair accumulator init (`sub_738D8` @`ovr032:097B`):**
 /// the binary initializes the per-candidate best range `var_1F` to **0xFF (255)**,
@@ -2889,10 +2913,10 @@ pub struct NearTarget {
 /// `sub_7354A`. Every path we model passes 0xFF — scan + no-op filter — so it is
 /// not a parameter here.)
 ///
-/// **Tie order:** `SortedCombatant.CompareTo` returns 0 for equal `(steps,
-/// direction)` and coab's `List.Sort` is unstable, so the live order of exact ties
-/// is statically unspecified; this uses a stable sort (roster order on ties) — a
-/// documented micro-divergence that only a binary trace could pin.
+/// **Tie order** is fully determined by the binary machinery above: incomparable
+/// pairs keep build order (CombatMap = roster order), and equal-steps ties are
+/// ordered by the full-list exchange dance before the filter strips the
+/// same-team entries.
 pub fn build_near_targets(
     map: &CombatMap,
     combatants: &[RangeCombatant],
@@ -2906,8 +2930,11 @@ pub fn build_near_targets(
     let mut out: Vec<(NearTarget, u8)> = Vec::new();
 
     for (i, c) in combatants.iter().enumerate() {
-        // combatantMap.size > 0 && filter(p.combat_team != attacker.combat_team).
-        if c.size == 0 || c.team == attacker.team {
+        // `sub_738D8`'s ONLY candidate gate: `combatantMap.size > 0`
+        // (`ovr032:096D-0972`). No team test — both teams and the attacker
+        // itself (steps 0) enter the sort; the team filter runs after it
+        // (coab≠binary #20, header note).
+        if c.size == 0 {
             continue;
         }
         let target_map = size_footprint(c.size, c.pos);
@@ -2980,7 +3007,12 @@ pub fn build_near_targets(
         }
     }
 
-    out.into_iter().map(|(nt, _)| nt).collect()
+    // `near_enermy`'s post-sort filter-compact (`ovr025:2648-26B2`): keep the
+    // opposite team, preserving sorted order (coab≠binary #20, header note).
+    out.into_iter()
+        .filter(|(nt, _)| combatants[nt.idx].team != attacker.team)
+        .map(|(nt, _)| nt)
+        .collect()
 }
 
 /// **`CombatWorld` is the former name of the now-unified [`CombatState`].** Kept

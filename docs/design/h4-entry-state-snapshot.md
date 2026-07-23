@@ -2797,3 +2797,81 @@ instrument draw indices into the near-dump, map every [13] turn from the [2]-dea
 round to the divergence on both sides (capture ops + snaps vs our events), and
 align. The answer is in that alignment — every static hypothesis is now exhausted
 with listing proof.
+
+## 44. ★ coab≠binary #20 — the near-list team filter runs AFTER the sort; caster-bar CLOSED 3517/3517, combat+terrain4 CLOSED, the capture matrix 8/8 CLOSED ★ (2026-07-23, Fable)
+
+**The §43.1 alignment plan found the fork in one pass — and §43.1's "guard turn"
+reading was a hook-cadence misread.** The capture's `turn_snapshot`s fire on STATE
+WRITES (§23's noted artifact), not per turn: aligning snapshots to draw positions
+chronologically (rng events and snapshots counted in file order) shows snaps
+110/111/112 are the three writes of ONE ordinary [13] turn — `actions.target ← 255`
+(find_target's invalidate write, after 2173 draws), `target ← 3` (the pick write,
+one draw later), `x ← 33` (the approach step, one draw later). The identical
+write-triple appears for [0] (snaps 98-100), [1] (102-104) and [11] (107-109) —
+there was never an extra guard/invalidate cycle to align. The capture's [13] turn
+decodes as: `2171 d4` (field_15 gate), `2172/2173 d7×2` (the behavior guards),
+invalidate, **`2174 d5` = the re-pick over five candidates**, `2175 d100` (one
+approach step west onto (33,14), the §26 freed downed-[2] tile), `2176 d1`
+(adjacent re-pick of the sole adjacent enemy [3]) + `2177 d20` (the attack) — vs
+ours: same head, same d5, pick [4], then TWO approach d100s toward (35,16),
+forking at 2176. Same draw, same raw, same five candidates, same sort inputs
+(§43/§43.1 proofs stand) — only the ARRAY ORDER differed.
+
+**The mechanism — coab≠binary #20: the team filter's placement.** The binary's
+`near_enermy` (`ovr025:25E0`) first calls `sub_738D8` (@`261B`), which builds and
+exchange-sorts over EVERY `size > 0` combatant — both teams AND the attacker
+itself (the candidate loop `var_1 = 1..=count` @`ovr032:0950-0972` gates ONLY on
+`cmp [di+66C0h], 0`; no team test exists in the proc; the self-entry reaches at
+steps 0 and sorts first). Only AFTER `sub_73033` runs (@`0B9E`) does `near_enermy`
+filter the sorted stride-3 list at `6EAE` to the opposite team — keep
+`player_array[entry].combat_team == on_our_team(attacker)` (@`2648-2678`, with
+`on_our_team` = `combat_team == 0` @`2564-2573`), compacting kept entries in
+place (`Move(&6EAE[3j], &6EAE[3k], 3)` @`26A7`, order-preserving) and re-counting
+`byte_1D1C0` (@`26BD`), then copying the kept indices to `byte_1D8B8[1..]`
+(@`26D8-26FD`) for `find_target`'s pick. coab hoisted the filter into the build
+loop as a predicate (`Rebuild_SortedCombatantList`'s `filter`, `ovr032.cs:238`) —
+identical under a total order, but the `sub_73033` swap predicate is a
+NON-TRANSITIVE partial order (bug #5): the interleaved other-team entries change
+which same-team pairs get compared and swapped, so sort-then-filter ≠
+filter-then-sort exactly when an equal-steps tie spans mixed odd/even directions.
+Our port copied coab's shape; five captures closed anyway because their tie
+structures happened to be interleave-insensitive.
+
+**At the pin**: [13]@(34,14) over live `{[0](s5,d4), [1](s4,d4), [3](s5,d6),
+[4](s5,d3), [5](s25,d6)}` + monsters `{[6](s2,d0), [10](s5,d2), [11](s2,d4),
+[12](s3,d7), [13]self(s0,d0), [15](s6,d3)}`: the full-list dance lands the party
+order `[1],[4],[0],[3],[5]` (roll 4 → **[3]**, the capture's pick — it then steps
+west and attacks [3]); the party-only sort gave `[1],[0],[3],[4],[5]` (roll 4 →
+**[4]**, our fork). Validated by simulation over the §43-instrumented tuples
+before the fix landed (both orders reproduced exactly).
+
+**The fix** (`build_near_targets`, `combat/mod.rs`): drop the team test from the
+candidate loop (size-gate only, self included — `can_reach(ap,ap)` = steps 0 as
+`sub_733F1`), exchange-sort the full list, then filter to the opposite team
+order-preservingly. Pin test `near_list_sorts_both_teams_then_filters_bug20`
+(tests/core.rs) fixes the draw-2174 board and asserts the filtered order.
+
+**Result: `caster-bar` CLOSED 3517/3517 — and `combat+terrain4` CLOSED with the
+same fix.** The @368 frontier (open since §29; the oldest) was the same
+signature: the capture's @365 is a 6-way find_target d6 and @368 sat in that
+turn's movement tail. **The frontier guard is now 8/8 CLOSED, operand-exact,
+0 trips — every captured fight replays draw-for-draw.**
+
+### 44.1 Cited, not modeled (new this session)
+
+- **`find_target`'s reject-retry is sparse, not shrinking** (`sub_41E44`
+  @`ovr014:3FB6-3FFD`): a rejected pick ZEROES its `byte_1D8B8` slot and
+  re-rolls `d(count)` over the sparse array (hole-hits cost a tryCount and a
+  draw @`3F4A-3F51`; exit when no non-zero slot remains). coab's
+  `nearTargets.Remove` (our `retain`) shrinks to `d(count-1)`. Divergent ONLY on
+  the reject path — unreachable while `CanSeeTargetA` is always true (no
+  invisibility modeled). Cited in `find_target`'s doc comment.
+- **Raw `sub_738D8` callers get the UNFILTERED sorted list**: the spell area
+  shapes in `ovr014.target` (@`24C9`/`2589`) and the `sub_352AF` save-scan
+  (@`ovr010:02F7`). When those land they must consume the pre-filter list — the
+  filter now lives visibly at `build_near_targets`' tail for that split.
+
+Gates: fmt, clippy 0 warnings (the newly-unconstructed `Expect::Frontier` pin
+variant carries an `#[allow(dead_code)]` + note), workspace green (**387
+engine**, 132 formats), guard **8/8 CLOSED** (both pin edits ride this commit
+per the exact-pin rule).

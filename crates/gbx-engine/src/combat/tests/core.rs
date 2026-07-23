@@ -1151,6 +1151,49 @@ fn build_near_targets_filters_team_and_sorts_nearest_first() {
 }
 
 #[test]
+fn near_list_sorts_both_teams_then_filters_bug20() {
+    // coab≠binary #20 (doc §44): `sub_738D8` exchange-sorts EVERY `size > 0`
+    // combatant — both teams, attacker included — and `near_enermy` filters to
+    // the opposite team only AFTER the sort (`ovr025:2648-26B2`). Under the
+    // non-transitive swap predicate the interleave is load-bearing. This is the
+    // caster-bar draw-2174 board ([13]'s re-pick, snaps 109/110): party-only
+    // sorting gives `[1],[0],[3],[4],[5]` (the old pick: roll 4 → [4]); the
+    // binary's full-list dance gives `[1],[4],[0],[3],[5]` (capture: roll 4 →
+    // [3], the @2176 fork).
+    let map = CombatMap::uniform(FLOOR);
+    let mut combatants = [
+        rc(Team::Party, 33, 16),   // 0
+        rc(Team::Party, 34, 16),   // 1
+        rc(Team::Party, 33, 14),   // 2 — downed (size 0 below)
+        rc(Team::Party, 32, 13),   // 3
+        rc(Team::Party, 35, 16),   // 4
+        rc(Team::Party, 23, 11),   // 5
+        rc(Team::Monster, 34, 13), // 6
+        rc(Team::Monster, 32, 13), // 7 — dead
+        rc(Team::Monster, 35, 15), // 8 — dead
+        rc(Team::Monster, 32, 11), // 9 — dead
+        rc(Team::Monster, 36, 15), // 10
+        rc(Team::Monster, 34, 15), // 11
+        rc(Team::Monster, 33, 13), // 12
+        rc(Team::Monster, 34, 14), // 13 = attacker
+        rc(Team::Monster, 24, 10), // 14 — dead
+        rc(Team::Monster, 36, 16), // 15
+    ];
+    for dead in [2usize, 7, 8, 9, 14] {
+        combatants[dead].size = 0;
+    }
+    let near = build_near_targets(&map, &combatants, 13, 0xff, false);
+    let idxs: Vec<usize> = near.iter().map(|n| n.idx).collect();
+    assert_eq!(
+        idxs,
+        vec![1, 4, 0, 3, 5],
+        "the full-list sort order must survive the post-sort team filter"
+    );
+    let steps: Vec<u16> = near.iter().map(|n| n.steps).collect();
+    assert_eq!(steps, vec![4, 5, 5, 5, 25]);
+}
+
+#[test]
 fn build_near_targets_range_1_is_melee_adjacency() {
     let map = CombatMap::uniform(FLOOR);
     let combatants = [

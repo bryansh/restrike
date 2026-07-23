@@ -46,6 +46,9 @@ enum Expect {
     /// Replays operand-exact, draw-for-draw, equal length, zero stub trips.
     Closed,
     /// Diverges at **exactly** this draw index (operand or `(before,after)`).
+    /// Unconstructed since doc §44 closed the matrix 8/8 — kept as the pin type
+    /// every future capture with an open frontier re-enters through.
+    #[allow(dead_code)]
     Frontier(usize),
 }
 
@@ -91,11 +94,16 @@ const PINS: &[Pin] = &[
         auto_cast_toggles: &[],
     },
     Pin {
-        // Pre-existing operand divergence in the oldest capture (no board
-        // snapshots, grafted terrain, field_58C=99 so unrelated to flee); it only
-        // ever count-matched (doc §29 finding 3).
+        // ★ CLOSED (doc §44): the oldest open frontier (@368 since the wire-gates
+        // session, doc §29 finding 3) fell to coab≠binary #20 — the near-list
+        // team filter runs AFTER the full-roster exchange sort (`near_enermy`
+        // @`ovr025:2648-26B2`), so interleaved same-steps ties order differently
+        // than coab's filter-during-build. The capture's @365 is a 6-way
+        // find_target d6 (field_15 d4 @362 + the two d7 guards precede it) and
+        // @368 sits in that turn's movement tail — the same silent-fork
+        // signature as caster-bar's @2174/@2176, closed by the same fix.
         capture: "combat+terrain4.gbxtrace",
-        expect: Expect::Frontier(368),
+        expect: Expect::Closed, // was Frontier(368); near-list filter placement (#20)
         map_direction: 2,
         auto_cast: false,
         auto_cast_toggles: &[],
@@ -135,16 +143,18 @@ const PINS: &[Pin] = &[
         // the cast's own d10+3×d4 and ~1150 further melee draws match). §38's
         // flip-window ruling stands: entry-false + a toggle at turn ordinal 16.
         //
-        // The residual @2176 is a MOVEMENT-geometry divergence, not a spell one
-        // (doc §42): monster [13] approaching PC [4] at (35,16) takes an
-        // orthogonal 2-step path (34,14)→(35,14)→(35,15) where the capture takes
-        // one diagonal step to adjacency (near-pick d1 + attack). It is
-        // camera-independent (disabling the missile camera leaves it @2176) and
-        // downstream of a byte-exact MM cast — a CanMove/DATA_2B8 approach-angle
-        // subtlety in the movement subsystem (§15/§20 class), out of the caster
-        // peel's scope. Banked, not forced (§41 acceptance).
+        // ★ CLOSED 3517/3517 (doc §44): the @2176 residual was coab≠binary #20 —
+        // [13]'s draw-2174 re-pick d5 fell on a 5-way party list whose tie order
+        // depends on the near-list build's OTHER-team entries: the binary
+        // exchange-sorts every `size > 0` combatant (attacker included, steps 0)
+        // and `near_enermy` filters to the opposite team only AFTER the sort
+        // (`ovr025:2648-26B2`), so the full-list dance orders the tied trio
+        // `[4],[0],[3]` where our party-only sort gave `[0],[3],[4]` — same
+        // roll 4, capture picks [3], we picked [4], forking the turn shape at
+        // 2176. Sort-then-filter lands the pick on [3] and the remaining ~1341
+        // draws replay operand-exact.
         capture: "caster-bar.gbxtrace",
-        expect: Expect::Frontier(2176),
+        expect: Expect::Closed, // was Frontier(2176); near-list filter placement (#20)
         map_direction: 2,
         auto_cast: false,
         auto_cast_toggles: &[16],

@@ -30,12 +30,22 @@ impl CombatState {
         )
     }
 
-    /// `find_target(clear, arg_2, max_range, actor)` (`ovr014.cs:2238`): keep a
-    /// still-valid target (**0 draws**), else pick a random near-target
-    /// (`roll_dice(nearTargets.Count, 1)` per retry, `:2275`). With no invisibility
-    /// modeled, `CanSeeTargetA` is always true, so the first pick succeeds — exactly
-    /// **1 draw** when a target is found from scratch, 0 when none exist or the old
-    /// target survives. Two passes (the second `ignoreWalls`) as coab.
+    /// `find_target(clear, arg_2, max_range, actor)` (`sub_41E44` @`ovr014:3E44`,
+    /// coab ovr014.cs:2238): keep a still-valid target (**0 draws**), else pick a
+    /// random near-target (`roll_dice(count, 1)` @`ovr014:3F3B`) from the
+    /// `near_enermy` list (@`3F0E`). With no invisibility modeled, `CanSeeTargetA`
+    /// is always true, so the first pick succeeds — exactly **1 draw** when a
+    /// target is found from scratch, 0 when none exist or the old target survives.
+    /// Two passes (the second `ignoreWalls`) as coab.
+    ///
+    /// **Retry semantics (cited, unreachable):** on a rejected pick the binary
+    /// ZEROES the picked `byte_1D8B8` slot (@`ovr014:3FBD`) and re-rolls
+    /// `d(count)` over the now-sparse array — a hole-hit costs a tryCount and a
+    /// fresh draw (@`3F4A-3F51` loops back through the roll) and the count never
+    /// shrinks; the loop exits when no non-zero slot remains (@`3FC2-3FFD`).
+    /// coab's `nearTargets.Remove(epi)` (and our `retain` below) shrinks the list
+    /// to `d(count-1)` instead — divergent ONLY on the reject path, which no
+    /// modeled fight reaches (rejection requires an invisible target).
     pub(super) fn find_target(
         &mut self,
         rng: &mut EngineRng,
