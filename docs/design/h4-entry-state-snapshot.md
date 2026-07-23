@@ -2755,3 +2755,45 @@ prize).
 
 Guard unchanged this session-segment: 8/8 exact, frontier @2176, zero code changes
 (the instrument was reverted; this note is the only delta).
+
+### 43.1 Day-2 findings: two more hypotheses eliminated instruction-level; coab≠binary #19 found and FIXED; the residual narrows to the re-pick turn alignment (2026-07-23)
+
+**The §43 "reach-flood steps" hypothesis is also dead.** Our `can_reach` is a pure
+Bresenham line march (`2·max(|dx|,|dy|) + min(|dx|,|dy|)`, occupancy-blind) — the tie
+steps are FORCED by geometry ([1]=4, [0]=[3]=[4]=5 from (34,14)), and `sub_733F1` was
+§19-20-verified as the same march. No step assignment can differ.
+
+**The cone formulas are now verified instruction-level, all eight cases**
+(`sub_7354A` @`ovr032:05ED-08C0` vs our `can_see_combatant`): cases 0, 2, 3, 4, 5, 6,
+7 are IDENTICAL to ours. The four tie-relevant dirs are therefore binary-equal
+([1]=4, [0]=4, [3]=6, [4]=3 — each verified with margins under both formula sets),
+and the sort predicate + swap placement were already verified (§43). Every input to
+the re-pick's sort now has an instruction-level identity proof — **the divergence is
+NOT in the list machinery** (the §31 "the list was innocent" lesson, a third time).
+
+**★ coab≠binary #19 — found in the sweep and FIXED: `CanSeeCombatant` case 1 (the
+NE cone) mistranscribes its second half-plane. ★** The binary bounds it by the
+ANTI-diagonal through the facing cell (`tx >= (fx + fy) − ty` @`ovr032:066F-068B`);
+coab wrote the main diagonal (`(fx − fy) + ay`), and our port copied it.
+Geometrically the binary is right — the NE axis IS the anti-diagonal, and the case's
+two disjuncts bound the quarter-plane from each side of it. The spurious wedge coab
+admits (west of the facing column, between the diagonals) is provably contained in
+the dir-0 cone, so **every first-true scan is unchanged** (near-list tie dirs
+unaffected — #19 could not have caused @2176) — the observable is the direct boolean,
+e.g. a NE-facing attacker's departure cone. Fixed with a pin test
+(`cone_dir1_second_half_plane_is_the_anti_diagonal_bug19`); guard 8/8 exact (the
+closed captures never exercised the wedge, as the scan-invariance proof predicts).
+
+**The surviving residual question**: the capture's snaps 109-111 show [13]'s
+tgt2 → tgt255 → tgt3 transition — a GUARD turn (cleared actions → target 255) between
+the long tgt2 hold and the tgt3 acquisition — while our replay's [13] re-picks once
+(one 5-candidate build) and holds [4]. The draws matched through 2175, so the two
+engines' turn SHAPES over that stretch were draw-identical while the picked TARGET
+differed — with every sort input now proven equal, what remains is the exact
+draw-position alignment of the re-pick(s): whether the binary's d5 fell on the same
+find_target call as ours, whether an extra invalidate/guard cycle re-ordered the
+build, and what the candidate list held at the binary's actual pick moment. NEXT:
+instrument draw indices into the near-dump, map every [13] turn from the [2]-death
+round to the divergence on both sides (capture ops + snaps vs our events), and
+align. The answer is in that alignment — every static hypothesis is now exhausted
+with listing proof.

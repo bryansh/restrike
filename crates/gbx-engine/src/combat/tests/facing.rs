@@ -685,3 +685,33 @@ fn setup_geometry_is_draw_free() {
     // (The rng binding exists only to hold the sink; silence unused warnings.)
     let _ = &mut rng;
 }
+
+/// coab≠binary #19 (doc §43.1): `can_see_combatant`'s dir-1 (NE) cone bounds
+/// its second half-plane by the ANTI-diagonal through the facing cell
+/// (`ovr032:066F-068B`: `tx >= (fx + fy) - ty`), not coab's main diagonal
+/// (`CanSeeCombatant` case 1). Anchor (10,10), facing (11,9): coab's spurious
+/// wedge — west of the facing column, between the diagonals — is OUTSIDE the
+/// binary's NE cone; the anti-diagonal boundary and the east side stay inside.
+/// The first-true SCAN is provably unchanged (the dir-0 cone's second
+/// half-plane from this anchor is `tx - ty >= 1`, a superset of the wedge's
+/// `tx - ty >= 2`), so near-list tie-break dirs are unaffected — the
+/// observable is the direct boolean (e.g. a NE-facing departure cone).
+#[test]
+fn cone_dir1_second_half_plane_is_the_anti_diagonal_bug19() {
+    let b = GridPos::new(10, 10); // anchor; facing cell (11,9)
+    let see = |x, y| can_see_combatant(1, GridPos::new(x, y), b);
+    // coab's wedge: OUT under the binary's cone.
+    assert!(
+        !see(10, 7),
+        "due north is not in the NE cone (coab said it was)"
+    );
+    assert!(!see(9, 6));
+    // The anti-diagonal boundary and beyond (east side): IN.
+    assert!(see(12, 8)); // tx+ty == fx+fy, ty <= fy
+    assert!(see(13, 8));
+    // The first disjunct is untouched.
+    assert!(see(11, 8));
+    assert!(see(12, 9));
+    // Scan invariance: a wedge point still resolves to dir 0 first.
+    assert_eq!(find_combatant_direction(GridPos::new(10, 7), b), 0);
+}

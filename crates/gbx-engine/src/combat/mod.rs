@@ -2814,7 +2814,14 @@ pub fn can_see_combatant(direction: u8, player_a: GridPos, player_b: GridPos) ->
     let (fx, fy) = (facing_x, facing_y);
     match direction {
         0 => (ax >= fx && ay <= (fx - ax) + fy) || (ax <= fx && ay <= (ax - fx) + fy),
-        1 => (ax >= fx && ay <= (fx - ax) + fy) || (ax >= (fx - fy) + ay && ay <= fy),
+        // coab≠binary #19 (doc §43.1): case 1's SECOND half-plane is the
+        // ANTI-diagonal `ax >= (fx + fy) - ay` (`ovr032:066F-068B`: `dx' = (fx +
+        // fy) - ty; tx >= dx'`), not coab's main-diagonal `(fx - fy) + ay`
+        // (`ovr032.cs` CanSeeCombatant case 1). Geometrically the binary is
+        // right: the NE cone's own axis IS the anti-diagonal, and its two
+        // disjuncts bound the quarter-plane from each side of it. All seven
+        // other cases verified instruction-identical (`ovr032:05ED-08C0`).
+        1 => (ax >= fx && ay <= (fx - ax) + fy) || (ax >= (fx + fy) - ay && ay <= fy),
         2 => (ax >= (fx + fy - ay) && ay <= fy) || (ax >= (fx + ay - fy) && ay >= fy),
         3 => (ax >= (fx + ay) - fy && ay >= fy) || (ax >= fx && ay >= (ax - fx) + fy),
         4 => (ax >= fx && ay >= (ax - fx) + fy) || (ax <= fx && ay >= (fx - ax) + fy),
