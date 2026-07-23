@@ -127,16 +127,24 @@ const PINS: &[Pin] = &[
         auto_cast_toggles: &[],
     },
     Pin {
-        // The caster driver. sub_3560B's selection loop is now faithful (doc
-        // §41.1): PHILIPPE's round-2 turn draws 3× roll_dice(1) (d7 bound rolled
-        // 1 → one priority-7 pass, MM pri 4 rejects ×3) and his round-3 turn
-        // draws 10× roll_dice(1) (3+3+3 rejects at pri 7/6/5, accept at pri 4)
-        // before the accept — carrying the frontier from @453 to @1026, the
-        // cast's first draw (the `find_target` targeting d10). The cast body
-        // lands in the next commit. §38's flip-window ruling stands: entry-false
-        // + a toggle at turn ordinal 16 (his round-2 turn head).
+        // The caster driver, fully peeled (doc §41). sub_3560B's selection loop
+        // (round-2 3× d1, round-3 10× d1 + accept) AND the Magic Missile cast —
+        // the `find_target` targeting d10, the 3× d4 damage (castingLvl 5 → 3+3d4,
+        // no save), slot consumption, the AI-turn early return — all replay
+        // operand-exact, carrying the frontier @453 → @2176 (a 1723-draw advance;
+        // the cast's own d10+3×d4 and ~1150 further melee draws match). §38's
+        // flip-window ruling stands: entry-false + a toggle at turn ordinal 16.
+        //
+        // The residual @2176 is a MOVEMENT-geometry divergence, not a spell one
+        // (doc §42): monster [13] approaching PC [4] at (35,16) takes an
+        // orthogonal 2-step path (34,14)→(35,14)→(35,15) where the capture takes
+        // one diagonal step to adjacency (near-pick d1 + attack). It is
+        // camera-independent (disabling the missile camera leaves it @2176) and
+        // downstream of a byte-exact MM cast — a CanMove/DATA_2B8 approach-angle
+        // subtlety in the movement subsystem (§15/§20 class), out of the caster
+        // peel's scope. Banked, not forced (§41 acceptance).
         capture: "caster-bar.gbxtrace",
-        expect: Expect::Frontier(1026),
+        expect: Expect::Frontier(2176),
         map_direction: 2,
         auto_cast: false,
         auto_cast_toggles: &[16],

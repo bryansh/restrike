@@ -163,15 +163,19 @@ fn selection_loop_casts_magic_missile_when_gate_and_bound_allow() {
 
     let ns = log.ns();
     assert_eq!(ns[0], 7, "the first draw is the d7 bound");
-    for n in &ns[1..] {
-        assert_eq!(*n, 1, "each selection pick is roll_dice(spells_count=1,1)");
-    }
     if bound >= 4 {
         assert!(cast, "bound {bound} ≥ 4 → MM accepted at priority 4");
-        assert_eq!(ns.len(), 1 + 10, "d7 + 3+3+3+1 picks");
+        // The 10 selection picks (3+3+3+1) are d1s; the cast's own draws follow.
+        for (i, n) in ns[1..=10].iter().enumerate() {
+            assert_eq!(*n, 1, "selection pick #{i} is roll_dice(spells_count=1,1)");
+        }
     } else {
         assert!(!cast, "bound {bound} < 4 → MM never reaches priority 4");
+        // No cast: exactly d7 + 3 picks per pass, all d1s.
         assert_eq!(ns.len(), 1 + 3 * bound as usize, "d7 + 3 picks per pass");
+        for n in &ns[1..] {
+            assert_eq!(*n, 1, "each selection pick is roll_dice(spells_count=1,1)");
+        }
     }
 }
 
@@ -190,4 +194,47 @@ fn selection_loop_gate_off_draws_only_the_d7() {
     assert!(!world.sub_3560b(&mut rng, 0), "magic off → no cast");
     assert_eq!(log.len(), 1, "gate off → only the d7 bound is drawn");
     assert_eq!(log.ns()[0], 7);
+}
+
+/// The full Magic Missile cast (doc §41.3): once the selection accepts (a d7
+/// bound reaching pass 4), sub_5D2E1 draws the targeting `find_target` pick and
+/// the 3 damage d4s (`castingLvl 5 → 3 + 3d4`), rolls **no** save d20
+/// (damageOnSave Normal), applies the damage, and consumes the memorized slot
+/// (ClearSpell → `memorized_list` empty). The AI-turn returns `true`.
+#[test]
+fn magic_missile_cast_targets_damages_and_consumes_the_slot() {
+    // A seed whose d7 bound ≥ 4 → the selection reaches priority 4 and casts.
+    let seed = (0u32..)
+        .find(|s| Replay::new(*s).roll(7) >= 4)
+        .expect("some seed rolls a d7 ≥ 4");
+    let mut world = caster_world();
+    let mut rng = EngineRng::new(seed);
+    let log = DrawLog::default();
+    rng.attach_sink(log.sink());
+    let hp_before = world.fighters[1].hp_current;
+
+    assert!(
+        world.sub_3560b(&mut rng, 0),
+        "gate on + bound ≥ 4 → Magic Missile casts"
+    );
+    // Slot consumed (ClearSpell) — the caster's later turns draw no selection d1s.
+    assert!(
+        world.fighters[0].memorized_list.is_empty(),
+        "the cast consumed the one memorized Magic Missile"
+    );
+    // No save: the stream carries no d20 (damageOnSave Normal ⇒ saved = false).
+    let ns = log.ns();
+    assert!(!ns.contains(&20), "Magic Missile rolls no save d20: {ns:?}");
+    // Damage = n/2 + roll_dice(4, n/2) with n = castingLvl(5) + 1 = 6 → the three
+    // damage d4s are the LAST three draws (targeting precedes them).
+    let tail = &ns[ns.len() - 3..];
+    assert!(
+        tail.iter().all(|&n| n == 4),
+        "the damage is 3 separate d4s at the tail: {ns:?}"
+    );
+    let dmg = hp_before - world.fighters[1].hp_current;
+    assert!(
+        (3 + 3..=3 + 12).contains(&dmg),
+        "damage 3 + 3d4 ∈ 6..=15, applied to the target; got {dmg}"
+    );
 }

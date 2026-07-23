@@ -134,6 +134,16 @@ const MAGIC_MISSILE: SpellEntry = SpellEntry {
     field_f: 0,
 };
 
+/// `Affects.affect_4a` (0x4A) — the miscast affect. `sub_5D2E1`'s miscast gate
+/// (`ovr023.cs:714`) draws a d2 only when the caster `HasAffect(0x4A)`.
+const AFF_4A: u8 = 0x4A;
+
+/// `unk_18ADB[1..=4]` (`ovr014.cs:1093`, `seg600:27CB`; index 0 = `bless` filler)
+/// == `held_affects` (`Player.cs:845`): snake_charm 0x33, paralyze 0x34, sleep
+/// 0x35, helpless 0x1F. `sub_4001C`'s held-target filter rejects a pick whose
+/// target `IsHeld()` when the spell's `affect_id` is one of these (doc §41.3).
+const HELD_AFFECT_IDS: [u8; 4] = [0x33, 0x34, 0x35, 0x1F];
+
 /// `gbl.spellCastingTable[id]` for the transcribed rows — **Magic Missile only**
 /// (doc §41.2's lazy-transcription rule). Any other id returns `None`; callers
 /// treat that as a `spell-entry` StubTripped + reject (capture-safe: pinned
@@ -205,15 +215,217 @@ impl CombatState {
         }
 
         if spell_id > 0 {
-            // doc §41.3: `spell_menu3`'s delay-0 path clears actions and returns
-            // casting_spell = true. The cast body (`sub_5D2E1`: the targeting d10,
-            // the missile camera, ClearSpell, the damage d4s) lands in the next
-            // commit of this slice — here the turn simply ends after a faithful
-            // selection, so the frontier sits at the cast's first draw.
-            self.clear_actions(actor);
-            return true;
+            // On accept: spell_menu3 (@070F-0726). Returns casting_spell.
+            return self.spell_menu3(rng, actor, spell_id);
         }
         false
+    }
+
+    /// `spell_menu3(out casting_spell, quick_fight, spell_id)` (`ovr014.cs:1373`)
+    /// for a QuickFight, already-chosen spell (doc §41.3): the `whenCast == Camp`
+    /// abort (unreachable for the combat-only Magic Missile — cited), then `delay
+    /// = castingDelay / 3`. Magic Missile: `1 / 3 == 0` ⇒ the immediate cast
+    /// [`sub_5d2e1`](Self::sub_5d2e1) + `clear_actions` (`ovr014.cs:1406-1411`);
+    /// a `delay > 0` spell queues (`ovr014.cs:1414-1427`) — not modeled
+    /// (`spell-queued` StubTripped, the turn still ends). Returns `casting_spell`.
+    fn spell_menu3(&mut self, rng: &mut EngineRng, actor: usize, spell_id: u8) -> bool {
+        let entry = spell_entry(spell_id).expect("caller guarantees a transcribed id");
+        // Camp-only spell reached in combat (@1385) — coab zeroes spell_id, so
+        // casting_spell stays false. Unreachable for Magic Missile (Combat).
+        if entry.when_cast == SpellWhen::Camp {
+            let id = self.fighters[actor].id;
+            self.emit(ActionEvent::StubTripped {
+                combatant_id: id,
+                stub: "spell-entry",
+            });
+            return false;
+        }
+        // delay = castingDelay / 3 (@1404, sbyte). Magic Missile: 1/3 == 0.
+        let delay = entry.casting_delay / 3;
+        if delay == 0 {
+            // Immediate cast (@1406-1411): sub_5D2E1 then clear_actions.
+            self.sub_5d2e1(rng, actor, spell_id);
+            self.clear_actions(actor);
+            true
+        } else {
+            // delay > 0: "Begins Casting" — the spell queues into actions.spell_id
+            // with a delay clamp (@1414-1427). Not modeled; the turn still ends.
+            let id = self.fighters[actor].id;
+            self.emit(ActionEvent::StubTripped {
+                combatant_id: id,
+                stub: "spell-queued",
+            });
+            true
+        }
+    }
+
+    /// `sub_5D2E1(showCastingText, quick_fight, spell_id)` (`ovr023.cs:674-812`),
+    /// the combat cast (doc §41.3). In draw order:
+    /// 1. the miscast gate — `HasAffect(affect_4a 0x4A)` would draw a d2 (1 =
+    ///    miscast); with empty affect lists no draw fires (§39 substrate);
+    /// 2. `SpellCastFunction = ovr014.target` in combat (`ovr009.cs:25`) — the
+    ///    targeting, [`spell_target`](Self::spell_target), which draws the
+    ///    `find_target` **d10**;
+    /// 3. on a target: the missile camera (`draw_missile_attack(0x1E, 4)` + the
+    ///    `draw_74B3F` attack-icon pair, PlayerOnScreen-gated) — draw-free (§36
+    ///    machinery, `MagicAttackDisplay` = §36.3 site 8);
+    /// 4. `remove_invisibility(caster)` (§39 substrate, draw-free);
+    /// 5. `spellList.ClearSpell(spell_id)` — slot consumption
+    ///    ([`clear_spell`](Self::clear_spell)); every later PHILIPPE turn then
+    ///    draws zero selection d1s (the capture's post-cast observable);
+    /// 6. `SpellMagicMissile` (`gbl.spellTable[0x0F]`) — the damage d4s + apply.
+    ///
+    /// A QuickFight cast that finds no target aborts (`ovr023.cs:792` — "Spell
+    /// Aborted", ClearSpell); the turn still ends. Magic Missile always finds a
+    /// target in the pinned captures (its selection gate needed a near enemy).
+    fn sub_5d2e1(&mut self, rng: &mut EngineRng, actor: usize, spell_id: u8) {
+        // Miscast gate (@0714): HasAffect(affect_4a) → d2, 1 = miscast. The read
+        // is draw-free on an empty list, and no capture carries the affect, so
+        // the miscast never fires; the d2 is drawn only when the affect is
+        // present (wired through the substrate for a future capture).
+        if self.fighters[actor].has_affect(AFF_4A) && roll_dice(rng, 2, 1) == 1 {
+            return; // "miscasts" — showCastingText/stillCast false, no cast.
+        }
+
+        // SpellCastFunction = target(quick_fight, spell_id) (@0733) — the d10.
+        let Some(target) = self.spell_target(rng, actor, spell_id) else {
+            // QuickFight abort (@0792): ClearSpell, turn ends (no cast). Not
+            // reached by a pinned Magic Missile cast.
+            self.clear_spell(actor, spell_id);
+            return;
+        };
+
+        // The missile camera (@0741-0768, doc §41.3 step 4). Draw-free — only the
+        // persistent mapScreenTopLeft/direction effects are ported.
+        let caster_pos = self.fighters[actor].pos;
+        let target_pos = self.fighters[target].pos;
+        let direction = find_combatant_direction(target_pos, caster_pos);
+        self.focus = true; // focusCombatAreaOnPlayer = true (@0746)
+        self.draw_74b3f(actor, direction); // draw_74B3F(false, Attack, dir, caster)
+        self.draw_missile_camera(actor, target); // draw_missile_attack(0x1E, 4, ...)
+        if self.on_screen(actor) {
+            // The on-screen attack-icon pair (@0764-0768): direction re-stores
+            // (no-ops, same value) + recenter checks (caster on-screen → no-op).
+            let d = self.fighters[actor].direction;
+            self.draw_74b3f(actor, d);
+            self.draw_74b3f(actor, d);
+        }
+
+        // remove_invisibility(caster) (@0771) — §39 substrate, draw-free.
+        self.remove_invisibility(actor);
+
+        // ClearSpell(spell_id) (@0775) — consume the memorized slot.
+        self.clear_spell(actor, spell_id);
+
+        // gbl.spellTable[0x0F] = SpellMagicMissile (@0780-0781).
+        self.spell_magic_missile(rng, actor, spell_id, target);
+    }
+
+    /// `ovr014.target(quick_fight, spell_id)` (`ovr014.cs:1164`) for the
+    /// **1-target** shape (doc §41.3 step 2). Magic Missile's `field_6 & 0xF = 4`
+    /// falls into the tail branch (`ovr014.cs:1322`), `max_targets = (field_6 &
+    /// 3) + 1 = 1`, so it makes one [`sub_4001c`](Self::sub_4001c) pick (the
+    /// `find_target` d10). Every other shape nibble is cited + tripped
+    /// (`spell-target-shape`): `0` self, `5` budgeted-multi (a 2d4 draw), `8..=E`
+    /// area, `0xF` held/area. Returns the single target, or `None` (no cast).
+    fn spell_target(&mut self, rng: &mut EngineRng, actor: usize, spell_id: u8) -> Option<usize> {
+        let entry = spell_entry(spell_id).expect("caller guarantees a transcribed id");
+        let nibble = entry.field_6 & 0x0F;
+        // The tail/default branch (@1322): nibbles NOT {0, 5, 8..=0xF}. Magic
+        // Missile is 4. max_targets = (field_6 & 3) + 1; for MM = 1.
+        let one_target = !(nibble == 0 || nibble == 5 || (8..=0x0F).contains(&nibble));
+        if !one_target {
+            let id = self.fighters[actor].id;
+            self.emit(ActionEvent::StubTripped {
+                combatant_id: id,
+                stub: "spell-target-shape",
+            });
+            return None;
+        }
+        // The max_targets loop (@1327-1358). For MM (max_targets 1) one pick.
+        self.sub_4001c(rng, actor, spell_id)
+    }
+
+    /// `sub_4001C(arg_0, canTargetEmptyGround, quick_fight, spellId)`
+    /// (`ovr014.cs:1095`) for the QuickFight + `field_E != 0` case (Magic
+    /// Missile, doc §41.3 step 3): `find_target(clear=true, arg_2=0,
+    /// max_range=SpellRange(id))` — **the d10** — then the held-target filter.
+    /// If the picked target `IsHeld()` **and** the spell's `affect_id` is one of
+    /// the held-affect ids [`HELD_AFFECT_IDS`] (`unk_18ADB[1..=4]`), the pick is
+    /// rejected and the `var_9` loop runs once → no cast. Magic Missile's
+    /// `affect_id` is 0, never in that table, and with empty affect lists nothing
+    /// is held — so the first pick always stands. Returns the target, or `None`.
+    fn sub_4001c(&mut self, rng: &mut EngineRng, actor: usize, spell_id: u8) -> Option<usize> {
+        let range = self.spell_range(actor, spell_id);
+        let affect_id = spell_entry(spell_id)
+            .expect("caller guarantees a transcribed id")
+            .affect_id;
+        // var_9 = 1: a single find_target attempt (@1117-1148).
+        // find_target(true, 0, SpellRange, caster) — the capture's d10.
+        if self.find_target(rng, actor, true, 0, range) {
+            let target = self.fighters[actor].target.expect("find_target set it");
+            // The held-target filter (@1128-1137): IsHeld && affect_id ∈
+            // unk_18ADB[1..=4] → reject (var_3 = false). MM affect_id 0 is never
+            // in the table; IsHeld is false on empty affect lists.
+            let held_rejected = self.is_held(target) && HELD_AFFECT_IDS.contains(&affect_id);
+            if !held_rejected {
+                return Some(target);
+            }
+        }
+        None
+    }
+
+    /// `SpellMagicMissile` (`gbl.spellTable[0x0F]` = `sub_5E221`, `ovr023.cs:1166`,
+    /// doc §41.3 steps 6-8): `n = spellMaxTargetCount + 1 = castingLvl + 1`;
+    /// `damage = n/2 + roll_dice(4, n/2)` (`roll_dice_save ≡ roll_dice`,
+    /// `ovr024.cs:601` — **(lvl+1)/2 separate d4 draws**; PHILIPPE lvl 5 → 3 d4s).
+    /// Then `DoSpellCastingWork`: `damageOnSave == Normal(0)` ⇒ **no save draw**;
+    /// `damage_person(false, Normal, damage, target)` routes through our
+    /// [`apply_damage`](Self::apply_damage) ladder (draw-free); `affect_id == 0`
+    /// ⇒ no `ApplyAttackSpellAffect`.
+    fn spell_magic_missile(
+        &mut self,
+        rng: &mut EngineRng,
+        actor: usize,
+        spell_id: u8,
+        target: usize,
+    ) {
+        let entry = spell_entry(spell_id).expect("caller guarantees a transcribed id");
+        let n = self.spell_max_target_count(actor, entry.spell_class) + 1; // var_1
+        let half = n / 2;
+        // damage = n/2 + roll_dice_save(4, n/2). roll_dice(4, half) draws `half`
+        // separate d4s (byte-summed) — for PHILIPPE half = 3 → three d4s.
+        let damage = half + roll_dice(rng, 4, half as u16) as i32;
+        // DoSpellCastingWork (@sub_5CF7F): damageOnSave Normal → saved = false, NO
+        // save draw; damage > 0 → damage_person → damage_player == apply_damage.
+        // affect_id 0 → no ApplyAttackSpellAffect.
+        if damage > 0 {
+            self.apply_damage(target, damage);
+        }
+    }
+
+    /// `IsHeld()` (`Player.cs:847`): the target carries any `held_affects`
+    /// {snake_charm 0x33, paralyze 0x34, sleep 0x35, helpless 0x1F}. Draw-free;
+    /// false on the empty affect lists every capture carries (§39).
+    fn is_held(&self, actor: usize) -> bool {
+        HELD_AFFECT_IDS
+            .iter()
+            .any(|&a| self.fighters[actor].has_affect(a))
+    }
+
+    /// `SpellList.ClearSpell(spellId)` (`Classes/SpellList.cs:30`): remove the
+    /// **first** memorized entry whose id matches (one instance). The engine's
+    /// `memorized_list` is the collected candidate list, so removing one `spell_id`
+    /// from it drops the caster's `spells_count` — PHILIPPE's one Magic Missile →
+    /// empty → his later turns draw zero selection d1s (doc §41.3 step 6).
+    fn clear_spell(&mut self, actor: usize, spell_id: u8) {
+        if let Some(pos) = self.fighters[actor]
+            .memorized_list
+            .iter()
+            .position(|&s| s == spell_id)
+        {
+            self.fighters[actor].memorized_list.remove(pos);
+        }
     }
 
     /// `ShouldCastSpellX(minPriority, spellId, attacker)` (`sub_353B1`
