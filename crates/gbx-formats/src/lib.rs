@@ -3,6 +3,7 @@
 //!
 //! This crate is platform-pure: no windowing, audio, or async runtime dependencies.
 
+pub mod affects;
 pub mod anim;
 pub mod dax;
 pub mod detect;
