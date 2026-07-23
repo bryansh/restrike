@@ -2705,3 +2705,53 @@ other `spellCastingTable` rows (transcribed lazily, named by a future capture th
 `spell-entry`); queued/delayed casts, area/self/multi targeting shapes, the `field_F`
 save-scan; `spell_from_item`; `can_cast`/`TryLooseSpell`; the affect-adding cast side
 (`add_affect`/`ApplyAttackSpellAffect`) — MM applies no affect.
+
+## 43. The @2176 residual RE-LOCALIZED — a silent held-target divergence; the reach-flood STEPS are the culprit, the direction tie-break is exonerated (2026-07-23, Fable)
+
+**The §42 bank note's "orthogonal vs diagonal approach" reading was the downstream
+symptom, not the mechanism.** The capture's turn snapshots (the §31 lesson: check
+held-target provenance FIRST) show capture-[13] never approaches PC [4] at all: it
+retargeted to [3] two turns before the divergence and parked; ours retargeted to [4].
+The divergence is SEEDED at [13]'s re-pick — both engines drew the SAME
+`roll_dice(5)` over the SAME five candidates and picked DIFFERENT targets, a
+draw-invisible state fork that only surfaces at 2176 when the held targets steer
+different turn shapes (ours: two advance d100s toward [4]; capture: one advance +
+the in-reach d1+d20 against [3]).
+
+**The re-pick, fully instrumented** (temp NEARDUMP, reverted): actor [13] at
+(34,14); our sorted near list `[(1,s4,d4), (0,s5,d4), (3,s5,d6), (4,s5,d3),
+(5,s25,d6)]` (idx, steps, dir); our pick = index 3 = [4] ⇒ the shared roll was 4;
+the capture picked [3] ⇒ the binary's effective order puts [3] at index 3.
+
+**Hypothesis 1 — direction args reversed — REFUTED in the listing** (empirically
+tempting: target-anchored dirs (0,0,2) for the ties reproduce the capture's order
+under our sort). The binary's near-list direction is ATTACKER-anchored, end to end:
+`sub_738D8` fills `var_F/var_13` from the ATTACKER footprint BEFORE the candidate
+loop (`ovr032:0917/092F`) and `var_17/var_1B` per candidate (`:09D1/:09F5`); the
+best-pair update stores `var_5 ← var_3` (attacker-cell index) and `var_6 ← var_4`
+(target-cell index) (`:0ADD-0AE6`); the dir scan pushes `var_F[var_5]` (attacker
+cell) as P1 and `var_17[var_6]` as P2 (`:0B42-0B6D`), and `sub_7354A` anchors its
+cone at P1 (`facing = arg_8/arg_6 + delta[dir]` @`:059F-05BC`; the half-planes test
+P2 = `arg_4/arg_2`). coab's `FindCombatantDirection(found_target, found_attacker)`
+is FAITHFUL here, and ours matches it. The `sub_73033` exchange-sort predicate was
+also re-verified instruction-level (`ovr032:0077-0118`): swap when `steps[j] <
+steps[i]` (`jb` @00C6), or equal steps (`jz` @00EC) AND `dir[j] < dir[i]` (`jb`
+@00F7) AND `dir[j]%2 <= dir[i]%2` (`jg`-no-swap @0118) — identical to ours,
+including the swap-in-inner-loop placement.
+
+**Hypothesis 2 — the reach-flood STEP VALUES differ — the surviving driver.** With
+the verified predicate and our forward dirs, `steps[4] = 4` (ours computes 5)
+reproduces the capture's order EXACTLY: build `[0](5,4) [1](4,4) [3](5,6) [4](4,3)
+[5](25,6)` sorts to `[1],[4],[0],[3],[5]` → index 3 = [3] ✓. The flood query in
+question: (34,14) → [4]@(35,16) on a board with [8]'s corpse cell (35,15) freed
+(§22), [11] live at (34,15), [2] downed at (33,14) (§26 tile). Our `can_reach`
+charges that route 5; the binary's `sub_733F1` must charge 4 (or an equivalent
+tie-shifting assignment across the tied three). The §19-20 reads pinned sub_733F1's
+write-back and budget test but NOT the per-cell charge on mixed diagonal/orthogonal
+paths through freed cells — that read is the next session's opener: diff
+`sub_733F1`'s step accounting against our `can_reach` for exactly this query set,
+then re-run; caster-bar should carry past 2176 (closure 3517/3517 remains the
+prize).
+
+Guard unchanged this session-segment: 8/8 exact, frontier @2176, zero code changes
+(the instrument was reverted; this note is the only delta).
