@@ -759,8 +759,24 @@ pub struct CombatState {
     /// **false** (`ovr011.cs:1186`), so `false` is the faithful entry state; a
     /// PARTY caster's `sub_3560B` spell-selection draws are gated on it
     /// (`ovr010:068D`) — an NPC's (`control_morale >= 0x80`) are not. Input-only
-    /// (the toggle key is UI, not modeled); replay harnesses set it per capture.
+    /// (the toggle key is UI, not modeled); replay harnesses set the entry value
+    /// and any mid-fight presses ([`auto_cast_toggles`](Self::auto_cast_toggles))
+    /// per capture.
     pub auto_pcs_cast_magic: bool,
+    /// Scheduled mid-combat '2' presses (doc §38): 0-based global turn ordinals
+    /// (the running count of turns started — one per `Pick`) at whose head
+    /// [`auto_pcs_cast_magic`](Self::auto_pcs_cast_magic) flips. Models the
+    /// buffered keypress the binary consumes at the in-turn keyboard poll
+    /// (`sub_36269` @`ovr010:1269-12A9`, called from the AI turn's head
+    /// `sub_3504B+D` — before `sub_3560B`'s gate read @`ovr010:068D`). The only
+    /// flag readers are the per-turn spell gates, so a head-of-turn flip is
+    /// gate-equivalent to any poll instant between the two gate checks that
+    /// bracket the real press (doc §38). Input-only; empty = no presses (the
+    /// staging hook does not yet emit toggle events — pins carry the schedule).
+    pub auto_cast_toggles: Vec<u32>,
+    /// The toggle schedule's clock: turns started so far (== `Pick` events;
+    /// incremented at every [`take_turn`](Self::take_turn) head).
+    turns_started: u32,
     /// The resident `ITEMS` data table (`gbl.ItemDataTable`, doc §34.1) — the
     /// weapon dice/range/attack-count/flags the ranged mechanics index by a
     /// readied weapon's type. `None` = no ranged loadouts in play (every
@@ -811,6 +827,8 @@ impl CombatState {
             area_field_58c: 0,
             map_direction: 0,
             auto_pcs_cast_magic: false,
+            auto_cast_toggles: Vec::new(),
+            turns_started: 0,
             item_data: None,
             map_screen_top_left: GridPos::new(0, 0),
             focus: false,
@@ -843,6 +861,8 @@ impl CombatState {
             area_field_58c: 0,
             map_direction: 0,
             auto_pcs_cast_magic: false,
+            auto_cast_toggles: Vec::new(),
+            turns_started: 0,
             item_data: None,
             map_screen_top_left: GridPos::new(0, 0),
             focus: false,
@@ -1042,6 +1062,15 @@ impl CombatState {
     /// dispatch `MainCombatLoop`'s `while (FindNextCombatant) { … }` body performs
     /// (`ovr009.cs:59-95`).
     fn take_turn(&mut self, rng: &mut EngineRng, idx: usize) {
+        // The in-turn keyboard poll (`sub_36269` @`ovr010:1269`, called at the
+        // AI turn's head `sub_3504B+D`): a buffered '2' press flips
+        // `AutoPCsCastMagic` ("Magic On"/"Magic Off" @`ovr010:129C-12A9`). The
+        // schedule entry for ordinal N takes effect at the head of turn N,
+        // before the turn body's `sub_3560B` gate read (doc §38).
+        if self.auto_cast_toggles.contains(&self.turns_started) {
+            self.auto_pcs_cast_magic = !self.auto_pcs_cast_magic;
+        }
+        self.turns_started += 1;
         match self.turn {
             // Zero-draw stub: DoPlayerCombatTurn eventually sets action.delay = 0
             // (ovr010.cs:521 etc.). The harness zeroes it immediately, consuming
@@ -8666,6 +8695,85 @@ mod tests {
         assert!(got.contains(&"0-hd-sweep"), "trips: {got:?}");
         assert!(got.contains(&"surrender-int5"), "trips: {got:?}");
         assert!(got.contains(&"memorized-spells"), "trips: {got:?}");
+    }
+
+    /// §38 — the mid-combat "Magic On" toggle schedule: each listed global
+    /// turn ordinal is one buffered '2' press, consumed at that turn's head
+    /// (the `sub_36269` keyboard poll, run from `sub_3504B+D`), flipping
+    /// `AutoPCsCastMagic` — so a second entry flips it back off.
+    #[test]
+    fn auto_cast_toggle_schedule_flips_at_the_listed_turn_heads() {
+        let mk = |id, team, npc, pos| {
+            let mut f = Fighter::new_melee(0, team, npc, pos, 30, 5, 20, 12, (1, 4, 2), 5, 1);
+            f.id = id;
+            f
+        };
+        let mut w = CombatWorld::initiative_only(vec![
+            mk(0, Team::Party, false, GridPos::new(25, 12)),
+            mk(1, Team::Monster, true, GridPos::new(26, 12)),
+        ]);
+        w.auto_cast_toggles = vec![1, 3];
+        let mut rng = EngineRng::new(SEED);
+        // Turn ordinals 0..=3: press #1 lands at ordinal 1's head, #2 at 3's.
+        for (turn, want) in [false, true, true, false].into_iter().enumerate() {
+            w.take_turn(&mut rng, turn % 2);
+            assert_eq!(
+                w.auto_pcs_cast_magic, want,
+                "flag after turn ordinal {turn}"
+            );
+        }
+    }
+
+    /// §38 — the head-of-turn flip is visible to the SAME turn's `sub_3560B`
+    /// gate (the poll at `sub_3504B+D` precedes the gate read @`ovr010:068D`):
+    /// a press scheduled at a PC caster's own turn ordinal arms that very
+    /// turn's selection gate. This is the boundary that separates §38's
+    /// in-window ordinals from the round-1 overdraw (caster-bar's ordinal-2
+    /// contrast trips @83).
+    #[test]
+    fn auto_cast_toggle_arms_the_flipped_turns_own_spell_gate() {
+        #[derive(Clone, Default)]
+        struct Trips(Rc<RefCell<Vec<(usize, &'static str)>>>);
+        impl ActionSink for Trips {
+            fn on_action(&mut self, e: ActionEvent) {
+                if let ActionEvent::StubTripped { combatant_id, stub } = e {
+                    self.0.borrow_mut().push((combatant_id, stub));
+                }
+            }
+        }
+
+        let mk = |id, team, npc, pos| {
+            let mut f = Fighter::new_melee(0, team, npc, pos, 30, 5, 20, 12, (1, 4, 2), 5, 1);
+            f.id = id;
+            f
+        };
+        let mut world = CombatWorld::new(
+            CombatMap::uniform(FLOOR),
+            vec![
+                mk(0, Team::Party, false, GridPos::new(25, 12)),
+                mk(1, Team::Monster, true, GridPos::new(26, 12)),
+            ],
+        );
+        world.fighters[0].memorized_spells = 1;
+        world.auto_cast_toggles = vec![0];
+        let trips = Trips::default();
+        world.attach_action_sink(Box::new(trips.clone()));
+        let mut rng = EngineRng::new(SEED);
+        world.take_turn(&mut rng, 0);
+        assert!(
+            world.auto_pcs_cast_magic,
+            "the ordinal-0 press flips the flag at the first turn's head"
+        );
+        let wire_trips = trips
+            .0
+            .borrow()
+            .iter()
+            .filter(|(id, s)| *id == 0 && *s == "memorized-spells")
+            .count();
+        assert_eq!(
+            wire_trips, 1,
+            "the flipped turn's own gate must see the flag ON"
+        );
     }
 
     /// **Bug #12 pinned** — `FleeCheck_001`'s gate 2 is an UNSIGNED 16-bit `jb`

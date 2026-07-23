@@ -233,6 +233,14 @@ fn h4_melee_replays_the_bar_brawl_capture_draw_for_draw() {
     state.auto_pcs_cast_magic = std::env::var("RESTRIKE_AUTO_CAST")
         .map(|v| v == "1")
         .unwrap_or(false);
+    // Mid-fight presses (doc §38): `RESTRIKE_AUTO_CAST_TOGGLES=16` (comma
+    // list of 0-based global turn ordinals) flips the flag at each listed
+    // turn's head — the flip-window model for captures where the '2' press
+    // landed mid-fight (caster-bar: between PHILIPPE's round-1 and round-2
+    // turns, so ordinal 16 = his round-2 turn head).
+    if let Ok(v) = std::env::var("RESTRIKE_AUTO_CAST_TOGGLES") {
+        state.auto_cast_toggles = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+    }
     // §34.1: the ITEMS table + per-capture ranged loadouts (one shared place,
     // `common`). `None` loadouts leave a combatant melee-identical; armed-bar
     // arms MATHEW/TRAVIS's bows.

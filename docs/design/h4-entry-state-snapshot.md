@@ -2057,3 +2057,55 @@ loop top is therefore draw- and state-equivalent, and is what landed: the re-tes
 before the `focus = true` write, in the binary's order. Canary: all eight pins exact
 (guard 8/8) — the six closed captures never drop a mover mid-departure-swarm, exactly as
 §37.1 predicted.
+
+## 38. RULING — §33's toggle window: a turn-ordinal toggle schedule (caster-bar pinned at ordinal 16) (2026-07-22)
+
+**The question (§33, blocking all spell draws):** caster-bar's "Magic On" ('2' →
+`AutoPCsCastMagic`/`byte_1D904`) was pressed BETWEEN PHILIPPE's round-1 and round-2 turns,
+but the harness modeled the flag on-from-entry. Draw-equivalent while the flag armed only
+the `memorized-spells` wire; the moment `sub_3560B`'s selection draws land, on-from-entry
+draws 3× `roll_dice(1)` at his round-1 turn and moves the frontier from @453 to ~@83.
+Options were (a) model the flip window as a per-capture input, or (b) extend the staging
+hook to emit toggle events and restage.
+
+**Ruling: (a) — a toggle schedule keyed by global turn ordinal, pinned per capture.**
+(b) stays the long-term fix for FUTURE captures (hook TODO unchanged: an emitted toggle
+event with its position would make the pin derived rather than fitted), but caster-bar is
+already localized (§33's memorized-list decode, the md/58C fields, the 453 frontier) and
+the flip point is recoverable from the capture itself to within a provably-equivalent
+window — restaging would buy nothing this capture can't already prove.
+
+**The listing grounds the model.** The mid-combat toggle is `sub_36269`
+(`ovr010:1269-12DA`): `KEYPRESSED` → '2' → flip `byte_1D904` + print "Magic On"/"Magic
+Off" (`@129C-12A9`; camp's own handler is `ovr009:0605-0647`). It is called from the AI
+turn body — `sub_3504B+D` (the turn's head, BEFORE `sub_3560B`'s gate read
+`@ovr010:068D`) and again later (`+19E`, …) — so the flag flips only at in-turn keyboard
+polls, and the only draw-affecting readers are the per-turn spell gates (`ovr010:0679-06A7`).
+A press is therefore observable ONLY through which gate checks see the flag on: any flip
+instant between the same two bracketing gate checks is draw-identical, and a head-of-turn
+flip can represent every equivalence class. The faithful input model is a schedule of
+'2' presses keyed by **global turn ordinal** (0-based count of turns started = `Pick`
+events) — general enough for multi-caster fights and mid-round presses, where a
+round-boundary flip would not be (two casters' gate checks can bracket a press inside one
+round).
+
+**Landed:** `CombatState.auto_cast_toggles: Vec<u32>` (input-only; each listed ordinal
+flips `auto_pcs_cast_magic` at that turn's head, the `sub_3504B+D` poll site);
+`RESTRIKE_AUTO_CAST_TOGGLES=<n,...>` in `h4_replay`/`h4_turndiff`'s shared knobs; the
+guard manifest gains `auto_cast_toggles` per pin. Unit tests pin the schedule mechanics
+and that a flip is visible to the flipped turn's OWN gate (poll precedes gate).
+
+**The caster-bar pin: entry `false`, toggles `[16]`.** Empirics (h4_replay trips, the
+wire being the flag's only observable today): PHILIPPE's round-1 turn is ordinal 2 (pick
+pass 2, round 1; gate check at draw 83 saw OFF — capture matches through his whole turn),
+his round-2 turn is ordinal 16 (pick pass 0, round 2 — all 16 combatants act each round;
+gate at draw 453 saw ON — the capture's first selection draws). Verified live: toggles
+`[16]` and `[3]` produce identical trip sets (453, 987, 1366, … — exactly the turns where
+the capture's unmodeled draws live) and the frontier stays @453; toggles `[2]` restores
+the round-1 trip @83 (the overdraw a from-entry flag would commit once selection draws
+land). The window is ordinals **[3, 16]**; 16 is pinned as the canonical representative —
+the head of the turn whose gate PROVES the flag on, i.e. the only boundary the capture
+itself names. The true press instant within the window is unknowable and irrelevant: all
+representations in the class are draw-identical at every reachable observation point.
+
+Guard after the pin edit: 8/8 exact, caster-bar frontier @453 unchanged.

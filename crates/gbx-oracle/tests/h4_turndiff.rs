@@ -212,7 +212,9 @@ fn parse_capture(text: &str) -> Capture {
 /// peel. Flee-heading precedence: `RESTRIKE_MAP_DIR` (explicit trial override),
 /// then the capture's emitted `map_direction` (hooks from 8ab275e on), then the
 /// provisional geometry-matched default 2 (E, doc §29). `RESTRIKE_AUTO_CAST=1`
-/// arms `AutoPCsCastMagic` (doc §33) for captures where the player did.
+/// arms `AutoPCsCastMagic` (doc §33) for captures where the player did;
+/// `RESTRIKE_AUTO_CAST_TOGGLES=<n,...>` schedules mid-fight presses by global
+/// turn ordinal (the §38 flip-window model).
 fn apply_capture_knobs(state: &mut gbx_engine::combat::CombatState, cap: &Capture) {
     state.area_field_58c = cap.field_58c;
     state.map_direction = std::env::var("RESTRIKE_MAP_DIR")
@@ -223,6 +225,9 @@ fn apply_capture_knobs(state: &mut gbx_engine::combat::CombatState, cap: &Captur
     state.auto_pcs_cast_magic = std::env::var("RESTRIKE_AUTO_CAST")
         .map(|v| v == "1")
         .unwrap_or(false);
+    if let Ok(v) = std::env::var("RESTRIKE_AUTO_CAST_TOGGLES") {
+        state.auto_cast_toggles = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+    }
     // §34.1: the ITEMS table + per-capture ranged loadouts (one shared place,
     // `common`) — applied here so EVERY replay/diagnostic in this file shares
     // the same ranged inputs (the §30 lesson). `None` loadouts are melee-

@@ -50,17 +50,20 @@ enum Expect {
 }
 
 /// One manifest row: capture basename, its pinned outcome, the flee heading
-/// (`map_direction`) to apply in-process, and the `AutoPCsCastMagic` entry state
-/// (`auto_cast`, doc §33). Only `bar-rout-58c50` routs, so the heading is
-/// load-bearing there (md=2, the geometry-matched value, doc §29); for the
-/// non-routing captures it is inert but set uniformly for clarity. `auto_cast`
-/// today feeds only the `memorized-spells` wire (no draws), but the manifest
-/// carries each fight's true input state so the caster peel inherits it.
+/// (`map_direction`) to apply in-process, and the `AutoPCsCastMagic` input
+/// state — the entry value (`auto_cast`, doc §33) plus any mid-fight '2'
+/// presses as a toggle schedule (`auto_cast_toggles`, global turn ordinals,
+/// doc §38). Only `bar-rout-58c50` routs, so the heading is load-bearing there
+/// (md=2, the geometry-matched value, doc §29); for the non-routing captures
+/// it is inert but set uniformly for clarity. The magic flag today feeds only
+/// the `memorized-spells` wire (no draws), but the manifest carries each
+/// fight's true input state so the caster peel inherits it.
 struct Pin {
     capture: &'static str,
     expect: Expect,
     map_direction: u8,
     auto_cast: bool,
+    auto_cast_toggles: &'static [u32],
 }
 
 /// **The manifest.** Current truth (doc §29). Edit ONLY alongside the fix that
@@ -71,18 +74,21 @@ const PINS: &[Pin] = &[
         expect: Expect::Closed,
         map_direction: 2,
         auto_cast: false,
+        auto_cast_toggles: &[],
     },
     Pin {
         capture: "combat3+terrain4.gbxtrace",
         expect: Expect::Closed,
         map_direction: 2,
         auto_cast: false,
+        auto_cast_toggles: &[],
     },
     Pin {
         capture: "combat2+terrain4.gbxtrace",
         expect: Expect::Closed,
         map_direction: 2,
         auto_cast: false,
+        auto_cast_toggles: &[],
     },
     Pin {
         // Pre-existing operand divergence in the oldest capture (no board
@@ -92,6 +98,7 @@ const PINS: &[Pin] = &[
         expect: Expect::Frontier(368),
         map_direction: 2,
         auto_cast: false,
+        auto_cast_toggles: &[],
     },
     Pin {
         // ★ CLOSED 3521/3521 (doc §32): the rout capture replays operand-exact
@@ -101,6 +108,7 @@ const PINS: &[Pin] = &[
         expect: Expect::Closed, // was Frontier(2895); guarding-survives-initiative (§32 bug #15)
         map_direction: 2,
         auto_cast: false,
+        auto_cast_toggles: &[],
     },
     Pin {
         // The armed-slice driver (doc §25 runbook item 3): MATHEW's first turn
@@ -116,19 +124,24 @@ const PINS: &[Pin] = &[
         expect: Expect::Closed,
         map_direction: 2,
         auto_cast: false,
+        auto_cast_toggles: &[],
     },
     Pin {
         // The caster driver: PHILIPPE's round-2 turn enters sub_3560B's
         // selection loop (3× roll_dice(1), spells_count=1) — unmodeled until
-        // the spell subsystem lands (after the affects substrate). auto_cast
-        // documents the fight's magic-on state (§33; today it arms only the
-        // memorized-spells wire — no draws — so the frontier is knob-invariant.
-        // NOTE §33's flip-window: the toggle went on BETWEEN his round-1 and
-        // round-2 turns; a from-entry flag overdraws once selection is modeled).
+        // the spell subsystem lands (after the affects substrate). §38's
+        // flip-window ruling: the '2' press landed BETWEEN his round-1 and
+        // round-2 turns (round-1 gate @draw 83 saw OFF; round-2 gate @453 saw
+        // ON), so the input is entry-false + a toggle at turn ordinal 16 = his
+        // round-2 turn head — the latest boundary the capture itself names.
+        // Any ordinal in [3, 16] is gate-equivalent (verified live); a
+        // from-entry flag would overdraw 3× d1 at his round-1 turn (~@83)
+        // once selection draws land.
         capture: "caster-bar.gbxtrace",
         expect: Expect::Frontier(453),
         map_direction: 2,
-        auto_cast: true,
+        auto_cast: false,
+        auto_cast_toggles: &[16],
     },
     Pin {
         // A third independent fist seed, free from the caster staging (doc
@@ -138,6 +151,7 @@ const PINS: &[Pin] = &[
         expect: Expect::Closed,
         map_direction: 2,
         auto_cast: false,
+        auto_cast_toggles: &[],
     },
 ];
 
@@ -220,6 +234,7 @@ fn replay(
     capture: &str,
     map_direction: u8,
     auto_cast: bool,
+    auto_cast_toggles: &[u32],
 ) -> (Option<usize>, usize) {
     let text = std::fs::read_to_string(path).expect("capture readable");
     let trace = Trace::parse(&text).expect("capture parses");
@@ -253,6 +268,7 @@ fn replay(
     // value covers legacy captures without the field.
     state.map_direction = entry.map_direction.unwrap_or(map_direction);
     state.auto_pcs_cast_magic = auto_cast;
+    state.auto_cast_toggles = auto_cast_toggles.to_vec();
     // §34.1: the ITEMS table + per-capture ranged loadouts (one shared place,
     // `common`). `None` loadouts leave a combatant melee-identical, so the six
     // non-armed pins are unshifted; armed-bar arms MATHEW/TRAVIS's bows.
@@ -328,7 +344,13 @@ fn h4_frontier_pins_hold() {
             continue;
         }
         checked += 1;
-        let (frontier, trips) = replay(&path, pin.capture, pin.map_direction, pin.auto_cast);
+        let (frontier, trips) = replay(
+            &path,
+            pin.capture,
+            pin.map_direction,
+            pin.auto_cast,
+            pin.auto_cast_toggles,
+        );
         match pin.expect {
             Expect::Closed => {
                 assert_eq!(
