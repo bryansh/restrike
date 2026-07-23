@@ -3992,11 +3992,21 @@ impl CombatState {
             .filter(|i| !dest_ids.contains(i))
             .collect();
         for att in departed {
+            // `sub_3E954` re-tests the MOVER's `in_combat` at the top of every
+            // candidate iteration (`ovr014:0AD2-0ADD`): dead → `jmp loc_3ECEF`,
+            // the loop continuation, skipping the swing AND the focus set. A
+            // mover dropped by an earlier departure swing therefore takes no
+            // further swings. Every remaining iteration skips identically
+            // (nothing revives mid-loop), so `break` is draw- and
+            // state-equivalent to the binary's skip-to-end scan.
+            if !self.fighters[mover].in_combat {
+                break;
+            }
             // Site 7 (departure attack) — `sub_3E954` @`ovr014:0AE0-0AE5` sets
             // `byte_1D90F = 1` and `byte_1D910 = 1` (`focusCombatAreaOnPlayer`)
             // at the TOP of each candidate iteration: after the loop's re-test of
-            // the MOVER's `in_combat` (@`0AD2-0ADD`), but BEFORE the candidate is
-            // even fetched (@`0AF5-0B0B`) and before every per-candidate filter
+            // the MOVER's `in_combat` (@`0AD2-0ADD`, above), but BEFORE the
+            // candidate is even fetched (@`0AF5-0B0B`) and before every per-candidate filter
             // (`sub_66BDB` @`0B14`, `sub_3F143` @`0B2D`, the two `find_affect`s).
             // So a candidate that is later skipped STILL leaves focus on — which
             // is why this is not folded into the `continue` below. The camera is

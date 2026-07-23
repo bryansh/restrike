@@ -2044,3 +2044,16 @@ kills the mover, the binary stops and we keep swinging at a dead mover. Pre-exis
 predates §36), unexercised by the eight captures, and out of this slice's scope — flagged
 rather than changed, since it alters attack counts and belongs in its own canary-checked
 commit.
+
+### 37.2 The deferred mover re-test, LANDED (post-merge, 2026-07-22)
+
+The §37.1 deferred item, in its own canary-checked commit on main. One correction to the
+§37.1 reading from the landing's own listing pass: the dead-mover jump at `ovr014:0ADD`
+targets `loc_3ECEF`, which is the candidate loop's **continuation** (`var_18` vs `var_24`
+compare → next iteration or `func_end`), not a hard exit — the binary skips the swing AND
+the focus set (`@0AE0`, downstream of the test) and keeps scanning, with every remaining
+iteration skipping identically since nothing revives the mover mid-loop. A `break` at our
+loop top is therefore draw- and state-equivalent, and is what landed: the re-test sits
+before the `focus = true` write, in the binary's order. Canary: all eight pins exact
+(guard 8/8) — the six closed captures never drop a mover mid-departure-swarm, exactly as
+§37.1 predicted.
