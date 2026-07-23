@@ -2875,3 +2875,31 @@ Gates: fmt, clippy 0 warnings (the newly-unconstructed `Expect::Frontier` pin
 variant carries an `#[allow(dead_code)]` + note), workspace green (**387
 engine**, 132 formats), guard **8/8 CLOSED** (both pin edits ride this commit
 per the exact-pin rule).
+
+### 44.2 The two hook TODOs LANDED (dosbox-staging `restrike-hook` 2eb0cbb + 3c26e5e, 2026-07-23)
+
+Both standing capture-side TODOs (§38's toggle events, §39.6's affect chains) are
+now in the staging hook — Opus-implemented, Fable-audited against the same listing
+reads that pinned the addresses. Additive to the trace format; all nine existing
+captures parse unchanged. Compile-verified only — the first capture of the next
+staging session live-validates both channels.
+
+- **`magic_toggle` events + `auto_pcs_cast_magic` in `combat_entry`** (2eb0cbb):
+  `gbl.AutoPCsCastMagic` = `byte_1D904` @`seg600:75F4` (the listing names the DS
+  offset directly; writers `ovr009:0613` camp / `ovr010:12A6` the in-combat '2'
+  toggle / `ovr011:1CA7` BattleSetup's reset; draw-affecting reader = the spell
+  gate `@ovr010:068D`). Sampled emit-on-change at each logged draw (the
+  `turn_snapshot` pattern, `last_round`-style re-arm): first in-combat sample =
+  baseline, later events = flips, each landing BEFORE the rng line of the first
+  draw that could observe it — §38 pins become **derived**, not fitted.
+- **Per-combatant `affects` arrays in `combat_entry`** (3c26e5e): walk the
+  `charStruct.affect_ptr` far-ptr chain @record+`0xF2` (stores
+  `ovr003:0634/0639`), each node dumped as 9 raw hex bytes (`affect_struct_size`
+  = 9; `next` {off@+5, seg@+7} per `add_affect`'s walk `@ovr024:143F-1450`, null
+  tail; stale next bytes included — the §39.1 decode ignores them); always
+  present, empty array when unbuffed; 32-node defensive cap. Unblocks
+  buffed-party / innate-affect captures (§39.6).
+
+Reader wiring (deriving toggle pins from the events; populating
+`Combatant.affects` from the arrays) intentionally NOT landed — it rides with
+the first capture that carries the data, so it lands against real bytes.
