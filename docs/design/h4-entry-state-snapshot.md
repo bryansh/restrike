@@ -2572,3 +2572,136 @@ pinned captures memorize only MM; a future capture names the next row to transcr
   6+4×5 = **26**, missiles (5+1)/2 = **3** ✓ the three d4s. Memorized:
   {0x71: 0x0F} only (§33). Combatant [3] is F4/MU4 with ZERO memorized slots —
   gate-1 inert, capture-consistent (no selection draws on its turns).
+
+## 42. LANDED — the caster peel: faithful spell selection + the Magic Missile cast; caster-bar 453 → 2176 (2176/3517, 0 trips) (M5, 2026-07-23)
+
+The §41 spec was implemented on branch `m5-caster-peel` off the restructure HEAD
+(`cd637b0`). The whole Magic Missile path — the `sub_3560B` selection loop,
+`ShouldCastSpellX`, and the cast (`spell_menu3` → `sub_5D2E1` → `ovr014.target` →
+`sub_4001C` → `SpellMagicMissile`) — is transliterated in draw order and verified at
+each listing site. **caster-bar's frontier advanced @453 → @2176 by faithful draws
+only (2176/3517 matched, ZERO stub trips), a 1723-draw advance; the guard held 8/8 at
+every commit, `bar-fists-2` stayed CLOSED (the §33 inert-slot proof), and the other
+six pins were byte-stable.** Closure did not land: a **movement-geometry residual**
+surfaces at draw 2176, downstream of a byte-exact cast and out of the caster peel's
+scope — banked, not forced (§41 acceptance).
+
+**Three commits (each fully gated — fmt/clippy/`test --workspace`/guard 8/8):**
+
+- `39a5366` §41.4 step 1 — new module `combat/spells.rs`: the `SpellEntry` row type +
+  Magic Missile's row (id 0x0F, `Gbl.cs:583`), the lazy-transcription `spell_entry(id)`
+  (MM only; every other id → `None` → `spell-entry` reject). Data-only; guard
+  unchanged. `combat/tests/spells.rs` pins the row + the lazy rule. **engine 375 → 378.**
+- `32a2e0e` §41.4 step 2 — the candidate list + selection loop + `ShouldCastSpellX`.
+  `Combatant.memorized_spells` (the §33 count) is retired for `memorized_list` (the
+  ordered non-zero `spell_list[1..]` in slot order, `ovr010:062A-065D`); `records.rs`
+  also decodes the caster's `skill_level_magic_user`/`skill_level_ranger`/
+  `caster_no_class` (`spellMaxTargetCount` inputs), and `skill_level_thief` is
+  generalized to `skill_level(rec, skill)`. `ai.rs` step 6's `memorized-spells`
+  tripwire becomes `sub_3560B` (draws the unconditional d7 bound, then — gated — the
+  priority-pass `roll_dice(spells_count,1)` picks). **Frontier @453 → @1026** (the
+  cast's first draw, the `find_target` targeting d10 — localizer-confirmed; the pin was
+  edited in this commit per the exact-pin rule). **engine 378 → 384.**
+- `9a14525` §41.4 step 3 — the cast. On accept, `spell_menu3` (whenCast/`delay =
+  castingDelay/3`; MM 0 → immediate) → `sub_5D2E1`: the miscast gate (`has_affect(0x4A)`
+  → d2; empty lists → no draw), `ovr014.target` → `sub_4001C`'s targeting **d10**
+  (`find_target(clear=true, arg_2=0, max_range=SpellRange 26)`), the held-target filter
+  (`IsHeld` && `affect_id ∈ unk_18ADB[1..=4]`; MM affect 0 → never rejects), the missile
+  camera (`draw_missile_attack(0x1E, 4)` + the PlayerOnScreen-gated `draw_74B3F` pair,
+  §36 machinery, draw-free), `remove_invisibility`, `ClearSpell` (slot consumption →
+  PHILIPPE's later turns draw no selection d1s), and `SpellMagicMissile`'s **3 damage
+  d4s** (`n = castingLvl+1 = 6`; `3 + roll_dice(4,3)`), `damageOnSave Normal` → **no save
+  d20**, `damage_person` → `apply_damage`. The AI turn returns after the cast
+  (`ovr010.cs:74-77`). **Frontier @1026 → @2176.** **engine 384 → 385.**
+
+### 42.1 Listing citations added (verified at each site)
+
+- Selection loop `sub_3560B` @`ovr010:060B-0738`: the collection @`062A-065D`, the
+  unconditional d7 bound @`066D`, the gate @`0679-06A7` (`spells_count>0`,
+  `control_morale>=0x80`/`AutoPCsCastMagic`, `friends_count`/`foe_count`), the pass
+  loop @`06A9-070D` (`priority=7` @`0663`, up to 3 inner picks @`06BB`, `priority--`
+  @`0707`), the `spell_menu3` dispatch @`070F-0726`.
+- `ShouldCastSpellX` `sub_353B1` @`ovr010:03B1-04A7`: priority gate, `field_E==0`
+  accept, `BuildNearTargets(SpellRange)` (`near_enermy`, `ovr025.cs:1290` = our
+  `build_near` enemy-team flood), `field_F==0` accept, the `sub_352AF` save-scan branch.
+- `SpellRange` `sub_5CDE5` @`ovr023.cs:515` (clamps); `spellMaxTargetCount` `sub_6886F`
+  @`ovr025.cs:1342` (no-caster fallback @`1351`, MagicUser `max(MU, Ranger−8)` @`1376`).
+- `spell_menu3` @`ovr014.cs:1373` (delay), `ovr014.target` @`ovr014.cs:1164` (the
+  `field_6 & 0xF` shape switch), `sub_4001C` @`ovr014.cs:1095` (the d10 + held filter),
+  `unk_18ADB[1..=4]` @`ovr014.cs:1093`/`seg600:27CB` = `held_affects` (`Player.cs:845`).
+- `sub_5D2E1` @`ovr023.cs:674-812` (miscast d2 @`0714`, `SpellCastFunction` @`0733`,
+  the missile camera @`0741-0768`, `remove_invisibility` @`0771`, `ClearSpell` @`0775`,
+  `SpellMagicMissile` dispatch @`0780`); `SpellMagicMissile` `sub_5E221`
+  @`ovr023.cs:1166` (`n = spellMaxTargetCount+1`, `n/2 + roll_dice_save(4, n/2)`);
+  `DoSpellCastingWork` `sub_5CF7F` @`ovr023.cs:575` (`damageOnSave==0` → no save,
+  `damage_person` → `damage_player`); `ClearSpell` `SpellList.cs:30` (first-match remove).
+
+### 42.2 Deviations (coab≠binary / cited-not-modeled)
+
+- **coab≠binary #18 (carried from §33): the collection counts ANY non-zero slot byte**
+  (`cmp ..,0`/`jbe` ≡ `jz` @`ovr010:0637`), including high-bit "learning" entries; coab's
+  `LearntList()` masks/filters them. `memorized_list` uses the binary's any-non-zero rule.
+  No capture fights mid-memorization.
+- **`spell_from_item` (→ castingLvl 6) is not modeled** — never set on a memorized cast
+  (`sub_5CDE5`/`sub_6886F` item branches); cited only.
+- **`TryLooseSpell` on the MM victim** (`damage_person` → `ovr024.cs:1243`) sets the
+  target's `can_cast = false` and clears its queued spell. Our engine does not model
+  `can_cast` (the §33 always-collect approximation); the caster-bar victims are
+  non-caster monsters, so it is unobservable. Cited.
+- **The camera port is draw-neutral** and the residual is **camera-independent**:
+  disabling the missile camera (`draw_74B3F` + `draw_missile_attack` + the `focus`
+  write) leaves the frontier at exactly 2176 — the camera cannot move a combatant, so it
+  cannot cause the movement residual (§42.3).
+
+### 42.3 The banked residual @2176 — a movement-geometry divergence, not a spell one
+
+`ours n=Some(100)` vs `capture op=Some(1)` at draw 2176. Localized: monster combatant
+**[13]** (M, hp 16), approaching PC combatant **[4]** at (35,16), takes an **orthogonal
+2-step path** `(34,14)→(35,14)→(35,15)` (two approach steps, each a morale d100) where
+the capture reaches adjacency in **one diagonal step** and then draws the near-pick
+`roll_dice(1,1)` (the d1 at op=1) + the attack d20. `field_15` (4), the board deaths,
+and every draw through 2175 match; the divergence is a `CanMove`/`DATA_2B8`
+approach-angle (or a silent upstream 1-tile position divergence with equal draw count) —
+the **movement subsystem** (the §15 `DATA_2B8` / §20 near-sort class), **not** the
+caster peel. It is provably downstream of a byte-exact MM cast: the cast's own d10 + 3
+d4s and ~1150 further melee draws are operand-exact, the MM target/damage/consumption
+match, and the divergence is camera-independent. Chasing it is a movement-slice task;
+banked here at the named draw per §41's acceptance ("do not force it").
+
+### 42.4 Tripwire inventory (spell wires)
+
+- `spell-entry` — an untranscribed id reaching `ShouldCastSpellX` (incl. id 3's
+  `find_healing_target` special) or a Camp-only spell in `spell_menu3`. **Reachable**
+  (tested via a non-MM memorized id); never fires on a pinned capture (only MM memorized).
+- `spell-ff-scan` — `ShouldCastSpellX`'s `field_F != 0` per-target `RollSavingThrow`
+  scan (`sub_352AF`, draw-bearing). Unreachable until a `field_F != 0` spell is
+  transcribed (MM is 0).
+- `spell-queued` — `spell_menu3`'s `delay > 0` "Begins Casting" queue. Unreachable until
+  a `castingDelay > 2` spell is transcribed (MM's `castingDelay 1 / 3 = 0`).
+- `spell-target-shape` — `ovr014.target`'s non-1-target `field_6` nibbles (0 self, 5
+  budgeted-multi w/ 2d4, 8..=E area, 0xF held/area). Unreachable until such a spell is
+  transcribed (MM's nibble 4 → the 1-target tail).
+
+The `memorized-spells` wire (§33) is **retired** — its mechanic is now modeled.
+
+### 42.5 Final matrix state
+
+Guard **8/8 exact** at every commit:
+
+```
+OK  combat4.gbxtrace — CLOSED (operand-exact, 0 trips)
+OK  combat3+terrain4.gbxtrace — CLOSED (operand-exact, 0 trips)
+OK  combat2+terrain4.gbxtrace — CLOSED (operand-exact, 0 trips)
+OK  combat+terrain4.gbxtrace — frontier @368 (exact)
+OK  bar-rout-58c50.gbxtrace — CLOSED (operand-exact, 0 trips)
+OK  armed-bar.gbxtrace — CLOSED (operand-exact, 0 trips)
+OK  caster-bar.gbxtrace — frontier @2176 (exact)   ← was @453
+OK  bar-fists-2.gbxtrace — CLOSED (operand-exact, 0 trips)
+```
+
+`cargo test --workspace` green (**132 formats, 385 engine**; all other crates
+unchanged). **Not modeled here** (their own slices): the movement residual @2176; the
+other `spellCastingTable` rows (transcribed lazily, named by a future capture through
+`spell-entry`); queued/delayed casts, area/self/multi targeting shapes, the `field_F`
+save-scan; `spell_from_item`; `can_cast`/`TryLooseSpell`; the affect-adding cast side
+(`add_affect`/`ApplyAttackSpellAffect`) — MM applies no affect.
