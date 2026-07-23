@@ -2109,3 +2109,168 @@ itself names. The true press instant within the window is unknowable and irrelev
 representations in the class are draw-identical at every reachable observation point.
 
 Guard after the pin edit: 8/8 exact, caster-bar frontier @453 unchanged.
+
+## 39. SPEC — the affects substrate (M5 Phase 2 opener; Fable-scoped, implementer-built) (2026-07-23)
+
+**Goal: the affect state machine + faithful check-site wiring, landed DRAW-NEUTRAL — all
+eight guard pins EXACT at every commit, zero manifest edits.** Every combat path that
+today says "draw-free, no affects modeled" becomes a real dispatch over (empty) affect
+state, and a future capture that meets a LIVE affect names itself through a tripwire
+instead of silently diverging. This is the platform every spell cast lands on (§25's
+Phase-2 order: affects FIRST, then spells); it must not move a single draw today.
+
+### 39.1 The data model (binary-verified)
+
+One affect = 9 on-disk bytes (`Affect.StructSize` = 9, `Classes/Affect.cs:164`;
+`affect_struct_size = 9` in the listing). Layout, confirmed THREE ways — coab's
+`DataOffset` attributes (`Affect.cs:188-195`), `add_affect`'s field stores
+(`ovr024:13F0-14A4`), and real `.FX` file dumps (`~/goldbox-data/cotab/SAVE/*.FX`):
+
+| off | size | field | notes |
+|---|---|---|---|
+| 0x00 | 1 | `kind` | the `Affects` enum id (0x00-0x93) |
+| 0x01 | 2 | `minutes` | game-time minutes; **0 = permanent/until-removed** |
+| 0x03 | 1 | `data` | per-kind payload (e.g. bless amount) |
+| 0x04 | 1 | `call_affect_table` | bool: fire the effect-handler jump table on add/remove |
+| 0x05 | 4 | *(next far ptr)* | **heap linkage, NOT state** — stale in real `.FX` dumps (live seg:off values, NULL tail); coab zero-fills on write. Decode MUST ignore. |
+
+Rust: `gbx_formats::affects::AffectRecord { kind: u8, minutes: u16, data: u8,
+call_affect_table: bool }` + `decode(&[u8]) -> Option<AffectRecord>` (None on short
+input; bytes 5-8 skipped). `save_orig::read_affects` (the opaque 9-byte splitter) stays;
+the typed decode layers on top. Storage on the combatant:
+`Combatant.affects: Vec<AffectRecord>` — **list order is load-bearing**: `add_affect`
+appends at the TAIL (walks `next` to the end, `ovr024:13F0-14A4`), `FindAffect` returns
+the FIRST match (`ovr025.cs:1175-1180`, binary `@find_affect` `ovr025:2345`), and
+`remove_affect` removes ONE instance (the found one), not all.
+
+### 39.2 The core API (all PRNG-free — verified)
+
+The ONLY `@Random` consumer in ovr024 is `roll_dice` itself (`ovr024:13AC`); the check
+dispatch, find, add, remove, and the expiry walk make **zero draws**. This is the
+substrate's whole draw-neutrality argument, and it is why the six closed captures could
+close with affects unmodeled.
+
+- `find_affect(actor, kind) -> Option<&AffectRecord>` — first match in list order.
+- `add_affect(actor, kind, minutes, data, call_table)` — append tail
+  (`ovr024:13F0-14A4`). The `call_table=true` add-side handler (`CallAffectTable(Add)`,
+  `ovr013`) is NOT modeled — no current caller adds affects yet; the spell slice will.
+- `remove_affect(actor, kind)` — remove the first matching instance
+  (`ovr024:010A-027A`, an UNHEADERED label — no proc header in the listing, reached via
+  the `stub024` thunk). Side effects cited, tripwired, not modeled: the
+  `CallAffectTable(Remove)` call when the removed record carries `call_affect_table`,
+  and the `CalcStatBonuses` recompute for `resist_fire` (CHA) /
+  `enlarge|strength|strength_spell` (STR).
+- `remove_combat_affects(actor)` — the fixed strip table (`sub_645AB` @`ovr024:15AB`,
+  coab `ovr024.cs:661-691`): faerie_fire, charm_person, reduce, silence_15_radius,
+  spiritual_hammer, stinking_cloud, helpless, animate_dead, snake_charm, paralyze,
+  sleep, clear_movement, regenerate, affect_5F, regen_3_hp, entangle, affect_89,
+  affect_8b, owlbear_hug_round_attack — **transcribe the ids from the listing, not the
+  names** — then the berserk quirk (`HasAffect(berserk) && control_morale == PC_Berzerk
+  → combat_team = Ours`), tripwired. Companion `remove_attackers_affects`
+  (`sub_6460D` @`ovr024:160D`): reduce, clear_movement, affect_8b,
+  owlbear_hug_round_attack.
+- `check_affects_effect(actor, CheckType)` — the 24-case dispatch (`work_on_00`
+  @`ovr024:0414-0D02`): for each id in the case's ORDERED list →
+  `calc_affect_effect(id, actor)`.
+- `calc_affect_effect(id, actor)` (`ovr024:027A-0411`, coab `:99-136`): find on the
+  actor; if absent AND id ∈ the radius set {prot_from_evil_10_radius 0x2D,
+  prot_from_good_10_radius 0x2E, prayer 0x31, silence_15_radius 0x15} → scan the
+  team lists for a CARRIER (any combatant holding id); a carrier found in combat gates
+  on range (≤6 for prayer, ≤1 else, via the near-list builder) — model the scan, and
+  TRIP on carrier-found (the range gate + handler are the spell slice's). If found on
+  the actor → **tripwire** (below); the real effect handler (`CallAffectTable(Add)`)
+  lands with the spells.
+
+**The dispatch table.** Binary verified case-by-case against coab this session: id-for-id
+and order-for-order IDENTICAL, all 24 cases (the listing's raw `affect_XX` names are the
+same ids under coab's meaningful names — affect_0d=reduce, affect_88=entangle,
+affect_03=sticks_to_snakes, affect_2f=dwarf_and_gnome_vs_giants, affect_3a=
+clear_movement, affect_38=item_invisibility, affect_62=regen_3_hp, affect_61=
+con_saving_bonus, affect_64=troll_fire_or_acid, affect_4b/4c=weap_dragon_slayer/
+frost_brand — full enum in `Classes/Affect.cs:5-157`). Transcribe from coab
+`ovr024.cs:140-375` verbatim (CheckType enum `ovr024.cs:6-32`); keep each case's list
+ORDER (find-first semantics make order observable once handlers land).
+
+### 39.3 What combat does NOT do: tick durations
+
+`CheckAffectsTimingOut` (`sub_5801E` @`ovr021:001E`, coab `ovr021.cs:11-107`) decrements
+`minutes` ONLY while Camping (converting rest time through `timeScales`); outside camp it
+just flags `affects_timed_out` and returns. **Combat never expires an affect by time.**
+The substrate therefore stores `minutes` verbatim and has NO tick machinery; per-round
+re-evaluation happens through the `Type_19` dispatch at `BattleRoundChecks`, and combat
+removal happens only via `remove_combat_affects`/`remove_affect` at the cited sites.
+Camp/rest expiry lands with the camp systems, not here.
+
+### 39.4 The tripwire strategy
+
+One wire: `ActionEvent::StubTripped { combatant_id, stub: "affect-effect" }`, emitted by
+`calc_affect_effect` when a matching affect is FOUND (= the point where the binary would
+run a `CallAffectTable` handler we don't model). Do NOT extend the event shape (the
+harness prints pattern-match it); the kind is recoverable by inspection. Secondary wires:
+`"affect-remove-side"` in `remove_affect` when an ACTUAL removal carries
+`call_affect_table` or a stat-recompute kind, and `"affect-berserk"` for the
+`remove_combat_affects` berserk quirk. With empty lists — the state of every current
+capture — no wire can fire; that plus the PRNG-free dispatch IS the draw-neutrality
+proof, and the guard 8/8 run at every commit is its check.
+
+### 39.5 The wiring census (comment-no-op → real dispatch)
+
+Wire `check_affects_effect` at the already-modeled sites that today carry a "no affects"
+comment — the exact CheckType per site, coab cite first, our anchor second:
+
+1. Turn head: `PlayerRestrained` (`ovr009.cs:108`), `Type_15` (`:125`), `Confusion`
+   (`:129`, gated `spell_id == 0`) — at `melee_ai_turn`'s head. The restrained/held TURN
+   BEHAVIOR stays unmodeled (a found affect trips via the dispatch itself).
+2. Round end: `Type_19` per member (`ovr009.cs:371`) — `battle_round_checks`, which
+   already cites it as gated-out (combat.rs `battle_round_checks` doc).
+3. FleeCheck: `Morale` twice (`ovr010.cs:780/788`) — our `flee_check` documents both.
+4. Movement: `Movement` (`ovr014.cs:23/76/488`) — the calc-moves paths (our :76 anchor).
+5. AI specials: `Type_14` (`ovr010.cs:516`) — our anchor cites `ovr010:0DDB`.
+6. To-hit: `Type_10` on attacker + `Type_16` on target (`ovr024.cs:529-530`,
+   PC_CanHitTarget); `Type_5` on target (`ovr014.cs:101`); `Type_11` on target
+   (`ovr014.cs:774`); `SpecialAttacks` on attacker (`ovr014.cs:100`).
+7. Visibility: `Visibility` on targetA + `None` on seer (`ovr014.cs:583/:591`) — our
+   `CanSeeTargetA` anchor (the `None` case is a no-op by the dispatch's own case 0).
+8. Saves: `SavingThrow` (`ovr024.cs:577`) — inside our save path.
+9. Damage/death: `PreDamage` (`ovr024.cs:1186`), `FireShield` (`:1201`), `Death`
+   (`:1272`; also `ovr014.cs:210` and KillPlayer `:49`) — our `apply_damage` ladder.
+10. Removal paths: `remove_combat_affects` at our KillPlayer/RemoveFromCombat
+    equivalents (`ovr024.cs:48/:645`, the sub_644A7 path we model);
+    `remove_attackers_affects` at the flee path (`ovr010.cs:765`, our :3237 anchor);
+    `remove_invisibility` (`ovr014.cs:752`, our :1248 anchor — loop
+    `find_affect(invisibility)` + `remove_affect`).
+
+Skip sites living in unmodeled subsystems (in_poison_cloud, spell resolution
+`MagicResistance`, manual-UI): they arrive with their own slices. Every wired site gets
+the binary citation in place of the old comment. **The implementer verifies each wired
+site's CheckType argument against the listing call site** (the pattern: push player, push
+type byte, call `work_on_00`), not just coab.
+
+### 39.6 Entry population (why replays stay empty)
+
+The record image's `affect_ptr` @0xF2 (`coab_new.lst` charStruct, occupies 0xF2-0xF5) is
+HEAP LINKAGE — a capture's record bytes cannot carry the list, so capture replays build
+every combatant with `affects: vec![]`, which is bit-for-bit today's behavior. That is
+faithful for all eight pins (proven by their closure/frontier stability), NOT a general
+truth: a future buffed-party or innate-affect capture needs the staging hook to walk the
+`0xF2` chain and emit per-combatant affect records at `combat_entry` (**hook TODO #2**,
+beside §38's toggle events; 9 bytes each, the `next` field ignored). Real-play population
+sources, cited for their own slices: `.FX` decode at save import (`ovr017.cs:558-579`
+fixed 9-byte blocks; our `SaveSet.chars[].affects` already carries the raw records) and
+`MON<area>SPC.dax` innate affects cloned per spawn (`ovr003.cs:275-286` — per-copy
+ShallowClone, our `gbx_formats::monster` already splits the records). This slice lands
+the `gbx-formats` typed decode + tests; the import/spawn plumbing is NOT wired here.
+
+### 39.7 Build order (canary discipline, §36.5 pattern)
+
+1. `gbx-formats`: `AffectRecord` + decode + tests (incl. a real-layout fixture with a
+   junk `next` field, synthetic bytes only — D10: no real save bytes in the repo).
+2. Engine: storage + the API of §39.2 + unit tests (order semantics: add-tail,
+   find-first, remove-one; the strip tables; dispatch → tripwire on a synthetic affect).
+3. Wire the census sites in small groups, **guard 8/8 after every commit** — the pins
+   must hold EXACTLY (no manifest edits; any shift = a bug in the slice, stop and report).
+4. Doc landing note (§40) + memory: which sites wired, which cited-skipped.
+
+One mechanic per commit, binary-cited; never weaken an assert; full gates (fmt, clippy,
+`cargo test --workspace`, guard) per commit. Worktree, no push — Bryan reviews the PR
+after Fable's audit.
