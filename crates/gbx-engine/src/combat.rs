@@ -1324,7 +1324,6 @@ impl CombatState {
     /// ids transcribed from the LISTING data `unk_16D41[1..19]` @`seg600:0A32-0A44`
     /// (`07 0B 0D 15 17 1E 1F 20 33 34 35 3A 3B 5F 62 88 89 8B 90` — 19 entries,
     /// matching coab). Draw-free.
-    #[allow(dead_code)]
     fn remove_combat_affects(&mut self, ci: usize) {
         for &kind in STRIP_COMBAT_KINDS {
             self.remove_affect(ci, kind);
@@ -1345,7 +1344,6 @@ impl CombatState {
     /// LISTING data `[0xA46..0xA49]` @`seg600` (`0D 3A 8B 90` = reduce,
     /// clear_movement, affect_8b, owlbear_hug_round_attack — 4 entries, matching
     /// coab). Draw-free.
-    #[allow(dead_code)]
     fn remove_attackers_affects(&mut self, ci: usize) {
         for &kind in STRIP_ATTACKERS_KINDS {
             self.remove_affect(ci, kind);
@@ -1364,21 +1362,19 @@ impl CombatState {
 
 // --- affect ids + fixed tables (doc §39, binary/coab-cited) ----------------
 //
-// The `#[allow(dead_code)]`s below are the seam between this API-landing commit
-// and the §39.5 census-wiring commits that consume it: each attribute is dropped
-// in the commit that first wires the item. What legitimately stays unused past
-// wiring — `add_affect` (no caller adds affects until the spell slice) and
-// `CheckType`'s unconstructed variants (the full 24 transcribed for fidelity) —
-// keeps its allow.
+// With the §39.5 census fully wired, every id/table below is live. The one
+// `#[allow(dead_code)]` that remains sits on `CheckType` (below): its full
+// 24-value set is transcribed for dispatch fidelity, but only the subset
+// constructed at census sites is built. (`add_affect` needs no allow — a `pub`
+// method on a `pub` struct is never dead-code-flagged; it stays uncalled until
+// the spell slice supplies the first affect-adding caller.)
 
 /// `Affects.invisibility` (`Classes/Affect.cs:32`).
 const AFF_INVISIBILITY: u8 = 0x19;
 /// `Affects.berserk` (`Affect.cs:84`) — the [`RemoveCombatAffects`] quirk gate.
-#[allow(dead_code)]
 const AFF_BERSERK: u8 = 0x4D;
 /// `Control.PC_Berzerk` (`Player.cs:324`) — `control_morale@0xF7`; the listing
 /// compares `es:[di+field_F7], 0B3h` (`ovr024:15F6`) after finding berserk.
-#[allow(dead_code)]
 const PC_BERZERK: u8 = 0xB3;
 
 /// The radius-cast affects a team-mate can source (`unk_6325A` bitmask
@@ -1399,7 +1395,6 @@ const STAT_RECOMPUTE_KINDS: [u8; 4] = [0x0E, 0x0C, 0x26, 0x92];
 /// helpless, animate_dead, snake_charm, paralyze, sleep, clear_movement,
 /// regenerate, affect_5F, regen_3_hp, entangle, affect_89, affect_8b,
 /// owlbear_hug_round_attack.
-#[allow(dead_code)]
 const STRIP_COMBAT_KINDS: &[u8] = &[
     0x07, 0x0B, 0x0D, 0x15, 0x17, 0x1E, 0x1F, 0x20, 0x33, 0x34, 0x35, 0x3A, 0x3B, 0x5F, 0x62, 0x88,
     0x89, 0x8B, 0x90,
@@ -1408,7 +1403,6 @@ const STRIP_COMBAT_KINDS: &[u8] = &[
 /// `RemoveAttackersAffects`'s strip table (`[0xA46..0xA49]` @`seg600`,
 /// transcribed from the LISTING; == coab `ovr024.cs:694-702`): reduce 0x0D,
 /// clear_movement 0x3A, affect_8b 0x8B, owlbear_hug_round_attack 0x90.
-#[allow(dead_code)]
 const STRIP_ATTACKERS_KINDS: &[u8] = &[0x0D, 0x3A, 0x8B, 0x90];
 
 /// `CheckType` (`ovr024.cs:6-32`) — the argument to `CheckAffectsEffect`
@@ -3578,6 +3572,10 @@ impl CombatState {
         self.rebuild_occupancy();
         // :155A clear_actions.
         self.clear_actions(actor);
+        // §39.5 site 10: `RemoveFromCombat` (`sub_644A7`) ends with
+        // `RemoveCombatAffects(player)` (coab ovr024.cs:645) — the strip on the
+        // flee/surrender removal path. Draw-free (empty lists).
+        self.remove_combat_affects(actor);
     }
 
     /// `FleeCheck_001` (`sub_3637F` @`ovr010:137F`, coab `ovr010.cs:760`) — the
@@ -3589,9 +3587,12 @@ impl CombatState {
     /// `coab_new.lst` this session.
     fn flee_check(&mut self, actor: usize) -> bool {
         // :1385 var_1 = 0 (the surrender return flag).
-        // :1391 actions.field_14 = 0 → moral_failure = false; RemoveAttackersAffects
-        // (:139C) is draw-free, no affects modeled.
+        // :1391 actions.field_14 = 0 → moral_failure = false.
         self.fighters[actor].moral_failure = false;
+        // §39.5 site 10: `RemoveAttackersAffects(player)` (`sub_6460D` @:139C,
+        // coab ovr010.cs:765) — strips reduce/clear_movement/affect_8b/
+        // owlbear_hug_round_attack. Draw-free (empty lists).
+        self.remove_attackers_affects(actor);
         // :13A9 fleeing (actions.field_10) → moral_failure = 1, "is forced to
         // flee", return false.
         if self.fighters[actor].fleeing {
@@ -3605,21 +3606,26 @@ impl CombatState {
         }
         // :13F1-13FC per-actor morale seed = (control_morale & 0x7F) << 1, recomputed
         // EVERY call (the deviation slice-2 replaces: the old stub used a process-
-        // lifetime scratch stuck at 100). :13FF `> 0x66` (102) → 0. Then
-        // CheckAffectsEffect(Morale=0x11) at :140B — draw-free.
+        // lifetime scratch stuck at 100). :13FF `> 0x66` (102) → 0.
         let mut morale = ((self.fighters[actor].control_morale & 0x7F) as i32) << 1;
         if morale > 0x66 {
             morale = 0;
         }
         self.monster_morale = morale;
+        // §39.5 site 3: `CheckAffectsEffect(Morale)` (`mov al,11h; call work_on_00`
+        // @`ovr010:1414`, coab ovr010.cs:780) — first of two, after the seed/clamp,
+        // before Gate 1. Reads bless/cursed/charm_person; draw-free (empty lists).
+        self.check_affects_effect(actor, CheckType::Morale);
 
         // Gate 1 (:143F-144D): morale < (100 − hp_cur·100/hp_max) SIGNED (`jl`)
         // OR morale == 0; else return false.
         let hp_pct = (self.fighters[actor].hp_current * 100) / self.fighters[actor].hp_max.max(1);
         if self.monster_morale < (100 - hp_pct) || self.monster_morale == 0 {
-            // :1458 monster_morale = byte_1D903 (enemyHealthPercentage); second
-            // CheckAffectsEffect(Morale) at :145E — draw-free.
+            // :1458 monster_morale = byte_1D903 (enemyHealthPercentage).
             self.monster_morale = self.enemy_health_pct;
+            // §39.5 site 3: the second `CheckAffectsEffect(Morale)` (`mov al,11h`
+            // @`ovr010:1467`, coab ovr010.cs:788), before Gate 2. Draw-free.
+            self.check_affects_effect(actor, CheckType::Morale);
 
             // Gate 2 (:146C-1493): morale < (100 − area2.field_58C) — ★ bug #12:
             // UNSIGNED 16-bit `jb` at :1481 over a 16-bit `sub` at :1473, so a
@@ -3632,8 +3638,8 @@ impl CombatState {
             if lhs < rhs || self.monster_morale == 0 || self.fighters[actor].team == Team::Party {
                 // Speed fork (:1498-14BE): MaxOppositionMoves > CalcMoves/2 SIGNED
                 // (`jg` at :14BE) → the surrender branch (loc_364F7); else (`<=`)
-                // moral_failure = 1 (:14C8) + remove_affect(0x4A)/remove_affect(0x4B)
-                // (:14DC/:14F0 — both no-ops here, no affects modeled).
+                // the flee fork: moral_failure = 1 (:14C8) + remove_affect(0x4A)/
+                // remove_affect(0x4B) (:14DC/:14F0) — §39.5, wired below.
                 let max_opp = self.max_opposition_moves(actor);
                 if max_opp > calc_moves(self.fighters[actor].movement) / 2 {
                     // Surrender branch (loc_364F7, :14F7-1529, §28 item 7). The
@@ -3656,6 +3662,10 @@ impl CombatState {
                     }
                 } else {
                     self.fighters[actor].moral_failure = true;
+                    // §39.5: the flee fork's `remove_affect(affect_4a 0x4A)` (:14DC)
+                    // and `remove_affect(weap_dragon_slayer 0x4B)` (:14F0). Draw-free.
+                    self.remove_affect(actor, 0x4A);
+                    self.remove_affect(actor, 0x4B);
                 }
             }
         }
@@ -3800,6 +3810,15 @@ impl CombatState {
         t.in_combat = false;
         t.delay = 0;
         let downed_party = t.team == Team::Party;
+        // §39.5 site 9/10: the weapon death tail (`DisplayAttackMessage`, coab
+        // ovr014.cs:209-210) runs `RemoveCombatAffects(target)` (`sub_645AB` call
+        // @`ovr014:0622`) then `CheckAffectsEffect(target, Death)` (`mov al,0Dh`
+        // @`ovr014:0630`) once `in_combat == false`, before `CombatantKilled`.
+        // (PreDamage/FireShield are NOT here — they live in `damage_person`, the
+        // spell/effect-damage entry; the weapon path is DisplayAttackMessage →
+        // damage_player, doc §40.) Draw-free.
+        self.remove_combat_affects(target);
+        self.check_affects_effect(target, CheckType::Death);
         // `CombatantKilled` (`sub_74E6F`, `ovr033:534`→coab): the removal path the
         // damage caller reaches whenever `in_combat == false` (`ovr014.cs:214`),
         // so it fires for dying/unconscious/dead alike. §26.5 — for a downed
