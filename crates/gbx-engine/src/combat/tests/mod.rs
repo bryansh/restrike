@@ -10,6 +10,7 @@ mod attack;
 mod core;
 mod facing;
 mod records;
+mod spells;
 
 const FLOOR: u8 = 0x17; // a passable floor tile (move_cost 1)
 

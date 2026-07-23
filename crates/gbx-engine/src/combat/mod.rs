@@ -44,6 +44,7 @@ mod ai;
 mod attack;
 pub use ai::field_15_mode_gate;
 mod facing;
+mod spells;
 
 /// One `roll_dice(size, count)` (`ovr024.cs:586-598`): `count` dice, each
 /// `1 + random(size)`, through the engine's one PRNG seam so an attached
