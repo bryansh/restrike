@@ -31,6 +31,7 @@
 
 use crate::monster::LoadedMonster;
 use crate::rng::EngineRng;
+use gbx_formats::affects::AffectRecord;
 use gbx_formats::geo::GeoBlock;
 use gbx_formats::save_orig::{decode_char_record, CharRecord, SaveParseError};
 use gbx_rules::flavor::Flavor;
@@ -341,6 +342,18 @@ pub struct Combatant {
     /// (`var_16`, doc §34.5) reads it: `dsB*dcB (+2*bonusB if >0)`. Distinct
     /// from the loadout's `unarmed_profile` (which folds in the STR adj).
     pub base_dice: (u8, u8, u8),
+
+    // --- the affect substrate (M5 Phase 2, doc §39) ------------------------
+    /// The combatant's active affects (`charStruct.affect_ptr`@0xF2 — a runtime
+    /// heap list; doc §39.1/§39.6). **List order is load-bearing**: `add_affect`
+    /// appends at the TAIL (`ovr024:13F0-14A4`), `find_affect` returns the FIRST
+    /// match (`ovr025:2345`), and `remove_affect` drops ONE instance. A capture's
+    /// record image cannot carry this list (@0xF2 is heap linkage), so every
+    /// entry-state replay builds it **empty** — bit-for-bit today's behaviour, and
+    /// the reason the substrate is draw-neutral for all eight guard pins (doc
+    /// §39.2/§39.6). Real-play population (save `.FX` import, `MON<area>SPC` innate
+    /// affects) is wired by their own slices.
+    pub affects: Vec<AffectRecord>,
 }
 
 /// Which item a ranged swing draws from — the `out item` of
@@ -443,6 +456,7 @@ impl Combatant {
             base_half_moves: 0,
             thief_skill_level: 0,
             base_dice: (0, 0, 0),
+            affects: Vec::new(),
         }
     }
 
@@ -528,7 +542,36 @@ impl Combatant {
             base_half_moves: 0,
             thief_skill_level: 0,
             base_dice: (0, 0, 0),
+            affects: Vec::new(),
         }
+    }
+
+    // --- the affect substrate API (doc §39.2, all PRNG-free) ---------------
+
+    /// `FindAffect(out affect, kind, player)` (`ovr025.cs:1175-1180`, binary
+    /// `find_affect` @`ovr025:2345`): the **first** affect of `kind` in list
+    /// order, or `None`. `player.affects.Find(aff => aff.type == kind)`.
+    pub fn find_affect(&self, kind: u8) -> Option<&AffectRecord> {
+        self.affects.iter().find(|a| a.kind == kind)
+    }
+
+    /// `player.HasAffect(kind)` — whether any affect of `kind` is present.
+    pub fn has_affect(&self, kind: u8) -> bool {
+        self.affects.iter().any(|a| a.kind == kind)
+    }
+
+    /// `add_affect(call_table, data, minutes, type, player)` (`ovr024:13F0-14A4`,
+    /// coab `ovr024.cs:609`): construct the affect and **append it at the TAIL**
+    /// (`player.affects.Add`; the binary walks the `next` chain to the end). The
+    /// `call_table=true` add-side handler (`CallAffectTable(Add)`, `ovr013`) is
+    /// NOT modeled — no current caller adds affects; the spell slice will.
+    pub fn add_affect(&mut self, kind: u8, minutes: u16, data: u8, call_affect_table: bool) {
+        self.affects.push(AffectRecord {
+            kind,
+            minutes,
+            data,
+            call_affect_table,
+        });
     }
 }
 
@@ -1164,6 +1207,276 @@ impl CombatState {
     fn emit(&mut self, event: ActionEvent) {
         if let Some(sink) = self.sink.as_mut() {
             sink.on_action(event);
+        }
+    }
+
+    // === the affect substrate (doc §39, all PRNG-free) =====================
+    //
+    // Every method below makes ZERO `roll_dice` calls (the only `@Random`
+    // consumer in ovr024 is `roll_dice` itself, `ovr024:13AC`), and with the
+    // empty affect lists every capture carries, every FIND misses — so no
+    // tripwire fires and no draw moves. That PRNG-free dispatch over empty
+    // state is the whole draw-neutrality argument (doc §39.2/§39.4); the guard
+    // 8/8 run per commit is its check.
+
+    /// `CheckAffectsEffect(player, type)` (`work_on_00` @`ovr024:0414-0D02`) —
+    /// the 24-case dispatch: for each affect id in the case's ORDERED list, run
+    /// [`calc_affect_effect`](Self::calc_affect_effect) on `ci`. The id lists are
+    /// transcribed verbatim from coab `ovr024.cs:140-375` (verified id-for-id and
+    /// order-for-order against the binary); find-first semantics make list order
+    /// observable once effect handlers land, so it is preserved. Draw-free.
+    #[allow(dead_code)]
+    fn check_affects_effect(&mut self, ci: usize, ty: CheckType) {
+        for &kind in ty.affect_ids() {
+            self.calc_affect_effect(ci, kind);
+        }
+    }
+
+    /// `calc_affect_effect(kind, player)` (`ovr024:027A-0411`, coab `:99-136`):
+    /// find `kind` on the actor `ci`; if absent AND `kind` is one of the
+    /// radius-cast affects [`RADIUS_CARRIER_KINDS`] {silence_15_radius 0x15,
+    /// prot_from_evil_10_radius 0x2D, prot_from_good_10_radius 0x2E, prayer 0x31}
+    /// (`unk_6325A` bitmask @`ovr024:025A`, decoded), scan the team lists for a
+    /// **carrier** holding `kind`. A carrier found in combat gates on range in the
+    /// binary (≤6 for prayer, else ≤1, via the near-list builder @`ovr024:031C-0388`)
+    /// — the range gate + the effect handler (`CallAffectTable(Add)`) are the
+    /// spell slice's; here we model the scan and **TRIP** on any found affect (on
+    /// the actor, or a carrier for a radius kind). Draw-free.
+    #[allow(dead_code)]
+    fn calc_affect_effect(&mut self, ci: usize, kind: u8) {
+        // Found on the actor → the point where the binary runs a `CallAffectTable`
+        // handler we don't model yet (doc §39.4).
+        if self.fighters[ci].find_affect(kind).is_some() {
+            self.trip_affect_effect(ci);
+            return;
+        }
+        // Radius-cast affects can be sourced from a team-mate carrier (the
+        // 10-/15-foot-radius blessings). Scan first (immutable), then trip.
+        if RADIUS_CARRIER_KINDS.contains(&kind)
+            && self.fighters.iter().any(|f| f.find_affect(kind).is_some())
+        {
+            self.trip_affect_effect(ci);
+        }
+    }
+
+    #[allow(dead_code)]
+    fn trip_affect_effect(&mut self, ci: usize) {
+        let id = self.fighters[ci].id;
+        self.emit(ActionEvent::StubTripped {
+            combatant_id: id,
+            stub: "affect-effect",
+        });
+    }
+
+    /// `remove_affect(null, kind, player)` (`ovr024:010A-0257`, an UNHEADERED
+    /// label reached via the `stub024` thunk; coab `:67-95`) — remove the FIRST
+    /// matching instance (not all). Side effects cited, tripwired via
+    /// `"affect-remove-side"`, not modeled: the `CallAffectTable(Remove)` when the
+    /// removed record carries `call_affect_table` (`ovr024:016B-0186`), and the
+    /// `CalcStatBonuses` recompute — **CHA for `friends` 0x0E** (`ovr024:0222`;
+    /// coab says `resist_fire`, a coab≠binary bug — the binary compares `0x0E`,
+    /// and Friends buffs Charisma) and **STR for enlarge 0x0C / strength 0x26 /
+    /// strength_spell 0x92** (`ovr024:0235-0245`). Draw-free.
+    #[allow(dead_code)]
+    fn remove_affect(&mut self, ci: usize, kind: u8) {
+        let Some(idx) = self.fighters[ci]
+            .affects
+            .iter()
+            .position(|a| a.kind == kind)
+        else {
+            return;
+        };
+        let removed = self.fighters[ci].affects.remove(idx);
+        if removed.call_affect_table || STAT_RECOMPUTE_KINDS.contains(&kind) {
+            let id = self.fighters[ci].id;
+            self.emit(ActionEvent::StubTripped {
+                combatant_id: id,
+                stub: "affect-remove-side",
+            });
+        }
+    }
+
+    /// `RemoveCombatAffects(player)` (`sub_645AB` @`ovr024:15AB`, coab `:661-691`):
+    /// strip the fixed table [`STRIP_COMBAT_KINDS`] (each id via
+    /// [`remove_affect`](Self::remove_affect)), then the berserk quirk
+    /// (`ovr024:15DC-1601`): if the combatant `HasAffect(berserk 0x4D)` and
+    /// `control_morale == PC_Berzerk 0xB3` (`field_F7`), the binary flips
+    /// `combat_team = Ours` — **tripwired** (`"affect-berserk"`), not modeled (a
+    /// runtime team flip we don't carry; it never fires on an empty list). Table
+    /// ids transcribed from the LISTING data `unk_16D41[1..19]` @`seg600:0A32-0A44`
+    /// (`07 0B 0D 15 17 1E 1F 20 33 34 35 3A 3B 5F 62 88 89 8B 90` — 19 entries,
+    /// matching coab). Draw-free.
+    #[allow(dead_code)]
+    fn remove_combat_affects(&mut self, ci: usize) {
+        for &kind in STRIP_COMBAT_KINDS {
+            self.remove_affect(ci, kind);
+        }
+        if self.fighters[ci].has_affect(AFF_BERSERK)
+            && self.fighters[ci].control_morale == PC_BERZERK
+        {
+            let id = self.fighters[ci].id;
+            self.emit(ActionEvent::StubTripped {
+                combatant_id: id,
+                stub: "affect-berserk",
+            });
+        }
+    }
+
+    /// `RemoveAttackersAffects(player)` (`sub_6460D` @`ovr024:160D`, coab
+    /// `:694-702`): strip [`STRIP_ATTACKERS_KINDS`]. Ids transcribed from the
+    /// LISTING data `[0xA46..0xA49]` @`seg600` (`0D 3A 8B 90` = reduce,
+    /// clear_movement, affect_8b, owlbear_hug_round_attack — 4 entries, matching
+    /// coab). Draw-free.
+    #[allow(dead_code)]
+    fn remove_attackers_affects(&mut self, ci: usize) {
+        for &kind in STRIP_ATTACKERS_KINDS {
+            self.remove_affect(ci, kind);
+        }
+    }
+
+    /// `remove_invisibility(player)` (coab `ovr024.cs:650-658`): while an
+    /// `invisibility` (0x19) affect remains, remove it — clears every instance.
+    /// Draw-free (a list walk).
+    #[allow(dead_code)]
+    fn remove_invisibility(&mut self, ci: usize) {
+        while self.fighters[ci].find_affect(AFF_INVISIBILITY).is_some() {
+            self.remove_affect(ci, AFF_INVISIBILITY);
+        }
+    }
+}
+
+// --- affect ids + fixed tables (doc §39, binary/coab-cited) ----------------
+//
+// The `#[allow(dead_code)]`s below are the seam between this API-landing commit
+// and the §39.5 census-wiring commits that consume it: each attribute is dropped
+// in the commit that first wires the item. What legitimately stays unused past
+// wiring — `add_affect` (no caller adds affects until the spell slice) and
+// `CheckType`'s unconstructed variants (the full 24 transcribed for fidelity) —
+// keeps its allow.
+
+/// `Affects.invisibility` (`Classes/Affect.cs:32`).
+#[allow(dead_code)]
+const AFF_INVISIBILITY: u8 = 0x19;
+/// `Affects.berserk` (`Affect.cs:84`) — the [`RemoveCombatAffects`] quirk gate.
+#[allow(dead_code)]
+const AFF_BERSERK: u8 = 0x4D;
+/// `Control.PC_Berzerk` (`Player.cs:324`) — `control_morale@0xF7`; the listing
+/// compares `es:[di+field_F7], 0B3h` (`ovr024:15F6`) after finding berserk.
+#[allow(dead_code)]
+const PC_BERZERK: u8 = 0xB3;
+
+/// The radius-cast affects a team-mate can source (`unk_6325A` bitmask
+/// @`ovr024:025A`, decoded to a set): silence_15_radius 0x15,
+/// prot_from_evil_10_radius 0x2D, prot_from_good_10_radius 0x2E, prayer 0x31.
+#[allow(dead_code)]
+const RADIUS_CARRIER_KINDS: [u8; 4] = [0x15, 0x2D, 0x2E, 0x31];
+
+/// The affect kinds whose `remove_affect` triggers a `CalcStatBonuses` recompute
+/// (`ovr024:0222-0245`) — the `"affect-remove-side"` tripwire set alongside
+/// `call_affect_table`. From the LISTING: **CHA on friends 0x0E** (`@0222`,
+/// coab≠binary — coab wrote `resist_fire`; the binary compares `0x0E`), **STR on
+/// enlarge 0x0C / strength 0x26 / strength_spell 0x92** (`@0235-0245`).
+#[allow(dead_code)]
+const STAT_RECOMPUTE_KINDS: [u8; 4] = [0x0E, 0x0C, 0x26, 0x92];
+
+/// `RemoveCombatAffects`'s strip table (`unk_16D41[1..19]` @`seg600:0A32-0A44`,
+/// transcribed from the LISTING; == coab `ovr024.cs:661-691`): faerie_fire,
+/// charm_person, reduce, silence_15_radius, spiritual_hammer, stinking_cloud,
+/// helpless, animate_dead, snake_charm, paralyze, sleep, clear_movement,
+/// regenerate, affect_5F, regen_3_hp, entangle, affect_89, affect_8b,
+/// owlbear_hug_round_attack.
+#[allow(dead_code)]
+const STRIP_COMBAT_KINDS: &[u8] = &[
+    0x07, 0x0B, 0x0D, 0x15, 0x17, 0x1E, 0x1F, 0x20, 0x33, 0x34, 0x35, 0x3A, 0x3B, 0x5F, 0x62, 0x88,
+    0x89, 0x8B, 0x90,
+];
+
+/// `RemoveAttackersAffects`'s strip table (`[0xA46..0xA49]` @`seg600`,
+/// transcribed from the LISTING; == coab `ovr024.cs:694-702`): reduce 0x0D,
+/// clear_movement 0x3A, affect_8b 0x8B, owlbear_hug_round_attack 0x90.
+#[allow(dead_code)]
+const STRIP_ATTACKERS_KINDS: &[u8] = &[0x0D, 0x3A, 0x8B, 0x90];
+
+/// `CheckType` (`ovr024.cs:6-32`) — the argument to `CheckAffectsEffect`
+/// (`work_on_00`). The full 24-value set is transcribed for fidelity; only the
+/// subset wired at census sites (doc §39.5) is ever constructed, so the rest are
+/// `dead_code` by construction — allowed, not removed, because the dispatch
+/// [`affect_ids`](CheckType::affect_ids) is only faithful with every case
+/// present and ordered.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckType {
+    None = 0,
+    Visibility = 1,
+    Type2 = 2,
+    Type3 = 3,
+    SpecialAttacks = 4,
+    Type5 = 5,
+    PreDamage = 6,
+    PlayerRestrained = 7,
+    Type8 = 8,
+    MagicResistance = 9,
+    Type10 = 10,
+    Type11 = 11,
+    SavingThrow = 12,
+    Death = 13,
+    Type14 = 14,
+    Type15 = 15,
+    Type16 = 16,
+    Morale = 17,
+    Movement = 18,
+    Type19 = 19,
+    FireShield = 20,
+    Confusion = 21,
+    Type22 = 22,
+    Type23 = 23,
+}
+
+impl CheckType {
+    /// The ORDERED affect-id list this check runs `calc_affect_effect` over,
+    /// transcribed verbatim from coab `ovr024.cs:140-375` (ids from
+    /// `Classes/Affect.cs`, verified id-for-id and order-for-order against the
+    /// binary dispatch `work_on_00` @`ovr024:0414-0D02`).
+    #[allow(dead_code)]
+    fn affect_ids(self) -> &'static [u8] {
+        match self {
+            CheckType::None => &[],
+            CheckType::Visibility => &[0x25, 0x19, 0x47, 0x45],
+            CheckType::Type2 => &[0x4F, 0x50, 0x91, 0x39, 0x60, 0x7A, 0x7B],
+            CheckType::Type3 => &[0x40, 0x41, 0x42, 0x43, 0x46, 0x4F, 0x57],
+            CheckType::SpecialAttacks => &[0x1D, 0x06, 0x67, 0x4B, 0x4C, 0x86],
+            CheckType::Type5 => &[
+                0x1C, 0x29, 0x68, 0x78, 0x65, 0x73, 0x74, 0x77, 0x5E, 0x75, 0x3C, 0x51, 0x52, 0x55,
+                0x82, 0x8F,
+            ],
+            CheckType::PreDamage => &[
+                0x71, 0x3D, 0x0A, 0x14, 0x69, 0x6A, 0x70, 0x72, 0x76, 0x11, 0x5D, 0x65, 0x1C, 0x6E,
+                0x49, 0x52, 0x54, 0x81, 0x85, 0x87, 0x3F,
+            ],
+            CheckType::PlayerRestrained => &[0x33, 0x34, 0x35, 0x1F, 0x03, 0x1B, 0x88],
+            CheckType::Type8 => &[0x63, 0x52, 0x59, 0x48, 0x38],
+            CheckType::MagicResistance => &[
+                0x69, 0x6A, 0x6B, 0x6C, 0x6D, 0x6E, 0x6F, 0x70, 0x7C, 0x7D, 0x3F, 0x81,
+            ],
+            CheckType::Type10 => &[0x01, 0x02, 0x21, 0x24, 0x31, 0x06, 0x12, 0x1A, 0x4B, 0x4C],
+            CheckType::Type11 => &[0x21, 0x11, 0x08, 0x09, 0x2D, 0x2E, 0x1E, 0x07],
+            CheckType::SavingThrow => &[
+                0x08, 0x09, 0x0A, 0x11, 0x14, 0x21, 0x24, 0x2D, 0x2E, 0x31, 0x3D, 0x6F, 0x7D, 0x61,
+                0x32, 0x36,
+            ],
+            CheckType::Death => &[0x63, 0x64, 0x4B],
+            CheckType::Type14 => &[
+                0x53, 0x58, 0x79, 0x56, 0x57, 0x5A, 0x7E, 0x80, 0x83, 0x84, 0x8B,
+            ],
+            CheckType::Type15 => &[0x15, 0x1E, 0x0B, 0x0D, 0x4D],
+            CheckType::Type16 => &[0x19, 0x47, 0x25, 0x2F, 0x30, 0x59, 0x04],
+            CheckType::Morale => &[0x01, 0x02, 0x0B],
+            CheckType::Movement => &[0x27, 0x2A, 0x3A],
+            CheckType::Type19 => &[0x62, 0x17, 0x48, 0x38, 0x0B],
+            CheckType::FireShield => &[0x32, 0x36],
+            CheckType::Confusion => &[0x23],
+            CheckType::Type22 => &[0x8A],
+            CheckType::Type23 => &[0x4A],
         }
     }
 }
@@ -8843,6 +9156,235 @@ mod tests {
         assert!(
             !world.fighters[1].moral_failure,
             "field_58C ≤ 100 gates normally: 100% enemy health does not rout"
+        );
+    }
+
+    // === the affect substrate (doc §39.2) ==================================
+
+    /// A two-fighter state (party 0, monster 1) with an attached [`ActionLog`],
+    /// so a test can drive the affect API and read the emitted tripwires.
+    fn affect_world() -> (CombatState, ActionLog) {
+        let mut state = CombatState::new(CombatMap::uniform(0x17), vec![party(0, 0), monster(1)]);
+        let log = ActionLog::default();
+        state.attach_action_sink(log.sink());
+        (state, log)
+    }
+
+    /// The `stub` names of every `StubTripped` emitted, in order.
+    fn stubs(log: &ActionLog) -> Vec<&'static str> {
+        log.events()
+            .into_iter()
+            .filter_map(|e| match e {
+                ActionEvent::StubTripped { stub, .. } => Some(stub),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn aff(kind: u8, call_table: bool) -> AffectRecord {
+        AffectRecord {
+            kind,
+            minutes: 0,
+            data: 0,
+            call_affect_table: call_table,
+        }
+    }
+
+    #[test]
+    fn add_affect_appends_at_the_tail() {
+        let mut f = party(0, 0);
+        f.add_affect(0x01, 10, 1, false); // bless
+        f.add_affect(0x0B, 0, 0, false); // charm_person
+        f.add_affect(0x01, 20, 2, true); // bless again (a second instance)
+        let kinds: Vec<u8> = f.affects.iter().map(|a| a.kind).collect();
+        assert_eq!(kinds, vec![0x01, 0x0B, 0x01], "add appends in call order");
+        assert_eq!(f.affects[2].minutes, 20);
+        assert!(f.affects[2].call_affect_table);
+    }
+
+    #[test]
+    fn find_affect_returns_the_first_match() {
+        let mut f = party(0, 0);
+        f.affects = vec![aff(0x01, false), aff(0x33, false), aff(0x01, true)];
+        // Two bless (0x01) instances; find returns the FIRST (call_table false).
+        let found = f.find_affect(0x01).unwrap();
+        assert!(!found.call_affect_table);
+        assert!(f.has_affect(0x33));
+        assert!(f.find_affect(0x99).is_none());
+    }
+
+    #[test]
+    fn remove_affect_drops_only_one_instance() {
+        let (mut state, log) = affect_world();
+        state.fighters[0].affects = vec![aff(0x33, false), aff(0x33, false), aff(0x01, false)];
+        state.remove_affect(0, 0x33);
+        let kinds: Vec<u8> = state.fighters[0].affects.iter().map(|a| a.kind).collect();
+        assert_eq!(kinds, vec![0x33, 0x01], "exactly one snake_charm removed");
+        // A plain (non-call_table, non-stat) removal fires no side tripwire.
+        assert!(stubs(&log).is_empty());
+    }
+
+    #[test]
+    fn remove_affect_side_tripwire_on_call_table_and_stat_kinds() {
+        // call_affect_table set → "affect-remove-side".
+        let (mut state, log) = affect_world();
+        state.fighters[0].affects = vec![aff(0x01, true)];
+        state.remove_affect(0, 0x01);
+        assert_eq!(stubs(&log), vec!["affect-remove-side"]);
+
+        // A STAT_RECOMPUTE kind (friends 0x0E → CHA) trips even without call_table.
+        let (mut state, log) = affect_world();
+        state.fighters[0].affects = vec![aff(0x0E, false)];
+        state.remove_affect(0, 0x0E);
+        assert_eq!(stubs(&log), vec!["affect-remove-side"]);
+
+        // STR-recompute kinds too (enlarge/strength/strength_spell).
+        for &k in &[0x0C_u8, 0x26, 0x92] {
+            let (mut state, log) = affect_world();
+            state.fighters[0].affects = vec![aff(k, false)];
+            state.remove_affect(0, k);
+            assert_eq!(stubs(&log), vec!["affect-remove-side"], "kind {k:#x}");
+        }
+    }
+
+    #[test]
+    fn remove_combat_affects_strips_the_table_and_keeps_the_rest() {
+        let (mut state, log) = affect_world();
+        // faerie_fire (stripped), bless (kept), reduce (stripped), berserk (kept —
+        // not in the table).
+        state.fighters[0].affects = vec![
+            aff(0x07, false),
+            aff(0x01, false),
+            aff(0x0D, false),
+            aff(0x4D, false),
+        ];
+        state.remove_combat_affects(0);
+        let kinds: Vec<u8> = state.fighters[0].affects.iter().map(|a| a.kind).collect();
+        assert_eq!(kinds, vec![0x01, 0x4D], "only table kinds stripped");
+        // control_morale != PC_Berzerk → no berserk quirk despite the affect.
+        assert!(stubs(&log).is_empty());
+    }
+
+    #[test]
+    fn remove_combat_affects_berserk_quirk_tripwire() {
+        let (mut state, log) = affect_world();
+        state.fighters[0].affects = vec![aff(0x4D, false)]; // berserk survives the strip
+        state.fighters[0].control_morale = 0xB3; // PC_Berzerk
+        state.remove_combat_affects(0);
+        assert_eq!(stubs(&log), vec!["affect-berserk"]);
+    }
+
+    #[test]
+    fn remove_attackers_affects_strips_its_four() {
+        let (mut state, _log) = affect_world();
+        state.fighters[0].affects = vec![
+            aff(0x0D, false), // reduce (stripped)
+            aff(0x01, false), // bless (kept)
+            aff(0x3A, false), // clear_movement (stripped)
+            aff(0x8B, false), // affect_8b (stripped)
+            aff(0x90, false), // owlbear_hug_round_attack (stripped)
+        ];
+        state.remove_attackers_affects(0);
+        let kinds: Vec<u8> = state.fighters[0].affects.iter().map(|a| a.kind).collect();
+        assert_eq!(kinds, vec![0x01]);
+    }
+
+    #[test]
+    fn remove_invisibility_clears_every_instance() {
+        let (mut state, _log) = affect_world();
+        state.fighters[0].affects = vec![aff(0x19, false), aff(0x01, false), aff(0x19, true)];
+        state.remove_invisibility(0);
+        let kinds: Vec<u8> = state.fighters[0].affects.iter().map(|a| a.kind).collect();
+        assert_eq!(kinds, vec![0x01], "both invisibility affects gone");
+    }
+
+    #[test]
+    fn dispatch_trips_on_a_found_affect() {
+        let (mut state, log) = affect_world();
+        // snake_charm (0x33) is in PlayerRestrained's list.
+        state.fighters[0].affects = vec![aff(0x33, false)];
+        state.check_affects_effect(0, CheckType::PlayerRestrained);
+        assert_eq!(stubs(&log), vec!["affect-effect"]);
+    }
+
+    #[test]
+    fn dispatch_on_empty_lists_is_a_total_no_op() {
+        let (mut state, log) = affect_world();
+        for ty in [
+            CheckType::None,
+            CheckType::Visibility,
+            CheckType::PlayerRestrained,
+            CheckType::Type10,
+            CheckType::Type16,
+            CheckType::Morale,
+            CheckType::Movement,
+            CheckType::Type19,
+            CheckType::SpecialAttacks,
+            CheckType::Type5,
+            CheckType::Type11,
+            CheckType::Death,
+            CheckType::Type14,
+            CheckType::Type15,
+            CheckType::Confusion,
+        ] {
+            state.check_affects_effect(0, ty);
+            state.check_affects_effect(1, ty);
+        }
+        assert!(stubs(&log).is_empty(), "no affects → no trips, no draws");
+    }
+
+    #[test]
+    fn calc_affect_effect_radius_carrier_scan() {
+        // The actor (0) lacks prayer; a team-mate carrier (1) holds it → the
+        // radius scan finds it and trips. Prayer (0x31) is a RADIUS kind.
+        let (mut state, log) = affect_world();
+        state.fighters[1].affects = vec![aff(0x31, false)];
+        state.calc_affect_effect(0, 0x31);
+        assert_eq!(stubs(&log), vec!["affect-effect"]);
+
+        // A non-radius kind not on the actor is NOT sourced from a carrier.
+        let (mut state, log) = affect_world();
+        state.fighters[1].affects = vec![aff(0x01, false)]; // bless — not a radius kind
+        state.calc_affect_effect(0, 0x01);
+        assert!(stubs(&log).is_empty());
+    }
+
+    #[test]
+    fn dispatch_id_lists_have_the_expected_case_lengths() {
+        // Guards the transcription against an accidental edit: the 24 case lengths
+        // from coab ovr024.cs:140-375.
+        let lens: Vec<usize> = [
+            CheckType::None,
+            CheckType::Visibility,
+            CheckType::Type2,
+            CheckType::Type3,
+            CheckType::SpecialAttacks,
+            CheckType::Type5,
+            CheckType::PreDamage,
+            CheckType::PlayerRestrained,
+            CheckType::Type8,
+            CheckType::MagicResistance,
+            CheckType::Type10,
+            CheckType::Type11,
+            CheckType::SavingThrow,
+            CheckType::Death,
+            CheckType::Type14,
+            CheckType::Type15,
+            CheckType::Type16,
+            CheckType::Morale,
+            CheckType::Movement,
+            CheckType::Type19,
+            CheckType::FireShield,
+            CheckType::Confusion,
+            CheckType::Type22,
+            CheckType::Type23,
+        ]
+        .iter()
+        .map(|t| t.affect_ids().len())
+        .collect();
+        assert_eq!(
+            lens,
+            vec![0, 4, 7, 7, 6, 16, 21, 7, 5, 12, 10, 8, 16, 3, 11, 5, 7, 3, 3, 5, 2, 1, 1, 1]
         );
     }
 }
