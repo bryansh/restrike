@@ -2277,7 +2277,7 @@ after Fable's audit.
 
 ## 40. LANDED — the affect substrate, draw-neutral; guard 8/8 exact at every commit (M5 Phase 2 opener, 2026-07-23)
 
-The §39 spec was implemented on branch `m5-affects` off the §39 spec commit
+The §39 spec was implemented on branch `m5-caster-prep` (folded from the implementer worktree) off the §39 spec commit
 (`8d79537`, which itself carries §38's toggle-window code). **Every wired site's
 `CheckType` was re-verified at the LISTING call site** (the `push player; mov al
 <type>; push ax; call work_on_00` pattern) via
@@ -2289,19 +2289,19 @@ commits, zero manifest edits, zero stub trips on every closed capture.**
 
 **Five commits (each fully gated):**
 
-- `27372bd` §39.1 — `gbx-formats::affects::AffectRecord {kind, minutes, data,
+- `b33b154` §39.1 — `gbx-formats::affects::AffectRecord {kind, minutes, data,
   call_affect_table}` + `decode` (bytes 0x00-0x04, the heap `next` @0x05-0x08
   ignored). Synthetic-only tests (D10), incl. a junk-`next` fixture proving 0x05-0x08
   are discarded. **7 formats tests** (125 → 132).
-- `17241fc` §39.2 — `Combatant.affects: Vec<AffectRecord>` (empty at both literal
+- `d278d50` §39.2 — `Combatant.affects: Vec<AffectRecord>` (empty at both literal
   constructors; `combatant_from_record` inherits it via `new_melee`) + the PRNG-free
   API (`find_affect`/`has_affect`/`add_affect` on `Combatant`;
   `check_affects_effect`/`calc_affect_effect`/`remove_affect`/`remove_combat_affects`/
   `remove_attackers_affects`/`remove_invisibility` on `CombatState`) + the `CheckType`
   enum and the 24-case dispatch. **10 engine tests** (365 → 375).
-- `95fc276` §39.5 (1/3) — turn/round/movement/AI-special check sites.
-- `bab70f5` §39.5 (2/3) — the to-hit / attack-path check sites.
-- `fcb91bd` §39.5 (3/3) — the flee / death / removal sites.
+- `ba92f3c` §39.5 (1/3) — turn/round/movement/AI-special check sites.
+- `75fc757` §39.5 (2/3) — the to-hit / attack-path check sites.
+- `2622ff8` §39.5 (3/3) — the flee / death / removal sites.
 
 ### 40.1 The dispatch table + the strip tables (LISTING-cited)
 
@@ -2451,3 +2451,124 @@ substrate is the platform the spell slice lands on (§25 Phase-2 order: affects 
 walk / `.FX` import / SPC innate clone — hook TODO #2), the `CallAffectTable` add/remove
 handlers, tick-duration expiry (camp-only, §39.3), and the skipped census sites in
 §40.3.
+
+## 41. SPEC — the caster peel, part 1: faithful spell selection + the Magic Missile cast (M5; Fable-scoped) (2026-07-23)
+
+**Goal: caster-bar's frontier moved past 453 by faithful draws only — plausibly to
+CLOSURE 3517/3517.** The capture's whole spell story is now RE-complete and
+draw-accounted: round 2 (@453) draws 3× d1 (one priority-7 pass, all picks rejected —
+the d7 rolled 1); round 3 (@1016-1029) is THE CAST — ten d1s (3+3+3 rejections at
+priorities 7/6/5, then the accepted pick at priority 4) + one d10 (the `find_target`
+near-list pick) + three d4s (Magic Missile damage 3+3d4) — and every later PHILIPPE
+turn is selection-silent (the slot was consumed) and pure modeled melee. Post-cast the
+fight contains no other stubbed territory, so closure is the realistic target; bank at
+a named draw if a residual surfaces.
+
+### 41.1 The selection loop (`sub_3560B` @`ovr010:060B-0738`) — the draws
+
+Already modeled: the collection loop (`record[0x1E+i]`, `i=1..0x53`, §33), the gates
+(§33 + the §38 toggle schedule), the unconditional d7. To land: the pass loop.
+
+- `priority = 7`, `bound = roll_dice(7,1)` (the existing d7 — its RESULT becomes
+  load-bearing), `pass = 1`.
+- While `pass <= bound` and nothing picked: up to **3×** `roll_dice(spells_count, 1)`
+  (each result −1 indexes the collected candidate list); each pick →
+  `ShouldCastSpellX(priority, id)`; an accept stops the inner loop AND the outer.
+  Then `priority -= 1`, `pass += 1`. (coab `ovr010.cs:255-273`, asm verified
+  `ovr010:06A9-070D`.)
+- On accept: `spell_menu3` (§41.3). On no pick: fall through to the normal turn
+  (items_selection → find_target → move-attack). **On a modeled cast the AI turn
+  RETURNS immediately after `sub_3560B`** (coab `ovr010.cs:74-77`) — no
+  items_selection, no melee targeting, no movement.
+
+### 41.2 `ShouldCastSpellX` (`sub_353B1` @`ovr010:03B1-04A7`) — draw-free for MM
+
+Verdict chain (in order):
+1. **Priority gate**: `SpellData[id].priority >= minPriority` else reject. The table =
+   `gbl.spellCastingTable` @`seg600:37DC`, 16-byte stride (`Classes/Gbl.cs:567+`,
+   struct field map `Classes/Spells.cs:153-204` — priority @+0xD, field_E @+0xE,
+   field_F @+0xF, fixedRange @+0x2, perLvlRange @+0x3, field_6 @+0x6, damageOnSave
+   @+0x8, affect_id @+0xA, whenCast @+0xB, castingDelay @+0xC).
+2. `id == 3` special (`find_healing_target`) — cite, tripwire (no capture).
+3. `field_E == 0` → **accept** (self/buff spells need no target scan).
+4. Else `near_enermy(SpellRange(id), caster)` — `BuildNearTargets`
+   (`ovr025.cs:1290`) = `Rebuild_SortedCombatantList(caster, range, enemy-team
+   filter)` = OUR near-list flood; count == 0 → reject.
+5. `field_F == 0` → **accept**. Else the `sub_352AF` per-target loop
+   (`ovr010.cs:117-141`) — **DRAW-BEARING: `RollSavingThrow` per candidate** —
+   tripwire this branch (`spell-ff-scan`); no pinned capture reaches it (MM ff=0).
+
+`SpellRange` (`sub_5CDE5`, `ovr023.cs:515`): `fixedRange + perLvlRange × castingLvl`;
+0-with-field_6 → 1; −1/0xFF → 1. `castingLvl = spellMaxTargetCount(id)`
+(`sub_6886F`, `ovr025.cs:1342`): MagicUser class → `max(SkillLevel(MU),
+SkillLevel(Ranger)−8)` (the §34 SkillLevel machinery); the no-caster fallback 6;
+Monster 12; `spell_from_item` → 6 (cite only).
+
+**Magic Missile row (id 0x0F)**: priority 4, field_E 1, field_F 0, fixedRange 6,
+perLvlRange 4, field_6 4, targets Combat, damageOnSave Normal(=0), saveVerse Spell,
+affect none, whenCast Combat, castingDelay 1. **Transcribe rows lazily**: MM now; any
+OTHER id reaching ShouldCastSpellX → StubTripped `spell-entry` + reject (capture-safe:
+pinned captures memorize only MM; a future capture names the next row to transcribe).
+
+### 41.3 The cast (`spell_menu3` → `sub_5D2E1` → `SpellMagicMissile`)
+
+- `spell_menu3` (`ovr014.cs:1373`): whenCast==Camp → "Camp Only" abort (cite);
+  `delay = castingDelay/3` — MM: 0 → **immediate cast** `sub_5D2E1` + clear_actions.
+  `delay > 0` spells queue `actions.spell_id` + delay clamp ("Begins Casting") —
+  cite, tripwire (`spell-queued`).
+- `sub_5D2E1` (`ovr023.cs:674-810`), combat path:
+  1. Miscast: `HasAffect(affect_4a)` → d2, 1 = miscast — a §39 `find_affect` read;
+     empty affects → no draw. Wire through the substrate.
+  2. Targeting: `SpellCastFunction = ovr014.target` in combat (`ovr009.cs:25`).
+     `ovr014.target` (`ovr014.cs:1164`): MM's `field_6 & 0xF = 4` → the tail branch,
+     `max_targets = (4&3)+1 = 1` → one `sub_4001C` pick. Other field_6 shapes (0 self,
+     5 budgeted multi w/ 2d4 draw, 8-0xE area, 0xF held/area) — cite, tripwire
+     (`spell-target-shape`).
+  3. `sub_4001C` (`ovr014.cs:1095`), QuickFight + field_E≠0: **`find_target(true, 0,
+     SpellRange(id), caster)` — the d10** (our find_target, spell-mode args:
+     clear_target=true, arg_2=0, max_range=range). Then the held filter: target
+     `IsHeld()` && spell's affect_id ∈ `unk_18ADB[1..4]` (held-affect ids) → pick
+     rejected (the var_9 loop runs ONCE → no cast this turn). MM affect none → never
+     rejects. IsHeld = the §39 held-affects test (empty lists → false).
+  4. On target success: the missile camera — `draw_missile_attack(0x1E, 4, targetPos,
+     casterPos)` + the `draw_74B3F` attack-icon pair (PlayerOnScreen-gated) — the §36
+     machinery, MagicAttackDisplay = §36.3 site 8. Draw-free.
+  5. `remove_invisibility(caster)` — §39 API. Draw-free.
+  6. **`spellList.ClearSpell(id)` — slot consumption**: clears ONE memorized slot
+     (implementer verifies WHICH slot in `SpellList.ClearSpell` + the binary; the
+     capture pins the observable: every post-cast PHILIPPE turn draws ZERO selection
+     d1s — spells_count must hit 0).
+  7. Dispatch `spellTable[0x0F] = SpellMagicMissile` (`ovr023.cs:1166`, `sub_5E221`):
+     `n = spellMaxTargetCount + 1 = lvl+1`; `damage = n/2 + roll_dice_save(4, n/2)`;
+     `roll_dice_save ≡ roll_dice` (`ovr024.cs:601` — sets `gbl.dice_count` only) →
+     **(lvl+1)/2 separate d4 draws**. Capture: 3 d4s → PHILIPPE lvl 5-6 (the record's
+     SkillLevel(MU) decides; verify the decode agrees).
+  8. `DoSpellCastingWork` (`sub_5CF7F`): per target — `damageOnSave == Normal(0)` →
+     `saved = false`, **NO save draw** (capture-confirmed: d100s follow the d4s);
+     `fixedRange == -1` touch branch (Type_11 + PC_CanHitTarget) not MM — cite;
+     `damage_person(false, Normal, damage, target)` → our existing apply_damage
+     ladder (draw-free); `affect_id == 0` → no ApplyAttackSpellAffect.
+
+### 41.4 Build order
+
+1. The SpellEntry row type + MM's row (lazy-transcription rule) + unit tests.
+2. Selection loop draws + ShouldCastSpellX (MM chain) — canary: guard 8/8 with
+   caster-bar's pin EDITED IN THE SAME COMMIT once the frontier moves (the exact-pin
+   rule). Expect 453 → 1016 region.
+3. The cast: targeting d10 → damage d4s → consumption → early-return. Expect the
+   frontier past 1029 — run to the next residual or closure; pin whatever is TRUE.
+4. Tripwires: `spell-entry`, `spell-ff-scan`, `spell-queued`, `spell-target-shape`.
+5. bar-fists-2 must stay CLOSED (two inert slots, magic off — the §33 proof), armed-bar
+   and the four brawls untouched. Full gates per commit.
+
+### Empirical anchors (this session's capture scan + record decode)
+
+- Round-2 trip @453: 3× d1 (d7 rolled 1). Round-3 cast @1016-1029: 10× d1 + d10 +
+  3× d4, then d100s (no save). Post-cast PHILIPPE turn heads draw d4/d7/d7 and no
+  d1s. Other single-d1 runs in the stream are melee find_target re-picks (near-list
+  size 1), not selection.
+- PHILIPPE = combatant [5]: ClassLevels (rec 0x109+) = MU slot(5) = **5**,
+  single-class, olds all 0 → SkillLevel(MU) = 5 → castingLvl 5, SpellRange
+  6+4×5 = **26**, missiles (5+1)/2 = **3** ✓ the three d4s. Memorized:
+  {0x71: 0x0F} only (§33). Combatant [3] is F4/MU4 with ZERO memorized slots —
+  gate-1 inert, capture-consistent (no selection draws on its turns).
