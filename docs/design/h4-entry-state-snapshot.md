@@ -2274,3 +2274,180 @@ the `gbx-formats` typed decode + tests; the import/spawn plumbing is NOT wired h
 One mechanic per commit, binary-cited; never weaken an assert; full gates (fmt, clippy,
 `cargo test --workspace`, guard) per commit. Worktree, no push — Bryan reviews the PR
 after Fable's audit.
+
+## 40. LANDED — the affect substrate, draw-neutral; guard 8/8 exact at every commit (M5 Phase 2 opener, 2026-07-23)
+
+The §39 spec was implemented on branch `m5-affects` off the §39 spec commit
+(`8d79537`, which itself carries §38's toggle-window code). **Every wired site's
+`CheckType` was re-verified at the LISTING call site** (the `push player; mov al
+<type>; push ax; call work_on_00` pattern) via
+`LC_ALL=C grep -an "work_on_00" coab_new.lst` and a per-call-site scan of the
+preceding `mov al,<type>` — the map is transcribed below. The substrate is
+draw-neutral by construction (PRNG-free dispatch over the empty affect lists every
+capture carries), and it held: **all eight guard pins EXACT at every one of the five
+commits, zero manifest edits, zero stub trips on every closed capture.**
+
+**Five commits (each fully gated):**
+
+- `27372bd` §39.1 — `gbx-formats::affects::AffectRecord {kind, minutes, data,
+  call_affect_table}` + `decode` (bytes 0x00-0x04, the heap `next` @0x05-0x08
+  ignored). Synthetic-only tests (D10), incl. a junk-`next` fixture proving 0x05-0x08
+  are discarded. **7 formats tests** (125 → 132).
+- `17241fc` §39.2 — `Combatant.affects: Vec<AffectRecord>` (empty at both literal
+  constructors; `combatant_from_record` inherits it via `new_melee`) + the PRNG-free
+  API (`find_affect`/`has_affect`/`add_affect` on `Combatant`;
+  `check_affects_effect`/`calc_affect_effect`/`remove_affect`/`remove_combat_affects`/
+  `remove_attackers_affects`/`remove_invisibility` on `CombatState`) + the `CheckType`
+  enum and the 24-case dispatch. **10 engine tests** (365 → 375).
+- `95fc276` §39.5 (1/3) — turn/round/movement/AI-special check sites.
+- `bab70f5` §39.5 (2/3) — the to-hit / attack-path check sites.
+- `fcb91bd` §39.5 (3/3) — the flee / death / removal sites.
+
+### 40.1 The dispatch table + the strip tables (LISTING-cited)
+
+The 24-case `work_on_00` dispatch (`ovr024:0414-0D02`) was transcribed verbatim from
+coab `ovr024.cs:140-375`, ids from `Classes/Affect.cs`, each case's ORDER preserved
+(find-first makes order observable once handlers land). A unit test pins the 24 case
+lengths `[0,4,7,7,6,16,21,7,5,12,10,8,16,3,11,5,7,3,3,5,2,1,1,1]` against an
+accidental edit.
+
+The two strip tables were transcribed **from the LISTING data** (not just coab) and
+match coab id-for-id:
+
+- `RemoveCombatAffects` (`sub_645AB` @`ovr024:15AB`): `unk_16D41[1..19]`
+  @`seg600:0A32-0A44` = `07 0B 0D 15 17 1E 1F 20 33 34 35 3A 3B 5F 62 88 89 8B 90`
+  (19 entries). The loop reads indices 1..19 (`mov al, unk_16D41[di]`, `cmp
+  loop_var,13h; jnz`), index 0 (`0FFh`) unused. Then the berserk quirk (`@15DC-1601`):
+  `find_affect(berserk 0x4D)` + `field_F7 == 0B3h` (`PC_Berzerk`) → `combat_team = 0`
+  (Ours) — modeled as the `"affect-berserk"` tripwire, not a team flip.
+- `RemoveAttackersAffects` (`sub_6460D` @`ovr024:160D`): `[0xA46..0xA49]` @`seg600`
+  = `0D 3A 8B 90` (reduce, clear_movement, affect_8b, owlbear_hug_round_attack; loop
+  reads `[di+0A45h]` for di 1..4, `cmp var_1,4; jnz`).
+
+The radius-carrier set for `calc_affect_effect` is the `unk_6325A` **bitmask**
+@`ovr024:025A` (`@Set@MemberOf` bit-test, `ptr[byte/8] & (byte&7)`), which decodes to
+`{silence_15_radius 0x15, prot_from_evil_10_radius 0x2D, prot_from_good_10_radius
+0x2E, prayer 0x31}` — verified bit-by-bit (0x15→byte2 bit5, 0x2D→byte5 bit5,
+0x2E→byte5 bit6, 0x31→byte6 bit1). The carrier range gate (`prayer ? 6 : 1`,
+`cmp affect_type,31h @031C`) is the spell slice's; the substrate models the scan and
+trips on a carrier found.
+
+### 40.2 The census sites wired (each `CheckType` verified at its listing call site)
+
+| § | site (our anchor) | CheckType | listing call | coab |
+|---|---|---|---|---|
+| 1 | turn head (`TurnDriver::MeleeAi`) | PlayerRestrained 7 | `ovr009:02B7` (`mov al,7`) | ovr009.cs:108 |
+| 1 | turn head, in `delay>0` | Type_15 0x0F | `ovr009:0352` | :125 |
+| 1 | turn head, in `delay>0` | Confusion 0x15 | `ovr009:036E` | :129 (spell_id==0, trivially true) |
+| 2 | `battle_round_checks` per member | Type_19 0x13 | `ovr009:09EF` | :371 |
+| 5 | `sub_35db1` head | Type_14 0x0E | `ovr010:0DDB` | :516 |
+| 4 | `reclac_attacks` | Movement 0x12 | `ovr014:0E66` | :488 |
+| 4 | `calculate_initiative` | Movement 0x12 | `ovr014:005E` | :23 |
+| 6 | `attack_target`, pre-AC-select | Type_11 0x0B | `ovr014:167E` | :774 |
+| 6 | `attack_target` swing, roll>1 | Type_10 0x0A | `ovr024:1283` | PC_CanHitTarget :529 |
+| 6 | `attack_target` swing, roll>1 | Type_16 0x10 | `ovr024:1290` | PC_CanHitTarget :530 |
+| 6 | `attack_target` on-hit, post-`roll_damage` | SpecialAttacks 4 | `ovr014:023A` | sub_3E192 :100 |
+| 6 | `attack_target` on-hit, post-`roll_damage` | Type_5 5 | `ovr014:0248` | sub_3E192 :101 |
+| 3 | `flee_check`, after seed/clamp | Morale 0x11 | `ovr010:1414` | :780 |
+| 3 | `flee_check`, after enemyHealth% | Morale 0x11 | `ovr010:1467` | :788 |
+| 9 | `apply_damage` death tail | Death 0x0D | `ovr014:0630` | DisplayAttackMessage :210 |
+
+Removal / list ops wired: `remove_invisibility(attacker)` per swing at the
+PC_CanHitTarget head (coab `ovr024.cs:519`, our `attack_target`);
+`remove_attackers_affects` at `flee_check`'s head (`sub_6460D`, coab :765);
+`remove_affect(0x4A)`/`remove_affect(0x4B)` in `flee_check`'s flee fork
+(`ovr010:14DC/14F0`); `remove_combat_affects` in `apply_damage`'s death tail
+(`sub_645AB` call @`ovr014:0622`) and in `remove_from_combat` (`sub_644A7`, coab :645).
+
+### 40.3 Census sites SKIPPED, with reasons (mechanic not modeled / no emit seam)
+
+- **`CalcMoves`'s Movement check (`ovr014:0179`, coab :76).** Our `calc_moves` is a
+  **pure free function** with no `&mut self`/emit seam, called from many read-only
+  sites. The other two Movement checks (CalcInit, reclac_attacks) ARE wired at their
+  self-bearing anchors, and both call `calc_moves` right after their own Movement pass,
+  so the effect (an empty-list no-op) is covered in the modeled flow. Threading emit
+  through the widely-used pure helper buys nothing draw-visible.
+- **`CanSeeTargetA`'s Visibility + None checks (`ovr014:117C`/`11BD`, coab :583/:591).**
+  Our `can_see_target` is a `&self` predicate (`return in_combat`) **inlined into
+  self-borrowing read-only loops** (near-target building, mover/target filters at 5
+  call sites). Hosting `CheckAffectsEffect(Visibility)` there needs `&mut self` to emit
+  and would fire per scan-iteration, not per logical visibility check. The underlying
+  invisibility RESOLUTION is explicitly unmodeled (the code comment: "no affects → a
+  live target is always seen"); the `None` case is a dispatch no-op anyway (case 0).
+  Belongs with the invisibility slice. Citation preserved at the anchor.
+- **`RollSavingThrow`'s SavingThrow check (`ovr024:134F`, coab :577).** Our
+  `roll_saving_throw` is a **pure free fn with no live combat caller** — its only
+  callers are tests; nothing in a modeled combat flow rolls a save (no spell/effect
+  resolution yet). No emit seam, no reachable site; lands with the effect slice.
+- **`damage_person`'s PreDamage + FireShield (`ovr024:1FD1`/`2002`, coab :1186/:1201).**
+  These live in `damage_person` — the **spell/effect-damage entry** — which our engine
+  does not model. The weapon path is `DisplayAttackMessage → damage_player` (our
+  `apply_damage`), which never enters `damage_person` (confirmed: coab `damage_player`,
+  ovr025.cs:1184-1245, contains NO affect checks; they are all in the callers). Wiring
+  them into the weapon path would run affect checks the binary does not run on a weapon
+  hit. Only the Death + RemoveCombatAffects tail, which IS in the weapon caller
+  (DisplayAttackMessage :209-210), was wired. Lands with the spell/effect-damage slice.
+- **`remove_invisibility` at the held-slay auto-hit (`ovr014:0752`, coab :752).** In the
+  `|| target.IsHeld()` auto-hit / held-slay branch, which is affect-gated (held IS an
+  affect state) and **not modeled** (our `resolve_attack` doc already flags the held
+  auto-hit as unmodeled). The modeled `remove_invisibility` is the PC_CanHitTarget one
+  (:519), which IS wired.
+- **`CanHitTarget`'s Type_16 (`ovr024:1211`, coab :493, `sub_641DD`).** A DIFFERENT
+  function from PC_CanHitTarget — its only caller is `CMD_Damage` (the ECL `DAMAGE`
+  opcode, a scripted/area effect), not the weapon path. Scripted effects are their own
+  slice.
+- **The on-hit `(CheckType)attackIdx+1` check (`ovr014:1839`, dynamic Type_2/Type_3).**
+  The poison/special-attack-on-hit check inside AttackTarget01's hit branch — **not in
+  the §39.5 census** (the census lists Type_5/SpecialAttacks/Type_10/16/11 for the
+  attack path, not Type_2/3). Left unwired per the census.
+- **`ovr011:1D7C`/`1D8A` (Type_8/Type_22), `ovr013:26B2` (Death, CallAffectTable),
+  `ovr023:*` (Type_11/MagicResistance ×2), `ovr024:230A` (MagicResistance),
+  `ovr024:22A8`/`008A` (Death in damage_person/KillPlayer).** Unmodeled subsystems
+  (BattleSetup, the affect-effect jump table itself, spell resolution) — the spec's
+  own "skip sites in unmodeled subsystems" clause. `KillPlayer` (`ovr024.cs:36`) is a
+  distinct death entry we don't model as its own function; the weapon-death tail it
+  shares (RemoveCombatAffects + Death) IS wired in `apply_damage`.
+
+### 40.4 coab≠binary found (LISTING evidence)
+
+**`remove_affect`'s CHA stat-recompute fires on `friends` (0x0E), not `resist_fire`
+(0x14).** coab (`ovr024.cs:83`) reads `if (affect_id == Affects.resist_fire)
+CalcStatBonuses(Stat.CHA, ...)`. The LISTING compares `[bp+0Ah] (affect_id), 0Eh`
+(`ovr024:0222`) → `sub_648D9(al=5)` (CHA). `0x0E` is `friends`, not `resist_fire`
+(`0x14`) — and semantically the binary is right: the AD&D **Friends** spell buffs
+Charisma; `resist_fire → CHA` is nonsense. The STR set matches coab exactly:
+`{enlarge 0x0C, strength 0x26, strength_spell 0x92}` → `sub_648D9(al=0)`
+(`@0235-0245`). The substrate uses the binary set `{0x0E, 0x0C, 0x26, 0x92}` for the
+`"affect-remove-side"` tripwire (draw-neutral either way — no capture removes an
+affect from a non-empty list).
+
+### 40.5 Result
+
+`cargo fmt --all --check` clean; `cargo clippy --workspace --all-targets` no warnings
+(the sole remaining `#[allow(dead_code)]` is on `CheckType`, whose full 24-value set is
+transcribed for dispatch fidelity though only the wired subset is constructed;
+`add_affect` is `pub`, uncalled until the spell slice supplies the first affect-adding
+caller). `cargo test --workspace` green (**132 formats, 375 engine**, all other crates
+unchanged). Guard **8/8 EXACT** at every commit:
+
+```
+OK  combat4.gbxtrace — CLOSED (operand-exact, 0 trips)
+OK  combat3+terrain4.gbxtrace — CLOSED (operand-exact, 0 trips)
+OK  combat2+terrain4.gbxtrace — CLOSED (operand-exact, 0 trips)
+OK  combat+terrain4.gbxtrace — frontier @368 (exact)
+OK  bar-rout-58c50.gbxtrace — CLOSED (operand-exact, 0 trips)
+OK  armed-bar.gbxtrace — CLOSED (operand-exact, 0 trips)
+OK  caster-bar.gbxtrace — frontier @453 (exact)
+OK  bar-fists-2.gbxtrace — CLOSED (operand-exact, 0 trips)
+frontier guard: 8/8 pins held
+```
+
+Draw-neutrality proof discharged: the flee path (`bar-rout` CLOSED) runs
+RemoveAttackersAffects + Morale ×2 + RemoveCombatAffects with zero trips; the
+downed-PC death path (`combat`/`combat2` diverge for other reasons) runs
+RemoveCombatAffects + Death unshifted; every closed capture stays 0 trips. The
+substrate is the platform the spell slice lands on (§25 Phase-2 order: affects first).
+**Not wired here** (their own slices): affect population at entry (the `0xF2` chain
+walk / `.FX` import / SPC innate clone — hook TODO #2), the `CallAffectTable` add/remove
+handlers, tick-duration expiry (camp-only, §39.3), and the skipped census sites in
+§40.3.
