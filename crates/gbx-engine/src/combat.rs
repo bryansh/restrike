@@ -1296,7 +1296,6 @@ impl CombatState {
     /// coab says `resist_fire`, a coab≠binary bug — the binary compares `0x0E`,
     /// and Friends buffs Charisma) and **STR for enlarge 0x0C / strength 0x26 /
     /// strength_spell 0x92** (`ovr024:0235-0245`). Draw-free.
-    #[allow(dead_code)]
     fn remove_affect(&mut self, ci: usize, kind: u8) {
         let Some(idx) = self.fighters[ci]
             .affects
@@ -1356,7 +1355,6 @@ impl CombatState {
     /// `remove_invisibility(player)` (coab `ovr024.cs:650-658`): while an
     /// `invisibility` (0x19) affect remains, remove it — clears every instance.
     /// Draw-free (a list walk).
-    #[allow(dead_code)]
     fn remove_invisibility(&mut self, ci: usize) {
         while self.fighters[ci].find_affect(AFF_INVISIBILITY).is_some() {
             self.remove_affect(ci, AFF_INVISIBILITY);
@@ -1374,7 +1372,6 @@ impl CombatState {
 // keeps its allow.
 
 /// `Affects.invisibility` (`Classes/Affect.cs:32`).
-#[allow(dead_code)]
 const AFF_INVISIBILITY: u8 = 0x19;
 /// `Affects.berserk` (`Affect.cs:84`) — the [`RemoveCombatAffects`] quirk gate.
 #[allow(dead_code)]
@@ -1394,7 +1391,6 @@ const RADIUS_CARRIER_KINDS: [u8; 4] = [0x15, 0x2D, 0x2E, 0x31];
 /// `call_affect_table`. From the LISTING: **CHA on friends 0x0E** (`@0222`,
 /// coab≠binary — coab wrote `resist_fire`; the binary compares `0x0E`), **STR on
 /// enlarge 0x0C / strength 0x26 / strength_spell 0x92** (`@0235-0245`).
-#[allow(dead_code)]
 const STAT_RECOMPUTE_KINDS: [u8; 4] = [0x0E, 0x0C, 0x26, 0x92];
 
 /// `RemoveCombatAffects`'s strip table (`unk_16D41[1..19]` @`seg600:0A32-0A44`,
@@ -4017,6 +4013,11 @@ impl CombatState {
             self.clear_actions(actor);
             return true;
         }
+        // §39.5 site 6: `CheckAffectsEffect(target, Type_11)` — after
+        // `reclac_player_values(target)` and before the AC selection, once per
+        // attack (`mov al,0Bh; call work_on_00` @`ovr014:167E`, coab
+        // ovr014.cs:774). Draw-free (empty lists).
+        self.check_affects_effect(target, CheckType::Type11);
         // AttackTarget01's AC selection (`sub_3F4EB` @`ovr014:1683-1708`, §36.4).
         // Backstab preempts (the binary's `if CanBackStabTarget` @`1694`, `else`
         // the flanking/behind path @`16AD`): `ac_behind − 4` (@`169E-16A5`).
@@ -4061,7 +4062,18 @@ impl CombatState {
                 }
                 self.fighters[actor].attack_idx = attack_idx;
 
+                // §39.5 site 6/10: `PC_CanHitTarget` (`sub_64245`) opens with
+                // `remove_invisibility(attacker)` (coab ovr024.cs:519) then rolls
+                // the d20; if `roll > 1` it runs `CheckAffectsEffect(attacker,
+                // Type_10)` (`mov al,0Ah` @`ovr024:1283`) and `(target, Type_16)`
+                // (`mov al,10h` @`ovr024:1290`). Our `pc_can_hit_target` is the
+                // pure d20; host those affect ops around it, per swing. Draw-free.
+                self.remove_invisibility(actor);
                 let th = pc_can_hit_target(rng, target_ac, hit_bonus, 0); // one d20
+                if th.d20 > 1 {
+                    self.check_affects_effect(actor, CheckType::Type10);
+                    self.check_affects_effect(target, CheckType::Type16);
+                }
                 if th.hit {
                     // `sub_3E192(idx)` damage cells (§34.6): idx 1 = @0x19E/0x1A0/
                     // 0x1A2 (our decoded profile-1), idx 2 = @0x19F/0x1A1/0x1A3
@@ -4085,6 +4097,15 @@ impl CombatState {
                         None
                     };
                     let dmg = roll_damage(rng, ds, dc, db, backstab);
+                    // §39.5 site 6: the tail of `sub_3E192` (the damage function),
+                    // after the roll/backstab and `damage_flags = 0`, before the
+                    // caller applies it: `CheckAffectsEffect(attacker,
+                    // SpecialAttacks)` (`mov al,4` @`ovr014:023A`, coab
+                    // ovr014.cs:100) then `(target, Type_5)` (`mov al,5`
+                    // @`ovr014:0248`, coab :101). Fires only on a hit (sub_3E192
+                    // runs only then). Draw-free.
+                    self.check_affects_effect(actor, CheckType::SpecialAttacks);
+                    self.check_affects_effect(target, CheckType::Type5);
                     self.apply_damage(target, dmg.amount);
                     if !self.fighters[target].in_combat {
                         target_gone = true;
