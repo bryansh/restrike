@@ -1,0 +1,23 @@
+# Revisions to skip in `git blame` — pure-move refactors that would otherwise
+# attribute every moved line to the move commit. See
+# docs/design/engine-restructure.md §6 (the combat.rs module split).
+#
+# Enable locally with:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+# (GitHub honours this file automatically.)
+#
+# The commit 1 rename (combat.rs -> combat/mod.rs) is intentionally omitted:
+# `git blame` follows content across renames on its own, so it needs no entry.
+
+# combat split 2/8: carve combat/records.rs
+5cb831c6d4abf57c94a044ca3e0602f85896ee44
+# combat split 3/8: carve combat/affects.rs
+ee8da23c80ee64f37b486586c5e8cb921edeadd5
+# combat split 4/8: carve combat/facing.rs
+d7ef5664c455c695c9c3f891071a39c04e1174e2
+# combat split 5/8: carve combat/attack.rs
+cd0777481acfe43445f0f38c9fa048cf5e6ec73e
+# combat split 6/8: carve combat/ai.rs
+8280f1c9b594f654ce51958eaaa81c14af15e745
+# combat split 7/8: move the test module into combat/tests/
+a1a3e257825ad196976d73e0db2b8e97bb05fc05

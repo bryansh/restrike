@@ -91,3 +91,58 @@ problem while the split waits for its quiet window.
 - No behavior or API change of any kind rides a move commit.
 - No renames of types/functions during the move (rename later if wanted, as its own
   reviewable change).
+
+## 6. Executed (2026-07-23, branch `combat-restructure` from main @ 4602b57)
+
+The split landed as the planned move-only series. Each carve passed the full gates
+(`cargo fmt --check`, `clippy --workspace --all-targets`, `test --workspace` with the
+engine suite steady at **375** and formats at **132**) and — the no-change proof — the
+frontier guard **8/8** unchanged after every commit (six CLOSED operand-exact 0-trip;
+`combat+terrain4` @368; `caster-bar` @453).
+
+The commit series (`.git-blame-ignore-revs` lists the carves 2–7; the rename is
+followed by `git blame` automatically):
+
+| # | commit | subject |
+|---|---|---|
+| 1 | `fe4458e` | rename `combat.rs` → `combat/mod.rs` (pure `git mv`) |
+| 2 | `5cb831c` | carve `combat/records.rs` (record decode + replay harness) |
+| 3 | `ee8da23` | carve `combat/affects.rs` (the §39 affect substrate) |
+| 4 | `d7ef566` | carve `combat/facing.rs` (the §36 combat camera) |
+| 5 | `cd07774` | carve `combat/attack.rs` (the ovr014 attack path) |
+| 6 | `8280f1c` | carve `combat/ai.rs` (the ovr010 QuickFight AI) |
+| 7 | `a1a3e25` | move the test module into `combat/tests/` |
+
+Final layout (`wc -l`):
+
+```
+crates/gbx-engine/src/combat/
+  mod.rs         3373   CombatState/Combatant/round loop/initiative + the shared
+                        resolve, map, placement, range, geometry helpers (ovr009/011)
+  records.rs      190   combatant_from_record + entry decode
+  affects.rs      289   the §39 substrate (ovr024)
+  facing.rs       156   the §36 combat camera (ovr033)
+  attack.rs      1072   find_target, attack_target, backstab, departure/sweep,
+                        ranged/ammo/items_selection (ovr014, §34)
+  ai.rs           775   the QuickFight turn body, flee/morale, guarding (ovr010)
+  tests/
+    mod.rs        134   shared fixtures (DrawLog/ActionLog/Replay/SEED/party/monster/
+                        clamp_init) + synth_item_table/place_input/FLOOR
+    core.rs      1187   initiative/selection/round-loop + resolve + map/placement +
+                        range/geometry tests
+    attack.rs     365   the armed/ranged (§34) tests
+    facing.rs     687   the camera + facing (§36) tests
+    ai.rs         933   field_15 gate, the melee-AI-turn parity, stub/auto-cast/flee
+    records.rs    125   the replay-harness (record decode) tests
+    affects.rs    230   the §39 substrate tests
+```
+
+Deviations from the §2 map, all noted at review: `missile_path_pixel_steps` stayed in
+`mod.rs`'s geometry section (an ovr025 `SteppingPath` helper called by
+`draw_missile_camera` as a parent helper — moving it would force a re-export for a
+bare-name test reference); `remove_from_combat`/`max_opposition_moves`/`flee_battle`/
+`bandage` (ovr024/ovr014/ovr025 by citation) landed in `ai.rs` with their sole
+callers (the flee/AI path); `apply_damage` (ovr025 `damage_player`) landed in
+`attack.rs` with its sole caller `attack_target`. Cross-module access uses the
+minimum `pub(super)` (plus `pub use` for `RecordCombatant`/`combat_state_from_records`/
+`field_15_mode_gate`); `lib.rs` was untouched.
