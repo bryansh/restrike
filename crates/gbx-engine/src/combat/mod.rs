@@ -277,11 +277,32 @@ pub struct Combatant {
     /// (`ovr009:029C`) and every movement step (`ovr014:090F`). Read ONLY by the
     /// flanking heuristic (`> 4`, `ovr014:16BA`). Values only ever 0..7.
     pub direction_changes: u8,
-    /// The count of non-zero `spellList`@0x1E slots on the source record — an
-    /// approximation of coab's `player.spells.Count`, decoded ONLY to drive the
-    /// `memorized-spells` stub tripwire (`sub_3560B`'s inner spell-selection
-    /// draws are unmodeled, M5). `0` for synthetic combatants.
-    pub memorized_spells: u8,
+    /// The ordered memorized-spell candidate list — `sub_3560B`'s collection
+    /// loop (`ovr010:062A-065D`) reading `record[0x1E + i]` for `i = 1..=0x53`
+    /// and collecting every **non-zero** byte in slot order (`cmp ..,0`/`jbe` ≡
+    /// `jz` — high-bit "learning" entries collect too, a cited coab≠binary
+    /// nuance, doc §33). The list packs from the back (`SpellList.Save` fills
+    /// index 83 down), so the first memorized spell lands at slot 83 (`0x1E+83 =
+    /// 0x71`); slot 0 @0x1E is never read (the loop is 1-based). The selection
+    /// loop indexes this list with `roll_dice(len,1) − 1` (doc §41.1). caster-bar
+    /// PHILIPPE decodes to `[0x0F]`; empty for synthetic combatants and every
+    /// non-caster record.
+    pub memorized_list: Vec<u8>,
+    /// `SkillLevel(SkillType.MagicUser)` precomputed from the record
+    /// (`ClassLevel[5] + ClassLevelsOld[5] · DualClassExceedsPreviousLevel`,
+    /// `Player.cs:494`) — the `spellMaxTargetCount` MagicUser term (doc §41.2,
+    /// `ovr025.cs:1376`). Constant during a fight. `0` for synthetic combatants.
+    pub skill_level_magic_user: i32,
+    /// `SkillLevel(SkillType.Ranger)` precomputed from the record — the
+    /// `spellMaxTargetCount` MagicUser `max(MU, Ranger − 8)` term
+    /// (`ovr025.cs:1377`). `0` for synthetic combatants.
+    pub skill_level_ranger: i32,
+    /// The `spellMaxTargetCount` **no-caster fallback** predicate precomputed
+    /// (`ovr025.cs:1351`): `cleric_lvl == 0 && magic_user_lvl == 0 && paladin_lvl
+    /// < 9 && ranger_lvl < 8` — a non-caster (or low paladin/ranger) casting from
+    /// an item gets casting level 6. `false` for a real Magic-User (PHILIPPE:
+    /// MU 5 ⇒ not fallback ⇒ castingLvl 5). `false` for synthetic combatants.
+    pub caster_no_class: bool,
     /// `Player.health_status@0x195` — the downed-PC ladder (§26). Entry records
     /// are [`HealthStatus::Okey`]; `damage_player` moves a downed combatant to
     /// `dying`/`unconscious`/`dead` (`apply_damage`), the bleed tick advances
@@ -452,7 +473,10 @@ impl Combatant {
             direction: 0,
             attacks_received: 0,
             direction_changes: 0,
-            memorized_spells: 0,
+            memorized_list: Vec::new(),
+            skill_level_magic_user: 0,
+            skill_level_ranger: 0,
+            caster_no_class: false,
             health_status: HealthStatus::Okey,
             bleeding: 0,
             loadout: None,
@@ -538,7 +562,10 @@ impl Combatant {
             direction: 0,
             attacks_received: 0,
             direction_changes: 0,
-            memorized_spells: 0,
+            memorized_list: Vec::new(),
+            skill_level_magic_user: 0,
+            skill_level_ranger: 0,
+            caster_no_class: false,
             health_status: HealthStatus::Okey,
             bleeding: 0,
             loadout: None,
@@ -665,9 +692,11 @@ pub enum ActionEvent {
     /// matches. **Diagnostic only**: never part of the `.gbxtrace` vocabulary
     /// (the oracle collector drops it); the replay harnesses report it so a
     /// capture that wanders into a stub names itself instead of silently
-    /// diverging. `stub` is a short stable name: `"memorized-spells"`,
-    /// `"0-hd-sweep"`, `"surrender-int5"` (the `"downed-pc"` wire was retired
-    /// once the downed-PC path was built, §26/§27).
+    /// diverging. `stub` is a short stable name: `"0-hd-sweep"`,
+    /// `"surrender-int5"`, and the spell wires `"spell-entry"`/`"spell-ff-scan"`
+    /// (doc §41.2). (The `"downed-pc"` wire was retired once the downed-PC path
+    /// was built, §26/§27; the `"memorized-spells"` wire was replaced by the
+    /// faithful selection loop, §41.)
     StubTripped {
         combatant_id: usize,
         stub: &'static str,

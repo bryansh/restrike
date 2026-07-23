@@ -1,3 +1,4 @@
+use super::*;
 use crate::combat::spells::{spell_entry, DamageOnSave, SpellClass, SpellTargets, SpellWhen};
 
 // --- the SpellEntry row + the lazy-transcription rule (doc §41.2) -----------
@@ -46,4 +47,147 @@ fn only_magic_missile_is_transcribed() {
             "id {id:#x} must be untranscribed (spell-entry trip)"
         );
     }
+}
+
+// --- the selection loop + ShouldCastSpellX (doc §41.1/§41.2) ----------------
+
+/// Build a tiny fight: an NPC caster [0] with one memorized Magic Missile and
+/// Magic-User level 5, and one live enemy [1] two tiles away (well within the
+/// spell's range 26). The NPC arm of the sub_3560B gate is satisfied; the
+/// enemy makes `BuildNearTargets` non-empty at priority 4.
+fn caster_world() -> CombatWorld {
+    let mut caster = Fighter::new_melee(
+        0,
+        Team::Monster,
+        true,
+        GridPos::new(10, 10),
+        30,
+        5,
+        20,
+        12,
+        (1, 4, 2),
+        5,
+        1,
+    );
+    caster.memorized_list = vec![0x0F];
+    caster.skill_level_magic_user = 5;
+    let enemy = Fighter::new_melee(
+        1,
+        Team::Party,
+        false,
+        GridPos::new(12, 10),
+        30,
+        5,
+        20,
+        12,
+        (1, 4, 2),
+        5,
+        1,
+    );
+    CombatWorld::new(CombatMap::uniform(FLOOR), vec![caster, enemy])
+}
+
+/// `spell_range` for Magic Missile (`ovr023.cs:515`): `fixedRange 6 + perLvlRange
+/// 4 × castingLvl`. A Magic-User 5 caster → castingLvl 5 → 26; the no-caster
+/// fallback → castingLvl 6 → 30.
+#[test]
+fn spell_range_magic_missile_scales_with_casting_level() {
+    let mut world = caster_world();
+    assert_eq!(world.spell_range(0, 0x0F), 26, "MU 5 → 6 + 4×5");
+    assert_eq!(
+        world.spell_max_target_count(0, SpellClass::MagicUser),
+        5,
+        "max(SkillLevel(MU)=5, SkillLevel(Ranger)−8=−8)"
+    );
+    world.fighters[0].caster_no_class = true;
+    assert_eq!(
+        world.spell_range(0, 0x0F),
+        30,
+        "no-caster fallback → 6 + 4×6"
+    );
+}
+
+/// `ShouldCastSpellX`'s Magic Missile chain (`ovr010.cs:143`), draw-free: the
+/// priority gate (MM priority 4), the enemy near-list, and the field_F == 0
+/// accept. An untranscribed id trips `spell-entry` and rejects.
+#[test]
+fn should_cast_spell_x_magic_missile_chain() {
+    let mut world = caster_world();
+    assert!(
+        !world.should_cast_spell_x(5, 0x0F, 0),
+        "priority 4 < minPriority 5 → reject at the gate"
+    );
+    assert!(
+        world.should_cast_spell_x(4, 0x0F, 0),
+        "priority 4 ≥ 4, an enemy is near, field_F 0 → accept"
+    );
+
+    // An untranscribed id (Shield 0x10) → spell-entry trip + reject.
+    let alog = ActionLog::default();
+    world.attach_action_sink(alog.sink());
+    assert!(!world.should_cast_spell_x(1, 0x10, 0));
+    let stubs: Vec<&'static str> = alog
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            ActionEvent::StubTripped { stub, .. } => Some(stub),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(stubs, vec!["spell-entry"]);
+}
+
+/// With no enemy in range, `BuildNearTargets` is empty, so a field_E-≠0 spell
+/// (Magic Missile) rejects even at its own priority (`ovr010.cs:156-158`).
+#[test]
+fn should_cast_spell_x_rejects_with_no_enemy_in_range() {
+    let mut world = caster_world();
+    world.fighters[1].in_combat = false; // the only enemy leaves combat
+    assert!(!world.should_cast_spell_x(4, 0x0F, 0));
+}
+
+/// The selection loop with the gate ON: the unconditional d7 bound, then the
+/// priority-pass picks — Magic Missile (priority 4) rejects at priority 7/6/5
+/// and accepts at priority 4, so a bound reaching pass 4 casts after 3+3+3+1 =
+/// 10 picks. Every pick is `roll_dice(1,1)` (spells_count 1). The exact count is
+/// driven by the seed's d7 (computed with the independent `Replay` oracle).
+#[test]
+fn selection_loop_casts_magic_missile_when_gate_and_bound_allow() {
+    let mut world = caster_world();
+    let mut rng = EngineRng::new(SEED);
+    let log = DrawLog::default();
+    rng.attach_sink(log.sink());
+
+    let bound = Replay::new(SEED).roll(7); // the first draw IS the d7 bound
+    let cast = world.sub_3560b(&mut rng, 0);
+
+    let ns = log.ns();
+    assert_eq!(ns[0], 7, "the first draw is the d7 bound");
+    for n in &ns[1..] {
+        assert_eq!(*n, 1, "each selection pick is roll_dice(spells_count=1,1)");
+    }
+    if bound >= 4 {
+        assert!(cast, "bound {bound} ≥ 4 → MM accepted at priority 4");
+        assert_eq!(ns.len(), 1 + 10, "d7 + 3+3+3+1 picks");
+    } else {
+        assert!(!cast, "bound {bound} < 4 → MM never reaches priority 4");
+        assert_eq!(ns.len(), 1 + 3 * bound as usize, "d7 + 3 picks per pass");
+    }
+}
+
+/// The gate OFF (a PC caster with `AutoPCsCastMagic` off): sub_3560B draws ONLY
+/// the unconditional d7 bound and returns false — the §33 capture-proof
+/// (bar-fists-2 closes with memorized MM slots and zero selection draws).
+#[test]
+fn selection_loop_gate_off_draws_only_the_d7() {
+    let mut world = caster_world();
+    world.fighters[0].team = Team::Party;
+    world.fighters[0].npc = false; // a PC
+    world.fighters[1].team = Team::Monster; // keep a live opponent
+    let mut rng = EngineRng::new(SEED);
+    let log = DrawLog::default();
+    rng.attach_sink(log.sink());
+    assert!(!world.sub_3560b(&mut rng, 0), "magic off → no cast");
+    assert_eq!(log.len(), 1, "gate off → only the d7 bound is drawn");
+    assert_eq!(log.ns()[0], 7);
 }

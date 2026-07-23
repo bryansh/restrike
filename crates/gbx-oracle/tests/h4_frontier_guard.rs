@@ -127,18 +127,16 @@ const PINS: &[Pin] = &[
         auto_cast_toggles: &[],
     },
     Pin {
-        // The caster driver: PHILIPPE's round-2 turn enters sub_3560B's
-        // selection loop (3× roll_dice(1), spells_count=1) — unmodeled until
-        // the spell subsystem lands (after the affects substrate). §38's
-        // flip-window ruling: the '2' press landed BETWEEN his round-1 and
-        // round-2 turns (round-1 gate @draw 83 saw OFF; round-2 gate @453 saw
-        // ON), so the input is entry-false + a toggle at turn ordinal 16 = his
-        // round-2 turn head — the latest boundary the capture itself names.
-        // Any ordinal in [3, 16] is gate-equivalent (verified live); a
-        // from-entry flag would overdraw 3× d1 at his round-1 turn (~@83)
-        // once selection draws land.
+        // The caster driver. sub_3560B's selection loop is now faithful (doc
+        // §41.1): PHILIPPE's round-2 turn draws 3× roll_dice(1) (d7 bound rolled
+        // 1 → one priority-7 pass, MM pri 4 rejects ×3) and his round-3 turn
+        // draws 10× roll_dice(1) (3+3+3 rejects at pri 7/6/5, accept at pri 4)
+        // before the accept — carrying the frontier from @453 to @1026, the
+        // cast's first draw (the `find_target` targeting d10). The cast body
+        // lands in the next commit. §38's flip-window ruling stands: entry-false
+        // + a toggle at turn ordinal 16 (his round-2 turn head).
         capture: "caster-bar.gbxtrace",
-        expect: Expect::Frontier(453),
+        expect: Expect::Frontier(1026),
         map_direction: 2,
         auto_cast: false,
         auto_cast_toggles: &[16],

@@ -715,33 +715,18 @@ impl CombatState {
         // 4. queued spell (spell_id>0) — none for a fighter.
         // 5. turn_undead — non-cleric, short-circuit, draw-free.
 
-        // 6. sub_3560B (ovr010.cs:74) — the UNCONDITIONAL memorized-spell d7 (:248).
-        let _spell_priority = roll_dice(rng, 7, 1);
-        // (spells_count==0 → the inner roll_dice(spells_count,1) loop never runs.)
-        // Tripwire: the binary's inner selection loop draws (3×
-        // `roll_dice(spells_count,1)` per priority pass + the cast) only when ALL
-        // its gates pass (`ovr010:0679-06A7`): memorized slots exist, the caster
-        // is NPC-controlled (`control_morale >= 0x80`) **or** `AutoPCsCastMagic`
-        // is on, and an enemy is live (`friends_count`/`foe_count`,
-        // ovr010.cs:255). A PC with magic OFF draws NOTHING here —
-        // capture-proven: bar-fists-2 closes 3811/3811 with two memorized slots
-        // and zero spell draws (doc §33) — so the wire mirrors the binary's
-        // draw condition, not mere possession.
-        let live_opponent = {
-            let (party, monsters) = self.live_counts();
-            match self.fighters[actor].team {
-                Team::Party => monsters > 0,
-                Team::Monster => party > 0,
-            }
-        };
-        if self.fighters[actor].memorized_spells > 0
-            && (self.fighters[actor].npc || self.auto_pcs_cast_magic)
-            && live_opponent
-        {
-            self.emit(ActionEvent::StubTripped {
-                combatant_id: actor,
-                stub: "memorized-spells",
-            });
+        // 6. sub_3560B (ovr010.cs:74) — the memorized-spell selection loop
+        // (doc §41.1). It always draws the unconditional d7 bound
+        // (`ovr010:066D`, :248) — the draw this step already carried — and, only
+        // when its gate passes (memorized slots exist, the caster is
+        // NPC-controlled OR `AutoPCsCastMagic` is on, and an enemy is live,
+        // `ovr010:0679-06A7`), the priority-pass selection draws. A PC with magic
+        // OFF still draws only the d7 (capture-proven: bar-fists-2 closes
+        // 3811/3811 with two memorized MM slots and no selection draws, doc §33).
+        // On a modeled cast the AI turn RETURNS immediately (`ovr010.cs:74-77`) —
+        // no items_selection, no melee targeting, no movement.
+        if self.sub_3560b(rng, actor) {
+            return;
         }
 
         // 7. AI_items_selection (ovr010.cs:79) — the cornered weapon swap

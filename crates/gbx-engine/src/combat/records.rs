@@ -94,15 +94,31 @@ fn combatant_from_record(
         Some(p) => p.iter().all(|&b| b == 0),
         None => true, // full 0x1A6 records always carry it; missing → treat as null
     };
-    // The `memorized-spells` tripwire input — `sub_3560B`'s spells_count. The
-    // collection loop (`ovr010:062A-065D`) reads `record[0x1E + i]` for
-    // i = 1..=0x53 (bytes 0x1F..0x71): slot 0 @0x1E is NEVER read, and the list
-    // packs from the BACK (`SpellList.Save` fills from index 83 down — the first
-    // memorized spell lands @0x71; doc §33's save-diff). ANY non-zero byte
-    // counts (`cmp ..,0`/`jbe` ≡ `jz` @`ovr010:0637-063C`), so high-bit
+    // `sub_3560B`'s memorized candidate list (doc §41.1). The collection loop
+    // (`ovr010:062A-065D`) reads `record[0x1E + i]` for i = 1..=0x53 (bytes
+    // 0x1F..0x71): slot 0 @0x1E is NEVER read, and the list packs from the BACK
+    // (`SpellList.Save` fills from index 83 down — the first memorized spell
+    // lands @0x71; doc §33's save-diff). ANY non-zero byte collects (`cmp
+    // ..,0`/`jbe` ≡ `jz` @`ovr010:0637-063C`), IN slot order, so high-bit
     // "learning" entries collect too — coab's `LearntList()` filters them, a
-    // cited coab≠binary nuance no capture exercises.
-    c.memorized_spells = rec.spell_list[1..].iter().filter(|&&b| b != 0).count() as u8;
+    // cited coab≠binary nuance no capture exercises. caster-bar PHILIPPE →
+    // `[0x0F]`; bar-fists-2 PHILIPPE → `[0x0F, 0x0F]`.
+    c.memorized_list = rec.spell_list[1..]
+        .iter()
+        .copied()
+        .filter(|&b| b != 0)
+        .collect();
+    // `spellMaxTargetCount` inputs (doc §41.2, `ovr025.cs:1342`): the caster's
+    // MagicUser/Ranger skill levels (`SkillLevel`, `Player.cs:494`, same shape as
+    // `skill_level_thief`) and the no-caster fallback predicate
+    // (`ovr025.cs:1351`). PHILIPPE: MU 5, single-class → SkillLevel(MU) 5,
+    // castingLvl 5.
+    c.skill_level_magic_user = skill_level(rec, SKILL_MAGIC_USER);
+    c.skill_level_ranger = skill_level(rec, SKILL_RANGER);
+    c.caster_no_class = rec.class_level[SKILL_CLERIC] == 0
+        && rec.class_level[SKILL_MAGIC_USER] == 0
+        && rec.class_level[SKILL_PALADIN] < 9
+        && rec.class_level[SKILL_RANGER] < 8;
     // §26.1 the downed-PC ladder: the entry `health_status@0x195` (okey in a
     // fresh combat snapshot). `bleeding` starts 0; `damage_player` seeds it.
     c.health_status = decode_health_status(rec.health_status);
@@ -132,21 +148,28 @@ fn combatant_from_record(
         rec.attack_profile_base[6], // attack1_DamageBonusBase @0x122
     );
     c.field_de = rec.field_de; // @0xde
-    c.thief_skill_level = skill_level_thief(rec);
+    c.thief_skill_level = skill_level(rec, SKILL_THIEF);
     c
 }
 
-/// `SkillLevel(SkillType.Thief)` (coab `Player.cs:492`): `ClassLevel[Thief] +
-/// ClassLevelsOld[Thief] * DualClassExceedsPreviousLevel()`. The binary reads
-/// `rec[0x10F]` (`ClassLevel[6]`) and `rec[0x117]` (`ClassLevelsOld[6]`) and
-/// multiplies the latter by `sub_6B3D1` (`ovr014:01F9-021F`, verified this
-/// session). `DualClassExceedsPreviousLevel` (`sub_6B3D1`, `Player.cs:800`) =
-/// `DuelClassCurrentLevel() > multiclassLevel ? 1 : 0`, where
-/// `DuelClassCurrentLevel` (`Player.cs:812`) returns 0 for non-humans, else the
-/// first non-zero `ClassLevel[0..7]` (or `ClassLevel[7]` if `0..7` are all 0).
-/// Constant during a fight — precomputed at decode.
-fn skill_level_thief(rec: &CharRecord) -> i32 {
-    const THIEF: usize = 6; // SkillType.Thief (Classes/Enums.cs:64)
+// `SkillType` (`Classes/Enums.cs:57`) — the `ClassLevel`/`ClassLevelsOld` index.
+const SKILL_CLERIC: usize = 0;
+const SKILL_PALADIN: usize = 3;
+const SKILL_RANGER: usize = 4;
+const SKILL_MAGIC_USER: usize = 5;
+const SKILL_THIEF: usize = 6;
+
+/// `SkillLevel(skill)` (coab `Player.cs:492`): `ClassLevel[skill] +
+/// ClassLevelsOld[skill] * DualClassExceedsPreviousLevel()`. The binary reads
+/// `rec[0x109 + skill]` (`ClassLevel[skill]`) and `rec[0x111 + skill]`
+/// (`ClassLevelsOld[skill]`) and multiplies the latter by `sub_6B3D1`
+/// (`ovr014:01F9-021F`, verified this session). `DualClassExceedsPreviousLevel`
+/// (`sub_6B3D1`, `Player.cs:800`) = `DuelClassCurrentLevel() > multiclassLevel ?
+/// 1 : 0`, where `DuelClassCurrentLevel` (`Player.cs:812`) returns 0 for
+/// non-humans, else the first non-zero `ClassLevel[0..7]` (or `ClassLevel[7]` if
+/// `0..7` are all 0). The dual term is class-independent, so it is computed once
+/// per record. Constant during a fight — precomputed at decode.
+fn skill_level(rec: &CharRecord, skill: usize) -> i32 {
     const HUMAN: u8 = 7; // Race.human (Classes/Enums.cs:54)
     let dual = {
         let current = if rec.race != HUMAN {
@@ -160,7 +183,7 @@ fn skill_level_thief(rec: &CharRecord) -> i32 {
         };
         i32::from(current > rec.multiclass_level as i32)
     };
-    rec.class_level[THIEF] as i32 + rec.class_levels_old[THIEF] as i32 * dual
+    rec.class_level[skill] as i32 + rec.class_levels_old[skill] as i32 * dual
 }
 
 /// Build a [`CombatState`] from a captured combat entry-state snapshot (H4,

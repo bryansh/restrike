@@ -123,3 +123,51 @@ fn replay_harness_maps_records_and_opens_with_one_d6_per_combatant() {
     }
     assert_eq!(ns[5], 100, "the d100 selection pass follows the 5 d6s");
 }
+
+/// The memorized-spell candidate list + casting-level decode (doc §41.1/§41.2).
+/// A Magic-User 5 record with one memorized Magic Missile in the back slot
+/// (`spell_list[83]` @ `0x1E + 83 = 0x71` — the pack-from-back layout, doc §33)
+/// decodes to `memorized_list == [0x0F]`, `skill_level_magic_user == 5`, and NOT
+/// the no-caster fallback — the caster-bar PHILIPPE shape.
+#[test]
+fn caster_record_decodes_memorized_list_and_casting_level() {
+    use gbx_rules::adnd1::flavor_impl::Adnd1;
+    use gbx_rules::pack::RuleSet;
+    let rules = RuleSet::load();
+    let flavor = Adnd1::new(&rules);
+
+    let mut r = synthetic_record(b"MAGE", 12, 12, 46, 15, 15, 1, 12, false, 2, (1, 4, 0));
+    r[0x71] = 0x0F; // spell_list[83] = Magic Missile (packs from the back)
+    r[0x1E] = 0x0F; // slot 0 (never read by the 1-based loop) — must be ignored
+    r[0x109 + 5] = 5; // ClassLevel[MagicUser] = 5
+
+    let entries = vec![RecordCombatant {
+        team: Team::Party,
+        pos: GridPos::new(23, 11),
+        record: &r,
+    }];
+    let state = combat_state_from_records(&entries, CombatMap::uniform(0x17), &flavor).unwrap();
+    let c = &state.fighters[0];
+    assert_eq!(
+        c.memorized_list,
+        vec![0x0F],
+        "one MM collected; slot 0 @0x1E ignored (the loop is 1-based)"
+    );
+    assert_eq!(c.skill_level_magic_user, 5);
+    assert_eq!(c.skill_level_ranger, 0);
+    assert!(
+        !c.caster_no_class,
+        "a real MU 5 is not the no-caster fallback"
+    );
+
+    // A non-caster (all class levels 0) is the fallback → casting level 6.
+    let r0 = synthetic_record(b"THUG", 8, 8, 40, 12, 10, 1, 9, true, 2, (1, 6, 0));
+    let entries0 = vec![RecordCombatant {
+        team: Team::Monster,
+        pos: GridPos::new(30, 11),
+        record: &r0,
+    }];
+    let state0 = combat_state_from_records(&entries0, CombatMap::uniform(0x17), &flavor).unwrap();
+    assert!(state0.fighters[0].caster_no_class);
+    assert!(state0.fighters[0].memorized_list.is_empty());
+}

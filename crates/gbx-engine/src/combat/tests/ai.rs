@@ -673,9 +673,11 @@ fn ai_action_events_emit_and_are_inert_on_the_draw_stream() {
 /// a replay that wanders into unmodeled territory produces a named finding
 /// instead of a silent divergence. Three wires: `0-hd-sweep`
 /// (try_sweep_attack vs hit_dice 0), `surrender-int5` (flee_check's omitted
-/// Int branch), `memorized-spells` (sub_3560B's unmodeled selection loop).
-/// The `downed-pc` wire was retired once the downed-PC path was built
-/// (§26/§27); this test also pins that downing a party member no longer trips.
+/// Int branch), `spell-entry` (sub_3560B/ShouldCastSpellX reaching an
+/// untranscribed spell, doc §41.2). The `downed-pc` wire was retired once the
+/// downed-PC path was built (§26/§27); this test also pins that downing a party
+/// member no longer trips. (The old `memorized-spells` wire was replaced by the
+/// faithful selection loop, doc §41.)
 #[test]
 fn stub_tripwires_fire_when_unmodeled_mechanics_are_reached() {
     #[derive(Clone, Default)]
@@ -743,22 +745,24 @@ fn stub_tripwires_fire_when_unmodeled_mechanics_are_reached() {
     world.area_field_58c = 0;
     assert!(!world.flee_check(1));
 
-    // 4. memorized-spells: an NPC caster with memorized slots runs a turn
-    // (the `control_morale >= 0x80` arm of the sub_3560B gate).
-    world.fighters[1].memorized_spells = 2;
+    // 4. spell-entry: an NPC caster whose memorized list holds an untranscribed
+    // spell (Shield 0x10) reaches ShouldCastSpellX with a non-MM id — the lazy-
+    // transcription reject (doc §41.2), via the `control_morale >= 0x80` arm of
+    // the sub_3560B gate.
+    world.fighters[1].memorized_list = vec![0x10];
     let mut rng = EngineRng::new(SEED);
     world.melee_ai_turn(&mut rng, 1);
 
     // 4b. the sub_3560B PC gates (`ovr010:0682-0692`): a PARTY caster with
-    // memorized slots draws nothing while `AutoPCsCastMagic` is off
-    // (capture-proven: bar-fists-2 closes with two memorized slots and zero
-    // spell draws, doc §33) — the wire stays silent; the toggle arms it.
-    let pc_trips = |trips: &Trips| {
+    // memorized slots reaches no selection draws (hence no spell-entry) while
+    // `AutoPCsCastMagic` is off (capture-proven: bar-fists-2 closes with two
+    // memorized slots and zero spell draws, doc §33) — the toggle arms it.
+    let pc_spell_entry = |trips: &Trips| {
         trips
             .0
             .borrow()
             .iter()
-            .filter(|(id, s)| *id == 0 && *s == "memorized-spells")
+            .filter(|(id, s)| *id == 0 && *s == "spell-entry")
             .count()
     };
     // Fighter 1's turn above re-killed the negative-hp fighter 0 — restore
@@ -766,12 +770,12 @@ fn stub_tripwires_fire_when_unmodeled_mechanics_are_reached() {
     world.fighters[0].in_combat = true;
     world.fighters[0].hp_current = 30;
     world.fighters[0].health_status = HealthStatus::Okey;
-    world.fighters[0].memorized_spells = 1;
+    world.fighters[0].memorized_list = vec![0x10];
     world.melee_ai_turn(&mut rng, 0);
-    assert_eq!(pc_trips(&trips), 0, "PC + magic OFF must not trip");
+    assert_eq!(pc_spell_entry(&trips), 0, "PC + magic OFF must not select");
     world.auto_pcs_cast_magic = true;
     world.melee_ai_turn(&mut rng, 0);
-    assert_eq!(pc_trips(&trips), 1, "PC + magic ON must trip");
+    assert!(pc_spell_entry(&trips) >= 1, "PC + magic ON must select");
 
     let got: Vec<&'static str> = trips.0.borrow().iter().map(|(_, s)| *s).collect();
     assert!(
@@ -780,7 +784,7 @@ fn stub_tripwires_fire_when_unmodeled_mechanics_are_reached() {
     );
     assert!(got.contains(&"0-hd-sweep"), "trips: {got:?}");
     assert!(got.contains(&"surrender-int5"), "trips: {got:?}");
-    assert!(got.contains(&"memorized-spells"), "trips: {got:?}");
+    assert!(got.contains(&"spell-entry"), "trips: {got:?}");
 }
 
 /// §38 — the mid-combat "Magic On" toggle schedule: each listed global
@@ -840,7 +844,10 @@ fn auto_cast_toggle_arms_the_flipped_turns_own_spell_gate() {
             mk(1, Team::Monster, true, GridPos::new(26, 12)),
         ],
     );
-    world.fighters[0].memorized_spells = 1;
+    // An untranscribed memorized spell (Shield 0x10) makes the gate observable
+    // through `spell-entry`: a passing gate runs the selection loop, which
+    // reaches ShouldCastSpellX with a non-MM id (doc §41.2).
+    world.fighters[0].memorized_list = vec![0x10];
     world.auto_cast_toggles = vec![0];
     let trips = Trips::default();
     world.attach_action_sink(Box::new(trips.clone()));
@@ -850,15 +857,15 @@ fn auto_cast_toggle_arms_the_flipped_turns_own_spell_gate() {
         world.auto_pcs_cast_magic,
         "the ordinal-0 press flips the flag at the first turn's head"
     );
-    let wire_trips = trips
+    let selected = trips
         .0
         .borrow()
         .iter()
-        .filter(|(id, s)| *id == 0 && *s == "memorized-spells")
+        .filter(|(id, s)| *id == 0 && *s == "spell-entry")
         .count();
-    assert_eq!(
-        wire_trips, 1,
-        "the flipped turn's own gate must see the flag ON"
+    assert!(
+        selected >= 1,
+        "the flipped turn's own gate must see the flag ON (selection ran)"
     );
 }
 
