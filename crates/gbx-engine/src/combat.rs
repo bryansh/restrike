@@ -1134,6 +1134,12 @@ impl CombatState {
                 self.fighters[idx].attacks_received = 0;
                 self.fighters[idx].direction_changes = 0;
                 self.fighters[idx].guarding = false;
+                // §39.5 site 1a: `CheckAffectsEffect(PlayerRestrained)` — the
+                // turn-head restrained/held check, UNCONDITIONAL (before the
+                // `delay > 0` gate), `mov al,7; call work_on_00` @`ovr009:02B7`
+                // (coab ovr009.cs:108). The held-turn BEHAVIOUR stays unmodeled;
+                // a found affect trips via the dispatch (draw-free, empty lists).
+                self.check_affects_effect(idx, CheckType::PlayerRestrained);
                 if self.fighters[idx].in_combat && self.fighters[idx].delay > 0 {
                     // Site 2 — the turn-head camera (`sub_33281` @`ovr009:02FA-0318`):
                     // the camera follows the acting combatant — `focus = (team ==
@@ -1145,6 +1151,13 @@ impl CombatState {
                         let p = self.fighters[idx].pos;
                         self.redraw_combat_area(8, 2, p);
                     }
+                    // §39.5 site 1b/1c, after the reclac/display position: `Type_15`
+                    // (`mov al,0Fh; call work_on_00` @`ovr009:0352`, coab :125) then
+                    // `Confusion` (`mov al,15h` @`ovr009:036E`, coab :129) which the
+                    // binary gates on `spell_id == 0` — always true in the no-spell
+                    // model (spell_id is the spell slice's), so run unconditionally.
+                    self.check_affects_effect(idx, CheckType::Type15);
+                    self.check_affects_effect(idx, CheckType::Confusion);
                     self.melee_ai_turn(rng, idx);
                 } else {
                     self.clear_actions(idx);
@@ -1154,15 +1167,24 @@ impl CombatState {
     }
 
     /// `BattleRoundChecks` (`ovr009.cs:363`, `battle01`) reduced to its
-    /// non-stubbed parts: increment the round counter, run the bleed tick, and
-    /// decide the loop exit. `step_game_time`, the per-member affect ticks
-    /// (`CheckAffectsEffect(Type_19)`), cloud damage (`in_poison_cloud`), the
-    /// display-only `bandage(false)` "Your Teammate is Dying" scan, and
+    /// non-stubbed parts: increment the round counter, run the per-member
+    /// `CheckAffectsEffect(Type_19)`, run the bleed tick, and decide the loop
+    /// exit. `step_game_time`, cloud damage (`in_poison_cloud`), the display-only
+    /// `bandage(false)` "Your Teammate is Dying" scan, and
     /// `calc_enemy_health_percentage` (recomputed at `begin_round` instead, both
     /// draw-free) are gated on systems not in this slice.
     fn battle_round_checks(&mut self) -> CombatStep {
         // ovr009.cs:366 — the byte_1D8B7 increment.
         self.combat_round += 1;
+
+        // §39.5 site 2: `CheckAffectsEffect(Type_19)` per TeamList member — the
+        // per-round affect re-evaluation (`mov al,13h; call work_on_00`
+        // @`ovr009:09EF`, coab ovr009.cs:371), run for EVERY member (before the
+        // per-member dying check in the binary's one loop). Draw-free; the
+        // `in_poison_cloud` companion is its own (cloud) slice.
+        for ci in 0..self.fighters.len() {
+            self.check_affects_effect(ci, CheckType::Type19);
+        }
 
         // The bleed tick (§26.4, `ovr009:0A05-0A2B`, coab ovr009.cs:369-382;
         // binary-verified against coab_new.lst this session): per round end, each
@@ -1225,7 +1247,6 @@ impl CombatState {
     /// transcribed verbatim from coab `ovr024.cs:140-375` (verified id-for-id and
     /// order-for-order against the binary); find-first semantics make list order
     /// observable once effect handlers land, so it is preserved. Draw-free.
-    #[allow(dead_code)]
     fn check_affects_effect(&mut self, ci: usize, ty: CheckType) {
         for &kind in ty.affect_ids() {
             self.calc_affect_effect(ci, kind);
@@ -1242,7 +1263,6 @@ impl CombatState {
     /// — the range gate + the effect handler (`CallAffectTable(Add)`) are the
     /// spell slice's; here we model the scan and **TRIP** on any found affect (on
     /// the actor, or a carrier for a radius kind). Draw-free.
-    #[allow(dead_code)]
     fn calc_affect_effect(&mut self, ci: usize, kind: u8) {
         // Found on the actor → the point where the binary runs a `CallAffectTable`
         // handler we don't model yet (doc §39.4).
@@ -1259,7 +1279,6 @@ impl CombatState {
         }
     }
 
-    #[allow(dead_code)]
     fn trip_affect_effect(&mut self, ci: usize) {
         let id = self.fighters[ci].id;
         self.emit(ActionEvent::StubTripped {
@@ -1368,7 +1387,6 @@ const PC_BERZERK: u8 = 0xB3;
 /// The radius-cast affects a team-mate can source (`unk_6325A` bitmask
 /// @`ovr024:025A`, decoded to a set): silence_15_radius 0x15,
 /// prot_from_evil_10_radius 0x2D, prot_from_good_10_radius 0x2E, prayer 0x31.
-#[allow(dead_code)]
 const RADIUS_CARRIER_KINDS: [u8; 4] = [0x15, 0x2D, 0x2E, 0x31];
 
 /// The affect kinds whose `remove_affect` triggers a `CalcStatBonuses` recompute
@@ -1437,7 +1455,6 @@ impl CheckType {
     /// transcribed verbatim from coab `ovr024.cs:140-375` (ids from
     /// `Classes/Affect.cs`, verified id-for-id and order-for-order against the
     /// binary dispatch `work_on_00` @`ovr024:0414-0D02`).
-    #[allow(dead_code)]
     fn affect_ids(self) -> &'static [u8] {
         match self {
             CheckType::None => &[],
@@ -4621,12 +4638,15 @@ impl CombatState {
     fn sub_35db1(&mut self, rng: &mut EngineRng, actor: usize) -> bool {
         let mut b1ab18 = 8i32;
         let mut b1ab19 = 0i32;
-        // CheckAffectsEffect(Type_14) (`ovr010:0DDB`) — draw-free, no affects
-        // modeled. Then the bandage turn (§26.2, `ovr010:0DE3-0DFF`): a Party
+        // §39.5 site 5: `CheckAffectsEffect(Type_14)` — the AI-specials check at
+        // the head of `sub_35DB1` (`mov al,0Eh; call work_on_00` @`ovr010:0DDB`,
+        // coab ovr010.cs:516). Draw-free (empty lists). Then the bandage turn
+        // (§26.2, `ovr010:0DE3-0DFF`): a Party
         // actor whose team has a dying ally spends its whole turn bandaging —
         // `bandage(true)` zeroes `actions.delay`, so `delayed` starts false and
         // the move-attack loop below never runs (no movement, no attack, no draws
         // beyond the turn head the caller already rolled). Draw-free itself.
+        self.check_affects_effect(actor, CheckType::Type14);
         if self.fighters[actor].team == Team::Party && self.bandage(true) {
             self.fighters[actor].delay = 0; // ovr010:0DFF — actions.delay = 0
         }
@@ -5083,6 +5103,13 @@ impl CombatState {
             self.fighters[actor].attack1_left as i32
         };
 
+        // §39.5 site 4: `CheckAffectsEffect(Movement)` inside `reclac_attacks`,
+        // after `halfActionsLeft` is set and before `ThisRoundActionCount` —
+        // `mov al,12h; call work_on_00` @`ovr014:0E66` (coab ovr014.cs:488). The
+        // haste/slow/clear_movement effects it reads are the spell slice's;
+        // draw-free (empty lists).
+        self.check_affects_effect(actor, CheckType::Movement);
+
         let mut attacks = this_round_action_count(half, self.combat_round);
 
         // Ammo cap (only for a found ranged item that is non-null — a Sling's
@@ -5264,6 +5291,14 @@ impl CombatState {
         // `max(2, table[type].numberAttacks)` half-actions (LongBow 4 → 2
         // shots/round), a melee combatant its `attacksCount`. Draw-free.
         self.reclac_attacks(i);
+        // §39.5 site 4: `CheckAffectsEffect(Movement)` in `CalculateInitiative`,
+        // after `reclac_attacks` and before the attack-2 count — `mov al,12h;
+        // call work_on_00` @`ovr014:005E` (coab ovr014.cs:23). A SECOND Movement
+        // pass this call (the first is inside `reclac_attacks` above, @0E66);
+        // both are draw-free no-ops on empty lists. (The third binary site, the
+        // one inside `CalcMoves` @`ovr014:0179`/coab :76, lives in our pure
+        // `calc_moves` helper — no emit seam; doc §40.)
+        self.check_affects_effect(i, CheckType::Movement);
         // CalcInit tail (`ovr014.cs:19-27`): attack-2 = ThisRoundActionCount of
         // `baseHalfMoves`@0x11D (0 in this party → attack-2 never swings). The
         // `maxSweapTargets = attackLevel` write is deferred with the 0-HD sweep.
