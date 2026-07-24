@@ -105,7 +105,10 @@ pub fn compare(a: &Trace, b: &Trace) -> Result<Comparison, Incomparable> {
     let is_positional = |e: &&TraceEvent| {
         !matches!(
             e,
-            TraceEvent::CombatEntry(_) | TraceEvent::RoundSnapshot(_) | TraceEvent::TurnSnapshot(_)
+            TraceEvent::CombatEntry(_)
+                | TraceEvent::RoundSnapshot(_)
+                | TraceEvent::TurnSnapshot(_)
+                | TraceEvent::MagicToggle(_)
         )
     };
     let a_events: Vec<&TraceEvent> = a.events.iter().filter(is_positional).collect();
@@ -186,6 +189,7 @@ fn kind(e: &TraceEvent) -> &'static str {
         TraceEvent::CombatEntry(_) => "combat_entry",
         TraceEvent::RoundSnapshot(_) => "round_snapshot",
         TraceEvent::TurnSnapshot(_) => "turn_snapshot",
+        TraceEvent::MagicToggle(_) => "magic_toggle",
     }
 }
 
@@ -333,6 +337,7 @@ pub fn check_chain(trace: &Trace) -> Result<(), ChainBreak> {
             // The combat_entry/board snapshots carry no PRNG state; they link
             // the draw before them to the draw after them transparently
             // (D-OR5(b)).
+            | TraceEvent::MagicToggle(_)
             | TraceEvent::CombatEntry(_)
             | TraceEvent::RoundSnapshot(_)
             | TraceEvent::TurnSnapshot(_) => {}

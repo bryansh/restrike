@@ -126,6 +126,22 @@ pub enum TraceEvent {
     /// `target`) recorded by the staging hook on in-turn state writes
     /// (position/hp/target). Ignored by comparator + chain like `combat_entry`.
     TurnSnapshot(TurnSnapshotEvent),
+    /// `magic_toggle` — a capture-side observation (staging hook, h4 doc
+    /// §44.2): the `AutoPCsCastMagic` byte, sampled emit-on-change at each
+    /// logged combat draw. The first event per fight is a baseline; later
+    /// events are '2'-key flips, each landing in the stream **before** the
+    /// `rng` line of the first draw that could observe it — the raw material
+    /// for **deriving** a §38 toggle schedule instead of fitting one. Carries
+    /// no PRNG state: ignored by comparator + chain like the other
+    /// observations.
+    MagicToggle(MagicToggleEvent),
+}
+
+/// The `magic_toggle` observation event (§44.2): the sampled
+/// `AutoPCsCastMagic` value (`0`/`1`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MagicToggleEvent {
+    pub value: u8,
 }
 
 /// A `prng`-profile draw event (D-OR3): `{"e":"rng","before":u32,"after":u32}`
@@ -399,6 +415,14 @@ pub struct CombatEntryCombatant {
     /// The full `0x1A6` combat record, hex-encoded on the wire.
     #[serde(with = "hex_record")]
     pub record: [u8; COMBAT_RECORD_LEN],
+    /// The combatant's live affect chain (staging hook §44.2): one 18-hex-char
+    /// string per 9-byte node walked from the record's `@0xF2` heap pointer,
+    /// raw — the stale next-pointer bytes 5-8 ride along and the decode must
+    /// ignore them (`gbx_formats::affects`). Empty for unbuffed combatants;
+    /// absent (defaulted) in pre-§44.2 captures, and skipped on write when
+    /// empty so their canonical serialization is unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub affects: Vec<String>,
 }
 
 impl fmt::Debug for CombatEntryCombatant {
@@ -573,7 +597,8 @@ impl Trace {
             | TraceEvent::Morale(_)
             | TraceEvent::CombatEntry(_)
             | TraceEvent::RoundSnapshot(_)
-            | TraceEvent::TurnSnapshot(_) => None,
+            | TraceEvent::TurnSnapshot(_)
+            | TraceEvent::MagicToggle(_) => None,
         })
     }
 
@@ -617,6 +642,37 @@ mod tests {
             line,
             r#"{"gbxtrace":1,"profile":"prng","game":"cotab-v1.3","seed":305419896,"encounter":"creation-rerolls","source":"restrike"}"#
         );
+    }
+
+    #[test]
+    fn magic_toggle_parses_and_round_trips_canonically() {
+        // The staging hook's §44.2 line, exactly as emitted.
+        let e: TraceEvent = serde_json::from_str(r#"{"e":"magic_toggle","value":1}"#).unwrap();
+        assert_eq!(e, TraceEvent::MagicToggle(MagicToggleEvent { value: 1 }));
+        assert_eq!(
+            serde_json::to_string(&e).unwrap(),
+            r#"{"e":"magic_toggle","value":1}"#
+        );
+    }
+
+    #[test]
+    fn combat_entry_combatant_affects_default_and_skip_when_empty() {
+        // Pre-§44.2 combatant JSON (no affects key) must still parse, and an
+        // empty affects list must serialize back WITHOUT the key (canonical
+        // stability for old captures).
+        let rec = "00".repeat(COMBAT_RECORD_LEN);
+        let json = format!(r#"{{"team":1,"x":2,"y":3,"record":"{rec}"}}"#);
+        let c: CombatEntryCombatant = serde_json::from_str(&json).unwrap();
+        assert!(c.affects.is_empty());
+        assert_eq!(serde_json::to_string(&c).unwrap(), json);
+
+        // A §44.2 combatant with a chain: the raw 18-hex-char nodes ride through.
+        let json2 = format!(
+            r#"{{"team":0,"x":2,"y":3,"record":"{rec}","affects":["610000ff000800004d"]}}"#
+        );
+        let c2: CombatEntryCombatant = serde_json::from_str(&json2).unwrap();
+        assert_eq!(c2.affects, vec!["610000ff000800004d".to_string()]);
+        assert_eq!(serde_json::to_string(&c2).unwrap(), json2);
     }
 
     #[test]
@@ -827,12 +883,16 @@ mod tests {
                     x: 26,
                     y: 12,
                     record: rec(0),
+
+                    affects: vec![],
                 },
                 CombatEntryCombatant {
                     team: 1,
                     x: 34,
                     y: 13,
                     record: rec(7),
+
+                    affects: vec![],
                 },
             ],
         });
@@ -884,6 +944,8 @@ mod tests {
                 x: 1,
                 y: 2,
                 record: rec(0),
+
+                affects: vec![],
             }],
         });
         let line = serde_json::to_string(&with_58c).unwrap();
