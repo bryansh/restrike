@@ -16,6 +16,12 @@ def put_w(base, off, v): struct.pack_into('<H', d, base + off, v)
 
 put_w(A1, 0x18A, BLOCK)          # current_3DMap_block_id
 put_w(A1, 0x1E4, BLOCK)          # LastEclBlockId (drives pristine ECL reload)
+put_w(A1, 0x0F2, BLOCK)          # script-private "current block" marker: every
+                                 # ECL2 entry vector opens with COMPARE mem
+                                 # 0x4BF2, <own id>; IF = -> EXIT (clean resume
+                                 # into the walk loop). Unset -> the block runs
+                                 # its first-visit branch instead (benign for
+                                 # the sewers: intro text + menu, no reposition).
 put_w(A1, 0x1E0, X)              # lastXPos
 put_w(A1, 0x1E2, Y)              # lastYPos
 d[A1 + 0x200: A1 + 0x242] = bytes(0x42)  # field_200 quest flags: fresh entry
