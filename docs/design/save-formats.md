@@ -59,7 +59,7 @@ back by `loadSaveGame` (`ovr017.cs:976-1103`) with matching fixed-size
 | 2 | `area_ptr` (`Area1`) | 0x800 (2048) | `:1153` | the **Area ScriptMemory window** backing — time, position, quest flags, sky, speed… (§1.4) |
 | 3 | `area2_ptr` (`Area2`) | 0x800 (2048) | `:1154` | the **Party ScriptMemory window** backing — search flags, party size, encounter, temple/shop… (§1.4) |
 | 4 | `stru_1B2CA` (`Struct_1B2CA`) | 0x400 (1024) | `:1155` | the **Table ScriptMemory window** backing (opaque word store, `Struct_1B2CA.cs:10`) |
-| 5 | `ecl_ptr` (`EclBlock`) | 0x1E00 (7680) | `:1156` | resident ECL block bytes — **written on save but discarded on load** (§1.5): `loadSaveGame` reloads the pristine block from `ECL{area}.dax` by `LastEclBlockId`, so import ignores these bytes (`EclBlock.cs`) |
+| 5 | `ecl_ptr` (`EclBlock`) | 0x1E00 (7680) | `:1156` | resident ECL block bytes — **AUTHORITATIVE on load in the real binary** (live-proven 2026-07-24, §1.2 addendum): the game resumes THESE bytes; coab instead discards them and reloads pristine by `LastEclBlockId` (coab≠binary). Import must honor them. |
 | 6 | position block | 5 | `:1158-1163` | `mapPosX, mapPosY, mapDirection, mapWallType, mapWallRoof` |
 | 7 | `last_game_state` | 1 | `:1165-1166` | prior `GameState` enum |
 | 8 | `game_state` | 1 | `:1167-1168` | current `GameState` enum |
@@ -129,6 +129,27 @@ ours will be**: it snapshots persistent state and re-derives both VM control flo
 *and the resident block*, where our save-anywhere (D8/D9) must snapshot the live
 (possibly self-modified) EclMachine too (§2 D-SAVE3). *(Confirm against DOSBox that the game menu is unreachable during a
 combat round — docket §5.1.)*
+
+**ADDENDUM 2026-07-24 — the paragraph above is coab, NOT the binary
+(coab≠binary, live-proven).** The save-doctor probe ladder (tools/save-doctor,
+slots D/E/F/G against the real GOG binary under DOSBox) showed the real load
+path **resumes the SAVED section-5 bytes** — it does not reload a pristine
+block by `LastEclBlockId`: patching every id field (`LastEclBlockId`,
+`current_3DMap_block_id`, the script-private `Area1[0xF2]` block marker,
+position) while leaving section 5 untouched kept executing the SOURCE slot's
+block (the city intro fired from block 1's first-visit branch); transplanting
+the destination block's pristine payload into section 5 (probe G) teleported
+correctly with the same id patches. Consequences: (1) **our original-save
+import must treat section 5 as authoritative resident-block state**, not dead
+bytes — a real save whose resident block self-modified before saving would
+diverge under coab-style discard-and-reload (ECL self-modifies; census §5);
+(2) coab's `reload_ecl_and_pictures = true` in `loadSaveGame` (`:983`) is a
+coab-side deviation, so §1.2's "re-derives the resident block" claim holds
+only for coab. Docket: re-check whether the real binary *ever* takes the
+pristine-reload path on load (e.g. version differences), and whether
+`vm_init_ecl` on the saved bytes re-fires the entry vector or resumes walk
+directly — G could not distinguish (its 0xF2 marker made the entry vector a
+no-op EXIT either way).
 
 ### 1.3 The character record (0x1A6 bytes), unified
 
