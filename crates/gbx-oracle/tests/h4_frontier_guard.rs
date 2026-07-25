@@ -1,9 +1,9 @@
 //! **The frontier-pin regression guard.** A committed manifest of the exact H4
-//! replay outcome for every local capture, so the open frontiers
-//! (`combat+terrain4` @368, `armed-bar` @58 — the ranged slice's driver,
-//! `caster-bar` @453 — the spell subsystem's driver) cannot silently drift and
-//! the five closed captures (incl. the `bar-rout-58c50` rout 3521/3521 — doc
-//! §32 — and `bar-fists-2` 3811/3811 — doc §33) cannot silently regress.
+//! replay outcome for every local capture, so the open frontier
+//! (`sewer-fight-1` @63 — the first post-matrix capture, doc §45) cannot
+//! silently drift and the eight closed captures (the full bar/terrain matrix,
+//! doc §44 — incl. the `bar-rout-58c50` rout 3521/3521 and `bar-fists-2`
+//! 3811/3811) cannot silently regress.
 //!
 //! ## The exact-pin rule (read before editing [`PINS`])
 //!
@@ -46,9 +46,6 @@ enum Expect {
     /// Replays operand-exact, draw-for-draw, equal length, zero stub trips.
     Closed,
     /// Diverges at **exactly** this draw index (operand or `(before,after)`).
-    /// Unconstructed since doc §44 closed the matrix 8/8 — kept as the pin type
-    /// every future capture with an open frontier re-enters through.
-    #[allow(dead_code)]
     Frontier(usize),
 }
 
@@ -166,6 +163,23 @@ const PINS: &[Pin] = &[
         capture: "bar-fists-2.gbxtrace",
         expect: Expect::Closed,
         map_direction: 2,
+        auto_cast: false,
+        auto_cast_toggles: &[],
+    },
+    Pin {
+        // The first post-matrix capture (doc §45): 5 Fire Knives jump the
+        // 6-PC party in a sewer corridor (save-doctor staging, natural seed,
+        // 7 rounds). md=0 and 58C=30 ride in-trace (hook channels), so the
+        // pin fields mirror them for clarity only. @63 ours draws d100 where
+        // the capture opens round-2 initiative d6 — our round 1 owes one
+        // extra turn (first board fork: Fire Knife [9]'s approach move).
+        // PHILIPPE's mid-fight '2' press IS recorded (magic_toggle flip after
+        // draw 105) but the replay does not consume the channel yet — the §38
+        // turn-ordinal pin gets derived when the peel reaches his first
+        // post-flip turn.
+        capture: "sewer-fight-1.gbxtrace",
+        expect: Expect::Frontier(63),
+        map_direction: 0,
         auto_cast: false,
         auto_cast_toggles: &[],
     },
