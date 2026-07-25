@@ -2903,3 +2903,81 @@ staging session live-validates both channels.
 Reader wiring (deriving toggle pins from the events; populating
 `Combatant.affects` from the arrays) intentionally NOT landed — it rides with
 the first capture that carries the data, so it lands against real bytes.
+
+## 45. ★ sewer-fight-1 CLOSED 1526/1526 — Fire Knife archers, casting disruption, coab≠binary #21 (the party-gated area move modifier) ★ (2026-07-25, Fable)
+
+The first post-matrix capture (5 FIRE KNIVES ambush the party in a sewer
+corridor — save-doctor staging, natural seed, 7 rounds, party wins) peeled
+from Frontier(63) to CLOSED in five commits, guard exact at every step. Every
+fix binary-cited; two are new coab≠binary divergences. The full 6-hop peel:
+
+- **@63 → 65 — FIRE KNIVES are archers, not walkers.** The @63 fork was never
+  terrain (the suspect-#1 tile census exonerated `BACKGROUND_MOVE_COST`: our
+  table matches the binary's `unk_189B4` @`seg600:26A4` exactly — it is
+  *coab's* C# list that dropped a row and shifted positions 22+). The capture's
+  back-rank [9] never moves: it THROWS twice from its entry square — the
+  armed-bar `d20/d6/d20` signature, plus a 6-way near-list re-pick d6 our
+  armed-bar turns never showed (monsters always re-pick; PCs keep held
+  targets). `MON2CHA/ITM.DAX` block 1 (`load_mob`, the `'ITM'` DAX-name build
+  @`ovr017:3298/3498`) settles the kit from real game data: **short bow (44) +
+  7 Arrows readied** (a data-derived ammo count — TRAVIS's fitted quiver has a
+  better-provenanced sibling) over longsword/shield/leather. One loadout row
+  arms all five (CMD_LoadMonster clones the template's items per copy).
+- **@65 → 381 — the ready/unready recompute** (`reclac_player_values` →
+  `CalculateAttackValues`, `sub_66023` @`ovr025`): readying installs the
+  weapon's TABLE attack-1 profile (`diceCountNormal/SizeNormal` @:61-62 —
+  arrow d6, not the sword's record 1d8; the old entry-snapshot read was an
+  armed-bar coincidence, its PC records having been serialized bow-readied)
+  and rebuilds `hitBonus` from `thac0@0x73`: `+DexReactionAdj` for `flag_02`
+  weapons (:20-23), `+strengthHitBonus` melee/unready (:29/:433), the str
+  terms gated on `field_125@0x125` (0 for FIRE KNIFE). The FK bow to-hit is
+  41+3 (dex 18); the constant-hit model let [10]'s capture-hit second shot
+  miss at @140. Sewer TRAVIS's record self-validates the model (43+1=44
+  unarmed vs armed-bar's 43+2=45 bow'd, dex 17 str 18/12).
+- **@381 — `actions.can_cast`, the casting disruption.** PHILIPPE's recorded
+  '2' press derives to toggle ordinal **2** (§44.2 sampling: the flip lands
+  between post-entry draws 57/58 = the head of [9]'s turn — the first
+  derived-not-fitted §38 pin). Naively applied it REGRESSED to @192: round-0
+  PHILIPPE drew no selection d1s despite the ON flag. The missing gate:
+  `sub_3560B` collects the memorized list only `if (actions.can_cast)`
+  (`ovr010.cs:238`); weapon damage > 0 zeroes `can_cast` at the
+  `DisplayAttackMessage` tail (the inlined `TryLooseSpell`,
+  `ovr014:050C-051A`; `CalculateInitiative` re-arms per round, `ovr014.cs:13`).
+  PHILIPPE was arrow-hit in round 0 → no d1s; unhurt in round 1 → the nine
+  d1s @381. Draw-neutral standalone across all 9 pins (commit-proven).
+- **@1152 → CLOSED — coab≠binary #21: `area2.field_6E4` is PARTY-gated.**
+  Round-5 boards forked with matched draws: three PC chase walks ([4]→(24,7),
+  [1]→(23,7), [0]→(22,7)) all stopped at cost 17 where ours ran to 23. The
+  new `h4_pos_at_draws` comparator (draw-indexed capture snapshots vs our
+  Move-event stream — step resolution; per-`step()` boards false-positive on
+  multi-step turns) proved rounds 0-4 position-exact and isolated the fork to
+  [4]'s round-5 turn. A full listing sweep of the movement trio
+  (`sub_35DB1`/`sub_359D1`/`sub_3573B`, plus `sub_409BC` and `CanSeeTargetA`)
+  found every routine instruction-equal to ours — the fork was INPUT, not
+  logic: `CalcMoves` (`sub_3E124` @`ovr014:0138-014E`) adds `area2.field_6E4`
+  when `combat_team == Ours` — **coab misread the gate as
+  `in_combat == false`**, an impossible condition in combat, so the modifier
+  never fired in any transliteration-derived engine. The sewers run the party
+  at 12−3=9 movement (18 halves): 5 diagonals (15) + the strict `cost < move`
+  compare force the observed sidestep-then-stop at 17. Monsters keep 24
+  (their 23-cost flee paths matched all along); the bar's 0 kept eight
+  captures blind to it. The value −3 is triple-pinned by independent walks;
+  the ECL store (via the Area2 ScriptMemory window; combat-end reset
+  `ovr006.cs:812-814` alongside the 6E0/6E2 to-hit pair) wasn't surfaced by
+  flow-following discl — deferred with the hook TODO below.
+
+**Remaining knobs & TODOs out of this session:**
+- Hook TODO: emit `area2_field_6e4` (and the `6E0/6E2` team to-hit pair) in
+  `combat_entry` — until then the value rides `RESTRIKE_AREA_6E4` + the
+  manifest pin.
+- The magic_toggle → §38-ordinal derivation stays manual (worked first try
+  here); harness wiring still optional.
+- Fire Knife thief-class fields decode fine; no monster backstab surfaced in
+  this fight (they routed before flanking mattered) — CanBackStabTarget's
+  team-gate-free path stays capture-unproven for monsters.
+- The [4] hit_bonus str/dex plumbing covers mundane loadouts; item `plus`
+  terms remain cited-deferred (no magic loadout weapon yet).
+
+**The guard now pins NINE closed captures.** First sewer roster proven; next
+frontiers need new captures (cleric/otyugh/troll rosters, buffed-party
+affects, multi-caster, invisibility — the §44.1 list stands).
