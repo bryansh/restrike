@@ -2981,3 +2981,50 @@ fix binary-cited; two are new coab≠binary divergences. The full 6-hop peel:
 **The guard now pins NINE closed captures.** First sewer roster proven; next
 frontiers need new captures (cleric/otyugh/troll rosters, buffed-party
 affects, multi-caster, invisibility — the §44.1 list stands).
+
+## 46. The M5 exit gate, redefined — "combat done (for now)" = three more capture campaigns, then the visualizer (agreed with Bryan 2026-07-25)
+
+With the guard 9/9 and the deterministic core proven (doc §45), the original
+M5 exit criterion ("every ovr010/ovr014 path capture-proven or cited+tripwired")
+is CLOSE by its letter — most unmodeled territory is already cited and
+tripwired. The agreed gate for calling combat done and starting the
+**visualizer (M6)**:
+
+**GATE = the 9/9 matrix stays closed AND these three campaigns close:**
+
+1. **Sewer roster 2** — otyugh / troll / sling-monkey (save-doctor slot D is
+   the staging base; no party prep). Drives: troll regeneration, the sling
+   null-item path live, otyugh specials, a second `field_6E4 = −3` data point,
+   and the first real shot at a MONSTER backstab/thief special. Watch the
+   §44.1 list while in the records.
+2. **Cleric casting (SHARA)** — camp memorize + rest prep, the caster-bar
+   staging pattern. Drives: cleric `ShouldCastSpellX` priorities (cure/hold),
+   turn undead (the cited stub), a second §38-derived toggle pin.
+3. **Buffed-party affects** — camp-cast bless/prot/etc BEFORE the fight, then
+   a normal QuickFight capture. Drives: the CallAffectTable effect handlers
+   (the dispatch skeleton is wired, handlers empty — the biggest remaining
+   chunk), affect POPULATION from the hook's per-combatant arrays (§44.2,
+   already live), and the .FX-import path.
+
+**Pre-staging prep (before campaign 1):** the §45 hook TODO — emit
+`area2_field_6e4` (+ the `6E0/6E2` team to-hit pair) in `combat_entry`
+(dosbox `restrike-hook`, the §44.2 sampling pattern) — so every future
+capture records the area modifiers instead of riding `RESTRIKE_AREA_6E4`.
+
+**Explicitly DEFERRED past the gate (the circle-back ledger — capture-driven,
+behind tripwires, accelerated by the visualizer once it exists):**
+- exotic/remaining spell rows (lazy-transcription rule stands: unknown id →
+  `spell-entry` tripwire), enemy-caster and multi-caster fights;
+- invisibility (the sparse find_target retry) and the monster specials the
+  three rosters don't surface (breath, gaze, level drain, …);
+- the surrender-int5 proof capture; wand/magic-item effects;
+- XP/treasure award, wilderness `SetupGroundTiles`, surprise breadth,
+  shop/temple COMBAT branch;
+- the ECL store decode for `field_6E4` (the flow-following gap, §45);
+- **manual-combat UI — rides WITH M6**, not before it (same ActionSink event
+  stream the visualizer consumes).
+
+Rationale recorded: closure velocity has inverted (sewer-fight-1 — a new
+roster, new weapon class, two new coab≠binary finds — closed in one session),
+and the visualizer accelerates the remaining tail rather than competing with
+it (staging and debugging by watching fights instead of reading draw streams).
