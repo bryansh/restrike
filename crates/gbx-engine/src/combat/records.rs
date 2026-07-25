@@ -149,6 +149,19 @@ fn combatant_from_record(
     );
     c.field_de = rec.field_de; // @0xde
     c.thief_skill_level = skill_level(rec, SKILL_THIEF);
+    // §45 the ready/unready hit-bonus recompute: `thac0@0x73` (the
+    // `reclac_player_values` base, `ovr025.cs:427`) and `strengthHitBonus`
+    // (`ovr025.cs:627` — coab reads `stats2.Str.full`/`Str00.cur`, our
+    // `.original`/`.current` bytes), zeroed by the `field_125@0x125` gate
+    // inside the coab bonus functions (FIRE KNIFE carries 0 there). The dex
+    // missile term reuses `reaction_adj` (`DexReactionAdj`, the same coab
+    // function the initiative delay reads).
+    c.thac0 = rec.thac0_base as i32;
+    c.str_hit_bonus = if rec.field_125 != 0 {
+        flavor.strength_hit_bonus(rec.stats.str.original, rec.stats.str_exceptional.current)
+    } else {
+        0
+    };
     c
 }
 

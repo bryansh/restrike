@@ -1016,6 +1016,56 @@ impl CombatState {
         found || flags == (gbx_formats::items::flags::FLAG_08 | gbx_formats::items::flags::FLAG_02)
     }
 
+    /// The attack-1 profile a readied primary weapon installs —
+    /// `CalculateAttackValues` (`sub_66023` @`ovr025:0023`, coab
+    /// `ovr025.cs:10`), reached from every ready/unready through
+    /// `reclac_player_values` (`sub_66C20`): with a non-null primary,
+    /// `attack1_DiceCount/Size := table[type].diceCountNormal/SizeNormal`
+    /// (`ovr025.cs:61-62`) and `attack1_DamageBonus := table.bonusNormal`
+    /// (`:25`) plus the strength term for a MELEE-flagged weapon and the
+    /// `item.plus`/ammo-`plus` terms (`:27-47`) — all zero for the mundane
+    /// non-melee loadout weapons modeled today (bows, plain arrows), so the
+    /// deferred terms are cited, not folded. armed-bar is provably unshifted:
+    /// its PC records serialized bow-readied, so their entry profile already
+    /// equals this table row.
+    pub(super) fn ranged_ready_profile(&self, item_type: u8) -> (u8, u8, u8) {
+        let it = self
+            .item_data
+            .as_ref()
+            .expect("ready-profile ⇒ items")
+            .get(item_type);
+        (
+            it.dice_count_normal,
+            it.dice_size_normal,
+            it.bonus_normal as u8,
+        )
+    }
+
+    /// The `hitBonus` a readied primary installs (`CalculateAttackValues`,
+    /// `ovr025.cs:18-60`; doc §45): `thac0` + `DexReactionAdj` for a `flag_02`
+    /// weapon (`:20-23` — both bows carry it; the same coab function
+    /// [`Combatant::reaction_adj`] holds) + `strengthHitBonus` for a
+    /// MELEE-flagged one (`:27-29`) — the `item.plus`/ammo-`plus` terms
+    /// (`:33-60`) are zero for the mundane loadout weapons, cited-deferred
+    /// like the damage side. Load-bearing for FIRE KNIFE: sword `hitBonus` 41
+    /// vs bow `41 + DexReactionAdj(18) = 44` (dex 18, str gate `field_125` 0).
+    pub(super) fn ranged_ready_hit_bonus(&self, actor: usize, item_type: u8) -> i32 {
+        let it = self
+            .item_data
+            .as_ref()
+            .expect("ready-hit ⇒ items")
+            .get(item_type);
+        let f = &self.fighters[actor];
+        let mut hit = f.thac0;
+        if it.flags & gbx_formats::items::flags::FLAG_02 != 0 {
+            hit += f.reaction_adj as i32;
+        }
+        if it.flags & gbx_formats::items::flags::MELEE != 0 {
+            hit += f.str_hit_bonus;
+        }
+        hit
+    }
+
     /// `AI_items_selection(player)` (`sub_36673` @`ovr010:1673`, coab
     /// `ovr010.cs:875`; doc §34.5) — the cornered weapon swap, faithful over the
     /// loadout's single weapon (the secondary/shield/multi-item branches are
@@ -1057,20 +1107,32 @@ impl CombatState {
         let currently_readied = self.fighters[actor].weapon_readied;
         if use_bow && !currently_readied {
             // Re-ready the bow: primaryWeapon := bow, attack-1 profile := the
-            // saved entry profile.
+            // weapon's TABLE profile ([`Self::ranged_ready_profile`], the
+            // `reclac_player_values` → `CalculateAttackValues` recompute both
+            // swap arms funnel through, `ovr010:1AB0`). The old entry-snapshot
+            // read was an armed-bar coincidence: a PC record serialized with
+            // the bow readied already carries the table row (`1d6+0`), but a
+            // sword-readied monster record (FIRE KNIFE `1d8+0`, doc §45) must
+            // NOT shoot with sword dice.
             self.fighters[actor].weapon_readied = true;
-            let (dc, ds, db) = self.fighters[actor].entry_dice;
-            self.fighters[actor].dice_count = dc;
-            self.fighters[actor].dice_size = ds;
-            self.fighters[actor].damage_bonus = db;
+            let (dc, ds, db) = self.ranged_ready_profile(l.primary_type);
+            let hit = self.ranged_ready_hit_bonus(actor, l.primary_type);
+            let f = &mut self.fighters[actor];
+            f.dice_count = dc;
+            f.dice_size = ds;
+            f.damage_bonus = db;
+            f.hit_bonus = hit;
         } else if !use_bow && currently_readied {
             // Unready the bow: primaryWeapon := null, attack-1 profile := the
-            // bare-hands profile.
-            self.fighters[actor].weapon_readied = false;
+            // bare-hands profile; `hitBonus := thac0 + strengthHitBonus` (the
+            // no-primary arm, `ovr025.cs:427+433`).
+            let f = &mut self.fighters[actor];
+            f.weapon_readied = false;
             let (dc, ds, db) = l.unarmed_profile;
-            self.fighters[actor].dice_count = dc;
-            self.fighters[actor].dice_size = ds;
-            self.fighters[actor].damage_bonus = db;
+            f.dice_count = dc;
+            f.dice_size = ds;
+            f.damage_bonus = db;
+            f.hit_bonus = f.thac0 + f.str_hit_bonus;
         }
         // The tail (`ovr010:1AB0-1AC6`, coab ovr010.cs:1018-1020) runs
         // `reclac_player_values` + `reclac_attacks` UNCONDITIONALLY — both the

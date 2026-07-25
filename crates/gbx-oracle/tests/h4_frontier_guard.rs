@@ -181,11 +181,15 @@ const PINS: &[Pin] = &[
         // @63→65: the FIRE KNIFE loadout landed (MON2ITM.DAX block 1 — short
         // bow + 7 arrows; doc §45). The @63 fork was never terrain: back-rank
         // [9] THROWS twice from its entry square (the armed-bar d20/d6/d20
-        // signature) where our melee-only decode walked it. @65 = shot-1
-        // damage rolls the sword's d8 (entry profile) where the capture rolls
-        // the arrow's d6 — the ready-profile recompute, next.
+        // signature) where our melee-only decode walked it.
+        // @65→381: the ready/unready recompute (`reclac_player_values` →
+        // `CalculateAttackValues`, ovr025.cs:407-62) — readying installs the
+        // weapon's TABLE profile (arrow d6, not the sword's record d8) and
+        // rebuilds hitBonus from thac0 (bow = 41 + DexReactionAdj(18) = 44;
+        // the constant-hit model let [10]'s capture-hit shot 2 miss @140).
+        // armed-bar unshifted by both (its PC records serialized bow-readied).
         capture: "sewer-fight-1.gbxtrace",
-        expect: Expect::Frontier(65),
+        expect: Expect::Frontier(381),
         map_direction: 0,
         auto_cast: false,
         auto_cast_toggles: &[],

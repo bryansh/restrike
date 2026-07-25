@@ -213,6 +213,16 @@ pub struct Combatant {
     pub ac_behind: u8,
     /// `attacker.hitBonus@0x199` (THAC0-derived to-hit number).
     pub hit_bonus: i32,
+    /// `thac0@0x73` — the base the ready/unready recompute rebuilds
+    /// `hit_bonus` from (`reclac_player_values` `ovr025.cs:427` resets
+    /// `hitBonus := thac0` before the per-weapon terms; doc §45). Hand-built
+    /// combatants set it to their `hit_bonus` so the recompute is a no-op.
+    pub thac0: i32,
+    /// `strengthHitBonus` (`ovr025.cs:627`) precomputed at decode — applied on
+    /// unready (`:433`, no primary) and for MELEE-flagged primaries (`:29`).
+    /// Zero when the record's `field_125@0x125` is 0 (the gate inside the coab
+    /// bonus functions — FIRE KNIFE) or for hand-built combatants.
+    pub str_hit_bonus: i32,
     /// `HitDice` — `TrySweepAttack` only sweeps `HitDice == 0` targets.
     pub hit_dice: u8,
     /// Base movement (`player.movement`) → [`calc_moves`] at initiative.
@@ -335,10 +345,11 @@ pub struct Combatant {
     /// (`item.count == 0` → `lose_item`, doc §34.6) — `GetCurrentAttackItem`
     /// then finds no ammo. Unexercised by armed-bar (ammo ≥ usage); cheap.
     pub ammo_item_lost: bool,
-    /// The saved readied attack-1 profile (`dice_count`, `dice_size`,
-    /// `damage_bonus` @0x19E/0x1A0/0x1A2 at entry) — what re-readying the bow
-    /// restores after a cornered unready swapped in the bare-hands profile
-    /// (doc §34.5). Set to the record's decoded profile at construction.
+    /// The record's decoded attack-1 profile at entry (`dice_count`,
+    /// `dice_size`, `damage_bonus` @0x19E/0x1A0/0x1A2). Decode-informational
+    /// since the table-driven ready profile landed (doc §45): re-readying
+    /// installs `ranged_ready_profile` (the `CalculateAttackValues` recompute),
+    /// not this snapshot.
     pub entry_dice: (u8, u8, u8),
     /// `action.field_8@0x08` — set `true` by `AttackTarget01` (`ovr014.cs:738`),
     /// reset by `CalculateInitiative` (`sub_3E000`, §32). Gates the
@@ -450,6 +461,8 @@ impl Combatant {
             ac: 0,
             ac_behind: 0,
             hit_bonus: 0,
+            thac0: 0,
+            str_hit_bonus: 0,
             hit_dice: 0,
             movement: 0,
             reaction_adj,
@@ -539,6 +552,10 @@ impl Combatant {
             ac,
             ac_behind: ac,
             hit_bonus,
+            // A synthetic combatant's recompute base IS its to-hit (str/dex
+            // terms 0), so ready/unready round-trips leave `hit_bonus` alone.
+            thac0: hit_bonus,
+            str_hit_bonus: 0,
             hit_dice: 1,
             movement,
             reaction_adj: 0,
@@ -943,11 +960,23 @@ impl CombatState {
         f.weapon_readied = true;
         f.ammo = loadout.ammo_count;
         f.ammo_item_lost = false;
-        // Snapshot the readied attack-1 profile as the re-ready target HERE, so
-        // a hand-built combatant (whose constructors default `entry_dice` to
-        // zeros) survives an unready→re-ready round trip; for the capture path
-        // this equals the record profile `combatant_from_record` already set.
         f.entry_dice = (f.dice_count, f.dice_size, f.damage_bonus);
+        // Readying installs the weapon's TABLE attack-1 profile
+        // (`CalculateAttackValues`, `ovr025.cs:61-62` — see
+        // `ranged_ready_profile`): load-bearing for a record serialized with a
+        // DIFFERENT weapon readied (FIRE KNIFE enters sword-readied `1d8+0`,
+        // shoots `1d6+0` arrows, doc §45); a no-op for armed-bar's bow-readied
+        // PC records. Without an item table the ranged path can never fire
+        // (`is_weapon_ranged` requires it), so the profile stays as decoded.
+        if self.item_data.is_some() {
+            let (dc, ds, db) = self.ranged_ready_profile(loadout.primary_type);
+            let hit = self.ranged_ready_hit_bonus(id, loadout.primary_type);
+            let f = &mut self.fighters[id];
+            f.dice_count = dc;
+            f.dice_size = ds;
+            f.damage_bonus = db;
+            f.hit_bonus = hit;
+        }
     }
 
     /// Sets the initial per-round surprise mask (`area2_ptr.field_596`) — a
