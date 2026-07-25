@@ -472,6 +472,19 @@ impl CombatState {
                     self.check_affects_effect(actor, CheckType::SpecialAttacks);
                     self.check_affects_effect(target, CheckType::Type5);
                     self.apply_damage(target, dmg.amount);
+                    // The casting disruption (`TryLooseSpell` inlined at the
+                    // `DisplayAttackMessage` tail, `ovr014:050C-051A`; doc §45):
+                    // `actualDamage > 0` → `actions.can_cast@+1 := 0`. The
+                    // queued-spell loss that follows (`actions.spell_id > 0` →
+                    // "lost a spell" + `clear_spell`, `:0527-0571`) is
+                    // cited-deferred — no queued-spell state is modeled (the
+                    // `spell-queued` tripwire owns that territory). The
+                    // spell-damage twin lives in `damage_person`
+                    // (`ovr024:21B3`, its own "lost a spell" string) — cited,
+                    // unexercised (no modeled fight damages a caster by spell).
+                    if dmg.amount > 0 {
+                        self.fighters[target].can_cast = false;
+                    }
                     if !self.fighters[target].in_combat {
                         target_gone = true;
                     }

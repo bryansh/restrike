@@ -175,7 +175,17 @@ impl CombatState {
     /// (`friends_count`/`foe_count`). Returns whether a spell was cast (the AI
     /// turn returns on `true`, `ovr010.cs:74-77`).
     pub(super) fn sub_3560b(&mut self, rng: &mut EngineRng, actor: usize) -> bool {
-        let spells_count = self.fighters[actor].memorized_list.len();
+        // The collection itself is gated on `actions.can_cast` (coab
+        // `ovr010.cs:238`; doc §45) — a caster disrupted by damage this round
+        // collects NOTHING, so the gate below fails on `spells_count` and the
+        // turn draws only the unconditional d7. Capture-proven by
+        // sewer-fight-1: PHILIPPE arrow-hit in round 0, selection d1s only
+        // from round 1 on.
+        let spells_count = if self.fighters[actor].can_cast {
+            self.fighters[actor].memorized_list.len()
+        } else {
+            0
+        };
         // `var_5B = roll_dice(7,1)` (@066D) — UNCONDITIONAL, before the gate.
         // This is the d7 step 6 already drew (`ovr010.cs:248`).
         let bound = roll_dice(rng, 7, 1) as i32;

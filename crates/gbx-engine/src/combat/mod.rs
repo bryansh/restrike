@@ -351,6 +351,15 @@ pub struct Combatant {
     /// installs `ranged_ready_profile` (the `CalculateAttackValues` recompute),
     /// not this snapshot.
     pub entry_dice: (u8, u8, u8),
+    /// `actions.can_cast@0x01` — the casting-disruption flag (doc §45).
+    /// `CalculateInitiative` re-arms it every round (`sub_3E000`,
+    /// `ovr014.cs:13`); weapon damage `> 0` zeroes it at the
+    /// `DisplayAttackMessage` tail (`ovr014:050C-051A` — the inlined
+    /// `TryLooseSpell`), so a caster hit before their turn skips the whole
+    /// `sub_3560B` spell-selection collection that round (`ovr010.cs:238`).
+    /// Load-bearing for sewer-fight-1: PHILIPPE is arrow-hit in round 0 (no
+    /// selection d1s) and unhurt in round 1 (nine d1s at #381).
+    pub can_cast: bool,
     /// `action.field_8@0x08` — set `true` by `AttackTarget01` (`ovr014.cs:738`),
     /// reset by `CalculateInitiative` (`sub_3E000`, §32). Gates the
     /// `reclac_attacks` write-back (doc §34.3). `false` at entry.
@@ -497,6 +506,7 @@ impl Combatant {
             ammo: 0,
             ammo_item_lost: false,
             entry_dice: (0, 0, 0),
+            can_cast: true,
             field_8: false,
             field_de: 0x01,
             attack2_dice: (0, 0, 0),
@@ -590,6 +600,7 @@ impl Combatant {
             ammo: 0,
             ammo_item_lost: false,
             entry_dice: (0, 0, 0),
+            can_cast: true,
             field_8: false,
             field_de: 0x01,
             attack2_dice: (0, 0, 0),
@@ -3168,6 +3179,7 @@ impl CombatState {
         {
             let f = &mut self.fighters[i];
             f.can_use = true;
+            f.can_cast = true; // sub_3E000's per-round re-arm (ovr014.cs:13)
             f.attack_idx = 2;
             f.field_8 = false;
         }

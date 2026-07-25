@@ -766,10 +766,13 @@ fn stub_tripwires_fire_when_unmodeled_mechanics_are_reached() {
             .count()
     };
     // Fighter 1's turn above re-killed the negative-hp fighter 0 — restore
-    // him to a real live PC before running HIS turns.
+    // him to a real live PC before running HIS turns. The damage he took also
+    // dropped `can_cast` (the §45 disruption); re-arm it as the next round's
+    // `CalculateInitiative` would (the test drives turns directly).
     world.fighters[0].in_combat = true;
     world.fighters[0].hp_current = 30;
     world.fighters[0].health_status = HealthStatus::Okey;
+    world.fighters[0].can_cast = true;
     world.fighters[0].memorized_list = vec![0x10];
     world.melee_ai_turn(&mut rng, 0);
     assert_eq!(pc_spell_entry(&trips), 0, "PC + magic OFF must not select");
