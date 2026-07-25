@@ -228,6 +228,11 @@ fn apply_capture_knobs(state: &mut gbx_engine::combat::CombatState, cap: &Captur
     if let Ok(v) = std::env::var("RESTRIKE_AUTO_CAST_TOGGLES") {
         state.auto_cast_toggles = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
     }
+    // coab≠binary #21 (doc §45): the party-only area movement modifier.
+    state.area_field_6e4 = std::env::var("RESTRIKE_AREA_6E4")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     // §34.1: the ITEMS table + per-capture ranged loadouts (one shared place,
     // `common`) — applied here so EVERY replay/diagnostic in this file shares
     // the same ranged inputs (the §30 lesson). `None` loadouts are melee-
@@ -804,7 +809,7 @@ fn h4_locate_draw() {
                     .map(|(i, f)| {
                         let team = if f.team == Team::Party { 'P' } else { 'M' };
                         format!(
-                            "[{i:2}] {team} ({:2},{:2}) ic={} hp{:>3} ready={} dice={}d{}+{} ammo={} tgt={}",
+                            "[{i:2}] {team} ({:2},{:2}) ic={} hp{:>3} ready={} dice={}d{}+{} ammo={} tgt={} f15={} delay={} move={}",
                             f.pos.x,
                             f.pos.y,
                             f.in_combat as u8,
@@ -815,6 +820,9 @@ fn h4_locate_draw() {
                             f.damage_bonus,
                             f.ammo,
                             f.target.map(|t| t as i64).unwrap_or(-1),
+                            f.field_15,
+                            f.delay,
+                            f.move_left,
                         )
                     })
                     .collect(),
@@ -1121,5 +1129,159 @@ fn h4_turndiff_localize() {
                 );
             }
         }
+    }
+}
+
+/// **Draw-indexed position comparator** (doc §45) — localizes SILENT (draw-free)
+/// movement forks. The capture's `turn_snapshot`s are sampled at logged draws
+/// (§44.2), so each carries an implicit draw index: a snapshot tagged after
+/// draw `D` shows state written between the `D`-th and `D+1`-th rng lines.
+/// This test re-parses the raw capture for `(draw_idx, positions)` pairs and
+/// replays our engine recording every `Move` event with its draw count —
+/// STEP-resolution positions (a per-`step()` board can't see intra-turn
+/// squares and false-positives on multi-step turns). For each capture
+/// snapshot it rebuilds our board from all moves with `count <= D+1` and
+/// reports the first mismatch — the forking turn, even when the draw streams
+/// agree (PC movement draws nothing).
+#[test]
+fn h4_pos_at_draws() {
+    let Some(path) = capture_path() else {
+        eprintln!("SKIPPED");
+        return;
+    };
+    if !path.exists() {
+        eprintln!("SKIPPED: capture absent");
+        return;
+    }
+    let text = std::fs::read_to_string(&path).expect("readable");
+    let cap = parse_capture(&text);
+
+    // (draw_idx_before_snapshot, positions) per turn_snapshot, raw-parsed.
+    let mut snaps: Vec<(usize, Vec<(u8, u8)>)> = Vec::new();
+    let mut seen_entry = false;
+    let mut idx: i64 = -1;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        match v.get("e").and_then(|e| e.as_str()) {
+            Some("combat_entry") => seen_entry = true,
+            Some("rng") if seen_entry => idx += 1,
+            Some("turn_snapshot") if seen_entry => {
+                let pos = v["combatants"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|c| {
+                        (
+                            c["x"].as_u64().unwrap() as u8,
+                            c["y"].as_u64().unwrap() as u8,
+                        )
+                    })
+                    .collect();
+                snaps.push((idx.max(0) as usize, pos));
+            }
+            _ => {}
+        }
+    }
+
+    // Replay, recording (draws_after_step, positions) per step.
+    let entries: Vec<RecordCombatant> = cap
+        .entry
+        .iter()
+        .map(|c| RecordCombatant {
+            team: team_of(c.team),
+            pos: GridPos::new(c.x, c.y),
+            record: &c.record,
+        })
+        .collect();
+    let rules = RuleSet::load();
+    let flavor = Adnd1::new(&rules);
+    let mut state = combat_state_from_records(
+        &entries,
+        CombatMap::from_ground(cap.terrain.clone()),
+        &flavor,
+    )
+    .expect("records decode");
+    apply_capture_knobs(&mut state, &cap);
+    let tap = DrawTap::default();
+    let draws = tap.draws.clone();
+    let mut rng = EngineRng::new(cap.rng_state);
+    rng.attach_sink(Box::new(tap));
+
+    // Record every landed step: (draw_count_at_event, mover, to_x, to_y).
+    // count == N means the move landed after the N-th draw (1-based), i.e.
+    // between 0-indexed draws N-1 and N — visible to a capture snapshot
+    // tagged `after draw D` iff count <= D + 1.
+    type Moves = Rc<RefCell<Vec<(usize, usize, u8, u8)>>>;
+    let moves: Moves = Rc::new(RefCell::new(Vec::new()));
+    struct MoveRec(Rc<RefCell<Vec<RngDraw>>>, Moves);
+    impl gbx_engine::combat::ActionSink for MoveRec {
+        fn on_action(&mut self, e: gbx_engine::combat::ActionEvent) {
+            if let gbx_engine::combat::ActionEvent::Move {
+                combatant_id,
+                to_x,
+                to_y,
+                ..
+            } = e
+            {
+                self.1.borrow_mut().push((
+                    self.0.borrow().len(),
+                    combatant_id,
+                    to_x as u8,
+                    to_y as u8,
+                ));
+            }
+        }
+    }
+    state.attach_action_sink(Box::new(MoveRec(draws.clone(), moves.clone())));
+
+    let mut guard = 0usize;
+    loop {
+        guard += 1;
+        assert!(guard < 1_000_000, "runaway");
+        match state.step(&mut rng) {
+            CombatStep::Ended => break,
+            CombatStep::RoundEnded { battle_over, .. } if battle_over => break,
+            _ => {}
+        }
+    }
+
+    // Walk capture snapshots and our move stream in lockstep draw order.
+    let mut ours: Vec<(u8, u8)> = cap.entry.iter().map(|c| (c.x as u8, c.y as u8)).collect();
+    let all_moves = moves.borrow();
+    let mut mi = 0usize;
+    let mut reported = 0;
+    for (si, (d, pos)) in snaps.iter().enumerate() {
+        while mi < all_moves.len() && all_moves[mi].0 <= d + 1 {
+            let (_, id, x, y) = all_moves[mi];
+            ours[id] = (x, y);
+            mi += 1;
+        }
+        if &ours != pos {
+            eprintln!("SILENT position fork: capture turn_snapshot #{si} (after draw {d}):");
+            for (k, (c, o)) in pos.iter().zip(ours.iter()).enumerate() {
+                let mark = if c != o { "  <-- differs" } else { "" };
+                eprintln!(
+                    "  [{k:2}] capture ({},{}) | ours ({},{}){mark}",
+                    c.0, c.1, o.0, o.1
+                );
+            }
+            reported += 1;
+            if reported >= 3 {
+                break;
+            }
+        }
+    }
+    if reported == 0 {
+        eprintln!(
+            "all {} capture snapshots position-consistent with our replay (step-resolution)",
+            snaps.len()
+        );
     }
 }

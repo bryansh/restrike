@@ -201,7 +201,7 @@ impl CombatState {
                 // the flee fork: moral_failure = 1 (:14C8) + remove_affect(0x4A)/
                 // remove_affect(0x4B) (:14DC/:14F0) — §39.5, wired below.
                 let max_opp = self.max_opposition_moves(actor);
-                if max_opp > calc_moves(self.fighters[actor].movement) / 2 {
+                if max_opp > self.calc_moves_actor(actor) / 2 {
                     // Surrender branch (loc_364F7, :14F7-1529, §28 item 7). The
                     // `surrender-int5` wire (kept, repurposed) fires whenever this
                     // implemented-but-capture-unproven branch executes — the rout
@@ -233,13 +233,13 @@ impl CombatState {
     }
 
     /// `MaxOppositionMoves` (`ovr014.cs:1699`) — the largest half-move budget over
-    /// the live opposite team. Draw-free.
+    /// the live opposite team (each member's full `CalcMoves`, so a Party
+    /// opponent carries the #21 team-gated `field_6E4` modifier). Draw-free.
     fn max_opposition_moves(&self, actor: usize) -> i32 {
         let team = self.fighters[actor].team;
-        self.fighters
-            .iter()
-            .filter(|f| f.in_combat && f.team != team)
-            .map(|f| calc_moves(f.movement) / 2)
+        (0..self.fighters.len())
+            .filter(|&i| self.fighters[i].in_combat && self.fighters[i].team != team)
+            .map(|i| self.calc_moves_actor(i) / 2)
             .max()
             .unwrap_or(0)
     }
@@ -457,7 +457,7 @@ impl CombatState {
         let gets_away = if self.build_near(actor, 0xff, false).is_empty() {
             true
         } else {
-            let var_4 = calc_moves(self.fighters[actor].movement) / 2;
+            let var_4 = self.calc_moves_actor(actor) / 2;
             let var_3 = self.max_opposition_moves(actor);
             if var_3 < var_4 {
                 true

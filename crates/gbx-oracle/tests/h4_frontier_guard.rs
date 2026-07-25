@@ -1,9 +1,8 @@
 //! **The frontier-pin regression guard.** A committed manifest of the exact H4
-//! replay outcome for every local capture, so the open frontier
-//! (`sewer-fight-1` @63 — the first post-matrix capture, doc §45) cannot
-//! silently drift and the eight closed captures (the full bar/terrain matrix,
-//! doc §44 — incl. the `bar-rout-58c50` rout 3521/3521 and `bar-fists-2`
-//! 3811/3811) cannot silently regress.
+//! replay outcome for every local capture — NINE closed captures (the full
+//! bar/terrain matrix, doc §44, plus `sewer-fight-1` 1526/1526, doc §45 — the
+//! first sewer fight: Fire Knife archers, casting disruption, the party-gated
+//! area move modifier #21) that cannot silently regress.
 //!
 //! ## The exact-pin rule (read before editing [`PINS`])
 //!
@@ -46,6 +45,10 @@ enum Expect {
     /// Replays operand-exact, draw-for-draw, equal length, zero stub trips.
     Closed,
     /// Diverges at **exactly** this draw index (operand or `(before,after)`).
+    /// Unconstructed since doc §45 closed sewer-fight-1 (9/9 closed) — kept as
+    /// the pin type every future capture with an open frontier re-enters
+    /// through.
+    #[allow(dead_code)]
     Frontier(usize),
 }
 
@@ -64,6 +67,10 @@ struct Pin {
     map_direction: u8,
     auto_cast: bool,
     auto_cast_toggles: &'static [u32],
+    /// `area2.field_6E4` — the PARTY-only area movement modifier (coab≠binary
+    /// #21, doc §45). ECL-set per area, not in the capture snapshot (hook
+    /// TODO): bar 0, sewers −3 (pinned by three independent chase walks).
+    area_field_6e4: i32,
 }
 
 /// **The manifest.** Current truth (doc §29). Edit ONLY alongside the fix that
@@ -75,6 +82,7 @@ const PINS: &[Pin] = &[
         map_direction: 2,
         auto_cast: false,
         auto_cast_toggles: &[],
+        area_field_6e4: 0,
     },
     Pin {
         capture: "combat3+terrain4.gbxtrace",
@@ -82,6 +90,7 @@ const PINS: &[Pin] = &[
         map_direction: 2,
         auto_cast: false,
         auto_cast_toggles: &[],
+        area_field_6e4: 0,
     },
     Pin {
         capture: "combat2+terrain4.gbxtrace",
@@ -89,6 +98,7 @@ const PINS: &[Pin] = &[
         map_direction: 2,
         auto_cast: false,
         auto_cast_toggles: &[],
+        area_field_6e4: 0,
     },
     Pin {
         // ★ CLOSED (doc §44): the oldest open frontier (@368 since the wire-gates
@@ -104,6 +114,7 @@ const PINS: &[Pin] = &[
         map_direction: 2,
         auto_cast: false,
         auto_cast_toggles: &[],
+        area_field_6e4: 0,
     },
     Pin {
         // ★ CLOSED 3521/3521 (doc §32): the rout capture replays operand-exact
@@ -114,6 +125,7 @@ const PINS: &[Pin] = &[
         map_direction: 2,
         auto_cast: false,
         auto_cast_toggles: &[],
+        area_field_6e4: 0,
     },
     Pin {
         // The armed-slice driver (doc §25 runbook item 3): MATHEW's first turn
@@ -130,6 +142,7 @@ const PINS: &[Pin] = &[
         map_direction: 2,
         auto_cast: false,
         auto_cast_toggles: &[],
+        area_field_6e4: 0,
     },
     Pin {
         // The caster driver, fully peeled (doc §41). sub_3560B's selection loop
@@ -155,6 +168,7 @@ const PINS: &[Pin] = &[
         map_direction: 2,
         auto_cast: false,
         auto_cast_toggles: &[16],
+        area_field_6e4: 0,
     },
     Pin {
         // A third independent fist seed, free from the caster staging (doc
@@ -165,6 +179,7 @@ const PINS: &[Pin] = &[
         map_direction: 2,
         auto_cast: false,
         auto_cast_toggles: &[],
+        area_field_6e4: 0,
     },
     Pin {
         // The first post-matrix capture (doc §45): 5 Fire Knives jump the
@@ -189,11 +204,22 @@ const PINS: &[Pin] = &[
         // round-0 PHILIPPE (ordinal 9) still draws no selection d1s because
         // the round-0 arrow hit dropped `can_cast` (the §45 disruption);
         // his round-1 turn draws the nine d1s at #381.
+        //
+        // ★ CLOSED 1526/1526 (doc §45): @1152 was coab≠binary #21 — the
+        // area movement modifier `area2.field_6E4` is PARTY-gated
+        // (`sub_3E124` @`ovr014:0138-014E` tests `combat_team == Ours`; coab
+        // misread the gate as `in_combat == false`). The sewers run the party
+        // at movement 12−3=9 (an 18-half budget), so the round-5 chase walks
+        // stop a step short of the routing Fire Knives — three independent
+        // PC walks pin −3 exactly; monsters keep 24 (their 23-cost flee
+        // paths matched all along). The remaining ~374 draws replay
+        // operand-exact — the first sewer roster proven draw-for-draw.
         capture: "sewer-fight-1.gbxtrace",
-        expect: Expect::Frontier(1152),
+        expect: Expect::Closed, // was Frontier(1152); party-gated field_6E4 (#21)
         map_direction: 0,
         auto_cast: false,
         auto_cast_toggles: &[2],
+        area_field_6e4: -3,
     },
 ];
 
@@ -277,6 +303,7 @@ fn replay(
     map_direction: u8,
     auto_cast: bool,
     auto_cast_toggles: &[u32],
+    area_field_6e4: i32,
 ) -> (Option<usize>, usize) {
     let text = std::fs::read_to_string(path).expect("capture readable");
     let trace = Trace::parse(&text).expect("capture parses");
@@ -311,6 +338,8 @@ fn replay(
     state.map_direction = entry.map_direction.unwrap_or(map_direction);
     state.auto_pcs_cast_magic = auto_cast;
     state.auto_cast_toggles = auto_cast_toggles.to_vec();
+    // coab≠binary #21 (doc §45): the party-only area movement modifier.
+    state.area_field_6e4 = area_field_6e4;
     // §34.1: the ITEMS table + per-capture ranged loadouts (one shared place,
     // `common`). `None` loadouts leave a combatant melee-identical, so the six
     // non-armed pins are unshifted; armed-bar arms MATHEW/TRAVIS's bows.
@@ -392,6 +421,7 @@ fn h4_frontier_pins_hold() {
             pin.map_direction,
             pin.auto_cast,
             pin.auto_cast_toggles,
+            pin.area_field_6e4,
         );
         match pin.expect {
             Expect::Closed => {

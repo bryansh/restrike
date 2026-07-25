@@ -241,6 +241,15 @@ fn h4_melee_replays_the_bar_brawl_capture_draw_for_draw() {
     if let Ok(v) = std::env::var("RESTRIKE_AUTO_CAST_TOGGLES") {
         state.auto_cast_toggles = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
     }
+    // `area2.field_6E4` — the PARTY-only area movement modifier (coab≠binary
+    // #21, doc §45). ECL-set at the ambush, reset at combat end, NOT in the
+    // capture snapshot (hook TODO) and 0 in the pre-fight save — so it rides
+    // as a knob: `RESTRIKE_AREA_6E4=-3` for the sewers (pinned by three
+    // independent round-5 chase walks). Default 0 = the bar value.
+    state.area_field_6e4 = std::env::var("RESTRIKE_AREA_6E4")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     // §34.1: the ITEMS table + per-capture ranged loadouts (one shared place,
     // `common`). `None` loadouts leave a combatant melee-identical; armed-bar
     // arms MATHEW/TRAVIS's bows.

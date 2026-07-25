@@ -833,6 +833,10 @@ pub struct CombatState {
     pub monster_morale: i32,
     /// `area2.field_58C` — a morale threshold (default 0).
     pub area_field_58c: i32,
+    /// `area2.field_6E4` — the PARTY-only area movement modifier (coab≠binary
+    /// #21, [`calc_moves`] doc; ECL-set via the ScriptMemory window, reset 0 at
+    /// combat end `ovr006.cs:814`). Sewers −3; bar 0. Default 0.
+    pub area_field_6e4: i32,
     /// `gbl.mapDirection` — the party's world facing, read only by the flee-move
     /// direction (`moralFailureEscape:401`).
     pub map_direction: u8,
@@ -907,6 +911,7 @@ impl CombatState {
             enemy_health_pct: 100,
             monster_morale: 0,
             area_field_58c: 0,
+            area_field_6e4: 0,
             map_direction: 0,
             auto_pcs_cast_magic: false,
             auto_cast_toggles: Vec::new(),
@@ -941,6 +946,7 @@ impl CombatState {
             enemy_health_pct: 100,
             monster_morale: 0,
             area_field_58c: 0,
+            area_field_6e4: 0,
             map_direction: 0,
             auto_pcs_cast_magic: false,
             auto_cast_toggles: Vec::new(),
@@ -2478,9 +2484,18 @@ fn place_combatant(
 /// into half-move granularity (`halfActionsLeft = moves * 2`, `:72`). The returned
 /// value is the round's half-move budget (`action.move`, `Action@0x06`).
 ///
-/// The out-of-combat wilderness bonus (`+ area2.field_6E4`, `:64`) and the
-/// `CheckAffectsEffect(Movement)` pass (`:76`, draw-free, no affects modeled) are
-/// omitted — this is the in-combat, no-affects budget.
+/// ★ coab≠binary #21 (doc §45): coab's `if (in_combat == false) moves +=
+/// area2.field_6E4` misread the gate — the binary (`sub_3E124`
+/// @`ovr014:0138-014E`) tests `combat_team == Ours` (`cmp es:[di+
+/// charStruct.combat_team], 0; jnz skip`), so the area movement modifier
+/// applies to the IN-COMBAT PARTY and never to monsters. The sewers set
+/// `field_6E4 = -3` (party movement 12 → 9 → an 18-half budget — pinned by
+/// three independent round-5 chase walks all stopping at cost 17), the bar
+/// leaves it 0 (why all eight closed captures never saw it), and combat end
+/// resets it with the team to-hit pair (`ovr006.cs:812-814`). The stateful
+/// [`CombatState::calc_moves_actor`] carries the team gate; this free helper
+/// stays the no-modifier base (`CheckAffectsEffect(Movement)` @`:76` remains
+/// draw-free, no affects modeled).
 pub fn calc_moves(movement: i32) -> i32 {
     let moves = if !(1..=96).contains(&movement) {
         1
@@ -2488,6 +2503,23 @@ pub fn calc_moves(movement: i32) -> i32 {
         movement
     };
     moves * 2
+}
+
+impl CombatState {
+    /// `CalcMoves(player)` (`sub_3E124` @`ovr014:0124`) with the faithful
+    /// team-gated area modifier (coab≠binary #21 — see [`calc_moves`]): a
+    /// Party actor adds `area2.field_6E4` to its movement BEFORE the 1..=96
+    /// clamp and the ×2; a monster never does. Every in-combat `CalcMoves`
+    /// call site routes through here (initiative's `actions.move`,
+    /// `MaxOppositionMoves`, `FleeCheck_001`'s speed fork, `flee_battle`).
+    pub(super) fn calc_moves_actor(&self, actor: usize) -> i32 {
+        let f = &self.fighters[actor];
+        let mut moves = f.movement;
+        if f.team == Team::Party {
+            moves += self.area_field_6e4; // ovr014:0138-014E — party-only add
+        }
+        calc_moves(moves)
+    }
 }
 
 /// The cost of stepping one tile in iso `direction` from `pos`, per `sub_3E748`
@@ -3200,9 +3232,10 @@ impl CombatState {
         // `baseHalfMoves`@0x11D (0 in this party → attack-2 never swings). The
         // `maxSweapTargets = attackLevel` write is deferred with the 0-HD sweep.
         let in_combat = {
+            let moves = self.calc_moves_actor(i); // #21: team-gated field_6E4
             let f = &mut self.fighters[i];
             f.attack2_left = this_round_action_count(f.base_half_moves as i32, round) as u8;
-            f.move_left = calc_moves(f.movement);
+            f.move_left = moves;
             f.in_combat
         };
 
