@@ -174,11 +174,18 @@ const PINS: &[Pin] = &[
         // the capture opens round-2 initiative d6 — our round 1 owes one
         // extra turn (first board fork: Fire Knife [9]'s approach move).
         // PHILIPPE's mid-fight '2' press IS recorded (magic_toggle flip after
-        // draw 105) but the replay does not consume the channel yet — the §38
-        // turn-ordinal pin gets derived when the peel reaches his first
+        // post-entry draw 57) but the replay does not consume the channel yet —
+        // the §38 turn-ordinal pin gets derived when the peel reaches his first
         // post-flip turn.
+        //
+        // @63→65: the FIRE KNIFE loadout landed (MON2ITM.DAX block 1 — short
+        // bow + 7 arrows; doc §45). The @63 fork was never terrain: back-rank
+        // [9] THROWS twice from its entry square (the armed-bar d20/d6/d20
+        // signature) where our melee-only decode walked it. @65 = shot-1
+        // damage rolls the sword's d8 (entry profile) where the capture rolls
+        // the arrow's d6 — the ready-profile recompute, next.
         capture: "sewer-fight-1.gbxtrace",
-        expect: Expect::Frontier(63),
+        expect: Expect::Frontier(65),
         map_direction: 0,
         auto_cast: false,
         auto_cast_toggles: &[],
