@@ -173,11 +173,6 @@ const PINS: &[Pin] = &[
         // pin fields mirror them for clarity only. @63 ours draws d100 where
         // the capture opens round-2 initiative d6 — our round 1 owes one
         // extra turn (first board fork: Fire Knife [9]'s approach move).
-        // PHILIPPE's mid-fight '2' press IS recorded (magic_toggle flip after
-        // post-entry draw 57) but the replay does not consume the channel yet —
-        // the §38 turn-ordinal pin gets derived when the peel reaches his first
-        // post-flip turn.
-        //
         // @63→65: the FIRE KNIFE loadout landed (MON2ITM.DAX block 1 — short
         // bow + 7 arrows; doc §45). The @63 fork was never terrain: back-rank
         // [9] THROWS twice from its entry square (the armed-bar d20/d6/d20
@@ -188,11 +183,17 @@ const PINS: &[Pin] = &[
         // rebuilds hitBonus from thac0 (bow = 41 + DexReactionAdj(18) = 44;
         // the constant-hit model let [10]'s capture-hit shot 2 miss @140).
         // armed-bar unshifted by both (its PC records serialized bow-readied).
+        // @381→1152: the §38 toggle pin, DERIVED from the recorded
+        // magic_toggle flip (doc §44.2 sampling places it between post-entry
+        // draws 57 and 58 — the head of global turn 2, [9]'s). Not fitted:
+        // round-0 PHILIPPE (ordinal 9) still draws no selection d1s because
+        // the round-0 arrow hit dropped `can_cast` (the §45 disruption);
+        // his round-1 turn draws the nine d1s at #381.
         capture: "sewer-fight-1.gbxtrace",
-        expect: Expect::Frontier(381),
+        expect: Expect::Frontier(1152),
         map_direction: 0,
         auto_cast: false,
-        auto_cast_toggles: &[],
+        auto_cast_toggles: &[2],
     },
 ];
 
