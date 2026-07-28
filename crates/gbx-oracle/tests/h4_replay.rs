@@ -244,13 +244,17 @@ fn h4_melee_replays_the_bar_brawl_capture_draw_for_draw() {
     // `area2.field_6E4` — the PARTY-only area movement modifier (coab≠binary
     // #21, doc §45). ECL-set at the ambush, reset at combat end. Precedence:
     // `RESTRIKE_AREA_6E4` (explicit trial override) > the capture's emitted
-    // `area2_field_6e4` (hooks from cc0c9cd on, the doc §46 prep) > 0 (the
-    // bar value). Pre-trio captures ride the knob: `RESTRIKE_AREA_6E4=-3`
+    // `area2_field_6e4` (hooks from cc0c9cd on, the doc §46 prep), through
+    // the §47 byte-bridge (the ECL stores a byte; sewer-fight-3's raw 253 =
+    // 0xFD means −3 under sub_3E124's word-add + AL-store) > 0 (the bar
+    // value). Pre-trio captures ride the knob: `RESTRIKE_AREA_6E4=-3`
     // for sewer-fight-1 (pinned by three independent round-5 chase walks).
     state.area_field_6e4 = std::env::var("RESTRIKE_AREA_6E4")
         .ok()
         .and_then(|s| s.parse().ok())
-        .or(entry.area2_field_6e4.map(|v| v as i32))
+        .or(entry
+            .area2_field_6e4
+            .map(|v| common::area_6e4_from_word(i32::from(v))))
         .unwrap_or(0);
     // The 6E0/6E2 per-team to-hit pair is parse-only (unmodeled — the gate
     // needs listing verification before engine wiring, the #21 lesson). A

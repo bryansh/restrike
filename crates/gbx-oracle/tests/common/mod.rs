@@ -97,6 +97,22 @@ fn sewer_monster_kit(name: &str) -> Option<Loadout> {
     }
 }
 
+/// The engine-semantic `area2.field_6E4` from the captured raw word — the
+/// **byte-bridge** (doc §47). The ECL stores a BYTE (sewer-fight-3 records the
+/// word 253 = 0x00FD), and the binary's add (`sub_3E124` @`ovr014:0140-014E`,
+/// listing-verified) is `mov al,movement; xor ah,ah; add ax,[6E4]word;
+/// mov [movement],al` — a WORD add whose result is truncated to AL on store.
+/// `(movement + word) & 0xFF ≡ (movement + sign_extended_low_byte) & 0xFF`
+/// identically (the high byte cannot reach the low byte of a sum), so the
+/// engine's i32 domain takes the low byte sign-extended: 0xFD → −3. The
+/// mapping is also invariant to how the hook signed the word (+253 and −3
+/// share a low byte). The subsequent clamp (`<1 || >0x60 → 1`,
+/// `ovr014:0156-0166`) is [`gbx_engine::combat::calc_moves`]'s, already
+/// faithful in the i32 domain for every value whose word sum stays under 256.
+pub fn area_6e4_from_word(raw: i32) -> i32 {
+    i32::from((raw & 0xFF) as u8 as i8)
+}
+
 /// True if any combatant in this capture carries a loadout — lets a harness
 /// skip a ranged capture when the `ITEMS` file is absent (it cannot replay
 /// ranged combat without the weapon table). `sewer-fight-3` (trolls +

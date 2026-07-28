@@ -256,11 +256,12 @@ fn apply_capture_knobs(state: &mut gbx_engine::combat::CombatState, cap: &Captur
     }
     // coab≠binary #21 (doc §45): the party-only area movement modifier.
     // Precedence mirrors h4_replay: knob (explicit trial override) > the
-    // capture's emitted area2_field_6e4 (post-cc0c9cd hooks) > 0.
+    // capture's emitted area2_field_6e4 through the §47 byte-bridge (the ECL
+    // stores a byte; raw 253 = 0xFD means −3) > 0.
     state.area_field_6e4 = std::env::var("RESTRIKE_AREA_6E4")
         .ok()
         .and_then(|s| s.parse().ok())
-        .or(cap.field_6e4)
+        .or(cap.field_6e4.map(common::area_6e4_from_word))
         .unwrap_or(0);
     if cap.field_6e0.unwrap_or(0) != 0 || cap.field_6e2.unwrap_or(0) != 0 {
         eprintln!(

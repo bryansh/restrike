@@ -242,6 +242,25 @@ const PINS: &[Pin] = &[
         auto_cast_toggles: &[17],
         area_field_6e4: 0,
     },
+    Pin {
+        // The campaign-1 troll tussock (doc §47): 4 TROLLS + 7 CROCODILES,
+        // 3,042 post-entry draws / 7 rounds (58C=75; the "trolls out walking
+        // their crocodiles" random-pool scene, teleport-slot-E staging). Both
+        // rosters are ITEMLESS (no MON2ITM blocks — natural attacks straight
+        // from the records). The capture's emitted 6E4 = raw word 253 = 0xFD:
+        // the ECL stores BYTE −3, bridged to the engine's i32 by
+        // `common::area_6e4_from_word` (sub_3E124's word-add + AL-store,
+        // listing-verified @ovr014:0140-014E) — the pin records the
+        // engine-semantic value. Intake frontier @115: ours draws a d1 where
+        // the capture draws a d100. Troll regeneration is UNMODELED — expect
+        // the peel to surface it.
+        capture: "sewer-fight-3.gbxtrace",
+        expect: Expect::Frontier(115),
+        map_direction: 2,
+        auto_cast: false,
+        auto_cast_toggles: &[],
+        area_field_6e4: -3,
+    },
 ];
 
 /// Open-floor fallback tile (matches `h4_replay`) for pre-terrain captures.
@@ -363,12 +382,16 @@ fn replay(
     // pin stays the documented input, but when the capture carries the field
     // (post-cc0c9cd hooks, the doc §46 prep) the two must AGREE — a silent
     // capture-vs-pin mismatch would let a stale pin mask the real input.
+    // Compared in ONE domain — the engine's — through the §47 byte-bridge:
+    // the ECL stores a byte (sewer-fight-3 records the raw word 253 = 0xFD),
+    // the pin records the engine-semantic −3; comparing raw-vs-semantic would
+    // fire spuriously on every byte-negative area.
     if let Some(cap_6e4) = entry.area2_field_6e4 {
         assert_eq!(
-            i32::from(cap_6e4),
+            common::area_6e4_from_word(i32::from(cap_6e4)),
             area_field_6e4,
             "{capture}: pin's area_field_6e4 must record the capture's emitted \
-             area2_field_6e4 — edit the manifest pin"
+             area2_field_6e4 (engine domain, §47 byte-bridge) — edit the manifest pin"
         );
     }
     // The 6E0/6E2 per-team to-hit pair is UNMODELED (parse-only; the team
