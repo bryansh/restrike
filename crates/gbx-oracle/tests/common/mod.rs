@@ -66,9 +66,29 @@ pub fn loadout_for(capture: &str, name: &str) -> Option<Loadout> {
             ammo_count: 10,
             unarmed_profile: (1, 2, 3),
         }),
-        // All five Fire Knives share the monster template (CMD_LoadMonster
-        // clones the item list per copy) — one entry arms the roster.
-        ("sewer-fight-1.gbxtrace", "FIRE KNIFE") => Some(Loadout {
+        // Sewer monster kits are DATA, not per-fight staging: `load_mob` reads
+        // the same `MON2ITM.DAX` template block for every copy of a basename
+        // in every sewer encounter (CMD_LoadMonster clones the item list per
+        // copy), so the kits key by NAME across all sewer captures.
+        (c, n) if c.starts_with("sewer-fight-") => sewer_monster_kit(n),
+        _ => None,
+    }
+}
+
+/// The per-basename sewer monster kits (`MON2ITM.DAX`, doc §45/§47 — blocks
+/// keyed by `MON2CHA.DAX` name): only rosters with a RANGED option need a row.
+/// - `FIRE KNIFE` (ITM block 1): 7 Arrows readied + ShortBow (44, unreadied)
+///   over LongSword (36, readied)/Shield/Leather — the §45 kit. The sword is
+///   the record's own `1d8+0` attack-1 profile, so the unready fallback equals
+///   the entry profile.
+/// - `THIEF` (ITM block 2): Dagger (8, readied) + LeatherArmor only — NO
+///   ranged option, so `ai_items_selection` never swaps and the entry-record
+///   profile stands: no row, melee-identical by construction.
+/// - `TROLL`/`CROCODILE` (CHA blocks 7/8): no ITM block at all — natural
+///   attacks straight from the record: no row.
+fn sewer_monster_kit(name: &str) -> Option<Loadout> {
+    match name {
+        "FIRE KNIFE" => Some(Loadout {
             primary_type: 44,
             ammo_count: 7,
             unarmed_profile: (1, 8, 0),
@@ -79,9 +99,14 @@ pub fn loadout_for(capture: &str, name: &str) -> Option<Loadout> {
 
 /// True if any combatant in this capture carries a loadout — lets a harness
 /// skip a ranged capture when the `ITEMS` file is absent (it cannot replay
-/// ranged combat without the weapon table).
+/// ranged combat without the weapon table). `sewer-fight-3` (trolls +
+/// crocodiles, both itemless) deliberately stays OFF this list — it replays
+/// without the `ITEMS` file.
 pub fn capture_has_loadout(capture: &str) -> bool {
-    matches!(capture, "armed-bar.gbxtrace" | "sewer-fight-1.gbxtrace")
+    matches!(
+        capture,
+        "armed-bar.gbxtrace" | "sewer-fight-1.gbxtrace" | "sewer-fight-2.gbxtrace"
+    )
 }
 
 /// Apply the `ITEMS` table and the per-capture loadouts to a freshly-built

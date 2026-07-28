@@ -2,7 +2,8 @@
 //! replay outcome for every local capture — NINE closed captures (the full
 //! bar/terrain matrix, doc §44, plus `sewer-fight-1` 1526/1526, doc §45 — the
 //! first sewer fight: Fire Knife archers, casting disruption, the party-gated
-//! area move modifier #21) that cannot silently regress.
+//! area move modifier #21) that cannot silently regress, plus the campaign-1
+//! sewer captures under active peel (doc §47).
 //!
 //! ## The exact-pin rule (read before editing [`PINS`])
 //!
@@ -45,10 +46,6 @@ enum Expect {
     /// Replays operand-exact, draw-for-draw, equal length, zero stub trips.
     Closed,
     /// Diverges at **exactly** this draw index (operand or `(before,after)`).
-    /// Unconstructed since doc §45 closed sewer-fight-1 (9/9 closed) — kept as
-    /// the pin type every future capture with an open frontier re-enters
-    /// through.
-    #[allow(dead_code)]
     Frontier(usize),
 }
 
@@ -220,6 +217,24 @@ const PINS: &[Pin] = &[
         auto_cast: false,
         auto_cast_toggles: &[2],
         area_field_6e4: -3,
+    },
+    Pin {
+        // The campaign-1 thief brawl (doc §47): the biggest capture yet —
+        // 18,185 post-entry draws / 49 rounds / 23 combatants, including the
+        // first ALLIED team-0 NPCs (4 guild thieves fighting beside the 6 PCs
+        // against 2 Fire Knives + 11 enemy thieves; 58C=60, 6E4=0 — the
+        // per-SCRIPT values, all emitted in-trace). Intake frontier @308 =
+        // the missing FIRE KNIFE loadout row for this basename (FK [6] stands
+        // and shoots where our melee decode walked it) — re-keying the §45
+        // MON2ITM kit by NAME across sewer captures carried it to 1336. The
+        // THIEF kit is rowless by data (MON2ITM block 2: Dagger readied +
+        // leather — no ranged option, entry profile stands).
+        capture: "sewer-fight-2.gbxtrace",
+        expect: Expect::Frontier(1336),
+        map_direction: 2,
+        auto_cast: false,
+        auto_cast_toggles: &[],
+        area_field_6e4: 0,
     },
 ];
 
