@@ -242,14 +242,27 @@ fn h4_melee_replays_the_bar_brawl_capture_draw_for_draw() {
         state.auto_cast_toggles = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
     }
     // `area2.field_6E4` — the PARTY-only area movement modifier (coab≠binary
-    // #21, doc §45). ECL-set at the ambush, reset at combat end, NOT in the
-    // capture snapshot (hook TODO) and 0 in the pre-fight save — so it rides
-    // as a knob: `RESTRIKE_AREA_6E4=-3` for the sewers (pinned by three
-    // independent round-5 chase walks). Default 0 = the bar value.
+    // #21, doc §45). ECL-set at the ambush, reset at combat end. Precedence:
+    // `RESTRIKE_AREA_6E4` (explicit trial override) > the capture's emitted
+    // `area2_field_6e4` (hooks from cc0c9cd on, the doc §46 prep) > 0 (the
+    // bar value). Pre-trio captures ride the knob: `RESTRIKE_AREA_6E4=-3`
+    // for sewer-fight-1 (pinned by three independent round-5 chase walks).
     state.area_field_6e4 = std::env::var("RESTRIKE_AREA_6E4")
         .ok()
         .and_then(|s| s.parse().ok())
+        .or(entry.area2_field_6e4.map(|v| v as i32))
         .unwrap_or(0);
+    // The 6E0/6E2 per-team to-hit pair is parse-only (unmodeled — the gate
+    // needs listing verification before engine wiring, the #21 lesson). A
+    // capture carrying nonzero values WILL diverge at its first hit test;
+    // say so up front instead of surfacing as a baffling d20 fork.
+    if entry.area2_field_6e0.unwrap_or(0) != 0 || entry.area2_field_6e2.unwrap_or(0) != 0 {
+        eprintln!(
+            "WARNING: capture carries a nonzero area2 to-hit pair (6e0={:?}, 6e2={:?}) — \
+             not modeled; expect hit-test divergence (doc §46)",
+            entry.area2_field_6e0, entry.area2_field_6e2
+        );
+    }
     // §34.1: the ITEMS table + per-capture ranged loadouts (one shared place,
     // `common`). `None` loadouts leave a combatant melee-identical; armed-bar
     // arms MATHEW/TRAVIS's bows.

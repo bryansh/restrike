@@ -351,6 +351,26 @@ pub struct CombatEntryEvent {
     /// under which the natural rout is mathematically impossible.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub area2_field_58c: Option<u16>,
+    /// `area2.field_6E0` / `field_6E2` / `field_6E4` — the per-area combat
+    /// modifier trio (SIGNED words, coab `Classes/Area2.cs:82-87`): ECL-set
+    /// free variables zeroed together at combat end (`ovr006.cs:812-814`),
+    /// emitted by staging hooks from cc0c9cd on (the doc §46 pre-staging
+    /// prep). `6E0`/`6E2` are the per-team to-hit pair the hit test adds
+    /// (coab `ovr024.cs:533-540` reads 6E0 for monsters, 6E2 for the party —
+    /// parse-only here: the engine models them only once a capture carries
+    /// nonzero values AND the team gate is listing-verified, the coab≠binary
+    /// #21 lesson). `6E4` is the PARTY-gated area movement modifier
+    /// (`sub_3E124` @`ovr014:0138-014E`, #21, doc §45); replay precedence:
+    /// `RESTRIKE_AREA_6E4` (explicit trial override) > this field > 0 (the
+    /// bar value). Optional and additive: pre-trio captures omit them (and
+    /// the canonical writer then omits the fields, keeping existing goldens
+    /// byte-identical) and ride the knob + manifest pin instead.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub area2_field_6e0: Option<i16>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub area2_field_6e2: Option<i16>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub area2_field_6e4: Option<i16>,
     /// `gbl.mapDirection` (`byte_1D53B`, half-encoded {0 N, 2 E, 4 S, 6 W}) —
     /// the party's world facing at combat entry, the flee-HEADING input
     /// (`sub_359D1` @`ovr010:0B14`, doc §29). Optional and additive: captures
@@ -876,6 +896,9 @@ mod tests {
             rng_state: 0xdead_beef,
             terrain: None,
             area2_field_58c: None,
+            area2_field_6e0: None,
+            area2_field_6e2: None,
+            area2_field_6e4: None,
             map_direction: None,
             combatants: vec![
                 CombatEntryCombatant {
@@ -905,6 +928,10 @@ mod tests {
         assert!(
             !line.contains("area2_field_58c"),
             "the field is omitted when absent"
+        );
+        assert!(
+            !line.contains("area2_field_6e"),
+            "the 6E0/6E2/6E4 trio is omitted when absent"
         );
         // The two records serialize to exactly 2·0x1A6 hex chars each.
         assert_eq!(line.matches("\"record\":\"").count(), 2);
@@ -938,6 +965,9 @@ mod tests {
             rng_state: 1,
             terrain: None,
             area2_field_58c: Some(50),
+            area2_field_6e0: Some(0),
+            area2_field_6e2: Some(0),
+            area2_field_6e4: Some(-3),
             map_direction: Some(2),
             combatants: vec![CombatEntryCombatant {
                 team: 0,
@@ -949,7 +979,9 @@ mod tests {
             }],
         });
         let line = serde_json::to_string(&with_58c).unwrap();
-        assert!(line.contains(r#""area2_field_58c":50,"map_direction":2,"combatants":"#));
+        assert!(line.contains(
+            r#""area2_field_58c":50,"area2_field_6e0":0,"area2_field_6e2":0,"area2_field_6e4":-3,"map_direction":2,"combatants":"#
+        ));
         assert_eq!(serde_json::from_str::<TraceEvent>(&line).unwrap(), with_58c);
     }
 

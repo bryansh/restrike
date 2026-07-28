@@ -338,7 +338,30 @@ fn replay(
     state.map_direction = entry.map_direction.unwrap_or(map_direction);
     state.auto_pcs_cast_magic = auto_cast;
     state.auto_cast_toggles = auto_cast_toggles.to_vec();
-    // coab≠binary #21 (doc §45): the party-only area movement modifier.
+    // coab≠binary #21 (doc §45): the party-only area movement modifier. The
+    // pin stays the documented input, but when the capture carries the field
+    // (post-cc0c9cd hooks, the doc §46 prep) the two must AGREE — a silent
+    // capture-vs-pin mismatch would let a stale pin mask the real input.
+    if let Some(cap_6e4) = entry.area2_field_6e4 {
+        assert_eq!(
+            i32::from(cap_6e4),
+            area_field_6e4,
+            "{capture}: pin's area_field_6e4 must record the capture's emitted \
+             area2_field_6e4 — edit the manifest pin"
+        );
+    }
+    // The 6E0/6E2 per-team to-hit pair is UNMODELED (parse-only; the team
+    // gate needs listing verification first — the #21 lesson). A nonzero
+    // pair cannot replay faithfully, so fail loudly at intake rather than
+    // surfacing as a baffling d20 fork mid-fight.
+    assert_eq!(
+        (
+            entry.area2_field_6e0.unwrap_or(0),
+            entry.area2_field_6e2.unwrap_or(0)
+        ),
+        (0, 0),
+        "{capture}: nonzero area2 to-hit pair (6E0/6E2) is not modeled (doc §46)"
+    );
     state.area_field_6e4 = area_field_6e4;
     // §34.1: the ITEMS table + per-capture ranged loadouts (one shared place,
     // `common`). `None` loadouts leave a combatant melee-identical, so the six

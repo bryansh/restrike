@@ -92,6 +92,13 @@ struct Capture {
     /// `gbl.mapDirection` when the hook emitted it (post-8ab275e captures);
     /// `None` for legacy captures (harnesses then default to 2, doc §29).
     map_direction: Option<u8>,
+    /// The area2 modifier trio when the hook emitted it (post-cc0c9cd, doc
+    /// §46): `field_6E4` = the #21 party-gated movement modifier (`None` →
+    /// the `RESTRIKE_AREA_6E4` knob / 0); 6E0/6E2 = the unmodeled per-team
+    /// to-hit pair (warned on when nonzero).
+    field_6e0: Option<i32>,
+    field_6e2: Option<i32>,
+    field_6e4: Option<i32>,
     entry: Vec<CapEntry>,
     /// post-`combat_entry` `rng` events.
     draws: Vec<Draw>,
@@ -106,6 +113,9 @@ fn parse_capture(text: &str) -> Capture {
     let mut terrain = Vec::new();
     let mut field_58c: i32 = 99; // §28 default for pre-field_58C captures
     let mut map_direction: Option<u8> = None;
+    let mut field_6e0: Option<i32> = None;
+    let mut field_6e2: Option<i32> = None;
+    let mut field_6e4: Option<i32> = None;
     let mut entry = Vec::new();
     let mut draws = Vec::new();
     let mut rounds = Vec::new();
@@ -134,6 +144,19 @@ fn parse_capture(text: &str) -> Capture {
                 if let Some(m) = v.get("map_direction").and_then(|m| m.as_u64()) {
                     map_direction = Some(m as u8);
                 }
+                // The area2 trio is SIGNED (sewers 6E4 = −3) → as_i64.
+                field_6e0 = v
+                    .get("area2_field_6e0")
+                    .and_then(|f| f.as_i64())
+                    .map(|f| f as i32);
+                field_6e2 = v
+                    .get("area2_field_6e2")
+                    .and_then(|f| f.as_i64())
+                    .map(|f| f as i32);
+                field_6e4 = v
+                    .get("area2_field_6e4")
+                    .and_then(|f| f.as_i64())
+                    .map(|f| f as i32);
                 for c in v["combatants"].as_array().unwrap() {
                     entry.push(CapEntry {
                         team: c["team"].as_u64().unwrap() as u8,
@@ -199,6 +222,9 @@ fn parse_capture(text: &str) -> Capture {
         terrain,
         field_58c,
         map_direction,
+        field_6e0,
+        field_6e2,
+        field_6e4,
         entry,
         draws,
         rounds,
@@ -229,10 +255,20 @@ fn apply_capture_knobs(state: &mut gbx_engine::combat::CombatState, cap: &Captur
         state.auto_cast_toggles = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
     }
     // coab≠binary #21 (doc §45): the party-only area movement modifier.
+    // Precedence mirrors h4_replay: knob (explicit trial override) > the
+    // capture's emitted area2_field_6e4 (post-cc0c9cd hooks) > 0.
     state.area_field_6e4 = std::env::var("RESTRIKE_AREA_6E4")
         .ok()
         .and_then(|s| s.parse().ok())
+        .or(cap.field_6e4)
         .unwrap_or(0);
+    if cap.field_6e0.unwrap_or(0) != 0 || cap.field_6e2.unwrap_or(0) != 0 {
+        eprintln!(
+            "WARNING: capture carries a nonzero area2 to-hit pair (6e0={:?}, 6e2={:?}) — \
+             not modeled; expect hit-test divergence (doc §46)",
+            cap.field_6e0, cap.field_6e2
+        );
+    }
     // §34.1: the ITEMS table + per-capture ranged loadouts (one shared place,
     // `common`) — applied here so EVERY replay/diagnostic in this file shares
     // the same ranged inputs (the §30 lesson). `None` loadouts are melee-
