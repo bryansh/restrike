@@ -229,11 +229,17 @@ const PINS: &[Pin] = &[
         // MON2ITM kit by NAME across sewer captures carried it to 1336. The
         // THIEF kit is rowless by data (MON2ITM block 2: Dagger readied +
         // leather — no ranged option, entry profile stands).
+        // @1336→7938: the §38 toggle pin, DERIVED (h4_toggle_ordinal): the
+        // recorded magic_toggle flip lands between post-entry draws 619/620 =
+        // exactly the head of global turn 17 ([9]'s pick d100 IS draw 619;
+        // the sub_36269 poll sits between it and the turn body). @1336 was
+        // PHILIPPE's selection d1s (capture d1 vs our plain-turn d100) —
+        // toggles=[17] replays the casting turns and ~6,600 further draws.
         capture: "sewer-fight-2.gbxtrace",
-        expect: Expect::Frontier(1336),
+        expect: Expect::Frontier(7938),
         map_direction: 2,
         auto_cast: false,
-        auto_cast_toggles: &[],
+        auto_cast_toggles: &[17],
         area_field_6e4: 0,
     },
 ];

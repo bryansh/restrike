@@ -900,6 +900,125 @@ fn h4_locate_draw() {
     );
 }
 
+/// **§38 toggle-ordinal derivation aid** (third+ manual derivation earned a
+/// tool — doc §45 item 4). The hook samples `byte_1D904` on CHANGE, so a
+/// recorded `magic_toggle` flip's post-entry draw position lands inside the
+/// turn whose head keyboard-poll wrote it (`sub_36269` @`ovr010:1269` — polled
+/// after the Pick d100, before the turn body's draws). Replay the capture and
+/// log every global turn head as `(ordinal, draw count at the head)`; the
+/// schedule candidate for `RESTRIKE_AUTO_CAST_TOGGLES` / the manifest pin is
+/// the ordinal of the turn whose head region brackets the flip. Point
+/// `GBX_FLIP_DRAW` at the 1-based post-entry draw count recorded BEFORE the
+/// flip line (the intake convention: "flip between draws N and N+1" → N).
+/// Derivations stay VERIFIED-BY-PIN (the §45 window trial): this prints the
+/// candidate, the replay + guard prove it.
+#[test]
+fn h4_toggle_ordinal() {
+    let Some(flip) = std::env::var("GBX_FLIP_DRAW")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+    else {
+        eprintln!("SKIPPED: set GBX_FLIP_DRAW=<post-entry draw count before the flip>");
+        return;
+    };
+    let Some(path) = capture_path() else {
+        eprintln!("SKIPPED");
+        return;
+    };
+    if !path.exists() {
+        eprintln!("SKIPPED");
+        return;
+    }
+    let text = std::fs::read_to_string(&path).expect("readable");
+    let cap = parse_capture(&text);
+
+    let count = Rc::new(RefCell::new(0usize));
+    struct Ctr(Rc<RefCell<usize>>);
+    impl RngSink for Ctr {
+        fn on_draw(&mut self, _: RngDraw) {
+            *self.0.borrow_mut() += 1;
+        }
+    }
+    /// Each `Pick` = one turn head (`take_turn` runs immediately after);
+    /// ordinal = 0-based cumulative pick count = `turns_started` at the poll.
+    struct Picks {
+        draw_count: Rc<RefCell<usize>>,
+        heads: Rc<RefCell<Vec<(usize, usize, usize)>>>, // (ordinal, draws_at_head, combatant)
+    }
+    impl gbx_engine::combat::ActionSink for Picks {
+        fn on_action(&mut self, e: gbx_engine::combat::ActionEvent) {
+            if let gbx_engine::combat::ActionEvent::Pick { combatant_id, .. } = e {
+                let ord = self.heads.borrow().len();
+                self.heads
+                    .borrow_mut()
+                    .push((ord, *self.draw_count.borrow(), combatant_id));
+            }
+        }
+    }
+    let heads: Rc<RefCell<Vec<(usize, usize, usize)>>> = Rc::new(RefCell::new(Vec::new()));
+
+    let records: Vec<Vec<u8>> = cap.entry.iter().map(|c| c.record.clone()).collect();
+    let entries: Vec<RecordCombatant> = cap
+        .entry
+        .iter()
+        .zip(&records)
+        .map(|(c, rec)| RecordCombatant {
+            team: team_of(c.team),
+            pos: GridPos::new(c.x, c.y),
+            record: rec,
+        })
+        .collect();
+    let rules = RuleSet::load();
+    let flavor = Adnd1::new(&rules);
+    let mut state = combat_state_from_records(
+        &entries,
+        CombatMap::from_ground(cap.terrain.clone()),
+        &flavor,
+    )
+    .expect("decode");
+    apply_capture_knobs(&mut state, &cap);
+    state.attach_action_sink(Box::new(Picks {
+        draw_count: count.clone(),
+        heads: heads.clone(),
+    }));
+    let mut rng = EngineRng::new(cap.rng_state);
+    rng.attach_sink(Box::new(Ctr(count.clone())));
+    let mut guard = 0;
+    loop {
+        guard += 1;
+        if guard > 1_000_000 || *count.borrow() > flip + 200 {
+            break;
+        }
+        match state.step(&mut rng) {
+            CombatStep::Ended => break,
+            CombatStep::RoundEnded { battle_over, .. } if battle_over => break,
+            _ => {}
+        }
+    }
+
+    eprintln!("=== turn heads around the flip (post-entry draw {flip}) ===");
+    let heads = heads.borrow();
+    let mut candidate = None;
+    for (ord, draws_at, who) in heads.iter() {
+        // The head poll sits after the pick's d100 (already counted) and
+        // before the turn body: the flip belongs to the LAST head whose
+        // logged draw count <= flip.
+        if *draws_at <= flip {
+            candidate = Some((*ord, *draws_at, *who));
+        }
+        if *draws_at + 80 >= flip && *draws_at <= flip + 80 {
+            eprintln!("  ordinal {ord:3}  head at draw {draws_at:5}  combatant [{who}]");
+        }
+    }
+    match candidate {
+        Some((ord, draws_at, who)) => eprintln!(
+            "candidate schedule entry: toggles=[{ord}] (head at draw {draws_at}, \
+             combatant [{who}]) — verify by pin (§45)"
+        ),
+        None => eprintln!("no turn head at or before draw {flip} — flip precedes turn 0?"),
+    }
+}
+
 #[test]
 fn h4_decode_party_records() {
     let Some(path) = capture_path() else {
