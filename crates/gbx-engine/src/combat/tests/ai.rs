@@ -941,3 +941,78 @@ fn flee_check_gate2_field_58c_over_100_is_always_true_bug12() {
         "field_58C ≤ 100 gates normally: 100% enemy health does not rout"
     );
 }
+
+// === bandage's nonTeamMember gate (doc §47, ovr025.cs:1634) =============
+
+/// A dying ALLIED team-0 NPC (`non_team_member = true` — the sewer-fight-2
+/// guild thieves) neither reports as bleeding nor gets bandaged: the scan
+/// keeps only `nonTeamMember == false && combat_team == Ours && dying`. A
+/// dying REAL party member still both reports and heals (dying →
+/// unconscious). §26 modeled the gate as `team == Party` alone — the @7938
+/// fork: a downed allied thief wrongly triggered a PC's bandage turn.
+#[test]
+fn bandage_skips_dying_allied_non_team_members() {
+    let pc = Combatant::new_melee(
+        0,
+        Team::Party,
+        false,
+        GridPos::new(25, 12),
+        20,
+        50,
+        16,
+        12,
+        (1, 2, 3),
+        5,
+        1,
+    );
+    let mut ally = Combatant::new_melee(
+        1,
+        Team::Party,
+        true,
+        GridPos::new(24, 12),
+        6,
+        42,
+        14,
+        12,
+        (1, 4, 0),
+        5,
+        1,
+    );
+    ally.non_team_member = true;
+    let monster = Combatant::new_melee(
+        2,
+        Team::Monster,
+        true,
+        GridPos::new(34, 13),
+        8,
+        40,
+        12,
+        9,
+        (1, 6, 0),
+        5,
+        1,
+    );
+    let mut world = CombatWorld::new(CombatMap::uniform(0x17), vec![pc, ally, monster]);
+
+    // Only the allied NPC is dying → NOT bandageable, NOT even "bleeding".
+    world.fighters[1].health_status = HealthStatus::Dying;
+    assert!(
+        !world.bandage(true),
+        "a dying allied non-team NPC must not report as bleeding (ovr025.cs:1634)"
+    );
+    assert_eq!(
+        world.fighters[1].health_status,
+        HealthStatus::Dying,
+        "the allied NPC is never bandaged"
+    );
+
+    // A dying REAL party member still bandages exactly as before.
+    world.fighters[0].health_status = HealthStatus::Dying;
+    assert!(world.bandage(true), "a real team member reports and heals");
+    assert_eq!(world.fighters[0].health_status, HealthStatus::Unconscious);
+    assert_eq!(
+        world.fighters[1].health_status,
+        HealthStatus::Dying,
+        "the ally stays untouched even when the scan fires for the PC"
+    );
+}

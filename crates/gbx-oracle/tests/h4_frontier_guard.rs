@@ -235,8 +235,17 @@ const PINS: &[Pin] = &[
         // the sub_36269 poll sits between it and the turn body). @1336 was
         // PHILIPPE's selection d1s (capture d1 vs our plain-turn d100) —
         // toggles=[17] replays the casting turns and ~6,600 further draws.
+        //
+        // ★ CLOSED 18185/18185 (doc §47): @7938 was the bandage nonTeamMember
+        // gate (`ovr025.cs:1634` — a dying ALLIED thief must not trigger a
+        // PC's bandage turn; §26's team==Party simplification finally paid
+        // for), and the @9716 length fork was the MOVING stalemate horizon
+        // (`ovr014.cs:911`, listing ovr014:19EB-19F3: every AttackTarget sets
+        // no_action_limit = combat_round + 15 — invisible in every fight
+        // shorter than 15 rounds, load-bearing across this brawl's 49). The
+        // fight ends BY the no-action rule, length-equal with the capture.
         capture: "sewer-fight-2.gbxtrace",
-        expect: Expect::Frontier(7938),
+        expect: Expect::Closed, // was Frontier(7938); bandage gate + stalemate horizon
         map_direction: 2,
         auto_cast: false,
         auto_cast_toggles: &[17],

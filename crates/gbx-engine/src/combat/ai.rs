@@ -485,15 +485,22 @@ impl CombatState {
     /// `dying → unconscious`, `bleeding = 0` — and no further member is bandaged
     /// (one per call); the scan continues only to keep reporting `someoneBleeding`.
     ///
-    /// `nonTeamMember == false && combat_team == Ours` is modeled as
-    /// `team == Party` (§26 cited simplification: allied non-team NPCs on the
-    /// party team are out of this slice's scope). Monsters are never bandaged.
+    /// The scan keeps only REAL team members: `nonTeamMember == false &&
+    /// combat_team == Ours && dying` (`ovr025.cs:1634-1636`). §26 modeled this
+    /// as `team == Party` alone — correct until the first allied-NPC capture:
+    /// sewer-fight-2's downed guild thieves are team-0 but `nonTeamMember`
+    /// (`sub_380E0`, `ovr011.cs:798-801`), so the binary neither bandages them
+    /// nor lets their dying trigger a PC's bandage turn (the @7938 fork, doc
+    /// §47). The bandage-ER gate stays `combat_team == Ours` (`ovr010:0DE3`) —
+    /// an allied thief CAN spend its turn bandaging a real party member.
     /// Draw-free (the "is bandaged" status string, `ovr025:33D6`, is display-only).
-    fn bandage(&mut self, apply_bandage: bool) -> bool {
+    /// (`pub(super)` for the §47 gate test only — engine callers stay in-module.)
+    pub(super) fn bandage(&mut self, apply_bandage: bool) -> bool {
         let mut someone_bleeding = false;
         let mut apply = apply_bandage;
         for f in &mut self.fighters {
-            if f.team == Team::Party && f.health_status == HealthStatus::Dying {
+            if f.team == Team::Party && !f.non_team_member && f.health_status == HealthStatus::Dying
+            {
                 someone_bleeding = true;
                 if apply {
                     f.health_status = HealthStatus::Unconscious;

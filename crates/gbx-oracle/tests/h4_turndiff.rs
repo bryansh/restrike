@@ -783,13 +783,14 @@ fn h4_locate_draw() {
     let cap = parse_capture(&text);
 
     let count = Rc::new(RefCell::new(0usize));
-    let our_ops: Rc<RefCell<Vec<Option<u16>>>> = Rc::new(RefCell::new(Vec::new()));
+    type OpVal = (Option<u16>, Option<u16>);
+    let our_ops: Rc<RefCell<Vec<OpVal>>> = Rc::new(RefCell::new(Vec::new()));
     let log: Rc<RefCell<Vec<(usize, String)>>> = Rc::new(RefCell::new(Vec::new()));
-    struct Ctr(Rc<RefCell<usize>>, Rc<RefCell<Vec<Option<u16>>>>);
+    struct Ctr(Rc<RefCell<usize>>, Rc<RefCell<Vec<OpVal>>>);
     impl RngSink for Ctr {
         fn on_draw(&mut self, d: RngDraw) {
             *self.0.borrow_mut() += 1;
-            self.1.borrow_mut().push(d.n);
+            self.1.borrow_mut().push((d.n, d.result));
         }
     }
     struct Rec(Rc<RefCell<usize>>, Rc<RefCell<Vec<(usize, String)>>>);
@@ -896,8 +897,22 @@ fn h4_locate_draw() {
     eprintln!(
         "our     operands {lo}-{hi}: {:?}",
         (lo..=hi)
-            .map(|i| our_ops.borrow().get(i).copied().flatten())
+            .map(|i| our_ops.borrow().get(i).copied().and_then(|(n, _)| n))
             .collect::<Vec<_>>()
+    );
+    // Our roll VALUES (die size:result). Draws before the shared frontier
+    // matched the capture, so these ARE the capture's rolls there — the §31
+    // provenance channel without any hook change.
+    eprintln!(
+        "our     n:result {lo}-{hi}: {}",
+        (lo..=hi)
+            .map(|i| match our_ops.borrow().get(i).copied() {
+                Some((Some(n), Some(r))) => format!("d{n}:{r}"),
+                Some((Some(n), None)) => format!("d{n}:?"),
+                _ => "-".to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
     );
 }
 

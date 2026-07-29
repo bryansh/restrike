@@ -124,6 +124,60 @@ fn replay_harness_maps_records_and_opens_with_one_d6_per_combatant() {
     assert_eq!(ns[5], 100, "the d100 selection pass follows the 5 d6s");
 }
 
+/// `actions.nonTeamMember` derivation (doc §47): `sub_380E0` marks every
+/// TeamList position past `area2.party_size`; the roster's leading team-0 run
+/// IS the party in every capture, so ALLIED team-0 NPCs appended after the
+/// enemy blocks (the sewer-fight-2 guild thieves) decode `non_team_member =
+/// true`, while the party prefix and only it stays false. Monsters past the
+/// prefix carry the flag too (faithful, though no monster read consumes it).
+#[test]
+fn allied_team0_npcs_after_the_party_prefix_are_non_team_members() {
+    use gbx_rules::adnd1::flavor_impl::Adnd1;
+    use gbx_rules::pack::RuleSet;
+    let rules = RuleSet::load();
+    let flavor = Adnd1::new(&rules);
+
+    let pc = synthetic_record(b"HERO", 20, 22, 54, 50, 16, 1, 12, false, 2, (1, 8, 0));
+    let thug = synthetic_record(b"THUG", 8, 8, 40, 12, 10, 1, 9, true, 2, (1, 6, 0));
+    // Allied thief: team-0 at COMBAT level, but an NPC record appended by the
+    // ECL load — the sewer-fight-2 shape ([0..5] PCs, enemies, then allies).
+    let ally = synthetic_record(b"THIEF", 6, 6, 42, 14, 10, 1, 12, true, 1, (1, 4, 0));
+    let entries = vec![
+        RecordCombatant {
+            team: Team::Party,
+            pos: GridPos::new(25, 12),
+            record: &pc,
+        },
+        RecordCombatant {
+            team: Team::Party,
+            pos: GridPos::new(24, 12),
+            record: &pc,
+        },
+        RecordCombatant {
+            team: Team::Monster,
+            pos: GridPos::new(34, 13),
+            record: &thug,
+        },
+        RecordCombatant {
+            team: Team::Party, // allied team-0 NPC, AFTER the enemy block
+            pos: GridPos::new(23, 12),
+            record: &ally,
+        },
+    ];
+    let state = combat_state_from_records(&entries, CombatMap::uniform(0x17), &flavor).unwrap();
+    let roster = state.roster();
+    assert!(!roster[0].non_team_member, "party prefix is the real team");
+    assert!(!roster[1].non_team_member);
+    assert!(
+        roster[2].non_team_member,
+        "positions past party_size are marked"
+    );
+    assert!(
+        roster[3].non_team_member,
+        "an allied team-0 NPC after the prefix is NOT a team member (ovr011.cs:798-801)"
+    );
+}
+
 /// The memorized-spell candidate list + casting-level decode (doc §41.1/§41.2).
 /// A Magic-User 5 record with one memorized Magic Missile in the back slot
 /// (`spell_list[83]` @ `0x1E + 83 = 0x71` — the pack-from-back layout, doc §33)

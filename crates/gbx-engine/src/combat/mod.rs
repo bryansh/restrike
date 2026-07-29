@@ -67,11 +67,13 @@ fn roll_dice(rng: &mut EngineRng, size: u16, count: u16) -> u16 {
     (total as u8) as u16 // (byte)roll_total — ovr024.cs:595
 }
 
-/// The stalemate cap: `combat_round_no_action_value` (`Classes/Gbl.cs:384`),
-/// the initial value of `combat_round_no_action_limit` (`byte_1D8B8`).
-/// `BattleRoundChecks` ends the fight once `combat_round >= this`
-/// (`ovr009.cs:399`), guaranteeing termination even when neither side can finish
-/// the other — the only terminator in this slice, since the stub kills no one.
+/// The stalemate value: `combat_round_no_action_value` (`Classes/Gbl.cs:384`),
+/// the initial value of `combat_round_no_action_limit` (`byte_1D8B8`,
+/// `BattleSetup` @`ovr011.cs:1188`). `BattleRoundChecks` ends the fight once
+/// `combat_round >= limit` (`ovr009.cs:399`) — but the limit is a MOVING
+/// horizon: every `AttackTarget` resets it to `combat_round + 15`
+/// (`ovr014.cs:911`; listing `ovr014:19EB-19F3`), so a fight ends only after
+/// 15 consecutive attack-free ROUNDS (doc §47 — sewer-fight-2 runs 49 rounds).
 pub const DEFAULT_NO_ACTION_LIMIT: u16 = 15;
 
 /// Which side a combatant fights on. The discriminants mirror coab's
@@ -182,6 +184,16 @@ pub struct Combatant {
     /// per-step morale-advance d100** (`moralFailureEscape:387`); PCs short-circuit
     /// it. Also gates the `FleeCheck_001` morale block.
     pub npc: bool,
+    /// `actions.nonTeamMember` (`Action@0x13`) — set by `SetupCombatActions`
+    /// (`sub_380E0`, coab `ovr011.cs:798-801`) for every TeamList position past
+    /// `area2.party_size`: an ALLIED team-0 NPC (a guild thief fighting beside
+    /// the party) is `combat_team == Ours` but NOT a team member. Combat reads:
+    /// `bandage`'s scan keeps only `nonTeamMember == false` dying combatants
+    /// (`ovr025.cs:1634` — allied NPCs are never bandaged and never trigger the
+    /// party's bandage turn — doc §47), and `CombatantKilled`'s downed-list /
+    /// `Tile_DownPlayer` stamp gate (`ovr033.cs:579/642` — cost-neutral on the
+    /// cost-1 sewer floor). Default false (every synthetic ctor).
+    pub non_team_member: bool,
     /// `control_morale@0xF7` (the raw byte). `FleeCheck_001` reseeds
     /// `monster_morale = (control_morale & 0x7F) << 1` **per actor, every call**
     /// (`sub_3637F` @`ovr010:13F1`, §28) — the deviation slice-2 replaces (the old
@@ -460,6 +472,7 @@ impl Combatant {
             id,
             team,
             npc: false,
+            non_team_member: false,
             control_morale: 0,
             int_score: 0,
             size: 1,
@@ -548,6 +561,7 @@ impl Combatant {
             id,
             team,
             npc,
+            non_team_member: false,
             // A synthetic melee combatant has no raw morale/Int decode; the
             // faithful FleeCheck reseeds from `control_morale` (npc → 0x80 folds
             // to seed 0, PCs stay 0), and `int_score` 0 never surrenders. Tests

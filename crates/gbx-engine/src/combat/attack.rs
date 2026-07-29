@@ -327,6 +327,15 @@ impl CombatState {
         // AttackTarget (`sub_3F9DB` @`ovr014:19DB`) head: focus the camera on
         // the attacker (`ovr014.cs:908`).
         self.focus = true;
+        // The stalemate horizon EXTENDS on every attack (`ovr014.cs:911`;
+        // listing `ovr014:19EB-19F3`: `mov al,byte_1D8B7; add ax,0Fh; mov
+        // byte_1D8B8,al` = `no_action_limit := combat_round + 15`). Every
+        // AttackTarget call — regular swings, departure and into-reach guard
+        // attacks — pushes it. Invisible in fights shorter than 15 rounds
+        // (all nine prior pins); load-bearing in sewer-fight-2's 49-round
+        // brawl, which our fixed cap ended at round 15 (the @9716 length
+        // fork, doc §47). Byte cell → the same `(u8)` wrap as the round.
+        self.no_action_limit = (self.combat_round + DEFAULT_NO_ACTION_LIMIT) & 0xFF;
         // §36.1 direction bookkeeping (`sub_3F9DB` @`ovr014:19FE-1AD2`): the
         // target-side facing store + the on-screen draw overwrite, then the
         // attacker ALWAYS faces its target. `behind` here is the caller's

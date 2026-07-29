@@ -215,12 +215,23 @@ pub fn combat_state_from_records(
     map: CombatMap,
     flavor: &dyn Flavor,
 ) -> Result<CombatState, SaveParseError> {
+    // `actions.nonTeamMember` (doc §47): `SetupCombatActions` (`sub_380E0`,
+    // coab `ovr011.cs:793-801`) walks TeamList and marks every position past
+    // `area2.party_size`. TeamList order == the snapshot's roster order, and
+    // `party_size` is the REAL party — the roster's leading team-0 run in
+    // every capture (allied team-0 NPCs are appended after the enemy blocks
+    // by the ECL loads, never inside the party prefix). Derive it here so
+    // allied NPCs decode `non_team_member = true` without a new hook field.
+    let party_size = entries
+        .iter()
+        .position(|e| e.team != Team::Party)
+        .unwrap_or(entries.len());
     let mut fighters = Vec::with_capacity(entries.len());
     for (id, e) in entries.iter().enumerate() {
         let rec = decode_char_record(e.record)?;
-        fighters.push(combatant_from_record(
-            id, e.team, e.pos, &rec, e.record, flavor,
-        ));
+        let mut c = combatant_from_record(id, e.team, e.pos, &rec, e.record, flavor);
+        c.non_team_member = id >= party_size;
+        fighters.push(c);
     }
     Ok(CombatState::new(map, fighters))
 }
