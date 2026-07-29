@@ -46,10 +46,6 @@ enum Expect {
     /// Replays operand-exact, draw-for-draw, equal length, zero stub trips.
     Closed,
     /// Diverges at **exactly** this draw index (operand or `(before,after)`).
-    /// Unconstructed since doc §47 closed the full 12-capture matrix — kept as
-    /// the pin type every future capture with an open frontier re-enters
-    /// through.
-    #[allow(dead_code)]
     Frontier(usize),
 }
 
@@ -304,6 +300,25 @@ const PINS: &[Pin] = &[
         // d20/d4) and the whole 5-monster brawl replay draw-for-draw.
         capture: "sewer-fight-4.gbxtrace",
         expect: Expect::Closed, // was Frontier(22) on the manual-turn staging; size slice
+        map_direction: 4,
+        auto_cast: false,
+        auto_cast_toggles: &[],
+        area_field_6e4: -3,
+    },
+    Pin {
+        // The campaign-2 opener (doc §48): the slot-H UPGRADED party walks into
+        // the 5-FIRE-KNIFE ambush (sewer-fight-1's script — 58C=30 / 6E4=0xFD
+        // → −3 / md=4, all emitted in-trace; the monster side is the fully
+        // modeled §45 kit, so every new draw is party-side novelty). 960
+        // post-entry draws / 5 rounds. SHARA (cleric 5) memorized [3,3,23,23]
+        // = 2× CLW + 2× HOLD PERSON; PHILIPPE [15]; the '2' press is recorded
+        // between post-entry draws 21 and 22 (before the first turn's body).
+        // Intake frontier @26: with no toggle pin PHILIPPE's round-0 turn
+        // draws no selection d1s — capture d1 (his 10×d1 MM selection) vs our
+        // post-head d100. Count-only runs 960/960 while operands fork here —
+        // the purest §14 count-artifact yet.
+        capture: "cleric-fk.gbxtrace",
+        expect: Expect::Frontier(26),
         map_direction: 4,
         auto_cast: false,
         auto_cast_toggles: &[],
