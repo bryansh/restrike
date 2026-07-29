@@ -3028,3 +3028,135 @@ Rationale recorded: closure velocity has inverted (sewer-fight-1 — a new
 roster, new weapon class, two new coab≠binary finds — closed in one session),
 and the visualizer accelerates the remaining tail rather than competing with
 it (staging and debugging by watching fights instead of reading draw streams).
+
+## 47. ★ sewer-fight-2 CLOSED 18,185/18,185 — the bandage nonTeamMember gate + the moving stalemate horizon; sewer-fight-3 pinned @115 with the full walk-fork dossier ★ (2026-07-28, Fable)
+
+The campaign-1 peel session. Both intaken captures entered the manifest;
+the thief brawl — the biggest capture ever (18,185 post-entry draws, 49
+rounds, 23 combatants, the first ALLIED team-0 NPCs) — closed draw-for-draw.
+**Guard: 11/11 pins held — TEN CLOSED + sewer-fight-3 Frontier(115) exact.**
+
+### 47.1 The sewer-fight-2 peel (308 → 1336 → 7938 → 9716 → CLOSED)
+
+- **@308 → 1336 — the FIRE KNIFE loadout row, re-keyed by NAME.** The §45
+  MON2ITM kit (7 Arrows readied + ShortBow 44 over longsword d8) now keys by
+  basename across ALL `sewer-fight-*` captures (`load_mob` reads the same
+  template block for every copy in every encounter). THIEF is rowless by
+  data (ITM block 2: Dagger 8 readied + LeatherArmor — no ranged option, the
+  entry profile stands); TROLL/CROCODILE have no ITM blocks at all, so
+  sewer-fight-3 replays without the ITEMS file.
+- **@1336 → 7938 — the §38 toggle ordinal, DERIVED with a new tool.**
+  `h4_toggle_ordinal` (h4_turndiff.rs; knob `GBX_FLIP_DRAW`) maps a recorded
+  magic_toggle flip to its global turn ordinal: fight-2's flip (between
+  post-entry draws 619/620) lands EXACTLY at the head of global turn 17 —
+  [9]'s pick d100 IS draw 619 and the `sub_36269` poll sits between it and
+  the turn body (the same write-site coincidence §45 saw). toggles=[17]
+  replays PHILIPPE's casting turns (@1336 was his selection d1s) plus ~6,600
+  further draws. Also learned from the listing: `sub_36269` is ALSO called
+  at the head of EVERY STEP (`sub_359D1` @`ovr010:0A2A`), so a press mid-walk
+  flips at a step boundary, and a nonzero return aborts the walk — a §38
+  model refinement no capture has yet exercised.
+- **@7938 — the bandage nonTeamMember gate (`ovr025.cs:1634-1636`).** The
+  capture's TRAVIS punches his adjacent Fire Knife (d20+d2) where ours ended
+  the turn draw-free: a downed ALLIED guild thief was "dying" and §26's
+  `team == Party` bandage model sent the PC on a bandage turn. The binary's
+  scan keeps only REAL team members: `nonTeamMember == false && combat_team
+  == Ours && dying`. `SetupCombatActions` (`sub_380E0` @`ovr011.cs:793-801`)
+  marks every TeamList position past `area2.party_size` — allied NPCs are
+  team-0 but non-team (they also get NPC control_morale = 58C + NPC_Base
+  @`:814-822`, which the captured records already carry — why their per-step
+  advance d100s matched all along). New `Combatant.non_team_member`, derived
+  at decode as roster index >= party_size (party_size = the roster's leading
+  team-0 run; allied NPCs are ECL-appended after the enemy blocks in every
+  capture). The bandage-ER gate stays `combat_team == Ours` (`ovr010:0DE3`):
+  an allied thief CAN spend its turn bandaging a real PC. Other
+  nonTeamMember reads in combat: `CombatantKilled`'s downed-list +
+  `Tile_DownPlayer` stamp gates (`ovr033.cs:579/642`) — allied deaths stamp
+  no downed tile; cost-neutral on the cost-1 sewer floor, cited not modeled.
+- **@9716 — the stalemate horizon MOVES (`ovr014.cs:911`).** Our fight ended
+  (fixed 15-round cap) while the capture rolled round-16 initiative. Every
+  `AttackTarget` resets `combat_round_no_action_limit = combat_round + 15`
+  (listing `ovr014:19EB-19F3`: `mov al,byte_1D8B7; add ax,0Fh; mov
+  byte_1D8B8,al`) — a fight ends only after 15 consecutive attack-free
+  ROUNDS. Invisible in every prior pin (all < 15 rounds); load-bearing
+  across this brawl's 49. The fight then ends BY the no-action rule,
+  length-equal with the capture (both sides' remnants out of reach).
+- No monster backstab/flanking surfaced as a divergence across 11 enemy
+  thieves × 49 rounds — the §36/§37 facing machinery carried whatever fired,
+  operand-exact, 0 trips.
+
+### 47.2 The 6E4 byte-bridge (sewer-fight-3's raw 253)
+
+`sub_3E124`'s add width verified in the listing (`ovr014:0140-014E`):
+`mov al,movement; xor ah,ah; add ax,[area2.field_6E4]` — a WORD add whose
+result is truncated to AL on store. `(movement + word) & 0xFF ==
+(movement + sign_extended_low_byte) & 0xFF` identically, so the bridge
+(`common::area_6e4_from_word`) takes the captured word's low byte
+sign-extended (253 = 0xFD → −3), invariant to how the hook signed the word.
+Wired at all three harness precedence sites; the guard's pin==capture
+agreement assert now compares in ONE domain (engine-semantic) where
+raw-vs-semantic would have fired spuriously on every byte-negative area.
+The post-add clamp (`<1 || >0x60 → 1`, `ovr014:0156-0166`) is `calc_moves`'
+own, already faithful. sewer-fight-3 replays knobless off its own trio.
+
+### 47.3 The sewer-fight-3 dossier — Frontier(115), the TRAVIS walk fork (NEXT session's peel)
+
+4 TROLLS + 7 CROCODILES on the tussock (58C=75, 6E4=−3, 3,042 post-entry
+draws, 7 rounds; party move 18 halves, trolls 24, crocs 30). The @115
+surface divergence (ours d1 vs capture d100) is DOWNSTREAM: croc [16]
+approaches SHARA — 5 steps to OUR SHARA at (28,15), 7 to the CAPTURE's at
+(27,14). The real fork is **draw-silent PC approach walks in round 0**,
+localized to TRAVIS [2]'s turn (draws 56-62) via h4_pos_at_draws + the
+snapshot target fields + a temporary find_target probe:
+
+- **Exonerated this session (instruction-level or three-probe empirical):**
+  the near-list machinery — OUR find_target picks match the capture on all
+  three round-0 PC turns (TRAVIS roll 3/9 → [7] = capture t7; PHILIPPE
+  8/9 → [16] ✓; SHARA 6/10 → [12] ✓ — transient targets from turn_snapshots,
+  which the hook resolves 0-BASED from the actions.target pointer, positions
+  from CombatMap); `unk_189B4` (the 4-byte-stride tile struct, direct row
+  indexing @`ovr014:07D8`, our 74-row cost table matches row-for-row —
+  §45's memory-note "matches exactly" now re-verified properly); the
+  `getTargetDirection` octants (0x6A/0x26A = tan 22.5°/67.5°; (dx4,dy3) →
+  SE both sides); `SteppingPath`'s metric (orth 2 / diag 3, identical steps:
+  [9]:4, [6]:8, [7]:11 from TRAVIS); `CanMove` (coab ovr010.cs:295 read,
+  no height reads, clouds absent); sub_35DB1 + sub_359D1 + sub_41E44 (full
+  listing reads — anti-osc args (0,1,0xFF) confirmed; the sparse-retry,
+  the b1ab19 ladder, the per-step keyboard poll all as modeled).
+- **The un-reconciled datum:** both sides pick [7] and walk. OURS: 3 steps
+  (25,12)/(26,13)/(27,14), then near-1 {[6]} → d1 pick + d20 miss on [6],
+  end (27,14) t6. CAPTURE (snapshots #2-#4, draw-sampled): TRAVIS at
+  **(26,13)** with t7 AT the d1, target flips to **[9]** between the d1 and
+  the d20 (miss — [9] hp unchanged, [9].t stays 255 per the bug-#14
+  backup), then he PARKS at (26,13) t9 for many rounds; SHARA later takes
+  (27,14) and attacks [6] (her d1 → t6 write confirms the near-pick DOES
+  write actions.target). A d1 = a ONE-entry find_target list whose entry is
+  [9] — but from (26,13) the reach-1 near list is EMPTY and the 0xFF list
+  has NINE entries; {[9]} exactly is only producible from **(26,11)** (the
+  unique square where reach-1 = {[9]}), which no path ending (26,13) can
+  visit. Neither budget variants (6/7 halves block step 3 at (26,13) but
+  then produce NO d1), nor departure/guard attacks (no [9]-adjacent square
+  on any (26,13)-terminated path), nor the anti-osc find_target (0xFF → d9)
+  reconcile all four observables (position, t9, d1, d20-miss with no
+  damage). Something in the walk/near machinery is exercised here that
+  neither fight-2's 49 rounds nor the nine other pins touch — candidates for
+  the fresh look: the fight-3-only inputs (6E4=−3 party budget, the
+  stream-tile geometry, troll/croc footprint sizes if != 1), and re-deriving
+  the capture's TRAVIS path from the h4_pos_at_draws step stream rather
+  than endpoint inference.
+- Fight-3's §38 ordinal derivation (flip between post-entry draws 513/514)
+  is BLOCKED behind the @115 peel (turn-head map untrusted past the
+  frontier).
+- Troll regeneration never surfaced (frontier precedes any troll damage
+  round-trip) — the expected trip is still ahead.
+
+### 47.4 Session ledger
+
+Five commits: 009763b (loadout re-key + fight-2 pin @1336) → 696a8f9
+(h4_toggle_ordinal + toggle pin @7938) → a152510 (the 6E4 byte-bridge +
+fight-3 pin @115, guard 11/11) → 8ed462d (★ fight-2 CLOSED: the bandage
+gate + the moving horizon; 968 tests ★) → this doc. Diagnostics gained:
+h4_toggle_ordinal, h4_locate_draw's roll-value line (`n:result` — the §31
+provenance channel needs no hook change; NOTE: RngDraw.result is the raw
+0-based wrapper value, NOT roll_dice's 1-based total — mis-reading it cost
+this session an hour of false near-list contradictions).
