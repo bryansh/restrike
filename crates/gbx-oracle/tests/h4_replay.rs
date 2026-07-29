@@ -242,6 +242,12 @@ fn h4_melee_replays_the_bar_brawl_capture_draw_for_draw() {
     if let Ok(v) = std::env::var("RESTRIKE_AUTO_CAST_TOGGLES") {
         state.auto_cast_toggles = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
     }
+    // The "Continue Battle:" prompt schedule (doc §48): comma list of 0-based
+    // OCCURRENCE indices answered 'Y' (cleric-fk: 0 — one Y at round 3's
+    // end). An input like the toggle schedule, not in the capture.
+    if let Ok(v) = std::env::var("RESTRIKE_CONTINUE_BATTLE") {
+        state.continue_battle_yes = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+    }
     // `area2.field_6E4` — the PARTY-only area movement modifier (coab≠binary
     // #21, doc §45). ECL-set at the ambush, reset at combat end. Precedence:
     // `RESTRIKE_AREA_6E4` (explicit trial override) > the capture's emitted

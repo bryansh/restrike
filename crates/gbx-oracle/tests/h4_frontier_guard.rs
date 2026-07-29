@@ -46,6 +46,10 @@ enum Expect {
     /// Replays operand-exact, draw-for-draw, equal length, zero stub trips.
     Closed,
     /// Diverges at **exactly** this draw index (operand or `(before,after)`).
+    /// Unconstructed since doc §48 closed the full 13-capture matrix — kept as
+    /// the pin type every future capture with an open frontier re-enters
+    /// through.
+    #[allow(dead_code)]
     Frontier(usize),
 }
 
@@ -68,6 +72,10 @@ struct Pin {
     /// #21, doc §45). ECL-set per area, not in the capture snapshot (hook
     /// TODO): bar 0, sewers −3 (pinned by three independent chase walks).
     area_field_6e4: i32,
+    /// The "Continue Battle:" prompt schedule (doc §48): 0-based occurrence
+    /// indices answered 'Y'. An operator input like the toggle schedule —
+    /// empty for every capture where the prompt never extended the fight.
+    continue_battle: &'static [u16],
 }
 
 /// **The manifest.** Current truth (doc §29). Edit ONLY alongside the fix that
@@ -80,6 +88,7 @@ const PINS: &[Pin] = &[
         auto_cast: false,
         auto_cast_toggles: &[],
         area_field_6e4: 0,
+        continue_battle: &[],
     },
     Pin {
         capture: "combat3+terrain4.gbxtrace",
@@ -88,6 +97,7 @@ const PINS: &[Pin] = &[
         auto_cast: false,
         auto_cast_toggles: &[],
         area_field_6e4: 0,
+        continue_battle: &[],
     },
     Pin {
         capture: "combat2+terrain4.gbxtrace",
@@ -96,6 +106,7 @@ const PINS: &[Pin] = &[
         auto_cast: false,
         auto_cast_toggles: &[],
         area_field_6e4: 0,
+        continue_battle: &[],
     },
     Pin {
         // ★ CLOSED (doc §44): the oldest open frontier (@368 since the wire-gates
@@ -112,6 +123,7 @@ const PINS: &[Pin] = &[
         auto_cast: false,
         auto_cast_toggles: &[],
         area_field_6e4: 0,
+        continue_battle: &[],
     },
     Pin {
         // ★ CLOSED 3521/3521 (doc §32): the rout capture replays operand-exact
@@ -123,6 +135,7 @@ const PINS: &[Pin] = &[
         auto_cast: false,
         auto_cast_toggles: &[],
         area_field_6e4: 0,
+        continue_battle: &[],
     },
     Pin {
         // The armed-slice driver (doc §25 runbook item 3): MATHEW's first turn
@@ -140,6 +153,7 @@ const PINS: &[Pin] = &[
         auto_cast: false,
         auto_cast_toggles: &[],
         area_field_6e4: 0,
+        continue_battle: &[],
     },
     Pin {
         // The caster driver, fully peeled (doc §41). sub_3560B's selection loop
@@ -166,6 +180,7 @@ const PINS: &[Pin] = &[
         auto_cast: false,
         auto_cast_toggles: &[16],
         area_field_6e4: 0,
+        continue_battle: &[],
     },
     Pin {
         // A third independent fist seed, free from the caster staging (doc
@@ -177,6 +192,7 @@ const PINS: &[Pin] = &[
         auto_cast: false,
         auto_cast_toggles: &[],
         area_field_6e4: 0,
+        continue_battle: &[],
     },
     Pin {
         // The first post-matrix capture (doc §45): 5 Fire Knives jump the
@@ -217,6 +233,7 @@ const PINS: &[Pin] = &[
         auto_cast: false,
         auto_cast_toggles: &[2],
         area_field_6e4: -3,
+        continue_battle: &[],
     },
     Pin {
         // The campaign-1 thief brawl (doc §47): the biggest capture yet —
@@ -250,6 +267,7 @@ const PINS: &[Pin] = &[
         auto_cast: false,
         auto_cast_toggles: &[17],
         area_field_6e4: 0,
+        continue_battle: &[],
     },
     Pin {
         // The campaign-1 troll tussock (doc §47): 4 TROLLS + 7 CROCODILES,
@@ -287,6 +305,7 @@ const PINS: &[Pin] = &[
         auto_cast: false,
         auto_cast_toggles: &[16],
         area_field_6e4: -3,
+        continue_battle: &[],
     },
     Pin {
         // The campaign-1 otyugh attack, RESTAGED with QuickFight from turn 1
@@ -304,6 +323,7 @@ const PINS: &[Pin] = &[
         auto_cast: false,
         auto_cast_toggles: &[],
         area_field_6e4: -3,
+        continue_battle: &[],
     },
     Pin {
         // The campaign-2 opener (doc §48): the slot-H UPGRADED party walks into
@@ -337,16 +357,34 @@ const PINS: &[Pin] = &[
         // sub_66023 recompute installs table dice + str + item plus (damage)
         // and thac0 + dex/str + plus (+1 elf rider, to-hit only — LEDERA).
         // Every round-0 party sword turn replays (MATHEW/TRAVIS +1 hits,
-        // MARK's 4-way pick + d1 retarget, LEDERA's walk-kill). @233 = the
-        // tail of SHARA's selection: her cleric ids (3/23) are untranscribed,
-        // so our loop rejects through every pass (9th d4) where the capture
+        // MARK's 4-way pick + d1 retarget, LEDERA's walk-kill). @233 was the
+        // tail of SHARA's selection: her cleric ids (3/23) were untranscribed,
+        // so our loop rejected through every pass (9th d4) where the capture
         // ACCEPTS hold person on pick 8 and moves to the next-turn scan d100.
+        //
+        // ★ CLOSED 960/960 (doc §48): the cleric spell slice — SpellEntry
+        // rows 3 (CLW, priority 1, delay 5/3=1) + 0x17 (hold person, priority
+        // 6, 3 targets, DamageOnSave::Zero); the QUEUED delayed cast
+        // ("Begins Casting" — ★ coab≠binary #22: the scheduler delay is
+        // SUBTRACTED (`sub es:[di+3],al` @ovr014:28BE), not assigned, so the
+        // caster's mini-turn wins the very next pick); the multi-target loop
+        // (3× find_target d4) + per-target d20 saves (all three passed —
+        // nobody held); find_healing_target's self-cure (51→55, one d8);
+        // slot consumption visible as the d4→d3→d2 selection-die ladder;
+        // the round-stale friends/foe counts (round-3 selection draws with
+        // both Fire Knives escaped, round-4 draws none); and the round-3-end
+        // "Continue Battle: Y" (occurrence schedule). The full 5-round fight
+        // — hold, disruption, cure, double rout, escape, mop-up — replays
+        // operand-exact.
         capture: "cleric-fk.gbxtrace",
-        expect: Expect::Frontier(233),
+        expect: Expect::Closed, // was Frontier(233); the cleric spell slice
         map_direction: 4,
         auto_cast: false,
         auto_cast_toggles: &[0],
         area_field_6e4: -3,
+        // Bryan answered the round-3-end "Continue Battle:" prompt 'Y' once
+        // (round 4 exists in the capture), 'N' at round 4's end.
+        continue_battle: &[0],
     },
 ];
 
@@ -424,6 +462,7 @@ fn capture_draws(text: &str) -> Vec<(u32, u32, Option<u16>)> {
 /// `None` divergence == closed (all draws equal on `(before, after, operand)` and
 /// equal length). The comparison is `h4_replay`'s: `(before, after)` always, plus
 /// the operand when both sides carry one.
+#[allow(clippy::too_many_arguments)]
 fn replay(
     path: &Path,
     capture: &str,
@@ -431,6 +470,7 @@ fn replay(
     auto_cast: bool,
     auto_cast_toggles: &[u32],
     area_field_6e4: i32,
+    continue_battle: &[u16],
 ) -> (Option<usize>, usize) {
     let text = std::fs::read_to_string(path).expect("capture readable");
     let trace = Trace::parse(&text).expect("capture parses");
@@ -466,6 +506,7 @@ fn replay(
     state.map_direction = entry.map_direction.unwrap_or(map_direction);
     state.auto_pcs_cast_magic = auto_cast;
     state.auto_cast_toggles = auto_cast_toggles.to_vec();
+    state.continue_battle_yes = continue_battle.to_vec();
     // coab≠binary #21 (doc §45): the party-only area movement modifier. The
     // pin stays the documented input, but when the capture carries the field
     // (post-cc0c9cd hooks, the doc §46 prep) the two must AGREE — a silent
@@ -577,6 +618,7 @@ fn h4_frontier_pins_hold() {
             pin.auto_cast,
             pin.auto_cast_toggles,
             pin.area_field_6e4,
+            pin.continue_battle,
         );
         match pin.expect {
             Expect::Closed => {

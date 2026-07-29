@@ -253,6 +253,26 @@ pub struct Combatant {
     /// by 1 when an elf readies a bow/short sword/long sword (types
     /// 0x29-0x2C, 0x24, 0x25). Default 0 (monster) for hand-built combatants.
     pub race: u8,
+    /// `saveVerse[5]@0xDF` — the record's five saving-throw targets, indexed
+    /// by `SaveVerseType` (Spell = 4). Read by `do_saving_throw`
+    /// (`ovr024:12F1`, doc §48); zero (auto-fail-ish) for hand-built
+    /// combatants that never save.
+    pub saves: [u8; 5],
+    /// `field_186@0x186` (sbyte) — the per-record additive save bonus
+    /// (Σ readied items' `plus_save`, recomputed by `reclac_player_values`;
+    /// we read the serialized value — no modeled kit carries `plus_save`).
+    pub field_186: i32,
+    /// `SkillLevel(Cleric)`/`SkillLevel(Paladin)` — `spellMaxTargetCount`'s
+    /// Cleric arm: `max(cleric, paladin − 8)` (`sub_6886F` @`ovr025.cs:1363`,
+    /// doc §48).
+    pub skill_level_cleric: i32,
+    pub skill_level_paladin: i32,
+    /// `actions.spell_id` — a queued delayed cast ("Begins Casting",
+    /// `spell_menu3` `ovr014.cs:1414-1427`, doc §48). The caster stays in the
+    /// pick pool (delay clamped to the cast delay); at its next pick the AI
+    /// turn fires the pending cast before the selection loop
+    /// (`ovr010.cs:60-66`). `Action.Clear` zeroes it (Action.cs:38).
+    pub pending_spell: Option<u8>,
     /// `HitDice` — `TrySweepAttack` only sweeps `HitDice == 0` targets.
     pub hit_dice: u8,
     /// Base movement (`player.movement`) → [`calc_moves`] at initiative.
@@ -522,6 +542,11 @@ impl Combatant {
             str_hit_bonus: 0,
             str_dmg_bonus: 0,
             race: 0,
+            saves: [0; 5],
+            field_186: 0,
+            skill_level_cleric: 0,
+            skill_level_paladin: 0,
+            pending_spell: None,
             hit_dice: 0,
             movement: 0,
             reaction_adj,
@@ -621,6 +646,11 @@ impl Combatant {
             str_hit_bonus: 0,
             str_dmg_bonus: 0,
             race: 0,
+            saves: [0; 5],
+            field_186: 0,
+            skill_level_cleric: 0,
+            skill_level_paladin: 0,
+            pending_spell: None,
             hit_dice: 1,
             movement,
             reaction_adj: 0,
@@ -926,6 +956,27 @@ pub struct CombatState {
     /// The toggle schedule's clock: turns started so far (== `Pick` events;
     /// incremented at every [`take_turn`](Self::take_turn) head).
     turns_started: u32,
+    /// `gbl.friends_count` / `gbl.foe_count` — the ROUND-STALE team counts
+    /// (doc §48). `CountCombatTeamMembers` (`ovr025.cs:1263`) refreshes them
+    /// only at the round head (`ovr009.cs:37`), the round end
+    /// (`ovr009.cs:391`), and events not in this slice (turn-undead
+    /// completion `ovr014.cs:690`, a mid-fight team switch `ovr014.cs:1745`,
+    /// the get-back-up heal `ovr024.cs:1400`) — NOT on a mid-round death or
+    /// escape. Load-bearing for `sub_3560B`'s live-opponent gate: cleric-fk's
+    /// round 3 draws SHARA's selection d2s AFTER both Fire Knives escaped
+    /// (counted at the round head), and round 4 draws none.
+    friends_count: usize,
+    foe_count: usize,
+    /// The "Continue Battle:" prompt schedule (`ovr009.cs:404-410`, doc §48):
+    /// when a round ends with `friends_count > 1 && foe_count == 0` the
+    /// binary prompts Y/N — 'Y' overrides `battleOver` and the fight plays
+    /// another round. Entries are 0-based OCCURRENCE indices of the prompt
+    /// answered 'Y' (cleric-fk: `[0]` — Bryan pressed Y once at round 3's
+    /// end, N at round 4's). Empty = always 'N' (every pre-§48 capture: the
+    /// prompt never extended a fight).
+    pub continue_battle_yes: Vec<u16>,
+    /// How many times the prompt has fired (the occurrence clock).
+    continue_prompts_seen: u16,
     /// The resident `ITEMS` data table (`gbl.ItemDataTable`, doc §34.1) — the
     /// weapon dice/range/attack-count/flags the ranged mechanics index by a
     /// readied weapon's type. `None` = no ranged loadouts in play (every
@@ -981,6 +1032,10 @@ impl CombatState {
             auto_pcs_cast_magic: false,
             auto_cast_toggles: Vec::new(),
             turns_started: 0,
+            friends_count: 0,
+            foe_count: 0,
+            continue_battle_yes: Vec::new(),
+            continue_prompts_seen: 0,
             item_data: None,
             map_screen_top_left: GridPos::new(0, 0),
             focus: false,
@@ -988,6 +1043,14 @@ impl CombatState {
             sink: None,
         };
         s.rebuild_occupancy();
+        // The entry-state team counts (the MainCombatLoop pre-loop
+        // `CountCombatTeamMembers` read, `ovr009.cs:29-33`) — round 1's head
+        // refresh overwrites these; they exist so a state driven without
+        // `begin_round` (unit tests, single-turn probes) still sees the
+        // faithful entry counts in `sub_3560B`'s gate (doc §48).
+        let (party, monsters) = s.live_counts();
+        s.friends_count = party;
+        s.foe_count = monsters;
         s
     }
 
@@ -1018,6 +1081,10 @@ impl CombatState {
             auto_pcs_cast_magic: false,
             auto_cast_toggles: Vec::new(),
             turns_started: 0,
+            friends_count: 0,
+            foe_count: 0,
+            continue_battle_yes: Vec::new(),
+            continue_prompts_seen: 0,
             item_data: None,
             map_screen_top_left: GridPos::new(0, 0),
             focus: false,
@@ -1157,12 +1224,18 @@ impl CombatState {
     /// `calc_enemy_health_percentage` (draw-free, the morale input), initiative
     /// over the whole roster, then clear the surprise mask.
     fn begin_round(&mut self, rng: &mut EngineRng) -> CombatStep {
-        // CountCombatTeamMembers + the pre-loop / round-top emptiness guard
-        // (ovr009.cs:29-33). Counts LIVE (in_combat) members — with a real death
-        // model this ends the fight when a side is wiped; with no deaths (the
-        // stub harness) live == all, so it reduces to the whole-roster count.
+        // CountCombatTeamMembers (the ovr009.cs:37 refresh site, doc §48).
+        // Counts LIVE (in_combat) members; the FIELDS then stay round-stale
+        // until the next refresh site — mid-round deaths/escapes do NOT
+        // update them.
         let (party, monsters) = self.live_counts();
-        if party == 0 || monsters == 0 {
+        self.friends_count = party;
+        self.foe_count = monsters;
+        // The PRE-LOOP emptiness guard (ovr009.cs:29-33) fires before ROUND 1
+        // only — later rounds are governed by battle01's round-END verdict,
+        // which a "Continue Battle:" 'Y' can override (doc §48): cleric-fk's
+        // round 4 runs with zero foes on the board.
+        if self.combat_round == 0 && (party == 0 || monsters == 0) {
             self.phase = Phase::Ended;
             return CombatStep::Ended;
         }
@@ -1282,10 +1355,12 @@ impl CombatState {
                     // §39.5 site 1b/1c, after the reclac/display position: `Type_15`
                     // (`mov al,0Fh; call work_on_00` @`ovr009:0352`, coab :125) then
                     // `Confusion` (`mov al,15h` @`ovr009:036E`, coab :129) which the
-                    // binary gates on `spell_id == 0` — always true in the no-spell
-                    // model (spell_id is the spell slice's), so run unconditionally.
+                    // binary gates on `spell_id == 0` — a pending delayed cast
+                    // (doc §48) skips the Confusion check on its resolution turn.
                     self.check_affects_effect(idx, CheckType::Type15);
-                    self.check_affects_effect(idx, CheckType::Confusion);
+                    if self.fighters[idx].pending_spell.is_none() {
+                        self.check_affects_effect(idx, CheckType::Confusion);
+                    }
                     self.melee_ai_turn(rng, idx);
                 } else {
                     self.clear_actions(idx);
@@ -1328,8 +1403,24 @@ impl CombatState {
                 }
             }
         }
+        // CountCombatTeamMembers (the ovr009.cs:391 round-end refresh site),
+        // then battle01's verdict (`ovr009.cs:395-402`) over the refreshed
+        // GLOBALS.
         let (party, monsters) = self.live_counts();
-        let battle_over = party == 0 || monsters == 0 || self.combat_round >= self.no_action_limit;
+        self.friends_count = party;
+        self.foe_count = monsters;
+        let mut battle_over =
+            party == 0 || monsters == 0 || self.combat_round >= self.no_action_limit;
+        // The "Continue Battle:" prompt (`ovr009.cs:404-410`, doc §48): with
+        // 2+ party members up and no foes, a 'Y' answer overrides battleOver.
+        // The occurrence-indexed schedule stands in for the keyboard.
+        if party > 1 && monsters == 0 {
+            let occurrence = self.continue_prompts_seen;
+            self.continue_prompts_seen += 1;
+            if self.continue_battle_yes.contains(&occurrence) {
+                battle_over = false;
+            }
+        }
         let round = self.combat_round;
         self.phase = if battle_over {
             Phase::Ended
@@ -3194,12 +3285,14 @@ impl CombatState {
     }
 
     /// `clear_actions` → `Action.Clear` (`Classes/Action.cs`): zero `delay`,
-    /// `guarding`, and `move` — but **keep** `field_15`/`target`/morale (persistent).
+    /// `guarding`, `move`, and `spell_id` (Action.cs:37-38) — but **keep**
+    /// `field_15`/`target`/morale (persistent).
     fn clear_actions(&mut self, actor: usize) {
         let f = &mut self.fighters[actor];
         f.delay = 0;
         f.guarding = false;
         f.move_left = 0;
+        f.pending_spell = None;
     }
 
     // --- the round loop (MainCombatLoop, ovr009.cs:22) ---------------------

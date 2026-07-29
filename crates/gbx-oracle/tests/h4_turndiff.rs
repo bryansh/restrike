@@ -265,6 +265,10 @@ fn apply_capture_knobs(state: &mut gbx_engine::combat::CombatState, cap: &Captur
     if let Ok(v) = std::env::var("RESTRIKE_AUTO_CAST_TOGGLES") {
         state.auto_cast_toggles = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
     }
+    // The "Continue Battle:" 'Y' schedule (doc §48) — mirrors h4_replay.
+    if let Ok(v) = std::env::var("RESTRIKE_CONTINUE_BATTLE") {
+        state.continue_battle_yes = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+    }
     // coab≠binary #21 (doc §45): the party-only area movement modifier.
     // Precedence mirrors h4_replay: knob (explicit trial override) > the
     // capture's emitted area2_field_6e4 through the §47 byte-bridge (the ECL

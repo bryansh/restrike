@@ -750,8 +750,20 @@ impl CombatState {
             return;
         }
 
-        // 4. queued spell (spell_id>0) — none for a fighter.
-        // 5. turn_undead — non-cleric, short-circuit, draw-free.
+        // 4. the queued delayed cast (`actions.spell_id > 0`, `ovr010.cs:60-66`,
+        // doc §48): a "Begins Casting" spell fires HERE at the caster's next
+        // pick — sub_5D2E1 then clear_actions, and the turn returns BEFORE
+        // sub_3560B, which is why the capture's cast mini-turn draws only ONE
+        // d7 (the sub_354AA wand d7 above) before the resolution dice.
+        if let Some(spell_id) = self.fighters[actor].pending_spell {
+            self.fighters[actor].pending_spell = None;
+            self.sub_5d2e1(rng, actor, spell_id);
+            self.clear_actions(actor);
+            return;
+        }
+        // 5. turn_undead — non-cleric, short-circuit, draw-free. (SHARA is a
+        // cleric, but `FindLowestE9Target` finds no undead in any pinned
+        // roster — the scan is draw-free and its cast path unexercised.)
 
         // 6. sub_3560B (ovr010.cs:74) — the memorized-spell selection loop
         // (doc §41.1). It always draws the unconditional d7 bound

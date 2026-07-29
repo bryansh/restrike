@@ -193,6 +193,16 @@ fn combatant_from_record(
         0
     };
     c.race = raw.get(0x74).copied().unwrap_or(0);
+    // §48 the cleric spell slice: `saveVerse[5]@0xDF` + the additive save
+    // bonus `field_186@0x186` (sbyte) — `do_saving_throw`'s inputs; and the
+    // Cleric/Paladin skill levels for `spellMaxTargetCount`'s Cleric arm
+    // (SHARA cleric 5, MATHEW/MARK paladin 5 — paladins < 9 cast nothing).
+    for (i, s) in c.saves.iter_mut().enumerate() {
+        *s = raw.get(0xDF + i).copied().unwrap_or(0);
+    }
+    c.field_186 = raw.get(0x186).map(|&b| b as i8 as i32).unwrap_or(0);
+    c.skill_level_cleric = skill_level(rec, SKILL_CLERIC);
+    c.skill_level_paladin = skill_level(rec, SKILL_PALADIN);
     c
 }
 
