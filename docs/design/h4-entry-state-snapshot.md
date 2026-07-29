@@ -3160,3 +3160,18 @@ h4_toggle_ordinal, h4_locate_draw's roll-value line (`n:result` — the §31
 provenance channel needs no hook change; NOTE: RngDraw.result is the raw
 0-based wrapper value, NOT roll_dice's 1-based total — mis-reading it cost
 this session an hour of false near-list contradictions).
+
+### 47.5 sewer-fight-4 intake — a MANUAL first turn; pinned Frontier(22), restage recommended
+
+The otyugh capture (4 OTYUGH + 1 NEO-OTYUGH, slot F, 1,208 post-entry draws,
+58C=75 / 6E4=−3 — the same per-SCRIPT pair as the trolls) was banked late in
+session 7 and intaken here: **TRAVIS's first turn is a bare `d20 + d2` — no
+mode gate, no find_target, no near re-pick — the MANUAL-UI attack shape.**
+Every subsequent turn carries the full QuickFight head (faithful `d8==8→d2`
+mode branches, the otyugh triple attack `d20/d8, d20/d8, d20/d4`, PHILIPPE's
+round-0 nine-d1 selection after the recorded flip @58/59 = global turn 2).
+Bryan swung once manually before engaging QuickFight, so the all-AI engine
+structurally diverges at that turn — closure needs the M6 manual-turn model
+or (cheaper) a RESTAGE with QuickFight engaged from turn 1. Pinned
+`Frontier(22)` (md=4, toggles=[2]) — the initiative + first-pick-scan prefix
+guards exactly. **Guard: 12/12.**

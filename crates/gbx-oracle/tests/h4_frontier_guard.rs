@@ -270,6 +270,28 @@ const PINS: &[Pin] = &[
         auto_cast_toggles: &[],
         area_field_6e4: -3,
     },
+    Pin {
+        // The campaign-1 otyugh attack (doc §47.5): 4 OTYUGHS + 1 NEO-OTYUGH
+        // (teleport slot F, 1,208 post-entry draws; 58C=75 / 6E4=−3 — the
+        // same per-SCRIPT sewer-area pair as the trolls). ★ This capture has
+        // a MANUAL first turn: TRAVIS's turn 0 is a bare d20+d2 (no mode
+        // gate, no find_target — the manual-UI attack) — Bryan swung once
+        // before engaging QuickFight. Every later turn carries the full AI
+        // head (incl. faithful d8==8→d2 mode branches and the otyugh triple
+        // attack d20/d8 ×2 + d20/d4). The all-AI engine structurally
+        // diverges at that first PC turn — closure needs either the M6
+        // manual-turn model or a RESTAGE with QuickFight from turn 1 (slot F
+        // reusable, one launch). Until then the pin guards the exact prefix
+        // (initiative + first pick scan). The recorded magic_toggle flip
+        // (post-entry draws 58/59 = the head of global turn 2, PHILIPPE's —
+        // his round-0 selection d1s follow @62-70) rides as toggles=[2].
+        capture: "sewer-fight-4.gbxtrace",
+        expect: Expect::Frontier(22),
+        map_direction: 4,
+        auto_cast: false,
+        auto_cast_toggles: &[2],
+        area_field_6e4: -3,
+    },
 ];
 
 /// Open-floor fallback tile (matches `h4_replay`) for pre-terrain captures.
