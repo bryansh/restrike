@@ -317,11 +317,19 @@ const PINS: &[Pin] = &[
         // draws no selection d1s — capture d1 (his 10×d1 MM selection) vs our
         // post-head d100. Count-only runs 960/960 while operands fork here —
         // the purest §14 count-artifact yet.
+        // @26→75: the §38 toggle pin, DERIVED (h4_toggle_ordinal): the
+        // recorded flip sits between post-entry draws 21/22, and draw 22 IS
+        // the head of global turn 0 — PHILIPPE's, whose MM selection + cast
+        // (10×d1 + d5 + 3×d4, the §41/§42 machinery on a 5-FK list) then
+        // replays through the round-0 Fire Knife sword turn. @75 = Fire
+        // Knife [9] (a back-ranker): the capture fires its short bow from its
+        // entry square (the §45 archer kit — not yet keyed to this basename)
+        // where our kitless decode walks it.
         capture: "cleric-fk.gbxtrace",
-        expect: Expect::Frontier(26),
+        expect: Expect::Frontier(75),
         map_direction: 4,
         auto_cast: false,
-        auto_cast_toggles: &[],
+        auto_cast_toggles: &[0],
         area_field_6e4: -3,
     },
 ];
