@@ -187,6 +187,7 @@ fn h4_melee_replays_the_bar_brawl_capture_draw_for_draw() {
             },
             pos: gbx_engine::combat::GridPos::new(c.x as i32, c.y as i32),
             record: &c.record,
+            affects: common::decode_affect_nodes(&c.affects),
         })
         .collect();
 

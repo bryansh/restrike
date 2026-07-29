@@ -720,7 +720,8 @@ fn stub_tripwires_fire_when_unmodeled_mechanics_are_reached() {
 
     // 1. downing a party member: no longer trips (the downed-pc wire was
     // retired, §26/§27). Overkill 99 ≫ 9 → dead, out of combat, tile stamped.
-    world.apply_damage(0, 99);
+    let mut rng = EngineRng::new(SEED);
+    world.apply_damage(&mut rng, 0, 99);
     assert!(!world.fighters[0].in_combat);
     assert_eq!(world.fighters[0].health_status, HealthStatus::Dead);
     assert_eq!(

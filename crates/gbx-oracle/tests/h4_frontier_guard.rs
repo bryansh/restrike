@@ -46,6 +46,10 @@ enum Expect {
     /// Replays operand-exact, draw-for-draw, equal length, zero stub trips.
     Closed,
     /// Diverges at **exactly** this draw index (operand or `(before,after)`).
+    /// Unconstructed since doc §47 closed the full 12-capture matrix — kept as
+    /// the pin type every future capture with an open frontier re-enters
+    /// through.
+    #[allow(dead_code)]
     Frontier(usize),
 }
 
@@ -263,33 +267,46 @@ const PINS: &[Pin] = &[
         // engine-semantic value. Intake frontier @115: ours draws a d1 where
         // the capture draws a d100. Troll regeneration is UNMODELED — expect
         // the peel to surface it.
+        // ★ CLOSED 3042/3042 (doc §47.6/§47.7): the intake @115 was the
+        // SIZE/FOOTPRINT slice — trolls are field_DE 0x82 (size 2 = origin +
+        // the cell SOUTH) and crocodiles 0x83 (size 3 = origin + EAST), the
+        // first multi-cell combatants in any capture; our decode ran them
+        // size-1, so every near list / reach / walk was computed against
+        // wrong footprints (the §47.3 "impossible d1" = troll [9]'s southern
+        // cell making it reach-1 from (26,13)). @937: the §38 toggle,
+        // DERIVED toggles=[16] (flip between post-entry draws 513/514 = the
+        // head of global turn 16). @978: the dwarf racial hit handlers —
+        // dwarf_and_gnome_vs_giants 0x2F (−4 vs size-2 giants/trolls,
+        // Type_16) and dwarf_vs_orc 0x1A (+1 vs field_14B&4 targets,
+        // Type_10) — the first REAL CallAffectTable handlers, live inside
+        // PC_CanHitTarget. @1982: TROLL REGENERATION — the on-hit 0x65
+        // cascade (regenerate 0x3B + regen_3_hp 0x62 via the ADD-time
+        // dispatch) heals +3 at every round end (Type_19): the capture's [9]
+        // survives the punch that killed ours. The party is WIPED in 7
+        // rounds — MonstersWin, length-equal, and no troll ever dies (the
+        // death-3d6/rise machinery stays tripwired).
         capture: "sewer-fight-3.gbxtrace",
-        expect: Expect::Frontier(115),
+        expect: Expect::Closed, // was Frontier(115); size slice + racials + troll regen
         map_direction: 2,
         auto_cast: false,
-        auto_cast_toggles: &[],
+        auto_cast_toggles: &[16],
         area_field_6e4: -3,
     },
     Pin {
-        // The campaign-1 otyugh attack (doc §47.5): 4 OTYUGHS + 1 NEO-OTYUGH
-        // (teleport slot F, 1,208 post-entry draws; 58C=75 / 6E4=−3 — the
-        // same per-SCRIPT sewer-area pair as the trolls). ★ This capture has
-        // a MANUAL first turn: TRAVIS's turn 0 is a bare d20+d2 (no mode
-        // gate, no find_target — the manual-UI attack) — Bryan swung once
-        // before engaging QuickFight. Every later turn carries the full AI
-        // head (incl. faithful d8==8→d2 mode branches and the otyugh triple
-        // attack d20/d8 ×2 + d20/d4). The all-AI engine structurally
-        // diverges at that first PC turn — closure needs either the M6
-        // manual-turn model or a RESTAGE with QuickFight from turn 1 (slot F
-        // reusable, one launch). Until then the pin guards the exact prefix
-        // (initiative + first pick scan). The recorded magic_toggle flip
-        // (post-entry draws 58/59 = the head of global turn 2, PHILIPPE's —
-        // his round-0 selection d1s follow @62-70) rides as toggles=[2].
+        // The campaign-1 otyugh attack, RESTAGED with QuickFight from turn 1
+        // (the first staging had a manual first turn — doc §47.5): 4 OTYUGHS
+        // + 1 NEO-OTYUGH (slot F, 1,361 post-entry draws; 58C=75 / 6E4=−3 —
+        // the same per-SCRIPT sewer-area pair as the trolls; no '2' press).
+        // ★ CLOSED 1361/1361 (doc §47.6): the intake @138 was the NEO-OTYUGH
+        // — field_DE 0x82, the size-2 footprint — walking a different
+        // anti-oscillation dance than our size-1 model; the size slice
+        // closes it outright. The otyugh triple attack (d20/d8, d20/d8,
+        // d20/d4) and the whole 5-monster brawl replay draw-for-draw.
         capture: "sewer-fight-4.gbxtrace",
-        expect: Expect::Frontier(22),
+        expect: Expect::Closed, // was Frontier(22) on the manual-turn staging; size slice
         map_direction: 4,
         auto_cast: false,
-        auto_cast_toggles: &[2],
+        auto_cast_toggles: &[],
         area_field_6e4: -3,
     },
 ];
@@ -393,6 +410,7 @@ fn replay(
             },
             pos: GridPos::new(c.x as i32, c.y as i32),
             record: &c.record,
+            affects: common::decode_affect_nodes(&c.affects),
         })
         .collect();
 

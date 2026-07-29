@@ -60,26 +60,31 @@ fn replay_harness_maps_records_and_opens_with_one_d6_per_combatant() {
             team: Team::Party,
             pos: GridPos::new(25, 12),
             record: &p0,
+            affects: vec![],
         },
         RecordCombatant {
             team: Team::Party,
             pos: GridPos::new(24, 12),
             record: &p1,
+            affects: vec![],
         },
         RecordCombatant {
             team: Team::Monster,
             pos: GridPos::new(34, 13),
             record: &m0,
+            affects: vec![],
         },
         RecordCombatant {
             team: Team::Monster,
             pos: GridPos::new(35, 13),
             record: &m0,
+            affects: vec![],
         },
         RecordCombatant {
             team: Team::Monster,
             pos: GridPos::new(33, 13),
             record: &m0,
+            affects: vec![],
         },
     ];
 
@@ -147,21 +152,25 @@ fn allied_team0_npcs_after_the_party_prefix_are_non_team_members() {
             team: Team::Party,
             pos: GridPos::new(25, 12),
             record: &pc,
+            affects: vec![],
         },
         RecordCombatant {
             team: Team::Party,
             pos: GridPos::new(24, 12),
             record: &pc,
+            affects: vec![],
         },
         RecordCombatant {
             team: Team::Monster,
             pos: GridPos::new(34, 13),
             record: &thug,
+            affects: vec![],
         },
         RecordCombatant {
             team: Team::Party, // allied team-0 NPC, AFTER the enemy block
             pos: GridPos::new(23, 12),
             record: &ally,
+            affects: vec![],
         },
     ];
     let state = combat_state_from_records(&entries, CombatMap::uniform(0x17), &flavor).unwrap();
@@ -199,6 +208,7 @@ fn caster_record_decodes_memorized_list_and_casting_level() {
         team: Team::Party,
         pos: GridPos::new(23, 11),
         record: &r,
+        affects: vec![],
     }];
     let state = combat_state_from_records(&entries, CombatMap::uniform(0x17), &flavor).unwrap();
     let c = &state.fighters[0];
@@ -220,6 +230,7 @@ fn caster_record_decodes_memorized_list_and_casting_level() {
         team: Team::Monster,
         pos: GridPos::new(30, 11),
         record: &r0,
+        affects: vec![],
     }];
     let state0 = combat_state_from_records(&entries0, CombatMap::uniform(0x17), &flavor).unwrap();
     assert!(state0.fighters[0].caster_no_class);

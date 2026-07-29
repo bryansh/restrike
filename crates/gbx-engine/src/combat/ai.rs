@@ -259,17 +259,51 @@ impl CombatState {
         false
     }
 
-    /// `getGroundInformation(direction, actor)` (`ovr033.cs:433`) for a single-cell
-    /// combatant: the destination cell (`pos + delta[direction]`), returning its
-    /// ground-tile index (0 for void/OOB) and any *other* occupant (1-based; 0 =
-    /// empty).
+    /// `getGroundInformation(direction, actor)` (`sub_74D04`, coab
+    /// `ovr033.cs:433`) — the FOOTPRINT-aware destination probe (§47.6): walk
+    /// the mover's own footprint (`BuildSizeMap(size, pos)`), test each cell's
+    /// destination (`cell + delta[direction]`), and fold:
+    /// - `playerIndex` = the LAST nonzero non-self occupant seen (`:453-461`;
+    ///   the mover's own cells fold to 0 — a size-2 mover stepping along its
+    ///   axis overlaps itself);
+    /// - `groundTile` starts **0x17** (`:436`) and is VOID-STICKY: any void/OOB
+    ///   destination cell zeroes it for good (`:463-466`); otherwise the cell
+    ///   whose `move_cost` is the MAX wins (`maxMoveCost` starts 1, `>=` so
+    ///   later cells win ties, `:469-473`) — a size-2 mover pays the WORST
+    ///   cell's tile, and a wall under either cell blocks the step.
+    ///
+    /// Size-1 footprints reduce to the old single-cell probe on every tile
+    /// whose cost is ≥ 1 (all tiles any capture map carries — a 0-cost tile
+    /// would faithfully report as the 0x17 default, as the binary does).
     fn ground_info_dir(&self, actor: usize, direction: u8) -> (i32, u16) {
-        let dest = self.fighters[actor].pos.stepped(direction);
-        let ground = self.map.ground_tile(dest) as i32;
-        let occ = self.map.occupant(dest);
+        let f = &self.fighters[actor];
         let current = (actor + 1) as u16;
-        let occ = if occ == current { 0 } else { occ };
-        (ground, occ)
+        let mut player_index: u16 = 0;
+        let mut ground_tile: i32 = 0x17; // :436 — the default floor
+        let mut max_move_cost: u8 = 1; // :438
+        for cell in size_footprint(f.size, f.pos) {
+            let dest = cell.stepped(direction);
+            // AtMapXY (`ovr033.cs:191`): out-of-bounds → tile 0, occupant 0.
+            let (at_tile, at_occ) = if dest.in_bounds() {
+                (self.map.ground_tile(dest) as i32, self.map.occupant(dest))
+            } else {
+                (0, 0)
+            };
+            let at_occ = if at_occ == current { 0 } else { at_occ };
+            if at_occ > 0 {
+                player_index = at_occ;
+            }
+            if at_tile == 0 {
+                ground_tile = 0;
+            } else if ground_tile != 0 {
+                let mc = ground_tile_move_cost(at_tile);
+                if mc >= max_move_cost {
+                    max_move_cost = mc;
+                    ground_tile = at_tile;
+                }
+            }
+        }
+        (ground_tile, player_index)
     }
 
     /// `CanMove(baseDirection, dirStep, actor)` (`ovr010.cs:295`): can the actor step
@@ -628,8 +662,9 @@ impl CombatState {
                                 self.ai_items_selection(actor);
                                 stop = true;
                             } else {
-                                let tp = self.fighters[picked].pos;
-                                if get_target_range(&self.map, tp, self.fighters[actor].pos) == 1
+                                // §47.6: footprint best-pair range — adjacency
+                                // to EITHER cell of a multi-cell monster is 1.
+                                if self.target_range(picked, actor) == 1
                                     || self.can_see_target(picked)
                                 {
                                     reachable = true;
@@ -663,11 +698,7 @@ impl CombatState {
                             let ranged_item = if self.is_weapon_ranged(actor) {
                                 let mut item = self.get_current_attack_item(actor).item;
                                 if self.is_weapon_ranged_melee(actor)
-                                    && get_target_range(
-                                        &self.map,
-                                        self.fighters[t].pos,
-                                        self.fighters[actor].pos,
-                                    ) == 1
+                                    && self.target_range(t, actor) == 1
                                 {
                                     item = AttackItemRef::None;
                                 }

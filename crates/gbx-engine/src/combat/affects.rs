@@ -64,18 +64,131 @@ impl CombatState {
     /// spell slice's; here we model the scan and **TRIP** on any found affect (on
     /// the actor, or a carrier for a radius kind). Draw-free.
     pub(super) fn calc_affect_effect(&mut self, ci: usize, kind: u8) {
-        // Found on the actor → the point where the binary runs a `CallAffectTable`
-        // handler we don't model yet (doc §39.4).
+        // Found on the actor → run the effect handler (§47.7 — the first REAL
+        // `CallAffectTable` handlers; unknown kinds still trip, §39.4).
         if self.fighters[ci].find_affect(kind).is_some() {
-            self.trip_affect_effect(ci);
+            self.run_affect_handler(ci, kind);
             return;
         }
         // Radius-cast affects can be sourced from a team-mate carrier (the
-        // 10-/15-foot-radius blessings). Scan first (immutable), then trip.
+        // 10-/15-foot-radius blessings). Scan first (immutable), then trip
+        // (none of the four radius kinds has a landed handler yet).
         if RADIUS_CARRIER_KINDS.contains(&kind)
             && self.fighters.iter().any(|f| f.find_affect(kind).is_some())
         {
             self.trip_affect_effect(ci);
+        }
+    }
+
+    /// The per-kind effect handlers (`CallAffectTable` check-time dispatch,
+    /// coab `ovr013.cs:1780+` `affect_table`; §47.7) — the kinds the sewer
+    /// captures actually dispatch, each binary-verified. Everything else keeps
+    /// the `affect-effect` tripwire (§39.4). All draw-free — the one
+    /// draw-bearing handler (`troll_fire_or_acid` 0x64, 3d6) lives on the
+    /// Death dispatch path ([`CombatState::affect_death_check`]), the only
+    /// site that carries an RNG.
+    fn run_affect_handler(&mut self, ci: usize, kind: u8) {
+        match kind {
+            // `protection_from_evil` 0x08 (`affect_protect_evil`, ovr013.cs:151):
+            // `attack_roll -= 2` for an evil-aligned attacker — but its only
+            // in-combat dispatch is Type_11, which fires BEFORE the swing's
+            // d20 (`AttackTarget01` pre-AC, ovr014.cs:774): the write lands on
+            // the PREVIOUS roll and the next `PC_CanHitTarget` overwrites it.
+            // A verified stale-write NO-OP for the hit test (capture-proven:
+            // troll roll-6 vs MARK hit at the exact boundary, doc §47.7). The
+            // `savingThrowRoll += 2` twin would matter on the SavingThrow
+            // dispatch — not fired by any modeled path.
+            0x08 => {}
+            // `dwarf_vs_orc` 0x1A (`AffectDwarfVsOrc` sub_3A7E8, ovr013.cs:357;
+            // Type_10, attacker-side, LIVE inside `PC_CanHitTarget`): the
+            // attacker's CURRENT target (actions.target — written by
+            // AttackTarget before the swings) is orc-class (`field_14B & 4`;
+            // the sewer TROLL carries 0x0E) → `attack_roll += 1`.
+            0x1A => {
+                if let Some(t) = self.fighters[ci].target {
+                    if self.fighters[t].field_14b & 4 != 0 {
+                        self.attack_roll += 1;
+                    }
+                }
+            }
+            // `dwarf_and_gnome_vs_giants` 0x2F (`AffectDwarfGnomeVsGiants`,
+            // ovr013.cs:687; Type_16, TARGET-side, LIVE): the ATTACKER
+            // (`gbl.SelectedPlayer`, mirrored in `selected_attacker`) is
+            // monsterType giant(2)/troll(10) AND size-class 2
+            // (`field_DE & 0x7F == 2`) → `attack_roll -= 4`. The sewer-fight-3
+            // @978 boundary: troll roll 6 vs TRAVIS-the-dwarf misses.
+            0x2F => {
+                let a = &self.fighters[self.selected_attacker];
+                if (a.monster_type == 2 || a.monster_type == 10) && (a.field_de & 0x7F) == 2 {
+                    self.attack_roll -= 4;
+                }
+            }
+            // `troll_regen` 0x65 (`sp_regenerate` @`ovr013:1FCC`,
+            // AffectTrollRegenerate; Type_5 — the on-hit target check): unless
+            // already regenerating (0x62 then 0x3B probed, `:1FD8-1FFE`), add
+            // `regenerate` 0x3B with `call_spell_jump_list = TRUE`
+            // (`add_affect(1, 0xFF, 3, regenerate)` @`:2000-2013`) — and the
+            // ADD fires the kind's handler through the SAME jump table
+            // (`sub_630C7` → `spell_jump_list[kind]`, no flag gate):
+            // `AffectRegenration` (ovr013.cs:774) adds `regen_3_hp` 0x62
+            // (call FALSE — the cascade stops). §47.7: the wounded troll then
+            // heals +3 at EVERY round end (Type_19) — capture-proven ([9]
+            // survives MATHEW's @1982 punch at hp 6 = two banked ticks ours
+            // lacked). Draw-free.
+            0x65 => {
+                if !self.fighters[ci].has_affect(0x62) && !self.fighters[ci].has_affect(0x3B) {
+                    self.fighters[ci].add_affect(0x3B, 3, 0xFF, true);
+                    // The 0x3B ADD-handler (AffectRegenration).
+                    self.fighters[ci].add_affect(0x62, 0, 0xFF, false);
+                }
+            }
+            // `regen_3_hp` 0x62 (`AffectRegen3Hp` sub_3BEB8, ovr013.cs:1240;
+            // Type_19 — BattleRoundChecks' per-combatant round-end sweep,
+            // ovr009.cs:371): `hp += 3`, capped at max. No status gate — the
+            // binary would tick a corpse too (unexercised: no troll dies in
+            // any capture; the death strip leaves at most one 0x62 behind).
+            0x62 => {
+                let f = &mut self.fighters[ci];
+                f.hp_current = (f.hp_current + 3).min(f.hp_max);
+            }
+            // `con_saving_bonus` 0x61 / `elf_resist_sleep` 0x6B: dispatched
+            // only under SavingThrow / MagicResistance — neither fires on a
+            // modeled path, so reaching here is a real surprise → trip.
+            _ => self.trip_affect_effect(ci),
+        }
+    }
+
+    /// The DEATH dispatch (`CheckAffectsEffect(target, Death)` at the weapon
+    /// death tail, `ovr014:0630`; list = `{affect_63, troll_fire_or_acid 0x64,
+    /// weap_dragon_slayer}` @coab `ovr024.cs:300-304`) — the ONE dispatch that
+    /// can DRAW today: `troll_fire_or_acid`'s handler
+    /// (`AffectTrollFireOrAcid`, ovr013.cs:1278) rolls **3d6** for the rise
+    /// timer when the kill was not fire/acid: `add_affect(true, data 0xFF,
+    /// minutes roll_dice(6,3), TrollRegen 0x66)`. Weapon damage carries no
+    /// fire/acid `damage_flags` in any modeled path (`sub_3E192` zeroes them,
+    /// doc §40), so the gate is always true here. The added `TrollRegen` is
+    /// combat-inert beyond the list (0x66 is in no combat CheckType list —
+    /// the corpse-rise machinery is camp/tick territory, cited §47.7; no
+    /// capture shows a rise). The other two list ids fall through to the
+    /// normal draw-free dispatch (trip on an unknown find).
+    pub(super) fn affect_death_check(&mut self, rng: &mut EngineRng, ci: usize) {
+        for &kind in CheckType::Death.affect_ids() {
+            if kind == 0x64 && self.fighters[ci].find_affect(kind).is_some() {
+                let minutes = roll_dice(rng, 6, 3); // ovr013.cs:1283 — 3d6
+                self.fighters[ci].add_affect(0x66, minutes, 0xFF, true);
+                // The 0x66 ADD-handler (`AffectTrollRegen` sub_3C01E): the
+                // RISE attempt — `combat_heal(hp_max)` stands the troll back
+                // up if placeable ("stands up and grins"), else re-adds the
+                // timer. Unexercised (no capture kills a troll — regen keeps
+                // them up); tripwire the territory rather than model it.
+                let id = self.fighters[ci].id;
+                self.emit(ActionEvent::StubTripped {
+                    combatant_id: id,
+                    stub: "troll-rise",
+                });
+                continue;
+            }
+            self.calc_affect_effect(ci, kind);
         }
     }
 
@@ -106,11 +219,25 @@ impl CombatState {
         };
         let removed = self.fighters[ci].affects.remove(idx);
         if removed.call_affect_table || STAT_RECOMPUTE_KINDS.contains(&kind) {
-            let id = self.fighters[ci].id;
-            self.emit(ActionEvent::StubTripped {
-                combatant_id: id,
-                stub: "affect-remove-side",
-            });
+            // §47.7 — the first REAL `CallAffectTable(Remove)` handler:
+            // `regenerate` 0x3B (added call_table=true by the troll on-hit
+            // handler) fires `AffectRegenration` (ovr013.cs:774) on removal
+            // too (the handler ignores the Effect arg): it adds `regen_3_hp`
+            // 0x62 (coab `add_affect(false, data 0xFF, minutes 0, ...)` —
+            // call_table FALSE). At the death strip this NETS TO ZERO by
+            // TABLE ORDER: `STRIP_COMBAT_KINDS` lists 0x3B before 0x62, so
+            // the re-added 0x62 is stripped two entries later (its own
+            // removal fires nothing) — why no capture ever shows a corpse
+            // regenerating. Draw-free. Everything else keeps the wire.
+            if kind == 0x3B {
+                self.fighters[ci].add_affect(0x62, 0, 0xFF, false);
+            } else {
+                let id = self.fighters[ci].id;
+                self.emit(ActionEvent::StubTripped {
+                    combatant_id: id,
+                    stub: "affect-remove-side",
+                });
+            }
         }
     }
 

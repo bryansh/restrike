@@ -73,6 +73,8 @@ struct CapEntry {
     x: i32,
     y: i32,
     record: Vec<u8>,
+    /// Raw hex affect nodes (§44.2 channel; §47.7) — decoded per replay site.
+    affects: Vec<String>,
 }
 
 /// One `(before, after, operand)` PRNG draw.
@@ -163,6 +165,15 @@ fn parse_capture(text: &str) -> Capture {
                         x: c["x"].as_u64().unwrap() as i32,
                         y: c["y"].as_u64().unwrap() as i32,
                         record: hex_decode(c["record"].as_str().unwrap()),
+                        affects: c
+                            .get("affects")
+                            .and_then(|a| a.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|n| n.as_str().map(str::to_string))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
                     });
                 }
             }
@@ -357,6 +368,7 @@ fn run(cap: &Capture, map: CombatMap) -> RunResult {
             team: team_of(c.team),
             pos: GridPos::new(c.x, c.y),
             record: &c.record,
+            affects: common::decode_affect_nodes(&c.affects),
         })
         .collect();
 
@@ -545,6 +557,7 @@ fn h4_first_turn_trace() {
             team: team_of(c.team),
             pos: GridPos::new(c.x, c.y),
             record: rec,
+            affects: common::decode_affect_nodes(&c.affects),
         })
         .collect();
     let rules = RuleSet::load();
@@ -645,7 +658,10 @@ fn h4_philippe_near_list() {
         .iter()
         .map(|c| RangeCombatant {
             pos: GridPos::new(c.x, c.y),
-            size: 1,
+            // §47.6: the real footprint size (field_DE & 7) — trolls/neo-otyugh
+            // are size 2, crocodiles size 3; a hardcoded 1 here made this tool
+            // dump lists the engine no longer builds.
+            size: c.record.get(0xDE).map(|b| b & 7).unwrap_or(1),
             team: team_of(c.team),
         })
         .collect();
@@ -724,6 +740,7 @@ fn h4_round0_moves() {
             team: team_of(c.team),
             pos: GridPos::new(c.x, c.y),
             record: rec,
+            affects: common::decode_affect_nodes(&c.affects),
         })
         .collect();
     let rules = RuleSet::load();
@@ -810,6 +827,7 @@ fn h4_locate_draw() {
             team: team_of(c.team),
             pos: GridPos::new(c.x, c.y),
             record: rec,
+            affects: common::decode_affect_nodes(&c.affects),
         })
         .collect();
     let rules = RuleSet::load();
@@ -982,6 +1000,7 @@ fn h4_toggle_ordinal() {
             team: team_of(c.team),
             pos: GridPos::new(c.x, c.y),
             record: rec,
+            affects: common::decode_affect_nodes(&c.affects),
         })
         .collect();
     let rules = RuleSet::load();
@@ -1369,6 +1388,7 @@ fn h4_pos_at_draws() {
             team: team_of(c.team),
             pos: GridPos::new(c.x, c.y),
             record: &c.record,
+            affects: common::decode_affect_nodes(&c.affects),
         })
         .collect();
     let rules = RuleSet::load();

@@ -109,7 +109,7 @@ impl CombatState {
     /// #9), and frees its occupancy footprint immediately (`CombatantKilled`,
     /// bug #10). `gbl.game_state == GameState.Combat` holds on this path, so the
     /// `bleeding` and `delay = 0` writes are unconditional here.
-    pub(super) fn apply_damage(&mut self, target: usize, amount: i32) {
+    pub(super) fn apply_damage(&mut self, rng: &mut EngineRng, target: usize, amount: i32) {
         let t = &mut self.fighters[target];
         let (neg_hp, new_hp) = if t.hp_current >= amount {
             (0, t.hp_current - amount)
@@ -150,7 +150,9 @@ impl CombatState {
         t.hp_current = 0;
         t.in_combat = false;
         t.delay = 0;
-        let downed_party = t.team == Team::Party;
+        // ovr033.cs:579: the downed-list/tile gate is `nonTeamMember == false`
+        // (§47.1) — an ALLIED NPC's fall stamps no Tile_DownPlayer.
+        let downed_party = t.team == Team::Party && !t.non_team_member;
         // §39.5 site 9/10: the weapon death tail (`DisplayAttackMessage`, coab
         // ovr014.cs:209-210) runs `RemoveCombatAffects(target)` (`sub_645AB` call
         // @`ovr014:0622`) then `CheckAffectsEffect(target, Death)` (`mov al,0Dh`
@@ -159,7 +161,7 @@ impl CombatState {
         // spell/effect-damage entry; the weapon path is DisplayAttackMessage →
         // damage_player, doc §40.) Draw-free.
         self.remove_combat_affects(target);
-        self.check_affects_effect(target, CheckType::Death);
+        self.affect_death_check(rng, target);
         // `CombatantKilled` (`sub_74E6F`, `ovr033:534`→coab): the removal path the
         // damage caller reaches whenever `in_combat == false` (`ovr014.cs:214`),
         // so it fires for dying/unconscious/dead alike. §26.5 — for a downed
@@ -410,6 +412,21 @@ impl CombatState {
                 self.fighters[target].ac
             }) as i32
         };
+        // TEMP DEBUG (not committed)
+        if std::env::var_os("RESTRIKE_DEBUG_HIT").is_some() {
+            let t = &self.fighters[target];
+            eprintln!(
+                "HIT a={actor} t={target} backstab={can_backstab} behind_arg={behind} \
+                 flank={} (ar={} tdir={} bearing={} dc={}) base_ac={base_ac} front={} behind_ac={}",
+                self.is_flanking(target, actor),
+                t.attacks_received,
+                t.direction,
+                target_direction(self.fighters[actor].pos, t.pos),
+                t.direction_changes,
+                t.ac,
+                t.ac_behind,
+            );
+        }
         let target_ac = (base_ac + self.ranged_defense_bonus(actor, target)).clamp(0, 255) as u8;
         let hit_bonus = self.fighters[actor].hit_bonus;
         let mut target_gone = false;
@@ -443,11 +460,7 @@ impl CombatState {
                 // (`mov al,10h` @`ovr024:1290`). Our `pc_can_hit_target` is the
                 // pure d20; host those affect ops around it, per swing. Draw-free.
                 self.remove_invisibility(actor);
-                let th = pc_can_hit_target(rng, target_ac, hit_bonus, 0); // one d20
-                if th.d20 > 1 {
-                    self.check_affects_effect(actor, CheckType::Type10);
-                    self.check_affects_effect(target, CheckType::Type16);
-                }
+                let th = self.roll_to_hit(rng, actor, target, target_ac, hit_bonus);
                 if th.hit {
                     // `sub_3E192(idx)` damage cells (§34.6): idx 1 = @0x19E/0x1A0/
                     // 0x1A2 (our decoded profile-1), idx 2 = @0x19F/0x1A1/0x1A3
@@ -480,7 +493,7 @@ impl CombatState {
                     // runs only then). Draw-free.
                     self.check_affects_effect(actor, CheckType::SpecialAttacks);
                     self.check_affects_effect(target, CheckType::Type5);
-                    self.apply_damage(target, dmg.amount);
+                    self.apply_damage(rng, target, dmg.amount);
                     // The casting disruption (`TryLooseSpell` inlined at the
                     // `DisplayAttackMessage` tail, `ovr014:050C-051A`; doc §45):
                     // `actualDamage > 0` → `actions.can_cast@+1 := 0`. The
@@ -542,6 +555,62 @@ impl CombatState {
         false
     }
 
+    /// `PC_CanHitTarget(target_ac, target, attacker)` (`sub_64245`
+    /// @`ovr024:1245-12EE`) — the full hit test with the LIVE affect dispatch
+    /// (§47.7), replacing the bare [`pc_can_hit_target`] at the swing site:
+    /// roll the d20; on `> 1`: promote a natural 20 to 100, run
+    /// `CheckAffectsEffect(attacker, Type_10)` then `(target, Type_16)` —
+    /// whose handlers adjust the live `attack_roll` (dwarf vs-orc +1, dwarf
+    /// vs-giants −4) — then compare `attack_roll + hitBonus + team >= ac`
+    /// (`jl` @`ovr024:12E2` — hit on equality). The per-team 6E0/6E2 bonus is
+    /// zero-verified at intake (parse-only guard), so `team` is 0 here. The
+    /// returned `d20` stays the RAW die (the honest observable, as before).
+    fn roll_to_hit(
+        &mut self,
+        rng: &mut EngineRng,
+        attacker: usize,
+        target: usize,
+        target_ac: u8,
+        hit_bonus: i32,
+    ) -> ToHit {
+        let d20 = roll_dice(rng, 20, 1) as u8;
+        let mut hit = false;
+        if d20 > 1 {
+            self.attack_roll = if d20 == 20 { 100 } else { d20 as i32 };
+            self.selected_attacker = attacker; // gbl.SelectedPlayer (ovr014:962)
+            self.check_affects_effect(attacker, CheckType::Type10);
+            self.check_affects_effect(target, CheckType::Type16);
+            if self.attack_roll >= 0 {
+                hit = self.attack_roll + hit_bonus >= target_ac as i32;
+            }
+        }
+        ToHit { d20, hit }
+    }
+
+    /// `getTargetRange(target, attacker)` (`sub_68708`, coab `ovr025.cs:1305`)
+    /// — the FOOTPRINT best-pair range (§47.6): `ignoreWalls = true`, then the
+    /// `Rebuild_SortedCombatantList(attacker, 0xff, p == target)` machinery's
+    /// min-steps over every (attacker cell × target cell) pair, `/ 2`. With
+    /// walls ignored every ray reaches, so this is the pure min. Adjacency to
+    /// EITHER cell of a size-2 troll is range 1 — the fight-3 §47.3 fork.
+    /// Size-1 × size-1 reduces to the old single-ray [`get_target_range`].
+    pub(super) fn target_range(&self, target: usize, attacker: usize) -> u16 {
+        let a = &self.fighters[attacker];
+        let t = &self.fighters[target];
+        let mut best = u16::MAX;
+        for tp in size_footprint(t.size, t.pos) {
+            for ap in size_footprint(a.size, a.pos) {
+                let steps = reach_ray(&self.map, ap, tp, true).steps;
+                best = best.min(steps);
+            }
+        }
+        if best == u16::MAX {
+            0xFF // coab's not-found fallback (empty footprint — dead target)
+        } else {
+            best / 2
+        }
+    }
+
     /// `RangedDefenseBonus(target, attacker)` (`sub_3FCED` @`ovr014:1CED`, coab
     /// `ovr014.cs:1012`; doc §34.6): a to-hit AC penalty that grows with distance
     /// for a ranged attacker. `oneThird = (table[type].range − 1) / 3`; the
@@ -553,11 +622,7 @@ impl CombatState {
             return 0;
         }
         let one_third = (self.primary_item(attacker).expect("ranged ⇒ item").range as i32 - 1) / 3;
-        let mut range = get_target_range(
-            &self.map,
-            self.fighters[target].pos,
-            self.fighters[attacker].pos,
-        ) as i32;
+        let mut range = self.target_range(target, attacker) as i32;
         let mut adj = 0;
         if range > one_third {
             range -= one_third;

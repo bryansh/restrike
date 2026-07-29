@@ -97,6 +97,23 @@ fn sewer_monster_kit(name: &str) -> Option<Loadout> {
     }
 }
 
+/// Decode a capture combatant's raw affect chain (hex-encoded 9-byte nodes,
+/// the §44.2 hook channel) into engine [`AffectRecord`]s, order preserved
+/// (find-FIRST is order-observable, §39.2/§47.7). Nodes too short to decode
+/// are skipped (defensive; real nodes are always 9 bytes).
+pub fn decode_affect_nodes(hex_nodes: &[String]) -> Vec<gbx_formats::affects::AffectRecord> {
+    hex_nodes
+        .iter()
+        .filter_map(|h| {
+            let bytes: Vec<u8> = (0..h.len().saturating_sub(1))
+                .step_by(2)
+                .filter_map(|i| u8::from_str_radix(&h[i..i + 2], 16).ok())
+                .collect();
+            gbx_formats::affects::AffectRecord::decode(&bytes)
+        })
+        .collect()
+}
+
 /// The engine-semantic `area2.field_6E4` from the captured raw word — the
 /// **byte-bridge** (doc §47). The ECL stores a BYTE (sewer-fight-3 records the
 /// word 253 = 0x00FD), and the binary's add (`sub_3E124` @`ovr014:0140-014E`,

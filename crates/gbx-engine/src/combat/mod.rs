@@ -205,6 +205,15 @@ pub struct Combatant {
     /// A combatant reaching the surrender fork **surrenders only when `Int > 5`**
     /// (§28 item 7). Default 0 (never surrenders) for synthetic combatants.
     pub int_score: u8,
+    /// `Player.monsterType@0x11A` (`MonsterType`, coab `Enums.cs:20` — giant 2,
+    /// troll 10, …). Read by the racial-affect hit handlers (§47.7:
+    /// `dwarf_and_gnome_vs_giants` gates on giant/troll). 0 (none) for PCs and
+    /// synthetics.
+    pub monster_type: u8,
+    /// `Player.field_14B@0x14B` — the monster-class flag byte. Bit 2 (`& 4`)
+    /// marks the orc/goblinoid class `dwarf_vs_orc` reads (§47.7; the sewer
+    /// TROLL carries 0x0E — bit set). Default 0.
+    pub field_14b: u8,
     /// Footprint size (`field_DE & 7`); combat uses 1 for single-cell combatants.
     pub size: u8,
     pub pos: GridPos,
@@ -473,6 +482,8 @@ impl Combatant {
             team,
             npc: false,
             non_team_member: false,
+            monster_type: 0,
+            field_14b: 0,
             control_morale: 0,
             int_score: 0,
             size: 1,
@@ -562,6 +573,8 @@ impl Combatant {
             team,
             npc,
             non_team_member: false,
+            monster_type: 0,
+            field_14b: 0,
             // A synthetic melee combatant has no raw morale/Int decode; the
             // faithful FleeCheck reseeds from `control_morale` (npc → 0x80 folds
             // to seed 0, PCs stay 0), and `int_score` 0 never surrenders. Tests
@@ -827,6 +840,14 @@ pub struct CombatState {
     /// `gbl.combat_round_no_action_limit` (`byte_1D8B8`), initialized to
     /// [`DEFAULT_NO_ACTION_LIMIT`].
     no_action_limit: u16,
+    /// `gbl.attack_roll` (`byte_1D2C9`) — the LIVE to-hit roll the Type_10/
+    /// Type_16 affect handlers adjust between the d20 and the compare
+    /// (`PC_CanHitTarget` @`ovr024:1263-12E2`; §47.7). Scratch, valid only
+    /// inside [`CombatState::roll_to_hit`].
+    attack_roll: i32,
+    /// `gbl.SelectedPlayer` — the current ATTACKER (`ovr014:962`), read by
+    /// target-side handlers (dwarf vs-giants). Scratch, as `attack_roll`.
+    selected_attacker: usize,
     /// `gbl.area2_ptr.field_596` — the per-round team surprise/init-bonus mask
     /// read by `CalculateInitiative` (`ovr014.cs:38`) and cleared each round
     /// after initiative (`ovr009.cs:44`). Bit `(team + 1)`: bit 0 = party
@@ -917,6 +938,8 @@ impl CombatState {
             map,
             combat_round: 0,
             no_action_limit: DEFAULT_NO_ACTION_LIMIT,
+            attack_roll: 0,
+            selected_attacker: 0,
             surprise_mask: 0,
             phase: Phase::RoundStart,
             turn: TurnDriver::MeleeAi,
@@ -952,6 +975,8 @@ impl CombatState {
             map: CombatMap::uniform(0),
             combat_round: 0,
             no_action_limit: DEFAULT_NO_ACTION_LIMIT,
+            attack_roll: 0,
+            selected_attacker: 0,
             surprise_mask: 0,
             phase: Phase::RoundStart,
             turn: TurnDriver::Stub,

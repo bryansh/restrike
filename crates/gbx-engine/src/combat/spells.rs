@@ -410,7 +410,7 @@ impl CombatState {
         // save draw; damage > 0 → damage_person → damage_player == apply_damage.
         // affect_id 0 → no ApplyAttackSpellAffect.
         if damage > 0 {
-            self.apply_damage(target, damage);
+            self.apply_damage(rng, target, damage);
         }
     }
 

@@ -228,3 +228,101 @@ fn dispatch_id_lists_have_the_expected_case_lengths() {
         vec![0, 4, 7, 7, 6, 16, 21, 7, 5, 12, 10, 8, 16, 3, 11, 5, 7, 3, 3, 5, 2, 1, 1, 1]
     );
 }
+
+// === the §47.7 handlers — troll regen + the dwarf racial hit adjusts ====
+
+/// The on-hit troll cascade (`sp_regenerate` @`ovr013:1FCC`, Type_5): a
+/// troll carrying `troll_regen` 0x65 gains `regenerate` 0x3B + `regen_3_hp`
+/// 0x62 (the ADD-time dispatch) ONCE — a second hit finds 0x62 and adds
+/// nothing. Then every round-end Type_19 heals +3, capped at max.
+#[test]
+fn troll_regen_cascade_and_round_end_tick() {
+    let (mut state, log) = affect_world();
+    state.fighters[1].hp_max = 40;
+    state.fighters[1].hp_current = 14;
+    state.fighters[1].affects.push(aff(0x65, false));
+
+    state.check_affects_effect(1, CheckType::Type5); // the on-hit dispatch
+    let kinds: Vec<u8> = state.fighters[1].affects.iter().map(|a| a.kind).collect();
+    assert_eq!(kinds, vec![0x65, 0x3B, 0x62], "the cascade, tail-appended");
+
+    state.check_affects_effect(1, CheckType::Type5); // a second hit
+    assert_eq!(state.fighters[1].affects.len(), 3, "already regenerating");
+
+    for _ in 0..3 {
+        state.check_affects_effect(1, CheckType::Type19); // round ends
+    }
+    assert_eq!(state.fighters[1].hp_current, 23, "+3 per round end");
+    state.fighters[1].hp_current = 39;
+    state.check_affects_effect(1, CheckType::Type19);
+    assert_eq!(state.fighters[1].hp_current, 40, "capped at hp_max");
+    assert!(
+        stubs(&log).is_empty(),
+        "the whole cascade is handled, no trips"
+    );
+}
+
+/// The death strip nets exactly ONE `regen_3_hp` left on the corpse: the
+/// table removes `regenerate` 0x3B (whose Remove-handler re-adds a 0x62 at
+/// the tail) before it removes the FIRST 0x62 (§47.7 — the order is
+/// load-bearing).
+#[test]
+fn death_strip_regen_dance_leaves_one_regen_3hp() {
+    let (mut state, log) = affect_world();
+    state.fighters[1].affects.push(aff(0x65, false));
+    state.check_affects_effect(1, CheckType::Type5);
+    state.remove_combat_affects(1);
+    let kinds: Vec<u8> = state.fighters[1].affects.iter().map(|a| a.kind).collect();
+    assert_eq!(
+        kinds,
+        vec![0x65, 0x62],
+        "0x3B stripped, its re-added 0x62 survives"
+    );
+    assert!(
+        stubs(&log).is_empty(),
+        "the 0x3B remove-side is handled, no trip"
+    );
+}
+
+/// The dwarf racial hit handlers (§47.7), live inside the hit roll:
+/// `dwarf_and_gnome_vs_giants` 0x2F (Type_16 on the TARGET) subtracts 4 when
+/// the attacker is a size-class-2 giant/troll; `dwarf_vs_orc` 0x1A (Type_10
+/// on the ATTACKER) adds 1 when the attacker's held target is orc-class
+/// (`field_14B & 4`). Gates verified both ways.
+#[test]
+fn dwarf_racial_hit_adjustments() {
+    let (mut state, _log) = affect_world();
+    // [1] = a troll-shaped attacker; [0] = a dwarf with both racials.
+    state.fighters[1].monster_type = 10;
+    state.fighters[1].field_de = 0x82;
+    state.fighters[1].field_14b = 0x0E;
+    state.fighters[0].affects.push(aff(0x2F, false));
+    state.fighters[0].affects.push(aff(0x1A, false));
+
+    // Troll attacks dwarf: Type_16 on the target fires the −4.
+    state.attack_roll = 10;
+    state.selected_attacker = 1;
+    state.check_affects_effect(0, CheckType::Type16);
+    assert_eq!(
+        state.attack_roll, 6,
+        "vs-giants −4 (giant/troll, size-class 2)"
+    );
+
+    // A size-1 attacker: no penalty.
+    state.fighters[1].field_de = 0x01;
+    state.attack_roll = 10;
+    state.check_affects_effect(0, CheckType::Type16);
+    assert_eq!(state.attack_roll, 10, "man-sized attacker: gate closed");
+
+    // Dwarf attacks the orc-class troll: Type_10 on the attacker fires +1.
+    state.fighters[0].target = Some(1);
+    state.attack_roll = 10;
+    state.check_affects_effect(0, CheckType::Type10);
+    assert_eq!(state.attack_roll, 11, "vs-orc +1 (field_14B & 4)");
+
+    // A non-orc-class target: no bonus.
+    state.fighters[1].field_14b = 0;
+    state.attack_roll = 10;
+    state.check_affects_effect(0, CheckType::Type10);
+    assert_eq!(state.attack_roll, 10, "non-orc target: gate closed");
+}

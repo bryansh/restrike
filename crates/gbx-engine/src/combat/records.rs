@@ -14,6 +14,12 @@ pub struct RecordCombatant<'a> {
     pub pos: GridPos,
     /// The full `0x1A6` combat record (`decode_char_record`'s input).
     pub record: &'a [u8],
+    /// The combatant's LIVE affect chain as the hook captured it (§44.2 raw
+    /// 9-byte nodes off `record@0xF2`, decoded; §47.7): racial affects
+    /// (dwarf vs-giants 0x2F / vs-orc 0x1A, con-save 0x61, …) and monster
+    /// innates (troll_fire_or_acid 0x64 / troll_regen 0x65). Empty for
+    /// synthetic rosters and pre-§44.2 captures.
+    pub affects: Vec<gbx_formats::affects::AffectRecord>,
 }
 
 /// Map one decoded `0x1A6` record onto a combat [`Combatant`] for a faithful
@@ -148,7 +154,20 @@ fn combatant_from_record(
         rec.attack_profile_base[6], // attack1_DamageBonusBase @0x122
     );
     c.field_de = rec.field_de; // @0xde
+                               // §47.6 the size/footprint slice: `CombatMap[i].size = field_DE & 7`
+                               // (`BattleSetup` @`ovr011.cs:1118`). Every prior capture carried only
+                               // size-1 combatants; the sewer bestiary is multi-cell — TROLL/NEO-OTYUGH
+                               // 0x82 (size 2 = origin + the cell SOUTH), CROCODILE 0x83 (size 3 =
+                               // origin + EAST), per the `Steps` table (`ovr033.cs:10`) our
+                               // [`size_footprint`] mirrors. Occupancy paint, the near/reach best-pair,
+                               // and the walk's ground test all key off this.
+    c.size = rec.field_de & 7;
     c.thief_skill_level = skill_level(rec, SKILL_THIEF);
+    // §47.7 the racial/innate affect handlers' gates: `monsterType@0x11A`
+    // (giant 2 / troll 10 → the dwarf vs-giants −4) and `field_14B@0x14B`
+    // bit 2 (the orc-class flag the dwarf vs-orc +1 reads; sewer TROLL 0x0E).
+    c.monster_type = rec.monster_type;
+    c.field_14b = raw.get(0x14B).copied().unwrap_or(0);
     // §45 the ready/unready hit-bonus recompute: `thac0@0x73` (the
     // `reclac_player_values` base, `ovr025.cs:427`) and `strengthHitBonus`
     // (`ovr025.cs:627` — coab reads `stats2.Str.full`/`Str00.cur`, our
@@ -231,6 +250,9 @@ pub fn combat_state_from_records(
         let rec = decode_char_record(e.record)?;
         let mut c = combatant_from_record(id, e.team, e.pos, &rec, e.record, flavor);
         c.non_team_member = id >= party_size;
+        // §47.7: the captured live affect chain rides straight onto the
+        // combatant — order preserved (find-FIRST is order-observable, §39.2).
+        c.affects = e.affects.clone();
         fighters.push(c);
     }
     Ok(CombatState::new(map, fighters))
