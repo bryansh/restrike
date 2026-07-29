@@ -3175,3 +3175,75 @@ structurally diverges at that turn — closure needs the M6 manual-turn model
 or (cheaper) a RESTAGE with QuickFight engaged from turn 1. Pinned
 `Frontier(22)` (md=4, toggles=[2]) — the initiative + first-pick-scan prefix
 guards exactly. **Guard: 12/12.**
+
+### 47.6 The SIZE/FOOTPRINT slice — sewer-fight-4 (restaged) CLOSED 1,361/1,361; the §47.3 dossier resolved (2026-07-28, session continuation)
+
+Bryan restaged the otyugh fight all-QuickFight (no manual turn, no '2'
+press; 1,361 post-entry draws). Intake @138 = the NEO-OTYUGH's round-1
+walk oscillating along different squares than ours — and its record reads
+`field_DE = 0x82`: **size 2, the first multi-cell combatant in any
+capture**. The bestiary: TROLL/NEO-OTYUGH 0x82 (size 2 = origin + the cell
+SOUTH), CROCODILE 0x83 (size 3 = origin + EAST) — `Steps` @`ovr033.cs:10`,
+which our `size_footprint` already mirrored for the near-list best-pair;
+the SIZE just never flowed from the record (`new_melee` hardcoded 1).
+
+Landed: `Combatant.size = field_DE & 7` (`BattleSetup` @`ovr011.cs:1118`);
+`ground_info_dir` = the faithful `sub_74D04` footprint probe (per-cell
+destinations `cell + delta[dir]`; `playerIndex` = LAST non-self occupant;
+`groundTile` starts 0x17, VOID-STICKY, max-`move_cost` cell wins with `>=`
+tie-handling); `target_range` = the footprint best-pair min
+(`sub_68708`, ignoreWalls) feeding the adjacency tests; occupancy painting
+was already footprint-aware. The step executor stays single-cell (origin
+tile only — listing `ovr014:07B5-0814`).
+
+**The §47.3 "impossible d1" resolves exactly**: troll [9]@(27,11) also
+occupies (27,12), diagonally adjacent to (26,13) — TRAVIS's walk stops
+there (reach-1 near = {[9]} — the d1), attacks [9] (the d20 miss), parks.
+Fight-3 @115 → 937 on the slice alone; fight-4 CLOSED outright (the otyugh
+triple attack d20/d8, d20/d8, d20/d4 included).
+
+### 47.7 The first REAL CallAffectTable handlers — troll regeneration + the dwarf racials; sewer-fight-3 CLOSED 3,042/3,042 — ★ GUARD 12/12, EVERY CAPTURE CLOSED ★
+
+Fight-3's remaining peel (937 → 978 → 1982 → CLOSED), all binary-cited:
+
+- **@937 → 978**: the §38 toggle, DERIVED — flip between post-entry draws
+  513/514 = the head of global turn 16 (`h4_toggle_ordinal`) →
+  `toggles=[16]`, verified by pin.
+- **@978 — the dwarf racial hit handlers.** The capture affect chains
+  (§44.2) now POPULATE the roster (`RecordCombatant.affects`), and the hit
+  roll is the faithful `PC_CanHitTarget` shape (`roll_to_hit`: d20 → nat-20
+  promote → `Type_10(attacker)` → `Type_16(target)` → compare, hit on `>=`
+  — listing `ovr024:1245-12EE`; the handlers adjust the live
+  `gbl.attack_roll` mirror):
+  - `dwarf_and_gnome_vs_giants` 0x2F (Type_16): −4 when the attacker is a
+    size-class-2 giant/troll (`ovr013.cs:687`). The @978 boundary: troll
+    roll 6 vs TRAVIS = 6+47 == 53 front AC — ours hit, the binary missed.
+  - `dwarf_vs_orc` 0x1A (Type_10): +1 when the attacker's held target has
+    `field_14B & 4` (sewer trolls carry 0x0E).
+  - `protection_from_evil` 0x08: verified STALE-WRITE NO-OP in combat
+    (Type_11 fires before the roll; the −2 lands on the previous roll) —
+    capture-proven by the troll-vs-MARK roll-6 boundary HIT.
+- **@1982 — TROLL REGENERATION.** The capture's [9] survived the punch
+  that killed ours, at hp 6 = two +3 ticks we lacked. The chain: on-hit
+  `Type_5` dispatches `troll_regen` 0x65 (`sp_regenerate` @`ovr013:1FCC`)
+  → adds `regenerate` 0x3B with call=TRUE — and the ADD fires the kind's
+  handler through the SAME jump list (`sub_630C7` → `spell_jump_list`,
+  NO flag gate — the §40 "spell table, nothing for affects" assumption was
+  wrong) → `AffectRegenration` adds `regen_3_hp` 0x62 → `Type_19` at every
+  `BattleRoundChecks` heals +3 capped (`AffectRegen3Hp`). The death strip
+  nets ONE 0x62 on a corpse (0x3B's remove-handler re-adds it mid-strip;
+  the strip table orders 0x3B before 0x62 — load-bearing, tested).
+- **The death machinery**: `affect_death_check` (the one rng-bearing
+  dispatch) — `troll_fire_or_acid` 0x64 rolls **3d6** for the `TrollRegen`
+  0x66 timer on any non-fire/acid death (`sub_3BF91` @`ovr013:1F91`;
+  weapon `damage_flags` are spell-writer-only → always 0 here); the RISE
+  (`combat_heal` — "stands up and grins") stays tripwired (`troll-rise`).
+  Unexercised: no capture kills a troll — fight-3's party WIPES in 7
+  rounds (MonstersWin, length-equal with the capture).
+
+**Guard 12/12 — EVERY capture ever taken now replays operand-exact,
+draw-for-draw, zero trips.** Campaign 1 (sewer roster 2) is COMPLETE:
+Fire Knife archers (§45), the thief guild war with allied NPCs (§47.1),
+trolls+crocodiles with regeneration and multi-cell footprints, and the
+otyugh pack. Next: campaign 2 (cleric SHARA) → campaign 3 (buffed-party
+affects — the CallAffectTable substrate is now LIVE and proven) → M6.
