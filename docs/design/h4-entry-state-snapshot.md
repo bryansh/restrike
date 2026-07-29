@@ -3247,3 +3247,147 @@ Fire Knife archers (§45), the thief guild war with allied NPCs (§47.1),
 trolls+crocodiles with regeneration and multi-cell footprints, and the
 otyugh pack. Next: campaign 2 (cleric SHARA) → campaign 3 (buffed-party
 affects — the CallAffectTable substrate is now LIVE and proven) → M6.
+
+## 48. ★ CAMPAIGN 2 COMPLETE — cleric-fk CLOSED 960/960: the cleric spell slice, the slot-H party kits + item-plus, coab≠binary #22 ★ (2026-07-29, Fable)
+
+The campaign-2 capture (`cleric-fk.gbxtrace`, doc §47's evening staging): the
+slot-H upgraded party (charup.py kits, game-validated) walks into the 5-FIRE-
+KNIFE ambush — sewer-fight-1's script (58C=30, 6E4=0xFD→−3, md=4, all
+in-trace), so the monster side was fully modeled and EVERY new draw was
+party-side novelty. 999 raw / 960 post-entry draws, 5 rounds. Peel chain, one
+commit per frontier move, guard exact at each: intake Frontier(26) → toggle
+26→75 → FK-kit keying 75→97 → party kits + item-plus 97→233 → the cleric
+slice 233→CLOSED (with 531/855 as intermediate localizations inside the last
+commit's work).
+
+### 48.1 The fight, decoded end-to-end
+
+- **R0**: PHILIPPE (turn ordinal 0, the toggle head) casts MM (10×d1 + d5 +
+  3×d4 — §41 machinery on a 5-FK list); the party readies SWORDS (adjacent
+  FKs) — every +1/+2 hit and damage number in the capture decomposes exactly
+  as d8 + strengthDamBonus + item.plus; SHARA's selection (8×d4, the 4-slot
+  die) accepts HOLD PERSON at the pri-5 pass, "Begins Casting", and the cast
+  resolves ONE PICK LATER as the d4+d7 mini-turn: 3 find_target d4 picks →
+  [9]'s cluster, **3×d20 saves — ALL THREE PASSED (FK saves[Spell]=13,
+  monsterType 0 size 1 — real rolls, no auto-save): NOBODY HELD.**
+- **R1**: SHARA arrow-hit before her turn → the §45 casting disruption,
+  party-side: ZERO selection draws.
+- **R2**: selection 19×d3 (**the hold consumed a slot — the selection-die
+  ladder d4→d3→d2 is capture-visible slot accounting**); hold REJECTS all
+  passes (BuildNearTargets(6) empty from (25,14) in the half-step metric);
+  CLW accepts at the pri-1 pass-7 pick → queued → mini-turn d4+d7+**d8**:
+  find_healing_target picks SHARA HERSELF (51 absolute < LEDERA's 56 —
+  lowest-current-hp, not deficit) → 51→55. Both surviving FKs rout (58C=30).
+- **R3**: both FKs flee SE and EXIT (Got Away); SHARA's selection STILL
+  draws 9×d2 — the round-stale counts (§48.4). Round end: foes 0, party 6 →
+  **"Continue Battle:" — Bryan pressed Y** (the capture's round 4 exists).
+- **R4**: PC-only mop-up, prompt again → N, fight ends at draw 960.
+
+### 48.2 The slot-H party kits + the item-plus recompute (the §34 model grown up)
+
+- `Loadout` becomes a two-candidate KIT: `ranged: Option<(type, plus)>` +
+  `melee: Option<(type, plus)>` + `unarmed_profile` + `entry_ranged_readied`
+  (false for the slot-H party — the records serialize NOTHING readied: fists
+  profiles + armor AC); `Combatant.weapon_readied` → `readied_weapon:
+  Option<(type, plus)>`. The migration is guard-proven draw-neutral on all
+  12 prior captures.
+- `AI_items_selection` (sub_36673) faithful two-candidate form: var_4 = best
+  ranged (rating floor 1), var_8 = best melee (must BEAT the base bare-hands
+  rating var_16, and raises it); ranged wins iff `var_15 > var_16>>1` + ammo
+  (`var_1F`, incl. the sling 0x0A no-ammo special) + (ranged-melee ‖ no
+  adjacent). The `classFlags` gate is folded into ROW CONSTRUCTION: a kit
+  carries only class-eligible items — SHARA's plain sling is 1e-cleric-
+  forbidden and never enters her row (mace +1 is her only weapon candidate).
+- `CalculateAttackValues` (sub_66023 @`ovr025:0023-021B`, instruction-
+  verified): hit = thac0 (+DexReactionAdj flag_02) (+strengthHitBonus
+  flag_04); dmg = table bonusNormal (+strengthDamBonus flag_04); bonus =
+  item.plus (+ readied arrows/quarrels plus); **dmg += bonus BEFORE the elf
+  rider; hit += bonus AFTER it** — `race@0x74 == elf(2)` with types
+  {0x29-0x2C bows, 0x25, 0x24 swords} bumps TO-HIT only (@`019E-01CD`).
+  LEDERA (F4/MU4, ELF, long sword +2): hit = 43+3+2+1. `CalcItemPowerRating`
+  gains the `plus*8` term (`shl ax,3` @`ovr010:1572-158E`): sword+1 → 19,
+  +2 → 27, bows 12. New decodes: race@0x74, strengthDamBonus (field_125-
+  gated), saves[5]@0xDF, field_186@0x186, cleric/paladin skill levels.
+- Party classes corrected from the records: MATHEW/MARK are PALADIN 5 (not
+  fighters), TRAVIS F4/T5 dwarf, LEDERA F4/MU4 elf, SHARA cleric 5,
+  PHILIPPE MU 5.
+
+### 48.3 The cleric casting machinery (rows 3 + 0x17)
+
+- Rows verified against `Gbl.cs:572/592` and pinned by test: CLW (pri 1,
+  touch, delay 5/3=1, field_E 0) and hold person (pri 6, range 6, field_6 6
+  → `(6&3)+1 = 3` targets, DamageOnSave::Zero, affect paralyze 0x34, delay
+  1). `SpellEntry` gains the duration cells (`fixed/perLvlDuration`).
+- `ShouldCastSpellX` id-3 special: `find_healing_target` (sub_3FDFE,
+  instruction-verified @`ovr014:1E72-1F09`): the 9-cell `MapDirectionDelta`
+  scan (neighbors first, SELF last), same-team + wounded, keep the LOWEST
+  ABSOLUTE current hp (strict <; the healer additionally qualifies below
+  half max). The downed-ally override (`Tile_DownPlayer` + lowest ≥ 8) is
+  cited-unexercised.
+- ★ **THE QUEUED CAST — coab≠binary #22.** "Begins Casting"
+  (`ovr014:2866-28CC`): `actions.spell_id := id`, then with `actions.delay >
+  castDelay` the binary **SUBTRACTS** (`sub es:[di+3], al` @`28BE`) — coab
+  ASSIGNS the cast delay. Under the max-delay-first scheduler the subtract
+  keeps the caster at the TOP of the pick order (SHARA 8−1=7 ties the two
+  remaining 7s; the pick-scan d100s break the tie her way = the capture's
+  immediate mini-turn); coab's assign parks her at 1 = acts LAST. The
+  `delay <= castDelay` arm floors at 1 (@`28CC`). The pending cast fires at
+  the next pick in the AI turn BEFORE sub_3560B (`ovr010.cs:60-66`) — hence
+  the mini-turn's single d7 (sub_354AA's) + `clear_actions` after; the
+  DoPlayerCombatTurn Confusion check is skipped while a cast is pending.
+- The multi-target loop (`ovr014.cs:1322-1358`): up to `max_targets`
+  `sub_4001C` picks, each drawing find_target d(count); a QuickFight
+  duplicate pick decrements without adding; a failed pick zeroes the loop;
+  `sub_4001C` gains the `field_E == 0` branch (self, id-3 healing override —
+  draw-free ✓ the capture's cure drew no targeting die). `SpellHoldX`
+  (@`ovr023:2444`): save bonus −2/−1/0 by unique-count →
+  `MultiTargetedSpell` (@`ovr023:1B24`): per target — 2nd+ missile camera,
+  ONE d20 save (drawn BEFORE the `monsterType>1 ‖ field_DE>1` auto-save
+  override), then ApplyAttackSpellAffect: saved+Zero → unaffected; a FAILED
+  save lands paralyze + trips `hold-landed` (unexercised). Note: the
+  override-skip id is 0x5E in the listing where coab writes 0x53 — neither
+  transcribed; recorded only. `SpellCureLight` (@`ovr023:1DBC`): one d8 +
+  heal capped at max. `do_saving_throw` (@`ovr024:12F1`): d20, nat-1 fail /
+  nat-20 pass, `+ bonus + field_186`, the SavingThrow affect hook, `>=
+  saves[verse]`. `spellMaxTargetCount` Cleric arm: `max(cleric, paladin−8)`.
+
+### 48.4 Round-stale team counts + the Continue-Battle prompt
+
+- `friends_count`/`foe_count` are GLOBALS refreshed by
+  `CountCombatTeamMembers` only at the round head (`ovr009.cs:37`), the
+  round end (`ovr009.cs:391`), and three unmodeled events (turn-undead
+  completion, team switch, get-back-up) — NOT on mid-round deaths/escapes.
+  `sub_3560B`'s live-opponent gate reads the stale values: R3 selection
+  draws with zero foes on the board, R4 draws none. Engine: fields + the
+  two refresh sites; `CombatState::new` seeds entry counts (the pre-loop
+  read). Draw-neutral for all 12 prior captures (every exposure
+  short-circuits on `spells_count`/magic-off first).
+- The round-head emptiness guard in `begin_round` is the PRE-LOOP check
+  (`ovr009.cs:29-33`) — round 1 only. Round ends are governed by battle01's
+  verdict (`ovr009.cs:395-410`), where `friends > 1 && foes == 0` prompts
+  **"Continue Battle:"** — a Y/N OPERATOR INPUT like the '2' toggle. Modeled
+  as an occurrence-indexed schedule (`continue_battle_yes`; pin field +
+  `RESTRIKE_CONTINUE_BATTLE`); cleric-fk pins `[0]` (one Y at R3's end).
+
+### 48.5 The hold-person question, answered
+
+**A hold cast FIRED (round 0, 3 picks into [9]'s cluster) but ALL THREE
+saves passed — no combatant was ever held.** The landing branch (paralyze
+add + held-turn behavior) is implemented-but-tripwired (`hold-landed`);
+the held-TURN behavior (PlayerRestrained skip) remains unmodeled. Per the
+session plan: **stage the guild-war 23-brawl as cleric capture #2** (route
+banked in memory) to hunt a landed hold — more targets, longer fight,
+better odds a save fails.
+
+### 48.6 Gates + residue
+
+- ★ **GUARD 13/13 — EVERY CAPTURE EVER TAKEN CLOSED, operand-exact,
+  draw-for-draw, 0 trips.** 980 tests, clippy clean, fmt clean. ★
+- Cited-not-modeled (wires standing): the sub_352AF ff-scan (field_F≠0
+  rows), the held-turn behavior behind `hold-landed`, the downed-ally
+  healing override, the 0x53/0x5E override-skip discrepancy, wand casting
+  (sub_354AA's scan body), turn-undead's cast path (FindLowestE9Target
+  finds no undead in any pinned roster).
+- Campaign 2 (cleric casting) is COMPLETE as staged; a landed-hold capture
+  (guild-war brawl) is the natural cleric #2 before campaign 3
+  (buffed-party affects → .FX import) → M6 visualizer per §46.
