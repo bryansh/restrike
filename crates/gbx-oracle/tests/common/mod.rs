@@ -53,18 +53,74 @@ pub fn load_item_data() -> Option<ItemDataTable> {
 pub fn loadout_for(capture: &str, name: &str) -> Option<Loadout> {
     match (capture, name) {
         ("armed-bar.gbxtrace", "MATHEW") => Some(Loadout {
-            primary_type: 43,
+            ranged: Some((43, 0)),
             ammo_count: 40,
+            melee: None,
             unarmed_profile: (1, 2, 6),
+            entry_ranged_readied: true,
         }),
         ("armed-bar.gbxtrace", "TRAVIS") => Some(Loadout {
-            primary_type: 44,
+            ranged: Some((44, 0)),
             // FITTED, not derived: 10 CLOSES the capture (2749/2749) — the only
             // loadout entry that is neither binary- nor record-derivable. The
             // facing slice (§36) did NOT move his shot count: re-fitted after
             // backstab landed, 9 still → diverge @1575, 11 → @1910, 10 → CLOSED.
             ammo_count: 10,
+            melee: None,
             unarmed_profile: (1, 2, 3),
+            entry_ranged_readied: true,
+        }),
+        // The slot-H upgraded party (doc §48): kits from `charup.py`'s PARTY
+        // table, validated in-game and re-saved (the game-written slot H is
+        // canonical). The records serialize NOTHING readied (bare-hands
+        // profiles + armor AC), so `entry_ranged_readied` is false and the
+        // round-0 `AI_items_selection` readies each PC's best weapon — the
+        // capture's sword turns (d8 + str + plus) prove the melee candidates.
+        // Class-ineligible items never enter a row (the `classFlags` gate,
+        // §48): SHARA's plain sling is 1e-cleric-forbidden, so her only
+        // candidates are the mace +1 and bare hands. Shields/armor are
+        // slot-1/Armor items — AC rides the serialized record, no row entry.
+        ("cleric-fk.gbxtrace", "MATHEW") => Some(Loadout {
+            ranged: Some((43, 0)), // long bow + 40 plain arrows
+            ammo_count: 40,
+            melee: Some((36, 1)), // long sword +1
+            unarmed_profile: (1, 2, 6),
+            entry_ranged_readied: false,
+        }),
+        ("cleric-fk.gbxtrace", "MARK") => Some(Loadout {
+            ranged: None,
+            ammo_count: 0,
+            melee: Some((36, 2)), // long sword +2
+            unarmed_profile: (1, 2, 6),
+            entry_ranged_readied: false,
+        }),
+        ("cleric-fk.gbxtrace", "TRAVIS") => Some(Loadout {
+            ranged: Some((44, 0)), // short bow + 40 plain arrows
+            ammo_count: 40,
+            melee: Some((36, 1)), // long sword +1
+            unarmed_profile: (1, 2, 6),
+            entry_ranged_readied: false,
+        }),
+        ("cleric-fk.gbxtrace", "LEDERA") => Some(Loadout {
+            ranged: None,
+            ammo_count: 0,
+            melee: Some((36, 2)), // long sword +2 (elf: +1 to-hit rider)
+            unarmed_profile: (1, 2, 6),
+            entry_ranged_readied: false,
+        }),
+        ("cleric-fk.gbxtrace", "SHARA") => Some(Loadout {
+            ranged: None, // plain sling (47) is cleric-forbidden — classFlags gate
+            ammo_count: 0,
+            melee: Some((23, 1)), // mace +1
+            unarmed_profile: (1, 2, 2),
+            entry_ranged_readied: false,
+        }),
+        ("cleric-fk.gbxtrace", "PHILIPPE") => Some(Loadout {
+            ranged: None,
+            ammo_count: 0,
+            melee: Some((8, 1)), // dagger +1
+            unarmed_profile: (1, 2, 1),
+            entry_ranged_readied: false,
         }),
         // Sewer monster kits are DATA, not per-fight staging: `load_mob` reads
         // the same `MON2ITM.DAX` template block for every copy of a basename
@@ -93,9 +149,14 @@ pub fn loadout_for(capture: &str, name: &str) -> Option<Loadout> {
 fn sewer_monster_kit(name: &str) -> Option<Loadout> {
     match name {
         "FIRE KNIFE" => Some(Loadout {
-            primary_type: 44,
+            ranged: Some((44, 0)),
             ammo_count: 7,
+            // The kit's LongSword rides as the bare-hands profile (§45's
+            // sword-equivalence: the record's own 1d8+0 attack-1 IS the plain
+            // sword's table profile, so `melee: None` is draw-equal).
+            melee: None,
             unarmed_profile: (1, 8, 0),
+            entry_ranged_readied: true,
         }),
         _ => None,
     }

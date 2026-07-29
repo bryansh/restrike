@@ -329,10 +329,20 @@ const PINS: &[Pin] = &[
         // MON2ITM block-1 data — kits key by NAME, doc §48); both round-0
         // back-rank archer turns replay. @97 = MATHEW's first swing: the
         // capture readies his long sword +1 (items_selection over the slot-H
-        // kit) and rolls d8 where our loadout-less decode punches d2 — the
+        // kit) and rolls d8 where our loadout-less decode punched d2 — the
         // item-plus / party-kit driver.
+        // @97→233: the slot-H party kits + the item-plus recompute (doc §48):
+        // the two-candidate AI_items_selection (ranged var_4 / melee var_8)
+        // readies each PC's best weapon at the turn head, and the faithful
+        // sub_66023 recompute installs table dice + str + item plus (damage)
+        // and thac0 + dex/str + plus (+1 elf rider, to-hit only — LEDERA).
+        // Every round-0 party sword turn replays (MATHEW/TRAVIS +1 hits,
+        // MARK's 4-way pick + d1 retarget, LEDERA's walk-kill). @233 = the
+        // tail of SHARA's selection: her cleric ids (3/23) are untranscribed,
+        // so our loop rejects through every pass (9th d4) where the capture
+        // ACCEPTS hold person on pick 8 and moves to the next-turn scan d100.
         capture: "cleric-fk.gbxtrace",
-        expect: Expect::Frontier(97),
+        expect: Expect::Frontier(233),
         map_direction: 4,
         auto_cast: false,
         auto_cast_toggles: &[0],

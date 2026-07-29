@@ -123,6 +123,12 @@ fn synth_item_table() -> gbx_formats::items::ItemDataTable {
         30,
         [0, 1, 1, 8, 0, 0, 0, 0, 0x80, 1, 8, 0, 1, 0xCC, 0x04, 0],
     );
+    // 36 LongSword (the real row): 1-hand, 1d8+0 normal, range 1, flags 0x04
+    // (MELEE) — the §48 melee-candidate/plus-terms tests.
+    set(
+        36,
+        [0, 1, 1, 0x0C, 0, 0, 0, 0, 0x80, 1, 8, 0, 1, 0xCC, 0x04, 0],
+    );
     gbx_formats::items::ItemDataTable::parse(&bytes).unwrap()
 }
 

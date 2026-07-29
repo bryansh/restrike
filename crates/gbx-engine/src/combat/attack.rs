@@ -287,15 +287,11 @@ impl CombatState {
         if self.fighters[attacker].thief_skill_level <= 0 {
             return false;
         }
-        // `weapon == null` ⟺ the primary is not readied (a depleted/unreadied
-        // loadout → bare hands, or no loadout at all → `weapon_readied == false`).
-        let weapon_ok = if self.fighters[attacker].weapon_readied {
-            match &self.fighters[attacker].loadout {
-                Some(l) => matches!(l.primary_type, 7 | 8 | 35 | 36 | 37 | 97),
-                None => false, // readied with no loadout is unreachable, but be safe
-            }
-        } else {
-            true // null primaryWeapon → bare hands → backstab-capable
+        // `weapon == null` ⟺ nothing readied (a depleted/unreadied loadout →
+        // bare hands, or no loadout at all → `readied_weapon == None`).
+        let weapon_ok = match self.fighters[attacker].readied_weapon {
+            Some((wtype, _)) => matches!(wtype, 7 | 8 | 35 | 36 | 37 | 97),
+            None => true, // null primaryWeapon → bare hands → backstab-capable
         };
         weapon_ok
             && self.fighters[target].attacks_received > 1
@@ -373,11 +369,10 @@ impl CombatState {
         // primary actually being readied. No capture carries a sling loadout.
         const ITEM_SLING: u8 = 0x2F;
         const ITEM_STAFF_SLING: u8 = 0x65;
-        let sling_primary = self.fighters[actor].weapon_readied
-            && matches!(
-                self.fighters[actor].loadout.map(|l| l.primary_type),
-                Some(ITEM_SLING) | Some(ITEM_STAFF_SLING)
-            );
+        let sling_primary = matches!(
+            self.fighters[actor].readied_weapon.map(|(t, _)| t),
+            Some(ITEM_SLING) | Some(ITEM_STAFF_SLING)
+        );
         if sling_primary {
             self.draw_missile_camera(actor, target);
         }
@@ -870,8 +865,8 @@ impl CombatState {
     /// combatant is never ranged — today's melee behaviour.
     pub(super) fn is_weapon_ranged(&self, actor: usize) -> bool {
         let f = &self.fighters[actor];
-        match (f.weapon_readied, f.loadout, self.item_data.as_ref()) {
-            (true, Some(l), Some(items)) => items.get(l.primary_type).range as i32 > 1,
+        match (f.readied_weapon, self.item_data.as_ref()) {
+            (Some((wtype, _)), Some(items)) => items.get(wtype).range as i32 > 1,
             _ => false,
         }
     }
@@ -898,8 +893,10 @@ impl CombatState {
         if !self.is_weapon_ranged(actor) {
             return false;
         }
-        let l = self.fighters[actor].loadout.expect("ranged ⇒ loadout");
-        self.candidate_ranged_melee(l.primary_type)
+        let (wtype, _) = self.fighters[actor]
+            .readied_weapon
+            .expect("ranged ⇒ readied");
+        self.candidate_ranged_melee(wtype)
     }
 
     /// The readied primary weapon's [`gbx_formats::items::ItemData`], or `None`
@@ -907,8 +904,8 @@ impl CombatState {
     /// item_data)` pair the predicates share.
     fn primary_item(&self, actor: usize) -> Option<gbx_formats::items::ItemData> {
         let f = &self.fighters[actor];
-        match (f.weapon_readied, f.loadout, self.item_data.as_ref()) {
-            (true, Some(l), Some(items)) => Some(items.get(l.primary_type)),
+        match (f.readied_weapon, self.item_data.as_ref()) {
+            (Some((wtype, _)), Some(items)) => Some(items.get(wtype)),
             _ => None,
         }
     }
@@ -1051,20 +1048,22 @@ impl CombatState {
     }
 
     /// `CalcItemPowerRating(item, player)` (`sub_36535` @`ovr010:1535`, coab
-    /// `ovr010.cs:817`; doc §34.5) for the loadout's primary weapon type:
+    /// `ovr010.cs:817`; doc §34.5/§48) for a loadout candidate:
     /// `rating = dsN*dcN + item.plus*8(if>0) + bonusN*2(if>0) +
-    /// (flag_08 ? (natk−1)*2 : 0) + (hands ≤ 1 ? 3 : 0)`. The loadout carries no
-    /// magic plus (mundane weapons → `plus = 0`); the cursed / affect / hands+used
-    /// zeroing branches are cited-deferred (a single non-cursed weapon). LongBow:
-    /// `6 + 6 = 12`.
-    fn calc_item_power_rating(&self, item_type: u8) -> i32 {
+    /// (flag_08 ? (natk−1)*2 : 0) + (hands ≤ 1 ? 3 : 0)` — the `plus*8` term
+    /// listing-verified (`shl ax,3` @`ovr010:1572-158E`, doc §48; long sword
+    /// +1 → 19, +2 → 27, LongBow 12). The cursed / affect / hands+used zeroing
+    /// branches are cited-deferred (single non-cursed kit weapons).
+    fn calc_item_power_rating(&self, item_type: u8, plus: i8) -> i32 {
         let it = self
             .item_data
             .as_ref()
             .expect("rating ⇒ items")
             .get(item_type);
         let mut rating = it.dice_size_normal as i32 * it.dice_count_normal as i32;
-        // item.plus not modeled (mundane loadout weapons) → the +plus*8 term is 0.
+        if plus > 0 {
+            rating += plus as i32 * 8;
+        }
         if it.bonus_normal > 0 {
             rating += it.bonus_normal as i32 * 2;
         }
@@ -1103,66 +1102,87 @@ impl CombatState {
         found || flags == (gbx_formats::items::flags::FLAG_08 | gbx_formats::items::flags::FLAG_02)
     }
 
-    /// The attack-1 profile a readied primary weapon installs —
-    /// `CalculateAttackValues` (`sub_66023` @`ovr025:0023`, coab
-    /// `ovr025.cs:10`), reached from every ready/unready through
-    /// `reclac_player_values` (`sub_66C20`): with a non-null primary,
-    /// `attack1_DiceCount/Size := table[type].diceCountNormal/SizeNormal`
-    /// (`ovr025.cs:61-62`) and `attack1_DamageBonus := table.bonusNormal`
-    /// (`:25`) plus the strength term for a MELEE-flagged weapon and the
-    /// `item.plus`/ammo-`plus` terms (`:27-47`) — all zero for the mundane
-    /// non-melee loadout weapons modeled today (bows, plain arrows), so the
-    /// deferred terms are cited, not folded. armed-bar is provably unshifted:
-    /// its PC records serialized bow-readied, so their entry profile already
-    /// equals this table row.
-    pub(super) fn ranged_ready_profile(&self, item_type: u8) -> (u8, u8, u8) {
+    /// The attack-1 profile + `hitBonus` a readied primary weapon installs —
+    /// `CalculateAttackValues` (`sub_66023` @`ovr025:0023-021B`, coab
+    /// `ovr025.cs:10`; instruction-verified doc §48), reached from every
+    /// ready/unready through `reclac_player_values` (`sub_66C20`). In listing
+    /// order:
+    ///
+    /// - `hitBonus := thac0` (`@0054-005B`), `+ DexReactionAdj` for a
+    ///   `flag_02` weapon (`@006B-0091` — both bows carry it;
+    ///   [`Combatant::reaction_adj`] is the same coab function);
+    /// - `attack1_DamageBonus := table.bonusNormal` (`@00A1-00A8`);
+    /// - a MELEE-flagged (`flags & 4`) weapon adds `strengthHitBonus` /
+    ///   `strengthDamBonus` (`@00B8-00FE`, `field_125`-gated inside the
+    ///   bonus functions);
+    /// - `bonus := item.plus@0x32` (`@0103-010A`) plus the READIED
+    ///   arrows/quarrels item's `plus` for a launcher (`@0118-017F`) — every
+    ///   modeled quiver is plain (+0), so the ammo term is folded as 0;
+    /// - `attack1_DamageBonus += bonus` (`@0182-0196`) — **before** the elf
+    ///   rider, so the rider is to-hit only;
+    /// - `race == elf(2)` with a bow/short-sword/long-sword (types
+    ///   `0x29-0x2C`, `0x25`, `0x24` @`019E-01CD`) → `bonus += 1`;
+    /// - `hitBonus += bonus` (`@01D0-01E5`);
+    /// - `attack1_DiceCount/Size := table` row `+9`/`+0xA` (`@01EA-0213`).
+    ///
+    /// Load-bearing three ways: FIRE KNIFE sword `hitBonus` 41 vs bow
+    /// `41 + DexReactionAdj(18) = 44` (str gate `field_125` 0, doc §45); the
+    /// slot-H party's `+1/+2` swords (doc §48 — both terms); and LEDERA the
+    /// elf's long sword (+1 to-hit only).
+    pub(super) fn weapon_ready_recompute(&mut self, actor: usize, item_type: u8, plus: i8) {
         let it = self
             .item_data
             .as_ref()
-            .expect("ready-profile ⇒ items")
-            .get(item_type);
-        (
-            it.dice_count_normal,
-            it.dice_size_normal,
-            it.bonus_normal as u8,
-        )
-    }
-
-    /// The `hitBonus` a readied primary installs (`CalculateAttackValues`,
-    /// `ovr025.cs:18-60`; doc §45): `thac0` + `DexReactionAdj` for a `flag_02`
-    /// weapon (`:20-23` — both bows carry it; the same coab function
-    /// [`Combatant::reaction_adj`] holds) + `strengthHitBonus` for a
-    /// MELEE-flagged one (`:27-29`) — the `item.plus`/ammo-`plus` terms
-    /// (`:33-60`) are zero for the mundane loadout weapons, cited-deferred
-    /// like the damage side. Load-bearing for FIRE KNIFE: sword `hitBonus` 41
-    /// vs bow `41 + DexReactionAdj(18) = 44` (dex 18, str gate `field_125` 0).
-    pub(super) fn ranged_ready_hit_bonus(&self, actor: usize, item_type: u8) -> i32 {
-        let it = self
-            .item_data
-            .as_ref()
-            .expect("ready-hit ⇒ items")
+            .expect("ready-recompute ⇒ items")
             .get(item_type);
         let f = &self.fighters[actor];
         let mut hit = f.thac0;
         if it.flags & gbx_formats::items::flags::FLAG_02 != 0 {
             hit += f.reaction_adj as i32;
         }
+        let mut dmg = it.bonus_normal as i32;
         if it.flags & gbx_formats::items::flags::MELEE != 0 {
             hit += f.str_hit_bonus;
+            dmg += f.str_dmg_bonus;
         }
-        hit
+        let mut bonus = plus as i32; // + readied ammo plus (all-plain, 0)
+        dmg += bonus;
+        if f.race == 2 && matches!(item_type, 0x24 | 0x25 | 0x29..=0x2C) {
+            bonus += 1;
+        }
+        hit += bonus;
+        let f = &mut self.fighters[actor];
+        f.dice_count = it.dice_count_normal;
+        f.dice_size = it.dice_size_normal;
+        f.damage_bonus = dmg as u8; // the byte cell @0x1A2 (AL store)
+        f.hit_bonus = hit;
     }
 
     /// `AI_items_selection(player)` (`sub_36673` @`ovr010:1673`, coab
-    /// `ovr010.cs:875`; doc §34.5) — the cornered weapon swap, faithful over the
-    /// loadout's single weapon (the secondary/shield/multi-item branches are
-    /// cited-deferred, tripwired). The primary candidate `var_4` = the loadout
-    /// bow (`rating = var_15`); the melee candidate `var_8` = bare hands here
-    /// (`None`). The bow wins iff `rating > (var_16 >> 1)` (`var_16` = the base
-    /// profile rating) AND ammo is available AND (ranged-melee OR no adjacent
-    /// enemy). Otherwise bare hands. The observable swap (§34.5): unready → the
-    /// attack-1 profile becomes the unarmed profile; re-ready → the saved entry
-    /// profile; attacks recomputed via [`Self::reclac_attacks`] both ways.
+    /// `ovr010.cs:875`; doc §34.5/§48) — the per-turn weapon selection over the
+    /// kit's TWO candidates (the secondary/shield/multi-item branches stay
+    /// cited-deferred):
+    ///
+    /// - `var_4` = the best RANGED item (`flag_08`/`flag_10`, rating floor 1,
+    ///   coab `:903-911`) — the loadout's `ranged` slot;
+    /// - `var_8` = the best MELEE item (`!flag_08`, rating must beat `var_16` =
+    ///   the BASE bare-hands profile rating `dsB*dcB (+2*bonusB if >0)`, coab
+    ///   `:913-919`) — the loadout's `melee` slot; `None` falls back to bare
+    ///   hands (the §45 Fire Knife model);
+    /// - the class-eligibility gate (`classFlags & player.classFlags`,
+    ///   `:898`) is folded into row construction: a kit row carries only items
+    ///   its owner may wield (SHARA's plain sling is 1e-cleric-forbidden and
+    ///   never enters her row — doc §48);
+    /// - ranged wins iff `var_15 > (var_16 >> 1)` AND ammo available (`var_1F`,
+    ///   incl. the sling `flag_02|flag_08` no-ammo special) AND (ranged-melee
+    ///   OR no adjacent enemy) (`:975-985`); otherwise the melee candidate.
+    ///
+    /// The winner is readied and the profile recomputed through
+    /// [`Self::weapon_ready_recompute`] (`reclac_player_values` →
+    /// `CalculateAttackValues` — the tail `ovr010:1AB0-1AC6` runs it
+    /// UNCONDITIONALLY, so recomputing every turn is the faithful shape); a
+    /// `None` winner takes the no-primary arm (`hitBonus := thac0 +
+    /// strengthHitBonus`, profile := bare hands, `ovr025.cs:427+433`).
     /// Inert without a loadout (weapon-only no-op). Draw-free.
     pub(super) fn ai_items_selection(&mut self, actor: usize) {
         let Some(l) = self.fighters[actor].loadout else {
@@ -1171,55 +1191,60 @@ impl CombatState {
         if self.item_data.is_none() {
             return;
         }
-        // var_15 = CalcItemPowerRating(bow); var_16 = the base profile rating
-        // (dsB*dcB (+2*bonusB if >0)).
-        let var_15 = self.calc_item_power_rating(l.primary_type);
+        // var_16 starts as the BASE bare-hands profile rating.
         let (dcb, dsb, dbb) = self.fighters[actor].base_dice;
         let mut var_16 = dsb as i32 * dcb as i32;
         if dbb as i32 > 0 {
             var_16 += dbb as i32 * 2;
         }
-        // var_1F = the bow's ammo is available.
-        let ammo_avail = self.candidate_attack_found(actor, l.primary_type);
+        // var_4/var_15: the ranged candidate (rating floor 1, coab `:884/:906`).
+        let var_4 = l
+            .ranged
+            .filter(|&(t, p)| self.calc_item_power_rating(t, p) > 1);
+        let var_15 = var_4
+            .map(|(t, p)| self.calc_item_power_rating(t, p))
+            .unwrap_or(1);
+        // var_8: the melee candidate must beat the base rating (and raises
+        // var_16 — the ranged dominance test compares against the WINNER).
+        let var_8 = l
+            .melee
+            .filter(|&(t, p)| self.calc_item_power_rating(t, p) > var_16);
+        if let Some((t, p)) = var_8 {
+            var_16 = self.calc_item_power_rating(t, p);
+        }
+        // var_1F = the ranged candidate's ammo is available.
+        let ammo_avail = match var_4 {
+            Some((t, _)) => self.candidate_attack_found(actor, t),
+            None => false,
+        };
         // ranged_melee(var_4) — a thrown weapon usable in hand (the candidate
         // may be unreadied, so this is the type-level test, not the actor one).
-        let ranged_of_bow = self.item_data.as_ref().unwrap().get(l.primary_type).range as i32 > 1;
-        let ranged_melee = ranged_of_bow && self.candidate_ranged_melee(l.primary_type);
+        let ranged_melee = match var_4 {
+            Some((t, _)) => {
+                self.item_data.as_ref().unwrap().get(t).range as i32 > 1
+                    && self.candidate_ranged_melee(t)
+            }
+            None => false,
+        };
         let no_adjacent = self.build_near(actor, 1, false).is_empty();
 
-        // The bow wins the primary slot iff rating dominates the base, ammo is
-        // available, and (ranged-melee or no adjacent enemy).
-        let use_bow = var_15 > (var_16 >> 1) && ammo_avail && (ranged_melee || no_adjacent);
+        let use_ranged = var_4.is_some()
+            && var_15 > (var_16 >> 1)
+            && ammo_avail
+            && (ranged_melee || no_adjacent);
+        let winner = if use_ranged { var_4 } else { var_8 };
 
-        let currently_readied = self.fighters[actor].weapon_readied;
-        if use_bow && !currently_readied {
-            // Re-ready the bow: primaryWeapon := bow, attack-1 profile := the
-            // weapon's TABLE profile ([`Self::ranged_ready_profile`], the
-            // `reclac_player_values` → `CalculateAttackValues` recompute both
-            // swap arms funnel through, `ovr010:1AB0`). The old entry-snapshot
-            // read was an armed-bar coincidence: a PC record serialized with
-            // the bow readied already carries the table row (`1d6+0`), but a
-            // sword-readied monster record (FIRE KNIFE `1d8+0`, doc §45) must
-            // NOT shoot with sword dice.
-            self.fighters[actor].weapon_readied = true;
-            let (dc, ds, db) = self.ranged_ready_profile(l.primary_type);
-            let hit = self.ranged_ready_hit_bonus(actor, l.primary_type);
-            let f = &mut self.fighters[actor];
-            f.dice_count = dc;
-            f.dice_size = ds;
-            f.damage_bonus = db;
-            f.hit_bonus = hit;
-        } else if !use_bow && currently_readied {
-            // Unready the bow: primaryWeapon := null, attack-1 profile := the
-            // bare-hands profile; `hitBonus := thac0 + strengthHitBonus` (the
-            // no-primary arm, `ovr025.cs:427+433`).
-            let f = &mut self.fighters[actor];
-            f.weapon_readied = false;
-            let (dc, ds, db) = l.unarmed_profile;
-            f.dice_count = dc;
-            f.dice_size = ds;
-            f.damage_bonus = db;
-            f.hit_bonus = f.thac0 + f.str_hit_bonus;
+        self.fighters[actor].readied_weapon = winner;
+        match winner {
+            Some((wtype, plus)) => self.weapon_ready_recompute(actor, wtype, plus),
+            None => {
+                let f = &mut self.fighters[actor];
+                let (dc, ds, db) = l.unarmed_profile;
+                f.dice_count = dc;
+                f.dice_size = ds;
+                f.damage_bonus = db;
+                f.hit_bonus = f.thac0 + f.str_hit_bonus;
+            }
         }
         // The tail (`ovr010:1AB0-1AC6`, coab ovr010.cs:1018-1020) runs
         // `reclac_player_values` + `reclac_attacks` UNCONDITIONALLY — both the

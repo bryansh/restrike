@@ -266,7 +266,7 @@ fn can_backstab_needs_a_thief_a_listed_weapon_a_swarmed_manzised_turned_target()
         (Team::Monster, GridPos::new(20, 12)), // target (idx 1)
     ]);
     s.fighters[0].thief_skill_level = 5; // TRAVIS's T5
-    s.fighters[0].weapon_readied = false; // punching → null weapon → capable
+    s.fighters[0].readied_weapon = None; // punching → null weapon → capable
     s.fighters[1].attacks_received = 2;
     s.fighters[1].field_de = 0x01; // man-sized
     s.fighters[1].direction = 4; // back turned
@@ -289,18 +289,9 @@ fn can_backstab_needs_a_thief_a_listed_weapon_a_swarmed_manzised_turned_target()
 
     // A readied weapon NOT in the list (short bow 44) fails; a dagger (8) is
     // in the list.
-    s.fighters[0].weapon_readied = true;
-    s.fighters[0].loadout = Some(Loadout {
-        primary_type: 44, // short bow — not a backstab weapon
-        ammo_count: 10,
-        unarmed_profile: (1, 2, 3),
-    });
+    s.fighters[0].readied_weapon = Some((44, 0)); // short bow — not a backstab weapon
     assert!(!s.can_backstab(1, 0), "a readied short bow can't backstab");
-    s.fighters[0].loadout = Some(Loadout {
-        primary_type: 8, // dagger — in the list
-        ammo_count: 0,
-        unarmed_profile: (1, 2, 3),
-    });
+    s.fighters[0].readied_weapon = Some((8, 0)); // dagger — in the list
     assert!(s.can_backstab(1, 0), "a readied dagger can backstab");
 
     // Back NOT turned (faces the attacker, N=0).
@@ -500,9 +491,11 @@ fn sling_state(primary_type: u8) -> CombatState {
     s.set_loadout(
         0,
         Loadout {
-            primary_type,
+            ranged: Some((primary_type, 0)),
             ammo_count: 40,
+            melee: None,
             unarmed_profile: (1, 2, 0),
+            entry_ranged_readied: true,
         },
     );
     s.combat_setup_done = true; // skip the lazy setup's camera/facing seed

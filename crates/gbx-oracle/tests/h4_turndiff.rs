@@ -865,12 +865,12 @@ fn h4_locate_draw() {
                     .map(|(i, f)| {
                         let team = if f.team == Team::Party { 'P' } else { 'M' };
                         format!(
-                            "[{i:2}] {team} ({:2},{:2}) ic={} hp{:>3} ready={} dice={}d{}+{} ammo={} tgt={} f15={} delay={} move={}",
+                            "[{i:2}] {team} ({:2},{:2}) ic={} hp{:>3} ready={:>2} dice={}d{}+{} ammo={} tgt={} f15={} delay={} move={}",
                             f.pos.x,
                             f.pos.y,
                             f.in_combat as u8,
                             f.hp_current,
-                            f.weapon_readied as u8,
+                            f.readied_weapon.map(|(t, _)| t as i32).unwrap_or(-1),
                             f.dice_count,
                             f.dice_size,
                             f.damage_bonus,

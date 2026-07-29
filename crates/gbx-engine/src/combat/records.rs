@@ -181,6 +181,18 @@ fn combatant_from_record(
     } else {
         0
     };
+    // §48 the melee-ready recompute (`sub_66023`): the damage-side strength
+    // term (`strengthDamBonus`, `ovr025.cs:637`, same `field_125` gate) and
+    // `race@0x74` for the elf weapon rider (`@ovr025:019E-01CD` — LEDERA, elf
+    // 2, long sword: +1 to-hit only). Cross-check: every slot-H PC's
+    // serialized bare-hands profile bonus (@0x1A2) equals base bonus (0x122,
+    // zero) + this value — MATHEW 18/00 → +6, SHARA 18 → +2.
+    c.str_dmg_bonus = if rec.field_125 != 0 {
+        flavor.strength_damage_bonus(rec.stats.str.original, rec.stats.str_exceptional.current)
+    } else {
+        0
+    };
+    c.race = raw.get(0x74).copied().unwrap_or(0);
     c
 }
 

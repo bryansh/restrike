@@ -25,9 +25,11 @@ fn ranged_state(primary_type: u8, attacks_count: u8, ammo: i32) -> CombatState {
     state.set_loadout(
         0,
         Loadout {
-            primary_type,
+            ranged: Some((primary_type, 0)),
             ammo_count: ammo,
+            melee: None,
             unarmed_profile: (1, 2, 6),
+            entry_ranged_readied: true,
         },
     );
     state
@@ -43,12 +45,12 @@ fn ranged_predicate_and_current_attack_item() {
     assert_eq!(it.item, AttackItemRef::Ammo);
     assert_eq!(state.attack_item_count(0, &it), Some(40));
     // Unreadying the bow → not ranged, no attack item found.
-    state.fighters[0].weapon_readied = false;
+    state.fighters[0].readied_weapon = None;
     assert!(!state.is_weapon_ranged(0));
     assert!(!state.get_current_attack_item(0).found);
-    // No loadout at all → melee.
+    // No loadout at all → nothing ever readied → melee.
     state.fighters[0].loadout = None;
-    state.fighters[0].weapon_readied = true;
+    state.fighters[0].readied_weapon = None;
     assert!(!state.is_weapon_ranged(0));
 }
 
@@ -71,14 +73,16 @@ fn weapon_range_sanitizes() {
     state.set_loadout(
         0,
         Loadout {
-            primary_type: 30,
+            ranged: Some((30, 0)),
             ammo_count: 0,
+            melee: None,
             unarmed_profile: (1, 2, 6),
+            entry_ranged_readied: true,
         },
     );
     assert_eq!(state.weapon_range(0), 1);
     // No readied weapon → 1.
-    state.fighters[0].weapon_readied = false;
+    state.fighters[0].readied_weapon = None;
     assert_eq!(state.weapon_range(0), 1);
 }
 
@@ -191,9 +195,11 @@ fn ammo_subtracts_by_swing_count_not_assigned() {
     state.set_loadout(
         0,
         Loadout {
-            primary_type: 43,
+            ranged: Some((43, 0)),
             ammo_count: 40,
+            melee: None,
             unarmed_profile: (1, 2, 6),
+            entry_ranged_readied: true,
         },
     );
     assert_eq!(state.fighters[0].attack1_left, 2);
@@ -240,9 +246,11 @@ fn ranged_defense_bonus_bands() {
         state.set_loadout(
             0,
             Loadout {
-                primary_type: 43,
+                ranged: Some((43, 0)),
                 ammo_count: 40,
+                melee: None,
                 unarmed_profile: (1, 2, 6),
+                entry_ranged_readied: true,
             },
         );
         state
@@ -272,7 +280,7 @@ fn ranged_defense_bonus_bands() {
     assert!(saw_plus5, "a far target must reach the +5 band");
     // A non-ranged attacker (bow unreadied) → 0.
     let mut melee = mk(40);
-    melee.fighters[0].weapon_readied = false;
+    melee.fighters[0].readied_weapon = None;
     assert_eq!(melee.ranged_defense_bonus(0, 1), 0);
 }
 
@@ -311,9 +319,11 @@ fn cornered_swap_unready_then_reready() {
     state.set_loadout(
         0,
         Loadout {
-            primary_type: 43,
+            ranged: Some((43, 0)),
             ammo_count: 40,
+            melee: None,
             unarmed_profile: (1, 2, 6),
+            entry_ranged_readied: true,
         },
     );
     // (`set_loadout` snapshots `entry_dice` from the live profile — no
@@ -322,7 +332,7 @@ fn cornered_swap_unready_then_reready() {
 
     // Adjacent enemy → unready to fists.
     state.ai_items_selection(0);
-    assert!(!state.fighters[0].weapon_readied);
+    assert!(state.fighters[0].readied_weapon.is_none());
     assert_eq!(
         (
             state.fighters[0].dice_count,
@@ -337,7 +347,7 @@ fn cornered_swap_unready_then_reready() {
     state.fighters[1].in_combat = false;
     state.rebuild_occupancy();
     state.ai_items_selection(0);
-    assert!(state.fighters[0].weapon_readied);
+    assert!(state.fighters[0].readied_weapon.is_some());
     assert_eq!(
         (
             state.fighters[0].dice_count,
@@ -358,8 +368,146 @@ fn try_guarding_ranged_clears_never_guards() {
     assert!(!state.fighters[0].guarding);
     assert_eq!(state.fighters[0].delay, 0);
     // Unreadied (melee) with delay > 0 → guards as before.
-    state.fighters[0].weapon_readied = false;
+    state.fighters[0].readied_weapon = None;
     state.fighters[0].delay = 5;
     state.try_guarding(0);
     assert!(state.fighters[0].guarding);
+}
+
+// === the §48 melee candidate + item-plus recompute ======================
+
+/// A two-combatant state: [0] a party PC at (0,0) with str bonuses and a
+/// kit loadout, [1] a monster at `enemy_pos`. `thac0` 12 so the recompute's
+/// terms are visible.
+fn kit_state(loadout: Loadout, race: u8, enemy_pos: GridPos) -> CombatState {
+    let mut pc = Combatant::new_melee(
+        0,
+        Team::Party,
+        false,
+        GridPos::new(0, 0),
+        10,
+        40,
+        15,
+        12,
+        (1, 2, 6),
+        5,
+        2,
+    );
+    pc.thac0 = 12;
+    pc.str_hit_bonus = 3;
+    pc.str_dmg_bonus = 6;
+    pc.race = race;
+    pc.base_dice = (1, 2, 0); // bare-hands base (bonus cell 0 — str rides on top)
+    let foe = Combatant::new_melee(
+        1,
+        Team::Monster,
+        true,
+        enemy_pos,
+        10,
+        40,
+        0,
+        12,
+        (1, 8, 0),
+        5,
+        2,
+    );
+    let mut state = CombatState::new(CombatMap::uniform(0x17), vec![pc, foe]);
+    state.item_data = Some(synth_item_table());
+    state.set_loadout(0, loadout);
+    state
+}
+
+#[test]
+fn melee_ready_recompute_adds_table_str_and_plus_terms() {
+    // A melee-only kit (sword +2, no ranged): AI_items_selection readies the
+    // sword whatever the adjacency, and the sub_66023 recompute installs
+    // table dice 1d8, damage = table 0 + str 6 + plus 2, hit = thac0 12 +
+    // str 3 + plus 2 (human: no elf rider).
+    let mut s = kit_state(
+        Loadout {
+            ranged: None,
+            ammo_count: 0,
+            melee: Some((36, 2)),
+            unarmed_profile: (1, 2, 6),
+            entry_ranged_readied: false,
+        },
+        7,
+        GridPos::new(1, 0),
+    );
+    // Entry state: nothing readied, the record profile stands.
+    assert_eq!(s.fighters[0].readied_weapon, None);
+    s.ai_items_selection(0);
+    assert_eq!(s.fighters[0].readied_weapon, Some((36, 2)));
+    let f = &s.fighters[0];
+    assert_eq!((f.dice_count, f.dice_size, f.damage_bonus), (1, 8, 8));
+    assert_eq!(f.hit_bonus, 17);
+}
+
+#[test]
+fn elf_rider_bumps_hit_only() {
+    // Same kit on an ELF (race 2): the sub_66023 rider (@ovr025:019E-01CD)
+    // adds +1 to the HIT bonus only — damage is written before the bump.
+    let mut s = kit_state(
+        Loadout {
+            ranged: None,
+            ammo_count: 0,
+            melee: Some((36, 2)),
+            unarmed_profile: (1, 2, 6),
+            entry_ranged_readied: false,
+        },
+        2,
+        GridPos::new(1, 0),
+    );
+    s.ai_items_selection(0);
+    let f = &s.fighters[0];
+    assert_eq!(f.damage_bonus, 8, "damage takes plus but NOT the elf rider");
+    assert_eq!(f.hit_bonus, 18, "hit takes plus AND the elf rider");
+}
+
+#[test]
+fn two_candidate_selection_prefers_sword_when_adjacent_bow_when_clear() {
+    // Bow + sword +1 kit (the slot-H MATHEW shape): adjacent enemy → the
+    // MELEE candidate wins (not bare hands); enemy far → the bow wins.
+    let kit = Loadout {
+        ranged: Some((43, 0)),
+        ammo_count: 40,
+        melee: Some((36, 1)),
+        unarmed_profile: (1, 2, 6),
+        entry_ranged_readied: false,
+    };
+    let mut adjacent = kit_state(kit, 7, GridPos::new(1, 0));
+    adjacent.ai_items_selection(0);
+    assert_eq!(adjacent.fighters[0].readied_weapon, Some((36, 1)));
+    assert!(!adjacent.is_weapon_ranged(0));
+
+    let mut clear = kit_state(kit, 7, GridPos::new(10, 10));
+    clear.ai_items_selection(0);
+    assert_eq!(clear.fighters[0].readied_weapon, Some((43, 0)));
+    assert!(clear.is_weapon_ranged(0));
+}
+
+#[test]
+fn weak_melee_candidate_loses_to_the_base_profile() {
+    // var_8 must BEAT var_16 (the bare-hands base rating): a plain type-30
+    // d8 (rating 8+3=11) loses to a base whose serialized profile rates
+    // higher, so the PC stays bare-handed on the unarmed profile.
+    let mut s = kit_state(
+        Loadout {
+            ranged: None,
+            ammo_count: 0,
+            melee: Some((30, 0)),
+            unarmed_profile: (1, 2, 6),
+            entry_ranged_readied: false,
+        },
+        7,
+        GridPos::new(1, 0),
+    );
+    // Base rating: ds*dc + 2*bonus(if>0) over the BASE cells — make the base
+    // profile beat rating 11 (e.g. serialized 1d6+3 → 6 + 6 = 12).
+    s.fighters[0].base_dice = (1, 6, 3);
+    s.ai_items_selection(0);
+    assert_eq!(s.fighters[0].readied_weapon, None);
+    let f = &s.fighters[0];
+    assert_eq!((f.dice_count, f.dice_size, f.damage_bonus), (1, 2, 6));
+    assert_eq!(f.hit_bonus, 15, "bare hands: thac0 + strengthHitBonus");
 }

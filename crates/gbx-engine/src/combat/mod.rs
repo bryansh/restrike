@@ -244,6 +244,15 @@ pub struct Combatant {
     /// Zero when the record's `field_125@0x125` is 0 (the gate inside the coab
     /// bonus functions — FIRE KNIFE) or for hand-built combatants.
     pub str_hit_bonus: i32,
+    /// `strengthDamBonus` (`ovr025.cs:637`) precomputed at decode, same
+    /// `field_125` gate — applied on unready (`:434`) and for MELEE-flagged
+    /// primaries (`sub_66023` @`ovr025:00EA`; doc §48).
+    pub str_dmg_bonus: i32,
+    /// `race@0x74` (`Race`: dwarf 1, elf 2, …, human 7). The `sub_66023`
+    /// elf-weapon rider (`@ovr025:019E-01CD`, doc §48) bumps the TO-HIT bonus
+    /// by 1 when an elf readies a bow/short sword/long sword (types
+    /// 0x29-0x2C, 0x24, 0x25). Default 0 (monster) for hand-built combatants.
+    pub race: u8,
     /// `HitDice` — `TrySweepAttack` only sweeps `HitDice == 0` targets.
     pub hit_dice: u8,
     /// Base movement (`player.movement`) → [`calc_moves`] at initiative.
@@ -352,12 +361,12 @@ pub struct Combatant {
     /// (`field_151`), the launcher's ammo, and the bare-hands profile the AI
     /// swaps to when cornered.
     pub loadout: Option<Loadout>,
-    /// `player.activeItems.primaryWeapon != null` — is the loadout's primary
-    /// weapon currently readied (`field_151` non-null)? Starts `true` when a
-    /// loadout is applied; the cornered weapon-selection AI toggles it (unready
-    /// → bare hands, re-ready → the bow). Always `false` without a loadout, so
+    /// `player.activeItems.primaryWeapon` (`field_151`): the currently readied
+    /// loadout weapon as `(ITEMS type, item.plus)`, or `None` for bare hands.
+    /// `AI_items_selection` re-decides it every turn between the loadout's
+    /// ranged/melee candidates (doc §48); always `None` without a loadout, so
     /// the ranged predicates read melee (doc §34.2).
-    pub weapon_readied: bool,
+    pub readied_weapon: Option<(u8, i8)>,
     /// The launcher's ammo count (`item.count`@item+0x39, doc §34.3/§34.6) — the
     /// arrows/quarrels remaining. Decremented by the swing count each ranged
     /// attack (coab≠binary #16: the binary SUBTRACTS). `0` without a loadout.
@@ -457,16 +466,31 @@ struct CurrentAttackItem {
 /// pins. `None` reproduces today's melee behaviour exactly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Loadout {
-    /// The readied primary weapon's item type (`field_151` weapon), indexing
-    /// the [`crate::combat::CombatState`]'s `ItemDataTable`.
-    pub primary_type: u8,
-    /// The launcher's initial ammo count (a free parameter — any count ≥
-    /// shots-fired replays identically; doc §34.1).
+    /// `AI_items_selection`'s ranged candidate `var_4` (`sub_36673`
+    /// @`ovr010:1673`, doc §48): the kit's best launcher/thrown weapon as
+    /// `(ITEMS type, item.plus@0x32)`. `None` = no class-eligible ranged item
+    /// (the selection scan's `classFlags` gate is folded into row
+    /// construction — a kit row carries only items its owner may wield).
+    pub ranged: Option<(u8, i8)>,
+    /// The launcher's initial ammo count (a free parameter when no depletion
+    /// occurs; TRAVIS's armed-bar 10 is capture-fitted; doc §34.1).
     pub ammo_count: i32,
+    /// The melee candidate `var_8`: the kit's best melee weapon as
+    /// `(ITEMS type, item.plus)`. `None` = bare hands (the §45 Fire Knife
+    /// model keeps its sword-equivalent profile in `unarmed_profile` instead —
+    /// draw-equal because a plain sword's table profile equals the record's).
+    pub melee: Option<(u8, i8)>,
     /// The bare-hands attack-1 profile (`dice_count`, `dice_size`,
-    /// `damage_bonus`) the AI swaps to when cornered — base dice @0x11E/0x120
-    /// plus the STR damage adjustment, pinned empirically (doc §34.1).
+    /// `damage_bonus`) — base dice @0x11E/0x120 plus the STR damage
+    /// adjustment, i.e. the record's own serialized nothing-readied profile.
     pub unarmed_profile: (u8, u8, u8),
+    /// `true` = the record was serialized with the RANGED candidate readied
+    /// (armed-bar's bow-readied PCs; §45's Fire Knife modeling) —
+    /// [`CombatState::set_loadout`] installs its table profile at setup.
+    /// `false` = the record enters with NOTHING readied (the slot-H party,
+    /// doc §48): the serialized bare-hands profile stands until the first
+    /// `AI_items_selection` readies a weapon.
+    pub entry_ranged_readied: bool,
 }
 
 impl Combatant {
@@ -496,6 +520,8 @@ impl Combatant {
             hit_bonus: 0,
             thac0: 0,
             str_hit_bonus: 0,
+            str_dmg_bonus: 0,
+            race: 0,
             hit_dice: 0,
             movement: 0,
             reaction_adj,
@@ -526,7 +552,7 @@ impl Combatant {
             health_status: HealthStatus::Okey,
             bleeding: 0,
             loadout: None,
-            weapon_readied: false,
+            readied_weapon: None,
             ammo: 0,
             ammo_item_lost: false,
             entry_dice: (0, 0, 0),
@@ -593,6 +619,8 @@ impl Combatant {
             // terms 0), so ready/unready round-trips leave `hit_bonus` alone.
             thac0: hit_bonus,
             str_hit_bonus: 0,
+            str_dmg_bonus: 0,
+            race: 0,
             hit_dice: 1,
             movement,
             reaction_adj: 0,
@@ -623,7 +651,7 @@ impl Combatant {
             health_status: HealthStatus::Okey,
             bleeding: 0,
             loadout: None,
-            weapon_readied: false,
+            readied_weapon: None,
             ammo: 0,
             ammo_item_lost: false,
             entry_dice: (0, 0, 0),
@@ -1013,25 +1041,29 @@ impl CombatState {
     pub fn set_loadout(&mut self, id: usize, loadout: Loadout) {
         let f = &mut self.fighters[id];
         f.loadout = Some(loadout);
-        f.weapon_readied = true;
         f.ammo = loadout.ammo_count;
         f.ammo_item_lost = false;
         f.entry_dice = (f.dice_count, f.dice_size, f.damage_bonus);
-        // Readying installs the weapon's TABLE attack-1 profile
-        // (`CalculateAttackValues`, `ovr025.cs:61-62` — see
-        // `ranged_ready_profile`): load-bearing for a record serialized with a
-        // DIFFERENT weapon readied (FIRE KNIFE enters sword-readied `1d8+0`,
-        // shoots `1d6+0` arrows, doc §45); a no-op for armed-bar's bow-readied
-        // PC records. Without an item table the ranged path can never fire
-        // (`is_weapon_ranged` requires it), so the profile stays as decoded.
-        if self.item_data.is_some() {
-            let (dc, ds, db) = self.ranged_ready_profile(loadout.primary_type);
-            let hit = self.ranged_ready_hit_bonus(id, loadout.primary_type);
-            let f = &mut self.fighters[id];
-            f.dice_count = dc;
-            f.dice_size = ds;
-            f.damage_bonus = db;
-            f.hit_bonus = hit;
+        if loadout.entry_ranged_readied {
+            // The record was serialized ranged-readied (armed-bar PCs) or is
+            // §45's Fire Knife model: install the ranged candidate's TABLE
+            // attack-1 profile (`CalculateAttackValues`, `ovr025.cs:61-62`) —
+            // load-bearing for a record serialized with a DIFFERENT weapon
+            // readied (FIRE KNIFE enters sword-readied `1d8+0`, shoots `1d6+0`
+            // arrows, doc §45). Without an item table the ranged path can
+            // never fire (`is_weapon_ranged` requires it), so the profile
+            // stays as decoded.
+            f.readied_weapon = loadout.ranged;
+            if self.item_data.is_some() {
+                if let Some((wtype, plus)) = loadout.ranged {
+                    self.weapon_ready_recompute(id, wtype, plus);
+                }
+            }
+        } else {
+            // The slot-H party (doc §48): nothing readied at save — the
+            // record's serialized bare-hands profile IS the entry state; the
+            // first `AI_items_selection` readies the kit's best weapon.
+            f.readied_weapon = None;
         }
     }
 
