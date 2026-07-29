@@ -69,8 +69,12 @@ pub fn loadout_for(capture: &str, name: &str) -> Option<Loadout> {
         // Sewer monster kits are DATA, not per-fight staging: `load_mob` reads
         // the same `MON2ITM.DAX` template block for every copy of a basename
         // in every sewer encounter (CMD_LoadMonster clones the item list per
-        // copy), so the kits key by NAME across all sewer captures.
-        (c, n) if c.starts_with("sewer-fight-") => sewer_monster_kit(n),
+        // copy), so the kits key by NAME across all sewer captures —
+        // `cleric-fk` (doc §48) is the same 5-FIRE-KNIFE ambush script as
+        // `sewer-fight-1` and its monsters carry the same block-1 kit.
+        (c, n) if c.starts_with("sewer-fight-") || c == "cleric-fk.gbxtrace" => {
+            sewer_monster_kit(n)
+        }
         _ => None,
     }
 }
@@ -138,7 +142,10 @@ pub fn area_6e4_from_word(raw: i32) -> i32 {
 pub fn capture_has_loadout(capture: &str) -> bool {
     matches!(
         capture,
-        "armed-bar.gbxtrace" | "sewer-fight-1.gbxtrace" | "sewer-fight-2.gbxtrace"
+        "armed-bar.gbxtrace"
+            | "sewer-fight-1.gbxtrace"
+            | "sewer-fight-2.gbxtrace"
+            | "cleric-fk.gbxtrace"
     )
 }
 

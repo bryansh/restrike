@@ -324,9 +324,15 @@ const PINS: &[Pin] = &[
         // replays through the round-0 Fire Knife sword turn. @75 = Fire
         // Knife [9] (a back-ranker): the capture fires its short bow from its
         // entry square (the §45 archer kit — not yet keyed to this basename)
-        // where our kitless decode walks it.
+        // where our kitless decode walked it.
+        // @75→97: the §45 FIRE KNIFE kit keyed to this basename (the same
+        // MON2ITM block-1 data — kits key by NAME, doc §48); both round-0
+        // back-rank archer turns replay. @97 = MATHEW's first swing: the
+        // capture readies his long sword +1 (items_selection over the slot-H
+        // kit) and rolls d8 where our loadout-less decode punches d2 — the
+        // item-plus / party-kit driver.
         capture: "cleric-fk.gbxtrace",
-        expect: Expect::Frontier(75),
+        expect: Expect::Frontier(97),
         map_direction: 4,
         auto_cast: false,
         auto_cast_toggles: &[0],
