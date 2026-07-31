@@ -3391,3 +3391,148 @@ better odds a save fails.
 - Campaign 2 (cleric casting) is COMPLETE as staged; a landed-hold capture
   (guild-war brawl) is the natural cleric #2 before campaign 3
   (buffed-party affects → .FX import) → M6 visualizer per §46.
+
+## 49. ★ cleric-guildwar CLOSED 5,659/5,659 — the readied-ammo gate + the HELD-TARGET slice (the first landed hold); GUARD 14/14, EVERY CAPTURE CLOSED ★ (2026-07-31, Fable)
+
+The campaign-2 second capture (`cleric-guildwar.gbxtrace`, §48.5's hunt for a
+landed hold): the slot-H party + 4 ALLIED team-0 thieves (roster [10]-[13])
+vs 2 Fire Knives + 11 thieves in the real guild-war brawl — 5,659 post-entry
+draws / 11 rounds / 578 turn_snapshots, 58C=60 / 6E4=0 / md=2 in-trace,
+decisive party win. Peel chain, one commit per frontier move, guard exact at
+each: intake Frontier(193) → kit keying (draw-neutral) + §38 toggle 193→228 →
+the readied-ammo gate 228→519 → the held-target slice 519→CLOSED.
+
+### 49.1 The peel chain
+
+- **Intake (193)**: real terrain, no toggle, kits unkeyed. The uniform-floor
+  metric read 127; the guard's real-terrain replay pins 193.
+- **Kit keying + toggles=[3] (193→228)**: `slot_h_party_kit(name)` factors
+  the §48 kits and keys them across BOTH cleric basenames (same charup.py
+  save); monster kits key by NAME as in every sewer capture (FK archer row;
+  THIEF rowless by data — allied and enemy alike). Kit keying alone proved
+  draw-neutral to 193 (guard-held). The §38 ordinal DERIVED
+  (h4_toggle_ordinal): the recorded flip sits between post-entry draws
+  153/154 and draw 153 IS the head of global turn 3 → toggles=[3]; turn 4
+  (head @189) is PHILIPPE's, and @193 was his first missing selection d1.
+- **@228 localized end-to-end**: TRAVIS's first turn (ordinal 5, head @223)
+  — head f15 d8+d2, the two d7 guards, find_target far pick d12 (both sides
+  pick [9]; the roll, the 12-entry list, and the target write all match) —
+  then the capture WALKS him east draw-free (the raw JSONL interleave pins
+  the pos-write snapshot between the d12 and the d1) and swords the blocking
+  thief [21] via a 1-entry near re-pick (d1/d20/d8, damage 12 = d8:5 + str 6
+  + plus 1), where ours stood and fired the bow (d20/d20/d6).
+
+### 49.2 The readied-ammo gate (228→519)
+
+`AI_items_selection`'s ammo term `var_1F` reads the **READIED ammo slot**
+(`activeItems.arrows` @0x17D / quarrels @0x181, `ovr010:1930-1952`; the full
+gate `ovr010:1983-19C7` re-read instruction-level: `var_15 > var_16>>1` +
+`var_1F` + `ranged_melee ‖ near_enermy(1)==0`) — NOT the inventory. And
+QuickFight never readies ammo for anyone. The slot-H records serialize the
+quivers UNREADIED (charup.py ships every item `@0x34=0`; the operator
+readied only weapons/armor before re-saving), so the party's bows can never
+win the gate: **MATHEW/TRAVIS fight the whole campaign as SWORDSMEN.** This
+is NOT a coab≠binary (coab reads `activeItems.arrows` too) — the gap was our
+`ammo_count > 0` shortcut standing in for readiness. `Loadout` gains
+`ammo_readied`; armed-bar's records (game-readied, slot-B lineage) and the
+Fire Knife MON2ITM kit ("7 Arrows readied" at load) set true — all 13 prior
+pins replay unshifted. cleric-fk stays CLOSED under the new gate: its sword
+picks were adjacency-forced, so both models agreed there.
+
+### 49.3 The held-target slice (519→CLOSED) — §48.5's question answered
+
+**Holds LAND in this capture — the first in any capture — and the held-target
+machinery is now modeled, all listing-verified:**
+
+- `IsHeld` = `sub_66BDB` = any of {snake_charm 0x33, paralyze 0x34, sleep
+  0x35, helpless 0x1F} (`Player.cs:847`).
+- **The melee SLAY** (`sub_3F4EB` head @`ovr014:152C-15E0`): `IsHeld(target)`
+  short-circuits the whole swing loop DRAW-FREE — attackHeld sound; walk
+  `actions.attackIdx` down to the first attack with swings left
+  (@`1547-156E`); count ONE swing (`bytes_1D900[idx] += 1` @`1580` — a
+  ranged slay spends a round of ammo through the ordinary write-back);
+  `DisplayAttackMessage(true, 1, hp_current@0x1A4 + 5, Slay)` (@`1584-15A8`)
+  whose hit tail applies the damage — a guaranteed kill — through the NORMAL
+  damage/death cascade (damage_player, TryLooseSpell, RemoveCombatAffects,
+  the Death dispatch, CombatantKilled); `remove_affect_19(attacker)` — the
+  attacker's invisibility strip (@`15AB-15B1`); both attacks-left cells
+  zeroed (@`15BC-15D3`); turn complete.
+- **The restrained TURN SKIP**: `DoPlayerCombatTurn` (`sub_33281`) fires
+  `CheckAffectsEffect(PlayerRestrained)` FIRST (coab ovr009.cs:108) and the
+  whole turn body is gated on `actions.delay > 0`; the affect handler for
+  the restrained family is `sub_3A071` = **`clear_actions`** (coab
+  `affect_table`, ovr013.cs:1816/1820/1840-1842: fumbling 0x1B, helpless
+  0x1F, snake_charm 0x33, paralyze 0x34, sleep 0x35) — a held combatant's
+  turn is a draw-free no-op. sticks_to_snakes 0x03 / entangle 0x88 have
+  DIFFERENT handlers (attack-count decrement / save-to-break) — still
+  tripwired.
+- **Opportunity-pass gates**: the departure scan skips held candidates
+  (`sub_3E954` @`ovr014:0B14-0B1B`, before the invisibility check) and the
+  into-reach guard fire requires `guarding && !IsHeld` (`sub_3E65D`, coab
+  ovr014.cs:236-237).
+- The `hold-landed` tripwire is RETIRED (behavior modeled + capture-proven);
+  three unit tests land in its place (draw-free slay + live-target control,
+  restrained turn skip, departure held gate).
+
+### 49.4 The fight, decoded
+
+- **R0, SHARA**: selection 5×d4 accepts HOLD PERSON; "Begins Casting"
+  queues it (the §48 #22 delay-subtract keeps her on top); the mini-turn
+  resolves at her next pick — d4+d7, 3 find_target picks over a 2-entry
+  d2 near list (dup-decrement), **2×d20 saves — at least one FAILS**.
+- **FOUR held thieves die DRAW-FREE** to the slay: [21] @519 (hp 12, MARK,
+  between a d1 near-pick and the next pick-scan d100), [15] @1258 (at FULL
+  hp 24), [9] @1580, [16] @1801 — the massacre pattern §48.5 predicted.
+  SHARA's second memorized hold accounts for the later victims.
+- **Both memorized CLWs fire, each on an ALLIED thief**: [11] 23→24 (round
+  6) and [12] 4→8 (round ~10), the d4+d7+d8 mini-turn signature — and
+  `find_healing_target`'s same-TEAM 9-cell scan (§48.3) covers non-party
+  allies with ZERO new code: allied thieves are team 0, so the cure target
+  selection across allies simply worked (the intake work-item answered).
+- **Continue-Battle**: the schedule stays EMPTY — the 11-round fight never
+  stalls to a 'Y' (the pin field documents the input as all-default).
+
+### 49.5 Structural listing reads banked (localization by-product)
+
+The @228 localization forced instruction-level reads that now stand for
+future peels: `sub_3504B`'s tail is an OUTER LOOP — `find_target(0,1,0xFF)`
++ `sub_35DB1` repeat until the turn stops (@`ovr010:01EF-0243`) — the
+walk-then-re-attack cadence; `sub_35DB1`'s attack range `var_4` = readied
+primary's table range − 1, sanitized (@`0ED5-0F0E`); its held-target probe =
+`sub_3F143` + `sub_733F1(budget = range)` + `steps/2 ≤ range`
+(@`0F51-0FDB`); the near-EMPTY branch re-validates the held target via
+`find_target(0,0,0xFF)` (a VALID held target draws nothing) then calls
+`sub_359D1` — the ONE-STEP mover (@`1002-1024`); the near-pick at
+`loc_36036` lands in the LOCAL only, with the cornered-bowman branch at
+@`1066-10A4`. `sub_359D1` anatomy: the §38 keyboard poll at its head
+(@`0A2A`), the NPC per-step morale d100 gated on `control_morale ≥ 0x80`
+(@`0A5E-0A93` — why PC steps are draw-free), the flee d2 heading (@`0AFD`),
+the DATA_2B8 sidestep tries (@`0B61-0BB0`), the double-block
+target-zero/guard fallback (@`0C40-0CBE`), and the per-step
+departure/into-reach passes (@`0D28-0D75`). `sub_41E44` (find_target) is
+TWO-PASS — pass 1 checks accepts through `sub_3F143`, pass 2 sets
+`ignoreWalls` and auto-accepts for `arg_2 ≠ 0` (@`3EE5-3F00`/`3F75-3F84`) —
+with the §44.1 sparse retry confirmed. `sub_3F143` (CanSeeTargetA) is
+invisibility-ONLY (the work_on_00 Type_1/Type_0 target-swap dance,
+@`ovr014:1143-11EB`) — §36's note confirmed at instruction level.
+`sub_738D8` builds near lists per FOOTPRINT CELL-PAIR: `sub_7354A` cone
+filter (0xFF from near_enermy = off) then a `sub_733F1` march per pair with
+the range budget (`var_35 = range·2+1`), entry steps = min over pairs,
+insert only if ANY pair reaches — and `sub_3F4EB`'s normal path carries a
+vs-LARGE damage-cell swap (@`15E3-1662`: readied weapon vs `field_DE>0x80`
+or size>1 installs the ITEMS LARGE columns) — cited + tripwired
+(`vs-large-dice`), unexercised by every pin (the sewer size-2/3 fights were
+bare-handed).
+
+### 49.6 Gates + residue
+
+- ★ **GUARD 14/14 — EVERY CAPTURE EVER TAKEN CLOSED, operand-exact,
+  draw-for-draw, 0 trips.** 984 tests, clippy clean, fmt clean. ★
+- New cited-not-modeled (wires standing): sticks_to_snakes/entangle
+  restrained handlers, the vs-large damage cells, plus §48.6's standing
+  list (ff-scan, downed-ally healing override, 0x53/0x5E, wands,
+  turn-undead).
+- Campaign 2 is COMPLETE — both cleric captures closed, the hold-person
+  question answered end-to-end. Next per §46: campaign 3 (buffed-party
+  affects — camp-cast bless/prot from slot H, driving the CallAffectTable
+  handlers + .FX import) → M6 visualizer.
