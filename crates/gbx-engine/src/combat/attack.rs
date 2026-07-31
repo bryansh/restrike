@@ -462,6 +462,22 @@ impl CombatState {
             }) as i32
         };
         let target_ac = (base_ac + self.ranged_defense_bonus(actor, target)).clamp(0, 255) as u8;
+        // vs-LARGE damage cells (`sub_3F4EB` @`ovr014:15E3-1662`, §49 residue,
+        // spotted during the held-branch read): a READIED weapon
+        // (`field_151` non-null) attacking a `field_DE > 0x80` or
+        // size-class `> 1` target installs the ITEMS row's LARGE dice
+        // (`[2]/[3]/[4]` = countLarge/sizeLarge/bonusLarge) into the damage
+        // cells before the swings. UNMODELED — no capture arms an attacker
+        // against a multi-cell target (the sewer size-2/3 fights were
+        // bare-handed) — so the territory carries a tripwire, §46 rule.
+        if self.fighters[actor].readied_weapon.is_some()
+            && (self.fighters[target].field_de > 0x80 || self.fighters[target].size > 1)
+        {
+            self.emit(ActionEvent::StubTripped {
+                combatant_id: actor,
+                stub: "vs-large-dice",
+            });
+        }
         let hit_bonus = self.fighters[actor].hit_bonus;
         let mut target_gone = false;
         // `bytes_1D900[1]` — the attack-1 swing count (each swing, hit or miss),

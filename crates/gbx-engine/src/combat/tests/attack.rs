@@ -633,3 +633,31 @@ fn held_combatant_makes_no_departure_swing() {
     s2.move_step_away_attack(&mut rng2, 0, 6);
     assert_ne!(rng2.state(), b2, "live enemy: departure swing fires");
 }
+
+#[test]
+fn vs_large_target_with_readied_weapon_trips() {
+    // `sub_3F4EB` @`ovr014:15E3-1662` (§49 residue): a readied weapon vs a
+    // size>1 / field_DE>0x80 target swaps in the ITEMS LARGE damage cells —
+    // unmodeled, tripwired. Bare hands (no readied weapon) never trip.
+    let log = ActionLog::default();
+    let mut s = held_pair(false);
+    s.fighters[1].size = 2;
+    s.fighters[1].field_de = 0x82;
+    s.fighters[0].readied_weapon = Some((36, 1));
+    s.attach_action_sink(log.sink());
+    let mut rng = EngineRng::new(SEED);
+    s.attack_target(&mut rng, 0, 1, false, AttackItemRef::None);
+    let tripped = log.events().iter().any(|e| {
+        matches!(
+            e,
+            ActionEvent::StubTripped {
+                stub: "vs-large-dice",
+                ..
+            }
+        )
+    });
+    assert!(
+        tripped,
+        "armed swing at a size-2 target flags the LARGE-dice territory"
+    );
+}
