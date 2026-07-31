@@ -46,10 +46,6 @@ enum Expect {
     /// Replays operand-exact, draw-for-draw, equal length, zero stub trips.
     Closed,
     /// Diverges at **exactly** this draw index (operand or `(before,after)`).
-    /// Unconstructed since doc §48 closed the full 13-capture matrix — kept as
-    /// the pin type every future capture with an open frontier re-enters
-    /// through.
-    #[allow(dead_code)]
     Frontier(usize),
 }
 
@@ -385,6 +381,27 @@ const PINS: &[Pin] = &[
         // Bryan answered the round-3-end "Continue Battle:" prompt 'Y' once
         // (round 4 exists in the capture), 'N' at round 4's end.
         continue_battle: &[0],
+    },
+    Pin {
+        // The campaign-2 second capture (doc §48.5's hunt for a LANDED hold):
+        // the REAL guild-war 23-brawl this time — 6 slot-H PCs + 4 ALLIED
+        // team-0 THIEFs (roster [10]-[13]) vs 2 FIRE KNIVES + 11 THIEVES.
+        // 5,659 post-entry draws / 11 rounds / 578 turn_snapshots; decisive
+        // party win. 58C=60 / 6E4=0 / md=2 all emitted in-trace (the
+        // per-SCRIPT guild-war values, same as sewer-fight-2); the '2' press
+        // is recorded between post-entry draws 153 and 154 (raw draw 224).
+        // Intake Frontier(193): the slot-H party kits key to
+        // `cleric-fk.gbxtrace`, not this basename — the round-0 party turns
+        // punch d2 where the capture readies swords (the §48 kit/item-plus
+        // machinery, unkeyed); the §38 toggle ordinal, the Continue-Battle
+        // schedule, and the hold-person landing are behind it.
+        capture: "cleric-guildwar.gbxtrace",
+        expect: Expect::Frontier(193),
+        map_direction: 2,
+        auto_cast: false,
+        auto_cast_toggles: &[],
+        area_field_6e4: 0,
+        continue_battle: &[],
     },
 ];
 
