@@ -151,6 +151,17 @@ impl CombatState {
                 let f = &mut self.fighters[ci];
                 f.hp_current = (f.hp_current + 3).min(f.hp_max);
             }
+            // `sub_3A071` = `clear_actions(player)` — the shared handler for
+            // the RESTRAINED family (coab `affect_table`, ovr013.cs:1816/1820/
+            // 1840-1842: fumbling 0x1B, helpless 0x1F, snake_charm 0x33,
+            // paralyze 0x34, sleep 0x35). Fired by the turn-head
+            // `CheckAffectsEffect(PlayerRestrained)` (`sub_33281`, coab
+            // ovr009.cs:108) it zeroes `actions` — including `delay` — so the
+            // held combatant's whole turn body is SKIPPED, draw-free (§49;
+            // capture-proven: cleric-guildwar's held thieves stand mute).
+            // sticks_to_snakes 0x03 / entangle 0x88 have DIFFERENT handlers
+            // (attack-count decrement / save-to-break) — still tripwired.
+            0x1B | 0x1F | 0x33 | 0x34 | 0x35 => self.clear_actions(ci),
             // `con_saving_bonus` 0x61 / `elf_resist_sleep` 0x6B: dispatched
             // only under SavingThrow / MagicResistance — neither fires on a
             // modeled path, so reaching here is a real surprise → trip.

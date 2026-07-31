@@ -55,12 +55,14 @@ pub fn loadout_for(capture: &str, name: &str) -> Option<Loadout> {
         ("armed-bar.gbxtrace", "MATHEW") => Some(Loadout {
             ranged: Some((43, 0)),
             ammo_count: 40,
+            ammo_readied: true, // game-readied (slot-B lineage, bow+arrows readied in-record)
             melee: None,
             unarmed_profile: (1, 2, 6),
             entry_ranged_readied: true,
         }),
         ("armed-bar.gbxtrace", "TRAVIS") => Some(Loadout {
             ranged: Some((44, 0)),
+            ammo_readied: true, // game-readied quiver (the fitted 10)
             // FITTED, not derived: 10 CLOSES the capture (2749/2749) — the only
             // loadout entry that is neither binary- nor record-derivable. The
             // facing slice (§36) did NOT move his shot count: re-fitted after
@@ -79,7 +81,7 @@ pub fn loadout_for(capture: &str, name: &str) -> Option<Loadout> {
         // list per copy). `cleric-fk` is sewer-fight-1's 5-FIRE-KNIFE ambush
         // script; `cleric-guildwar` is sewer-fight-2's guild-war brawl (both
         // allied and enemy THIEFs are the same rowless ITM block 2).
-        (c, n) if matches!(c, "cleric-fk.gbxtrace" | "cleric-guildwar.gbxtrace") => {
+        ("cleric-fk.gbxtrace" | "cleric-guildwar.gbxtrace", n) => {
             slot_h_party_kit(n).or_else(|| sewer_monster_kit(n))
         }
         (c, n) if c.starts_with("sewer-fight-") => sewer_monster_kit(n),
@@ -96,11 +98,20 @@ pub fn loadout_for(capture: &str, name: &str) -> Option<Loadout> {
 /// (the `classFlags` gate, §48): SHARA's plain sling is 1e-cleric-forbidden,
 /// so her only candidates are the mace +1 and bare hands. Shields/armor are
 /// slot-1/Armor items — AC rides the serialized record, no row entry.
+///
+/// **The arrows are UNREADIED too** (`ammo_readied: false`, §49): charup.py
+/// ships every item `@0x34 = 0` and the operator readied only weapons/armor,
+/// so the binary's `var_1F` (the READIED-ammo-slot test, `ovr010:1939-1952`)
+/// stays false all fight — the bows can never win `AI_items_selection` and
+/// MATHEW/TRAVIS fight as SWORDSMEN. Capture-proven: cleric-guildwar TRAVIS's
+/// first turn readies the long sword +1 with no adjacent enemy (d8+str+plus =
+/// 12 damage on [21]) where a readied-arrows model stands and shoots d6.
 fn slot_h_party_kit(name: &str) -> Option<Loadout> {
     match name {
         "MATHEW" => Some(Loadout {
-            ranged: Some((43, 0)), // long bow + 40 plain arrows
+            ranged: Some((43, 0)), // long bow + 40 plain arrows (unreadied)
             ammo_count: 40,
+            ammo_readied: false,
             melee: Some((36, 1)), // long sword +1
             unarmed_profile: (1, 2, 6),
             entry_ranged_readied: false,
@@ -108,13 +119,15 @@ fn slot_h_party_kit(name: &str) -> Option<Loadout> {
         "MARK" => Some(Loadout {
             ranged: None,
             ammo_count: 0,
+            ammo_readied: false,
             melee: Some((36, 2)), // long sword +2
             unarmed_profile: (1, 2, 6),
             entry_ranged_readied: false,
         }),
         "TRAVIS" => Some(Loadout {
-            ranged: Some((44, 0)), // short bow + 40 plain arrows
+            ranged: Some((44, 0)), // short bow + 40 plain arrows (unreadied)
             ammo_count: 40,
+            ammo_readied: false,
             melee: Some((36, 1)), // long sword +1
             unarmed_profile: (1, 2, 6),
             entry_ranged_readied: false,
@@ -122,6 +135,7 @@ fn slot_h_party_kit(name: &str) -> Option<Loadout> {
         "LEDERA" => Some(Loadout {
             ranged: None,
             ammo_count: 0,
+            ammo_readied: false,
             melee: Some((36, 2)), // long sword +2 (elf: +1 to-hit rider)
             unarmed_profile: (1, 2, 6),
             entry_ranged_readied: false,
@@ -129,6 +143,7 @@ fn slot_h_party_kit(name: &str) -> Option<Loadout> {
         "SHARA" => Some(Loadout {
             ranged: None, // plain sling (47) is cleric-forbidden — classFlags gate
             ammo_count: 0,
+            ammo_readied: false,
             melee: Some((23, 1)), // mace +1
             unarmed_profile: (1, 2, 2),
             entry_ranged_readied: false,
@@ -136,6 +151,7 @@ fn slot_h_party_kit(name: &str) -> Option<Loadout> {
         "PHILIPPE" => Some(Loadout {
             ranged: None,
             ammo_count: 0,
+            ammo_readied: false,
             melee: Some((8, 1)), // dagger +1
             unarmed_profile: (1, 2, 1),
             entry_ranged_readied: false,
@@ -160,6 +176,7 @@ fn sewer_monster_kit(name: &str) -> Option<Loadout> {
         "FIRE KNIFE" => Some(Loadout {
             ranged: Some((44, 0)),
             ammo_count: 7,
+            ammo_readied: true, // MON2ITM block 1: the 7 Arrows load READIED
             // The kit's LongSword rides as the bare-hands profile (§45's
             // sword-equivalence: the record's own 1d8+0 attack-1 IS the plain
             // sword's table profile, so `melee: None` is draw-equal).

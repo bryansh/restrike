@@ -27,6 +27,7 @@ fn ranged_state(primary_type: u8, attacks_count: u8, ammo: i32) -> CombatState {
         Loadout {
             ranged: Some((primary_type, 0)),
             ammo_count: ammo,
+            ammo_readied: true,
             melee: None,
             unarmed_profile: (1, 2, 6),
             entry_ranged_readied: true,
@@ -75,6 +76,7 @@ fn weapon_range_sanitizes() {
         Loadout {
             ranged: Some((30, 0)),
             ammo_count: 0,
+            ammo_readied: true,
             melee: None,
             unarmed_profile: (1, 2, 6),
             entry_ranged_readied: true,
@@ -197,6 +199,7 @@ fn ammo_subtracts_by_swing_count_not_assigned() {
         Loadout {
             ranged: Some((43, 0)),
             ammo_count: 40,
+            ammo_readied: true,
             melee: None,
             unarmed_profile: (1, 2, 6),
             entry_ranged_readied: true,
@@ -248,6 +251,7 @@ fn ranged_defense_bonus_bands() {
             Loadout {
                 ranged: Some((43, 0)),
                 ammo_count: 40,
+                ammo_readied: true,
                 melee: None,
                 unarmed_profile: (1, 2, 6),
                 entry_ranged_readied: true,
@@ -321,6 +325,7 @@ fn cornered_swap_unready_then_reready() {
         Loadout {
             ranged: Some((43, 0)),
             ammo_count: 40,
+            ammo_readied: true,
             melee: None,
             unarmed_profile: (1, 2, 6),
             entry_ranged_readied: true,
@@ -427,6 +432,7 @@ fn melee_ready_recompute_adds_table_str_and_plus_terms() {
         Loadout {
             ranged: None,
             ammo_count: 0,
+            ammo_readied: true,
             melee: Some((36, 2)),
             unarmed_profile: (1, 2, 6),
             entry_ranged_readied: false,
@@ -451,6 +457,7 @@ fn elf_rider_bumps_hit_only() {
         Loadout {
             ranged: None,
             ammo_count: 0,
+            ammo_readied: true,
             melee: Some((36, 2)),
             unarmed_profile: (1, 2, 6),
             entry_ranged_readied: false,
@@ -471,6 +478,7 @@ fn two_candidate_selection_prefers_sword_when_adjacent_bow_when_clear() {
     let kit = Loadout {
         ranged: Some((43, 0)),
         ammo_count: 40,
+        ammo_readied: true,
         melee: Some((36, 1)),
         unarmed_profile: (1, 2, 6),
         entry_ranged_readied: false,
@@ -495,6 +503,7 @@ fn weak_melee_candidate_loses_to_the_base_profile() {
         Loadout {
             ranged: None,
             ammo_count: 0,
+            ammo_readied: true,
             melee: Some((30, 0)),
             unarmed_profile: (1, 2, 6),
             entry_ranged_readied: false,
@@ -510,4 +519,117 @@ fn weak_melee_candidate_loses_to_the_base_profile() {
     let f = &s.fighters[0];
     assert_eq!((f.dice_count, f.dice_size, f.damage_bonus), (1, 2, 6));
     assert_eq!(f.hit_bonus, 15, "bare hands: thac0 + strengthHitBonus");
+}
+
+// === the held-target slice (doc §49) =====================================
+
+/// A melee pair: attacker [0] adjacent to target [1]; the target carries
+/// `paralyze` 0x34 when `held`.
+fn held_pair(held: bool) -> CombatState {
+    let attacker = Combatant::new_melee(
+        0,
+        Team::Party,
+        false,
+        GridPos::new(0, 0),
+        30,
+        40,
+        10,
+        12,
+        (1, 8, 1),
+        5,
+        1,
+    );
+    let mut target = Combatant::new_melee(
+        1,
+        Team::Monster,
+        true,
+        GridPos::new(1, 0),
+        12,
+        40,
+        0,
+        12,
+        (1, 2, 0),
+        5,
+        1,
+    );
+    if held {
+        target.add_affect(0x34, 5, 1, false); // paralyze
+    }
+    CombatState::new(CombatMap::uniform(0x17), vec![attacker, target])
+}
+
+#[test]
+fn held_target_is_slain_draw_free() {
+    // `sub_3F4EB` head (@`ovr014:152C-15E0`, doc §49): IsHeld(target) short-
+    // circuits the swing loop — damage = hp_current + 5 (a guaranteed kill),
+    // both attacks-left cells zero, turn complete, and NOT ONE die drawn.
+    // Capture-proven: cleric-guildwar's MARK kills the held [21] at draw 519
+    // between a d1 near-pick and the next pick-scan d100.
+    let mut s = held_pair(true);
+    let mut rng = EngineRng::new(SEED);
+    let before = rng.state();
+    let complete = s.attack_target(&mut rng, 0, 1, false, AttackItemRef::None);
+    assert_eq!(rng.state(), before, "the slay is draw-free");
+    assert!(complete);
+    assert_eq!(s.fighters[1].hp_current, 0);
+    assert!(!s.fighters[1].in_combat, "hp 12 − (12+5) → dead");
+    assert_eq!(s.fighters[0].attack1_left, 0);
+    assert_eq!(s.fighters[0].attack2_left, 0);
+    // The same pair un-held rolls a d20 (control: the branch is held-gated).
+    let mut s2 = held_pair(false);
+    let mut rng2 = EngineRng::new(SEED);
+    let before2 = rng2.state();
+    s2.attack_target(&mut rng2, 0, 1, false, AttackItemRef::None);
+    assert_ne!(
+        rng2.state(),
+        before2,
+        "a live target still draws the swing d20"
+    );
+}
+
+#[test]
+fn restrained_turn_head_clears_actions() {
+    // `sub_3A071` = `clear_actions` for the restrained family (coab
+    // affect_table, ovr013.cs:1840-1842), fired by the turn-head
+    // `CheckAffectsEffect(PlayerRestrained)` (`sub_33281`, ovr009.cs:108):
+    // the held combatant's delay zeroes, so the `delay > 0` turn body is
+    // skipped entirely — the draw-free held turn (doc §49).
+    let mut s = held_pair(true);
+    s.fighters[1].delay = 7;
+    s.check_affects_effect(1, CheckType::PlayerRestrained);
+    assert_eq!(s.fighters[1].delay, 0, "paralyze → clear_actions → no turn");
+    // A combatant without a restrained affect keeps its delay.
+    let mut s2 = held_pair(false);
+    s2.fighters[1].delay = 7;
+    s2.check_affects_effect(1, CheckType::PlayerRestrained);
+    assert_eq!(s2.fighters[1].delay, 7);
+}
+
+#[test]
+fn held_combatant_makes_no_departure_swing() {
+    // `sub_3E954`'s per-candidate IsHeld filter (@`ovr014:0B14-0B1B`, doc
+    // §49): a held enemy adjacent to the mover takes no opportunity swing
+    // when the mover departs its reach.
+    // Mid-board pair so a single westward step actually leaves reach:
+    // mover [0]@(5,5), enemy [1]@(6,5); step W → (4,5), distance 2.
+    let place = |s: &mut CombatState| {
+        s.fighters[0].pos = GridPos::new(5, 5);
+        s.fighters[1].pos = GridPos::new(6, 5);
+        s.rebuild_occupancy();
+        s.fighters[1].delay = 0;
+        s.fighters[1].attacks_received = 0; // qualifies without the cone scan
+    };
+    let mut s = held_pair(true);
+    place(&mut s);
+    let mut rng = EngineRng::new(SEED);
+    let before = rng.state();
+    s.move_step_away_attack(&mut rng, 0, 6);
+    assert_eq!(rng.state(), before, "held enemy: no departure d20");
+    // Control: un-held, the departure swing draws.
+    let mut s2 = held_pair(false);
+    place(&mut s2);
+    let mut rng2 = EngineRng::new(SEED);
+    let b2 = rng2.state();
+    s2.move_step_away_attack(&mut rng2, 0, 6);
+    assert_ne!(rng2.state(), b2, "live enemy: departure swing fires");
 }

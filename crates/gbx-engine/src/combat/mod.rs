@@ -495,6 +495,19 @@ pub struct Loadout {
     /// The launcher's initial ammo count (a free parameter when no depletion
     /// occurs; TRAVIS's armed-bar 10 is capture-fitted; doc §34.1).
     pub ammo_count: i32,
+    /// Whether the launcher's AMMO item is serialized READIED (§49): the
+    /// binary's `AI_items_selection` ammo term `var_1F` reads the READIED
+    /// ammo slot (`activeItems.arrows` @0x17D / quarrels @0x181,
+    /// `ovr010:1930-1952`), **not** the inventory — and QuickFight never
+    /// readies ammo for anyone. A kit whose arrows enter unreadied (the
+    /// slot-H party: charup.py ships everything `@0x34 = 0` and the operator
+    /// readied only weapons/armor) has `var_1F = false` every turn, so the
+    /// launcher LOSES the selection gate regardless of rating and the melee
+    /// candidate is readied instead — capture-proven by cleric-guildwar's
+    /// TRAVIS turn (sword d8 where a readied-arrows model shoots d6).
+    /// armed-bar's records serialize bow+arrows readied (game-written);
+    /// the Fire Knife `MON2ITM` template readies its 7 arrows at load.
+    pub ammo_readied: bool,
     /// The melee candidate `var_8`: the kit's best melee weapon as
     /// `(ITEMS type, item.plus)`. `None` = bare hands (the §45 Fire Knife
     /// model keeps its sword-equivalent profile in `unarmed_profile` instead —

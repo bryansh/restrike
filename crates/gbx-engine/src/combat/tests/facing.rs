@@ -493,6 +493,7 @@ fn sling_state(primary_type: u8) -> CombatState {
         Loadout {
             ranged: Some((primary_type, 0)),
             ammo_count: 40,
+            ammo_readied: true,
             melee: None,
             unarmed_profile: (1, 2, 0),
             entry_ranged_readied: true,

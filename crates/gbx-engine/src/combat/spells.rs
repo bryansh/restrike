@@ -647,10 +647,11 @@ impl CombatState {
             // The landing (`is_unaffected` else-arm, ovr024.cs:1316-1329):
             // remove an existing `minutes > 0` instance, then
             // `add_affect(call_affect_table = false, data = castingLvl,
-            // time = GetSpellAffectTimeout)`. UNEXERCISED by any pinned
-            // capture (all three cleric-fk saves passed) — tripwired so the
-            // first capture that lands a hold flags for the held-turn
-            // behavior audit (CheckAffectsEffect(PlayerRestrained) reads it).
+            // time = GetSpellAffectTimeout)`. CAPTURE-PROVEN (§49,
+            // cleric-guildwar): the held-target behavior is now modeled —
+            // the PlayerRestrained turn skip (`sub_3A071` = clear_actions)
+            // and the melee SLAY (`sub_3F4EB` @`ovr014:152C-15E0`) — so the
+            // `hold-landed` tripwire is RETIRED.
             if self.fighters[target]
                 .affects
                 .iter()
@@ -662,11 +663,6 @@ impl CombatState {
             let timeout =
                 (entry.fixed_duration + entry.per_lvl_duration * casting_lvl).max(0) as u16;
             self.fighters[target].add_affect(entry.affect_id, timeout, casting_lvl as u8, false);
-            let id = self.fighters[target].id;
-            self.emit(ActionEvent::StubTripped {
-                combatant_id: id,
-                stub: "hold-landed",
-            });
         }
     }
 
@@ -702,7 +698,7 @@ impl CombatState {
     /// `IsHeld()` (`Player.cs:847`): the target carries any `held_affects`
     /// {snake_charm 0x33, paralyze 0x34, sleep 0x35, helpless 0x1F}. Draw-free;
     /// false on the empty affect lists every capture carries (§39).
-    fn is_held(&self, actor: usize) -> bool {
+    pub(super) fn is_held(&self, actor: usize) -> bool {
         HELD_AFFECT_IDS
             .iter()
             .any(|&a| self.fighters[actor].has_affect(a))

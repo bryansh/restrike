@@ -46,6 +46,10 @@ enum Expect {
     /// Replays operand-exact, draw-for-draw, equal length, zero stub trips.
     Closed,
     /// Diverges at **exactly** this draw index (operand or `(before,after)`).
+    /// Unconstructed since doc §49 closed the full 14-capture matrix — kept as
+    /// the pin type every future capture with an open frontier re-enters
+    /// through.
+    #[allow(dead_code)]
     Frontier(usize),
 }
 
@@ -399,10 +403,29 @@ const PINS: &[Pin] = &[
         // selection d1. @228 = TRAVIS's first turn (ordinal 5, head @223):
         // after the head f15 d8+d2, the two d7 guards, and the find_target
         // far pick d12 (both sides pick [9]), the capture WALKS him east
-        // and swords blocking [21] (d1/d20/d8) where ours stands and
-        // shoots (d20/d20/d6) — the readied-ammo gate, next commit.
+        // and swords blocking [21] (d1/d20/d8) where ours stood and shot.
+        // @228→519: the READIED-AMMO gate (§49) — `AI_items_selection`'s
+        // `var_1F` reads the readied-arrows SLOT (@0x17D), which the slot-H
+        // records serialize EMPTY, so the party's bows can never win the
+        // gate and MATHEW/TRAVIS fight as swordsmen. @519 = MARK's first
+        // swing at the thief [21]: ours rolled a d20 where the capture
+        // killed DRAW-FREE — because [21] was HELD (SHARA's round-0 hold
+        // person; the 2×d20 saves at ~490 sit in the matched region and
+        // one FAILED — the first landed hold in any capture).
+        //
+        // ★ CLOSED 5659/5659 (doc §49): the held-target slice — the melee
+        // SLAY (`sub_3F4EB` @`ovr014:152C-15E0`: damage = hp+5, no dice,
+        // both attack cells zeroed) and the restrained turn skip
+        // (`sub_3A071` = clear_actions on the turn-head PlayerRestrained
+        // dispatch) — plus the held gates on the departure/into-reach
+        // opportunity passes. FOUR held thieves die draw-free ([21]@519,
+        // [15]@1258 at FULL hp, [9]@1580, [16]@1801); both memorized CLWs
+        // fire, each on an ALLIED thief ([11] 23→24 round 6, [12] 4→8
+        // round 10 — find_healing_target's same-TEAM scan covers allies
+        // unchanged); the 11-round decisive win replays operand-exact with
+        // no Continue-Battle 'Y' (the fight never stalls to the prompt).
         capture: "cleric-guildwar.gbxtrace",
-        expect: Expect::Frontier(228),
+        expect: Expect::Closed, // was Frontier(228); the held-target slice (§49)
         map_direction: 2,
         auto_cast: false,
         // The §38 toggle pin, DERIVED (h4_toggle_ordinal): the recorded

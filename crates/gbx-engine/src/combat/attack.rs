@@ -384,6 +384,60 @@ impl CombatState {
             self.clear_actions(actor);
             return true;
         }
+        // ★ The held-target SLAY (`sub_3F4EB` head @`ovr014:152C-15E0`, coab
+        // ovr014.cs:740-759; §49) — capture-proven by cleric-guildwar (MARK's
+        // draw-free kill of the held thief [21], hp 12→0 with zero dice):
+        // `sub_66BDB` (IsHeld — any of {snake_charm 0x33, paralyze 0x34,
+        // sleep 0x35, helpless 0x1F}) short-circuits the whole swing loop.
+        // In listing order: the attackHeld sound; walk `actions.attackIdx`
+        // DOWN to the first attack with swings left (@`1547-156E`, reads the
+        // attacks-left cells `[0x19B+idx]`); count ONE swing
+        // (`bytes_1D900[idx] += 1` @`1580` — a RANGED slay spends one round
+        // of ammo through the ordinary write-back);
+        // `DisplayAttackMessage(true, 1, hp_current@0x1A4 + 5, Slay)`
+        // (@`1584-15A8`) whose hit tail applies the damage — a guaranteed
+        // kill — through the NORMAL damage/death cascade (damage_player,
+        // TryLooseSpell, RemoveCombatAffects, the Death dispatch,
+        // CombatantKilled); `remove_affect_19(attacker)` — the attacker's
+        // invisibility strip (@`15AB-15B1`); then BOTH attacks-left cells
+        // zero (@`15BC-15D3`) and turn-complete. Entirely draw-free.
+        if self.is_held(target) {
+            let start = self.fighters[actor].attack_idx;
+            let idx = if start >= 2 && self.fighters[actor].attack2_left > 0 {
+                2
+            } else {
+                1
+            };
+            self.fighters[actor].attack_idx = idx;
+            let slay = self.fighters[target].hp_current + 5;
+            self.remove_invisibility(actor);
+            self.apply_damage(rng, target, slay);
+            // The DisplayAttackMessage hit tail (`TryLooseSpell`, §45):
+            // actualDamage = hp+5 > 0 always.
+            self.fighters[target].can_cast = false;
+            // Ammo write-back (`sub_3F9DB` @`ovr014:1BB3-1BC7`) for the one
+            // counted swing — only an attack-1 ranged slay decrements.
+            if idx == 1
+                && matches!(ranged_item, AttackItemRef::Ammo | AttackItemRef::SelfWeapon)
+                && self.fighters[actor].ammo > 0
+            {
+                self.fighters[actor].ammo -= 1;
+                if self.fighters[actor].ammo <= 0 && !self.fighters[actor].ammo_item_lost {
+                    self.fighters[actor].ammo = 0;
+                    self.fighters[actor].ammo_item_lost = true;
+                    if ranged_item == AttackItemRef::SelfWeapon {
+                        self.emit(ActionEvent::StubTripped {
+                            combatant_id: actor,
+                            stub: "self-weapon-depleted",
+                        });
+                    }
+                }
+            }
+            self.fighters[actor].attack1_left = 0;
+            self.fighters[actor].attack2_left = 0;
+            self.clear_actions(actor);
+            return true;
+        }
         // §39.5 site 6: `CheckAffectsEffect(target, Type_11)` — after
         // `reclac_player_values(target)` and before the AC selection, once per
         // attack (`mov al,0Bh; call work_on_00` @`ovr014:167E`, coab
@@ -407,21 +461,6 @@ impl CombatState {
                 self.fighters[target].ac
             }) as i32
         };
-        // TEMP DEBUG (not committed)
-        if std::env::var_os("RESTRIKE_DEBUG_HIT").is_some() {
-            let t = &self.fighters[target];
-            eprintln!(
-                "HIT a={actor} t={target} backstab={can_backstab} behind_arg={behind} \
-                 flank={} (ar={} tdir={} bearing={} dc={}) base_ac={base_ac} front={} behind_ac={}",
-                self.is_flanking(target, actor),
-                t.attacks_received,
-                t.direction,
-                target_direction(self.fighters[actor].pos, t.pos),
-                t.direction_changes,
-                t.ac,
-                t.ac_behind,
-            );
-        }
         let target_ac = (base_ac + self.ranged_defense_bonus(actor, target)).clamp(0, 255) as u8;
         let hit_bonus = self.fighters[actor].hit_bonus;
         let mut target_gone = false;
@@ -737,7 +776,9 @@ impl CombatState {
         let near = self.build_near(mover, 1, false);
         for n in near {
             let att = n.idx;
-            if self.fighters[att].guarding {
+            // `guarding && IsHeld() == false` (`sub_3E65D`, coab ovr014.cs:236-237;
+            // §32/§49) — a held guard never fires its into-reach swing.
+            if self.fighters[att].guarding && !self.is_held(att) {
                 // Site 7 (guard fire) — `move_step_into_attack` scrolls to the
                 // entering mover before the swing: `redrawCombatArea(8, 2,
                 // target.pos)` (`ovr014.cs:239`).
@@ -805,7 +846,10 @@ impl CombatState {
             // then live for the step that follows (`sub_3E748`'s focus-gated
             // scrolls) even for an off-screen monster mover.
             self.focus = true;
-            if !self.fighters[att].in_combat || !self.can_see_target(mover) {
+            // Per-candidate filters (`sub_3E954` @`ovr014:0B14-0B32`, coab
+            // ovr014.cs:367-368): `sub_66BDB` (IsHeld — a held combatant makes
+            // no departure swing, §49) THEN `sub_3F143` (invisibility).
+            if !self.fighters[att].in_combat || self.is_held(att) || !self.can_see_target(mover) {
                 continue;
             }
             // The tmpDir visibility scan (ovr014.cs:374-380): an attacker that
@@ -1097,7 +1141,14 @@ impl CombatState {
             && flags & (gbx_formats::items::flags::ARROWS | gbx_formats::items::flags::QUARRELS)
                 != 0
         {
-            found = !self.fighters[actor].ammo_item_lost;
+            // The binary reads the READIED ammo slot (`activeItems.arrows`
+            // @0x17D, `ovr010:1939-1952`) — an unreadied quiver is invisible
+            // to the selection gate (§49; QuickFight never readies ammo).
+            let ammo_readied = self.fighters[actor]
+                .loadout
+                .map(|l| l.ammo_readied)
+                .unwrap_or(false);
+            found = ammo_readied && !self.fighters[actor].ammo_item_lost;
         }
         found || flags == (gbx_formats::items::flags::FLAG_08 | gbx_formats::items::flags::FLAG_02)
     }

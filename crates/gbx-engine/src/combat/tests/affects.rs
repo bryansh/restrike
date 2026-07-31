@@ -142,8 +142,11 @@ fn remove_invisibility_clears_every_instance() {
 #[test]
 fn dispatch_trips_on_a_found_affect() {
     let (mut state, log) = affect_world();
-    // snake_charm (0x33) is in PlayerRestrained's list.
-    state.fighters[0].affects = vec![aff(0x33, false)];
+    // sticks_to_snakes (0x03) is in PlayerRestrained's list and its handler
+    // (an attack-count decrementer, coab SticksToSnakes) is still tripwired
+    // — unlike the restrained family {0x1B,0x1F,0x33,0x34,0x35}, which now
+    // dispatches `clear_actions` (§49).
+    state.fighters[0].affects = vec![aff(0x03, false)];
     state.check_affects_effect(0, CheckType::PlayerRestrained);
     assert_eq!(stubs(&log), vec!["affect-effect"]);
 }
