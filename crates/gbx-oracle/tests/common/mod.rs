@@ -70,67 +70,76 @@ pub fn loadout_for(capture: &str, name: &str) -> Option<Loadout> {
             unarmed_profile: (1, 2, 3),
             entry_ranged_readied: true,
         }),
-        // The slot-H upgraded party (doc §48): kits from `charup.py`'s PARTY
-        // table, validated in-game and re-saved (the game-written slot H is
-        // canonical). The records serialize NOTHING readied (bare-hands
-        // profiles + armor AC), so `entry_ranged_readied` is false and the
-        // round-0 `AI_items_selection` readies each PC's best weapon — the
-        // capture's sword turns (d8 + str + plus) prove the melee candidates.
-        // Class-ineligible items never enter a row (the `classFlags` gate,
-        // §48): SHARA's plain sling is 1e-cleric-forbidden, so her only
-        // candidates are the mace +1 and bare hands. Shields/armor are
-        // slot-1/Armor items — AC rides the serialized record, no row entry.
-        ("cleric-fk.gbxtrace", "MATHEW") => Some(Loadout {
+        // The campaign-2 captures (doc §48/§49) carry the SAME slot-H party
+        // (charup.py's kits, one game-validated save) plus sewer monsters —
+        // the party kits key by PC name across both basenames, and the
+        // monster kits by NAME exactly as in the sewer captures: `load_mob`
+        // reads the same `MON2ITM.DAX` template block for every copy of a
+        // basename in every sewer encounter (CMD_LoadMonster clones the item
+        // list per copy). `cleric-fk` is sewer-fight-1's 5-FIRE-KNIFE ambush
+        // script; `cleric-guildwar` is sewer-fight-2's guild-war brawl (both
+        // allied and enemy THIEFs are the same rowless ITM block 2).
+        (c, n) if matches!(c, "cleric-fk.gbxtrace" | "cleric-guildwar.gbxtrace") => {
+            slot_h_party_kit(n).or_else(|| sewer_monster_kit(n))
+        }
+        (c, n) if c.starts_with("sewer-fight-") => sewer_monster_kit(n),
+        _ => None,
+    }
+}
+
+/// The slot-H upgraded party kits (doc §48): from `charup.py`'s PARTY table,
+/// validated in-game and re-saved (the game-written slot H is canonical). The
+/// records serialize NOTHING readied (bare-hands profiles + armor AC), so
+/// `entry_ranged_readied` is false and the round-0 `AI_items_selection`
+/// readies each PC's best weapon — the captures' sword turns (d8 + str +
+/// plus) prove the melee candidates. Class-ineligible items never enter a row
+/// (the `classFlags` gate, §48): SHARA's plain sling is 1e-cleric-forbidden,
+/// so her only candidates are the mace +1 and bare hands. Shields/armor are
+/// slot-1/Armor items — AC rides the serialized record, no row entry.
+fn slot_h_party_kit(name: &str) -> Option<Loadout> {
+    match name {
+        "MATHEW" => Some(Loadout {
             ranged: Some((43, 0)), // long bow + 40 plain arrows
             ammo_count: 40,
             melee: Some((36, 1)), // long sword +1
             unarmed_profile: (1, 2, 6),
             entry_ranged_readied: false,
         }),
-        ("cleric-fk.gbxtrace", "MARK") => Some(Loadout {
+        "MARK" => Some(Loadout {
             ranged: None,
             ammo_count: 0,
             melee: Some((36, 2)), // long sword +2
             unarmed_profile: (1, 2, 6),
             entry_ranged_readied: false,
         }),
-        ("cleric-fk.gbxtrace", "TRAVIS") => Some(Loadout {
+        "TRAVIS" => Some(Loadout {
             ranged: Some((44, 0)), // short bow + 40 plain arrows
             ammo_count: 40,
             melee: Some((36, 1)), // long sword +1
             unarmed_profile: (1, 2, 6),
             entry_ranged_readied: false,
         }),
-        ("cleric-fk.gbxtrace", "LEDERA") => Some(Loadout {
+        "LEDERA" => Some(Loadout {
             ranged: None,
             ammo_count: 0,
             melee: Some((36, 2)), // long sword +2 (elf: +1 to-hit rider)
             unarmed_profile: (1, 2, 6),
             entry_ranged_readied: false,
         }),
-        ("cleric-fk.gbxtrace", "SHARA") => Some(Loadout {
+        "SHARA" => Some(Loadout {
             ranged: None, // plain sling (47) is cleric-forbidden — classFlags gate
             ammo_count: 0,
             melee: Some((23, 1)), // mace +1
             unarmed_profile: (1, 2, 2),
             entry_ranged_readied: false,
         }),
-        ("cleric-fk.gbxtrace", "PHILIPPE") => Some(Loadout {
+        "PHILIPPE" => Some(Loadout {
             ranged: None,
             ammo_count: 0,
             melee: Some((8, 1)), // dagger +1
             unarmed_profile: (1, 2, 1),
             entry_ranged_readied: false,
         }),
-        // Sewer monster kits are DATA, not per-fight staging: `load_mob` reads
-        // the same `MON2ITM.DAX` template block for every copy of a basename
-        // in every sewer encounter (CMD_LoadMonster clones the item list per
-        // copy), so the kits key by NAME across all sewer captures —
-        // `cleric-fk` (doc §48) is the same 5-FIRE-KNIFE ambush script as
-        // `sewer-fight-1` and its monsters carry the same block-1 kit.
-        (c, n) if c.starts_with("sewer-fight-") || c == "cleric-fk.gbxtrace" => {
-            sewer_monster_kit(n)
-        }
         _ => None,
     }
 }
@@ -207,6 +216,7 @@ pub fn capture_has_loadout(capture: &str) -> bool {
             | "sewer-fight-1.gbxtrace"
             | "sewer-fight-2.gbxtrace"
             | "cleric-fk.gbxtrace"
+            | "cleric-guildwar.gbxtrace"
     )
 }
 

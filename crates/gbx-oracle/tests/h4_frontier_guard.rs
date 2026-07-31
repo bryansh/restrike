@@ -390,16 +390,27 @@ const PINS: &[Pin] = &[
         // party win. 58C=60 / 6E4=0 / md=2 all emitted in-trace (the
         // per-SCRIPT guild-war values, same as sewer-fight-2); the '2' press
         // is recorded between post-entry draws 153 and 154 (raw draw 224).
-        // Intake Frontier(193): the slot-H party kits key to
-        // `cleric-fk.gbxtrace`, not this basename — the round-0 party turns
-        // punch d2 where the capture readies swords (the §48 kit/item-plus
-        // machinery, unkeyed); the §38 toggle ordinal, the Continue-Battle
-        // schedule, and the hold-person landing are behind it.
+        // Intake Frontier(193): the slot-H party kits keyed only to
+        // `cleric-fk.gbxtrace` and the §38 toggle was unpinned. The kit
+        // keying (slot_h_party_kit by NAME across both cleric basenames)
+        // proved draw-neutral to 193; the toggle pin carried 193→228: draw
+        // 153 IS the head of global turn 3 ([20]'s — the poll sees the
+        // press), turn 4 (head @189) is PHILIPPE's, and @193 was his first
+        // selection d1. @228 = TRAVIS's first turn (ordinal 5, head @223):
+        // after the head f15 d8+d2, the two d7 guards, and the find_target
+        // far pick d12 (both sides pick [9]), the capture WALKS him east
+        // and swords blocking [21] (d1/d20/d8) where ours stands and
+        // shoots (d20/d20/d6) — the readied-ammo gate, next commit.
         capture: "cleric-guildwar.gbxtrace",
-        expect: Expect::Frontier(193),
+        expect: Expect::Frontier(228),
         map_direction: 2,
         auto_cast: false,
-        auto_cast_toggles: &[],
+        // The §38 toggle pin, DERIVED (h4_toggle_ordinal): the recorded
+        // magic_toggle flip sits between post-entry draws 153/154, and draw
+        // 153 IS the head of global turn 3 ([20]'s) — the poll at that head
+        // sees the press. Turn 4 (head @189) is PHILIPPE's: his selection
+        // d1s are the @193 fork the intake pin sat on.
+        auto_cast_toggles: &[3],
         area_field_6e4: 0,
         continue_battle: &[],
     },
