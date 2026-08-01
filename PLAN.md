@@ -360,6 +360,16 @@ Walk around Tilverton, looking right.
 - **Exit gate:** a real fixed encounter (e.g., the Tilverton sewers fight) playable interactively
   and headlessly; headless traces match the oracle exactly for at least 10 seeds.
 
+> **Working-ledger numbering note (2026-08-01):** the session ledger split combat
+> across two milestones — working **M4** = first blood/H4 melee (closed
+> 2026-07-20, PR #1) and working **M5** = combat completion (§46 exit gate
+> passed 2026-08-01, guard 15/15) — and named working **M6 = the combat
+> visualizer + manual-combat UI** (door: `docs/design/combat-visualizer.md`).
+> This plan's M5 "Fireball" content largely landed inside working M5 (cleric +
+> MM casting, affects; the exotic-spell tail is the circle-back ledger,
+> `h4-entry-state-snapshot.md` §50.5), and this plan's M6–M8 shift right
+> accordingly. Sections below keep their original numbering as history.
+
 ### M5 — Fireball (3–5 weekends)
 - Vancian memorization/slots/scribing; casting in and out of combat.
 - Per-spell effects for the full CotAB spell list (enumerated from data + manual during this
