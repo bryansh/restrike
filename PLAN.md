@@ -500,7 +500,7 @@ reasoning depth. Feature "importance" is not a factor; verifiability is.
 |---|---|---|---|
 | **Haiku 4.5** | low–medium | Dump/log triage, SOURCES.md upkeep, doc formatting, one-off shell/python helpers, commit hygiene | Anything touching VM/rules/format semantics |
 | **Sonnet 5** | medium–high; xhigh when stuck | **The workhorse (~70% of build work):** parsers written against reference decoders, egui inspector, CLI plumbing, CI/packaging, and any well-specified mechanic/opcode/spell implemented against existing tests | Greenfield architecture; ambiguous RE with no reference |
-| **Opus 4.8** | high–xhigh; fast mode for interactive grind sessions | Subsystem design-and-build (renderer/UI-shell state machine, save format, effect system), reading coab to spec a mechanic, ordinary trace-divergence debugging | Pure boilerplate (waste) |
+| **Opus 5** *(current Opus tier — adopted 2026-08-01, was Opus 4.8 through M5; same price, stronger agentic coding/review)* | high–xhigh; fast mode for interactive grind sessions | Subsystem design-and-build (renderer/UI-shell state machine, save format, effect system), reading coab to spec a mechanic, ordinary trace-divergence debugging | Pure boilerplate (waste) |
 | **Fable 5** | xhigh; **max sparingly** | One-way-door architecture (ScriptMemory, tick core, rules-pack schema), PRNG recovery, combat-trace forensics after Opus stalls, Buck Rogers binary RE, fidelity-docket adjudication, plan revisions | Routine implementation (waste) |
 
 ### Operating rules

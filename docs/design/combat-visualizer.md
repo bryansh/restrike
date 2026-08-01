@@ -610,7 +610,11 @@ while the player-facing save UI stays faithfully absent in combat.
 ## 5. Build order and session guidance
 
 Slices sized for the established loop (Fable specs already in this doc; Opus
-implements; Fable audits; guard referees every commit):
+implements; Fable audits; guard referees every commit). Implementer tier =
+**Opus 5** (adopted 2026-08-01, Bryan — the current Opus, same price as 4.8,
+stronger on exactly the implementer profile; the PLAN §9 "Opus 4.8" rows read
+as "current Opus tier"). Effort: `high` for the mechanical slices, `xhigh`
+where fidelity is subtle (timeline/draw-parity, floor-gen, suspensions):
 
 1. Formats + atlas + boot/entry art loading (pure `gbx-formats` + loaders;
    verify COMSPR/CPIC shapes against real data first — the §6 OPEN).
@@ -632,13 +636,13 @@ specs/audits/merges, Opus implements, Bryan launches/playtests/ratifies):**
 
 | Slice | Work | Implementer | Spec source | Bryan | Closes |
 |---|---|---|---|---|---|
-| 1 | COMSPR/CPIC/CHEAD/CBODY + tile decoders, 24×24 atlas, boot/entry art loading; opens with the `dump-image` shape check (§6.1) | **Opus 4.8 @ high**, worktree | doc §1.2–1.3 + D-CV4 | — | — |
-| 2 | Camera getter, new presentation events + collector drop arms, `Move`-emit relocation — all draw-neutral, guard-proven | **Opus 4.8 @ high** (may ride with slice 3, or run parallel to slice 1 — disjoint crates) | D-CV2 | — | — |
-| 3 | `CombatScene` core: layout/tiles/icons/presented board; fixture pixel goldens | **Opus 4.8 @ high** | §1.1–1.3 + D-CV4 | — | — |
-| 4 | Playback timeline: beats/messages/missiles/death flash/sounds; timeline units + **the draw-parity invariant test** | **Opus 4.8 @ high** | §1.4–1.5 + D-CV2/3 | — | — |
-| 5 | Reel host (`Engine::new_reel`), knob/loadout library-ification, versioned sidecar (+ hand-pinned CPIC ids ×15) | **Opus 4.8 @ high** | D-CV1(2) + §4 M6a | watches the first reel (demo payoff) | **M6a** |
-| 6 | Shell combat flow + faithful floor-gen + real party kits + serde budget + sequencing obligations | **Fable 5 @ xhigh spec-refresh first** (shell-flow state chart §-section), then **Opus 4.8 @ high** | D-CV1(1)/6/7 + the new § | boot→bar playtest | **M6b** |
-| 7 | Suspensions + `TurnCmd` core (dark-landing, guard-exact) then menus/aim UI | **Fable 5 @ xhigh spec-refresh first** (TurnCmd legality table §-section), then **Opus 4.8 @ high** | D-CV5 + §1.7 + the new § | stages the manual-turn capture w/ Fable (one launch, §25 runbook); manual-fight playtest | **M6c** |
+| 1 | COMSPR/CPIC/CHEAD/CBODY + tile decoders, 24×24 atlas, boot/entry art loading; opens with the `dump-image` shape check (§6.1) | **Opus 5 @ high**, worktree | doc §1.2–1.3 + D-CV4 | — | — |
+| 2 | Camera getter, new presentation events + collector drop arms, `Move`-emit relocation — all draw-neutral, guard-proven | **Opus 5 @ high** (may ride with slice 3, or run parallel to slice 1 — disjoint crates) | D-CV2 | — | — |
+| 3 | `CombatScene` core: layout/tiles/icons/presented board; fixture pixel goldens | **Opus 5 @ high** | §1.1–1.3 + D-CV4 | — | — |
+| 4 | Playback timeline: beats/messages/missiles/death flash/sounds; timeline units + **the draw-parity invariant test** | **Opus 5 @ xhigh** | §1.4–1.5 + D-CV2/3 | — | — |
+| 5 | Reel host (`Engine::new_reel`), knob/loadout library-ification, versioned sidecar (+ hand-pinned CPIC ids ×15) | **Opus 5 @ high** | D-CV1(2) + §4 M6a | watches the first reel (demo payoff) | **M6a** |
+| 6 | Shell combat flow + faithful floor-gen + real party kits + serde budget + sequencing obligations | **Fable 5 @ xhigh spec-refresh first** (shell-flow state chart §-section), then **Opus 5 @ xhigh** (the floor-gen is draw-bearing) | D-CV1(1)/6/7 + the new § | boot→bar playtest | **M6b** |
+| 7 | Suspensions + `TurnCmd` core (dark-landing, guard-exact) then menus/aim UI | **Fable 5 @ xhigh spec-refresh first** (TurnCmd legality table §-section), then **Opus 5 @ xhigh** | D-CV5 + §1.7 + the new § | stages the manual-turn capture w/ Fable (one launch, §25 runbook); manual-fight playtest | **M6c** |
 
 Constant per slice: **Fable acceptance-audits and merges** (the no-PR model),
 the guard runs 15/15 exact at every commit, all six CI gates green.
