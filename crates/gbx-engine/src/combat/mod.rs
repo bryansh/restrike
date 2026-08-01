@@ -253,6 +253,12 @@ pub struct Combatant {
     /// by 1 when an elf readies a bow/short sword/long sword (types
     /// 0x29-0x2C, 0x24, 0x25). Default 0 (monster) for hand-built combatants.
     pub race: u8,
+    /// `alignment@0x11B` (struct-verified `011B alignment db ?`) — the 3×3
+    /// grid, column = ethic: {0,3,6} good, {1,4,7} neutral, {2,5,8} evil.
+    /// Read by the prot-evil/prot-good alignment gates on the ACTING
+    /// combatant (`sub_3A224`/`sub_3A259` @`ovr013:022B/0260`; doc §50).
+    /// Default 0 for hand-built combatants.
+    pub alignment: u8,
     /// `saveVerse[5]@0xDF` — the record's five saving-throw targets, indexed
     /// by `SaveVerseType` (Spell = 4). Read by `do_saving_throw`
     /// (`ovr024:12F1`, doc §48); zero (auto-fail-ish) for hand-built
@@ -555,6 +561,7 @@ impl Combatant {
             str_hit_bonus: 0,
             str_dmg_bonus: 0,
             race: 0,
+            alignment: 0,
             saves: [0; 5],
             field_186: 0,
             skill_level_cleric: 0,
@@ -659,6 +666,7 @@ impl Combatant {
             str_hit_bonus: 0,
             str_dmg_bonus: 0,
             race: 0,
+            alignment: 0,
             saves: [0; 5],
             field_186: 0,
             skill_level_cleric: 0,
@@ -918,7 +926,17 @@ pub struct CombatState {
     attack_roll: i32,
     /// `gbl.SelectedPlayer` — the current ATTACKER (`ovr014:962`), read by
     /// target-side handlers (dwarf vs-giants). Scratch, as `attack_roll`.
+    /// Mirrors the binary's `player_ptr` global (`seg600:6520`): set to the
+    /// turn actor at the turn head (`sub_33281` @`ovr009:02EA`) and re-pointed
+    /// at the swing's attacker around `sub_3F4EB` (`sub_3F9DB` @`1B6F-1B85`)
+    /// — the identity the prot-evil alignment gate reads (doc §50).
     selected_attacker: usize,
+    /// `saving_throw` (the byte global `do_saving_throw` seeds per save,
+    /// `ovr024:1306/133C`) — the LIVE save-roll accumulator the SavingThrow
+    /// affect dispatch adjusts between the bonus add and the compare
+    /// (`work_on_00(player, 12)` @`ovr024:134F`; doc §50). Scratch, valid
+    /// only inside [`CombatState::do_saving_throw`].
+    saving_throw: i32,
     /// `gbl.area2_ptr.field_596` — the per-round team surprise/init-bonus mask
     /// read by `CalculateInitiative` (`ovr014.cs:38`) and cleared each round
     /// after initiative (`ovr009.cs:44`). Bit `(team + 1)`: bit 0 = party
@@ -1032,6 +1050,7 @@ impl CombatState {
             no_action_limit: DEFAULT_NO_ACTION_LIMIT,
             attack_roll: 0,
             selected_attacker: 0,
+            saving_throw: 0,
             surprise_mask: 0,
             phase: Phase::RoundStart,
             turn: TurnDriver::MeleeAi,
@@ -1081,6 +1100,7 @@ impl CombatState {
             no_action_limit: DEFAULT_NO_ACTION_LIMIT,
             attack_roll: 0,
             selected_attacker: 0,
+            saving_throw: 0,
             surprise_mask: 0,
             phase: Phase::RoundStart,
             turn: TurnDriver::Stub,
@@ -1354,6 +1374,12 @@ impl CombatState {
                 // (coab ovr009.cs:108). The held-turn BEHAVIOUR stays unmodeled;
                 // a found affect trips via the dispatch (draw-free, empty lists).
                 self.check_affects_effect(idx, CheckType::PlayerRestrained);
+                // `player_ptr := the turn actor` (`sub_33281` @`ovr009:02EA`,
+                // after the restrained dispatch, before the turn body) — the
+                // acting-combatant identity the prot-evil alignment gate
+                // reads on non-swing dispatches (e.g. a cast's saving
+                // throws); re-pointed per swing in `attack_target` (doc §50).
+                self.selected_attacker = idx;
                 if self.fighters[idx].in_combat && self.fighters[idx].delay > 0 {
                     // Site 2 — the turn-head camera (`sub_33281` @`ovr009:02FA-0318`):
                     // the camera follows the acting combatant — `focus = (team ==

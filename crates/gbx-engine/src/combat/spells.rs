@@ -686,13 +686,17 @@ impl CombatState {
         if d20 == 20 {
             return true;
         }
-        // The affect hook sits between the bonus add and the compare
-        // (`work_on_00(target, 12)` @`ovr024:134F`). Draw-free; a real
-        // save-modifying affect (dwarf 0x61) trips through the dispatch.
+        // The `saving_throw` accumulator (doc §50): the binary seeds the
+        // global with the roll (`mov saving_throw, al` @`ovr024:1306`), adds
+        // `field_186 + saveBonus` (@`1322-133C`), runs the affect hook
+        // (`work_on_00(target, 12)` @`134F`) — whose handlers adjust the LIVE
+        // accumulator (prot-evil +2; dwarf 0x61 still trips) — then compares
+        // `saves[verse] > saving_throw` (@`135B-1364`, made on equality).
+        self.saving_throw = d20 + save_bonus + self.fighters[target].field_186;
         self.check_affects_effect(target, CheckType::SavingThrow);
         let f = &self.fighters[target];
         let target_num = f.saves[(save_verse as usize).min(4)] as i32;
-        d20 + save_bonus + f.field_186 >= target_num
+        self.saving_throw >= target_num
     }
 
     /// `IsHeld()` (`Player.cs:847`): the target carries any `held_affects`

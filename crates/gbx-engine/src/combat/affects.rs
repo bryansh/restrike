@@ -89,16 +89,45 @@ impl CombatState {
     /// site that carries an RNG.
     fn run_affect_handler(&mut self, ci: usize, kind: u8) {
         match kind {
-            // `protection_from_evil` 0x08 (`affect_protect_evil`, ovr013.cs:151):
-            // `attack_roll -= 2` for an evil-aligned attacker — but its only
-            // in-combat dispatch is Type_11, which fires BEFORE the swing's
-            // d20 (`AttackTarget01` pre-AC, ovr014.cs:774): the write lands on
-            // the PREVIOUS roll and the next `PC_CanHitTarget` overwrites it.
-            // A verified stale-write NO-OP for the hit test (capture-proven:
-            // troll roll-6 vs MARK hit at the exact boundary, doc §47.7). The
-            // `savingThrowRoll += 2` twin would matter on the SavingThrow
-            // dispatch — not fired by any modeled path.
-            0x08 => {}
+            // `bless` 0x01 (`sub_3A096` @`ovr013:0096-00A3`, thunk `sub_BDA4`;
+            // coab ovr013.cs:45 `Bless`): UNCONDITIONAL `monster_morale += 5`
+            // (`add byte_1D2CC,5` @`0099`) + `attack_roll += 1` (`inc
+            // byte_1D2C9` @`009E`). Liveness is per dispatch SITE: at Type_10
+            // (attacker-side, inside `PC_CanHitTarget`) the +1 lands LIVE
+            // between the d20 seed and the compare while the +5 is stale
+            // (`FleeCheck_001` re-seeds `monster_morale` before every read);
+            // at Morale (the FleeCheck pair) the +5 is live and the +1 stale
+            // (the next swing re-seeds). No pinned capture blesses an NPC, so
+            // only the Type_10 side is capture-exercised: buffed-otyugh (doc
+            // §50) blesses all six PCs — 19 attacker dispatches, no boundary
+            // roll (the capture pins the dispatch path, the listing the +1).
+            0x01 => {
+                self.monster_morale += 5;
+                self.attack_roll += 1;
+            }
+            // `protection_from_evil` 0x08 (`sub_3A224` @`ovr013:0224-0256`,
+            // thunk `sub_BDC2`; coab ovr013.cs:151): gate on the ACTING
+            // combatant's `alignment@0x11B` ∈ {2, 5, 8} — the EVIL column
+            // (LE/NE/CE), instruction-verified @`022B-0249` — then
+            // `saving_throw += 2` + `attack_roll -= 2` (@`024B-0250`). The
+            // binary reads the `player_ptr` GLOBAL (not the dispatched
+            // player): the turn actor (`sub_33281` @`ovr009:02EA`),
+            // re-pointed at the swing's attacker around `sub_3F4EB`
+            // (`sub_3F9DB` @`1B6F-1B85`) — mirrored by `selected_attacker`.
+            // Liveness by site (§47.7): at Type_11 (once per attack, BEFORE
+            // the swing d20 seeds `attack_roll`) BOTH writes are stale —
+            // capture-proven at a troll boundary hit (§47.7) and again in
+            // buffed-otyugh with a byte-pinned evil attacker (otyugh 0x08,
+            // doc §50); at SavingThrow the `+= 2` lands LIVE on the
+            // accumulator (unexercised: no pinned save has a protected
+            // saver). MARK's duplicate node rides inert via find-FIRST.
+            0x08 => {
+                let al = self.fighters[self.selected_attacker].alignment;
+                if al == 2 || al == 5 || al == 8 {
+                    self.saving_throw += 2;
+                    self.attack_roll -= 2;
+                }
+            }
             // `dwarf_vs_orc` 0x1A (`AffectDwarfVsOrc` sub_3A7E8, ovr013.cs:357;
             // Type_10, attacker-side, LIVE inside `PC_CanHitTarget`): the
             // attacker's CURRENT target (actions.target — written by

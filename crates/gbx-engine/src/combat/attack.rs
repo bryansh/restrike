@@ -438,10 +438,18 @@ impl CombatState {
             self.clear_actions(actor);
             return true;
         }
+        // `player_ptr` re-point (`sub_3F9DB` @`1B6F-1B85`): the caller saves
+        // the global and points it at the swing's ATTACKER around the whole
+        // `sub_3F4EB` call — so every dispatch below (Type_11 included) sees
+        // the current attacker, opportunity passes included (doc §50).
+        self.selected_attacker = actor;
         // §39.5 site 6: `CheckAffectsEffect(target, Type_11)` — after
         // `reclac_player_values(target)` and before the AC selection, once per
         // attack (`mov al,0Bh; call work_on_00` @`ovr014:167E`, coab
-        // ovr014.cs:774). Draw-free (empty lists).
+        // ovr014.cs:774). Draw-free (empty lists). With prot-evil populated
+        // (doc §50) the handler's two writes land here STALE by timing: the
+        // swing d20 re-seeds `attack_roll` and every save re-seeds
+        // `saving_throw` before either is read.
         self.check_affects_effect(target, CheckType::Type11);
         // AttackTarget01's AC selection (`sub_3F4EB` @`ovr014:1683-1708`, §36.4).
         // Backstab preempts (the binary's `if CanBackStabTarget` @`1694`, `else`

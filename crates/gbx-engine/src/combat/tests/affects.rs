@@ -329,3 +329,69 @@ fn dwarf_racial_hit_adjustments() {
     state.check_affects_effect(0, CheckType::Type10);
     assert_eq!(state.attack_roll, 10, "non-orc target: gate closed");
 }
+
+// === the camp-buff handlers (doc §50 — buffed-otyugh) ==================
+
+#[test]
+fn bless_bumps_the_live_attack_roll_and_morale() {
+    // `sub_3A096` @`ovr013:0096-00A3` (§50): UNCONDITIONAL
+    // `monster_morale += 5` + `attack_roll += 1`. At Type_10 (attacker-side,
+    // inside the hit test) the +1 is live and the +5 stale; at Morale the
+    // reverse — one handler, liveness by dispatch site.
+    let (mut state, log) = affect_world();
+    state.fighters[0].affects = vec![aff(0x01, false)];
+    state.attack_roll = 10;
+    state.monster_morale = 0;
+    state.check_affects_effect(0, CheckType::Type10);
+    assert_eq!(state.attack_roll, 11, "bless +1, live at Type_10");
+    assert_eq!(state.monster_morale, 5, "the morale twin");
+    state.check_affects_effect(0, CheckType::Morale);
+    assert_eq!(
+        state.monster_morale, 10,
+        "live at the FleeCheck Morale site"
+    );
+    assert!(stubs(&log).is_empty(), "bless dispatches, no tripwire");
+}
+
+#[test]
+fn prot_evil_gates_on_the_acting_combatants_alignment() {
+    // `sub_3A224` @`ovr013:0224-0256` (§50): the ACTING combatant's
+    // `alignment@0x11B` ∈ {2,5,8} (the evil column) → `saving_throw += 2`
+    // + `attack_roll -= 2`; any other alignment → a total no-op. The
+    // buffed-otyugh attackers carry 0x08 (CE).
+    let (mut state, log) = affect_world();
+    state.fighters[0].affects = vec![aff(0x08, false)];
+    for (align, fires) in [(8u8, true), (2, true), (5, true), (0, false), (4, false)] {
+        state.fighters[1].alignment = align;
+        state.selected_attacker = 1;
+        state.saving_throw = 10;
+        state.attack_roll = 10;
+        state.check_affects_effect(0, CheckType::Type11);
+        let want = if fires { (12, 8) } else { (10, 10) };
+        assert_eq!(
+            (state.saving_throw, state.attack_roll),
+            want,
+            "alignment {align}"
+        );
+    }
+    assert!(stubs(&log).is_empty(), "prot-evil dispatches, no tripwire");
+}
+
+#[test]
+fn prot_evil_duplicate_node_is_inert_via_find_first() {
+    // MARK carries TWO prot-evil nodes (buffed-otyugh entry chains, §50):
+    // `calc_affect_effect` finds the kind once per dispatch (find-FIRST), so
+    // the duplicate never lands a second −2/+2.
+    let (mut state, _log) = affect_world();
+    state.fighters[0].affects = vec![aff(0x08, false), aff(0x08, false)];
+    state.fighters[1].alignment = 8;
+    state.selected_attacker = 1;
+    state.saving_throw = 10;
+    state.attack_roll = 10;
+    state.check_affects_effect(0, CheckType::Type11);
+    assert_eq!(
+        (state.saving_throw, state.attack_roll),
+        (12, 8),
+        "one firing, not two"
+    );
+}

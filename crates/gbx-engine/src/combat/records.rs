@@ -193,6 +193,10 @@ fn combatant_from_record(
         0
     };
     c.race = raw.get(0x74).copied().unwrap_or(0);
+    // §50 the prot-evil alignment gate: `alignment@0x11B` (struct-verified),
+    // read on the ACTING combatant by `sub_3A224`/`sub_3A259` — the otyughs
+    // carry 0x08 (CE, the evil column {2,5,8}); TRAVIS 0x04 (TN).
+    c.alignment = raw.get(0x11B).copied().unwrap_or(0);
     // §48 the cleric spell slice: `saveVerse[5]@0xDF` + the additive save
     // bonus `field_186@0x186` (sbyte) — `do_saving_throw`'s inputs; and the
     // Cleric/Paladin skill levels for `spellMaxTargetCount`'s Cleric arm
