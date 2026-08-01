@@ -3536,3 +3536,128 @@ bare-handed).
   question answered end-to-end. Next per §46: campaign 3 (buffed-party
   affects — camp-cast bless/prot from slot H, driving the CallAffectTable
   handlers + .FX import) → M6 visualizer.
+
+## 50. ★ buffed-otyugh CLOSED 1,089/1,089 — the camp-buff handlers (bless + prot-evil) and the SURRENDER proof; GUARD 15/15 — THE §46 EXIT GATE PASSES ★ (2026-08-01, Fable)
+
+The campaign-3 capture (`buffed-otyugh.gbxtrace`) — the LAST §46 gate: the
+slot-H party, staged from slot I (a position-only teleport clone of the same
+records/gear), CAMP-BUFFED before the fight, vs 5 evil OTYUGHS (alignment
+0x08, all size-1 — not the sewer-fight-4 pack). 1,094 raw / 1,089 post-entry
+draws, 5 rounds, decisive win; 58C=75 / 6E4=0xFD→−3 (the §47 byte-bridge) /
+md=6 all emitted in-trace. Entry affect chains (the §44.2 hook channel, first
+capture to carry SPELL buffs): **bless 0x01 on all six PCs**,
+**protection_from_evil 0x08 on MATHEW ×1 and MARK ×2 (a duplicate node)**,
+TRAVIS's dwarf racials (0x61/0x1A/0x2F) and LEDERA's 0x6B riding along.
+
+Peel chain, guard exact at each commit: intake Frontier(29) → the camp-buff
+handlers (frontier UNMOVED @29 — handlers are draw-neutral by themselves) →
+kits + toggle + the surrender-wire retirement → CLOSED.
+
+### 50.1 The intake and the input pins
+
+- **Frontier(29)**: LEDERA's first swing (turn 0: walk + d5/d1 near-pick +
+  d20) punches d2 where the capture swords d8 — the cleric-guildwar intake
+  signature on a new basename. The fix is pure keying: `slot_h_party_kit`
+  now keys across all THREE slot-H basenames (slot I clones the records);
+  the OTYUGH roster is itemless (natural attacks from the records, exactly
+  as sewer-fight-4 proved).
+- **§38 toggles=[0] DERIVED** (h4_toggle_ordinal): the recorded flip sits
+  between post-entry draws 22/23 and draw 22 IS the head of global turn 0
+  (LEDERA's) — the cleric-fk shape again. Continue-Battle schedule EMPTY.
+- With kits + toggle the replay ran **draw-exact end-to-end with 21 stub
+  trips** — the frontier pin type has no arm for that state, which forced
+  the honest commit order: handlers first (frontier unmoved), then the
+  closure commit. The trips decomposed: 19 × `affect-effect` = bless
+  Type_10 dispatches (MATHEW 4, MARK 5, TRAVIS 4, LEDERA 5, SHARA 1 —
+  PHILIPPE never swings), 2 × `surrender-int5` (below).
+
+### 50.2 The bless handler (`sub_3A096` @`ovr013:0096-00A3`, thunk `sub_BDA4`)
+
+- Instruction-verified: `add byte_1D2CC,5` (monster_morale) + `inc
+  byte_1D2C9` (attack_roll) — UNCONDITIONAL, one handler for every dispatch
+  site; coab's `Bless` (ovr013.cs:45) is faithful. Liveness is per SITE: at
+  Type_10 (attacker-side, inside `PC_CanHitTarget` between the d20 seed and
+  the compare) the +1 is LIVE and the +5 stale (`FleeCheck_001` re-seeds
+  `monster_morale` before every read); at the two FleeCheck Morale sites
+  the reverse. No pinned capture blesses an NPC, so only the Type_10 side
+  is capture-exercised.
+- The capture pins the DISPATCH PATH, the listing pins the +1: all 19
+  blessed swings replay identically because no d20 lands on a hit/miss
+  boundary the +1 would flip (the draw-exact no-op replay proved the
+  boundary's absence before the handler landed).
+
+### 50.3 The prot-evil handler (`sub_3A224` @`ovr013:0224-0256`, thunk `sub_BDC2`)
+
+- **The alignment gate, instruction-verified** (@`022B-0249`): the binary
+  tests `alignment@0x11B` (struct-verified `011B alignment db ?`) against
+  {2, 5, 8} — the EVIL column of the 3×3 grid — then `add saving_throw,2` +
+  `sub byte_1D2C9,2` (@`024B-0250`). The twin `sub_3A259` (prot-good) tests
+  {0, 3, 6}. Direction confirmed: protection FROM evil fires for EVIL
+  attackers; coab's `SelectedPlayer.alignment` transliteration is faithful.
+- **Whose alignment: the `player_ptr` GLOBAL** (seg600:6520), not the
+  dispatched player — set to the turn actor at the turn head (`sub_33281`
+  @`ovr009:02EA`, after the PlayerRestrained dispatch) and saved/re-pointed
+  at the swing's ATTACKER around the whole `sub_3F4EB` call (`sub_3F9DB`
+  @`1B6F-1B85`) — opportunity passes included. Our `selected_attacker` now
+  mirrors both sites.
+- **The `saving_throw` accumulator modeled**: `do_saving_throw` seeds the
+  byte global with the roll (@`ovr024:1306`), adds `field_186 + saveBonus`
+  (@`1322-133C`), runs the SavingThrow hook (@`134F`) — where handlers
+  adjust the LIVE value — then compares `saves[verse] > saving_throw`
+  (@`135B-1364`). Our inline sum became the seeded accumulator; both cleric
+  captures' saves replay operand-identical through the refactor.
+- **Liveness by site**: at Type_11 (once per attack, BEFORE the swing d20
+  re-seeds `attack_roll`) BOTH writes are stale — §47.7's ruling re-proven
+  here with a BYTE-PINNED evil attacker (otyugh 0x08; the sewer-fight-3
+  proof never pinned the troll's alignment). At the SavingThrow hook the
+  `+= 2` lands LIVE — unexercised (no pinned save has a protected saver),
+  the one genuinely-open arm of the handler. MARK's duplicate node is inert
+  via find-FIRST (`calc_affect_effect` runs the handler once per dispatch);
+  unit test pinned.
+- SHARA/PHILIPPE/LEDERA/TRAVIS pin the unprotected path (no 0x08 → no
+  dispatch); TRAVIS's 0x04 (TN) would also fail the gate if he ever carried
+  the affect.
+
+### 50.4 ★ The SURRENDER proof (§28 item 7, unproven since 2026-07-20) ★
+
+The two remaining trips were the `surrender-int5` wire — firing NOT as a
+stub but as the branch's first live exercise, and the capture proves it
+draw-for-draw:
+
+- The otyughs are SLOW (move 6 → 12-half) against the buffed party's
+  18-half budgets, so a failing FleeCheck lands in the speed fork's
+  surrender arm (`MaxOppositionMoves > CalcMoves/2`), and **otyugh
+  Int@0x13 = 10 > 5** takes the surrender: `RemoveFromCombat("Surrenders",
+  status 4 unconscious)`, turn over. TWO otyughs ([6] and [8]) surrender in
+  the endgame and the whole fight — removals, occupancy repaints, the
+  post-surrender mop-up — replays operand-exact to equal length. This is
+  exactly the "slower-than-party Int>5 enemy capture" the branch had been
+  waiting for since §28/§29.
+- The wire RETIRED capture-proven (the hold-landed pattern): unit tests pin
+  the Int>5 arm (removed unconscious, no `Tile_DownPlayer` stamp — §28) and
+  the Int≤5 fall-through (the repurposed tripwire test, now wire-free).
+
+### 50.5 Gates + residue
+
+- ★ **GUARD 15/15 — EVERY CAPTURE EVER TAKEN CLOSED, operand-exact,
+  draw-for-draw, 0 trips.** 988 workspace tests, clippy 0, fmt clean. ★
+- New cited-not-modeled: the prot-evil SavingThrow `+= 2` arm (LIVE in the
+  accumulator, no capture exercises a protected saver); 0x61 con-save and
+  0x6B elf-resist-sleep keep the `affect-effect` tripwire (their dispatches
+  never fire on a modeled path); the radius carriers (prot-evil-10-radius
+  0x2D/0x2E, prayer 0x31) still trip on a carrier find. Standing §48.6/
+  §49.6 lists unchanged (ff-scan, downed-ally healing override, 0x53/0x5E,
+  wands, turn-undead, sticks_to_snakes/entangle, vs-large dice).
+
+### 50.6 ★ THE §46 EXIT GATE PASSES — combat is done-for-now; M6 OPENS ★
+
+All three §46 campaigns are complete: campaign 1 (the four sewer rosters,
+§45/§47), campaign 2 (the two cleric fights, §48/§49), campaign 3 (the
+buffed-party affects, this section). The 15-capture matrix is closed
+operand-exact with zero stub trips, and the affect substrate now carries
+REAL camp-cast spell buffs end-to-end (population → dispatch → live
+handlers). Per the §46 ruling: **combat is DONE-FOR-NOW and M6 — the
+VISUALIZER — opens.** The circle-back ledger stands for the deferred tail
+(exotic spells, monster specials, invisibility's sparse retry, wands,
+turn-undead, XP/treasure, the .FX import, wilderness tiles, the 6E4
+ECL-store decode) — capture-driven behind tripwires, post-visualizer.
