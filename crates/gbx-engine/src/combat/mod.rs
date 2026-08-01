@@ -835,6 +835,167 @@ pub enum ActionEvent {
         combatant_id: usize,
         stub: &'static str,
     },
+
+    // --- presentation vocabulary (M6 slice 2, D-CV2) -----------------------
+    //
+    // Everything below is **engine-local**: the `.gbxtrace` `action` profile is
+    // FROZEN at the translated set above, so the oracle collector drops each of
+    // these with its own explicit arm exactly as it drops `StubTripped`
+    // (`gbx-oracle/src/sink.rs`). They exist so the combat scene can present a
+    // fight without reading `CombatState` mid-playback (the §49 "end-of-STEP
+    // state" trap). Every one is emitted from the original's own already-modeled
+    // call site and is **draw-neutral** — emission touches nothing but the sink.
+    /// The combat camera moved (`mapScreenTopLeft`, doc §36.3). Emitted from
+    /// [`CombatState::screen_map_check`] — the single choke point every modeled
+    /// scroll site in `facing.rs` funnels through (§1.2) — on the branch that
+    /// actually rewrites the window, carrying the **new** top-left. The setup
+    /// camera (`combat_setup`, `ovr011.cs:1209`) writes the field directly and
+    /// emits nothing: it is the entry snapshot the scene reads through
+    /// [`CombatState::camera_top_left`] after the first `step()`, not a scroll.
+    Camera { top_left: GridPos },
+    /// A combatant left the board. Drives the death flash, the body tile, the
+    /// vanish, and the message choice (§1.5). Emitted from both removal paths:
+    /// `CombatantKilled` (the damage-death tail of [`CombatState::apply_damage`],
+    /// `ovr033:534`) and `RemoveFromCombat` (`sub_644A7` @`ovr024:14A7`), after
+    /// the removal's own camera scroll — so a `Camera` that brings the leaver
+    /// into view precedes its `Removed`, as the original draws it.
+    Removed {
+        combatant_id: usize,
+        reason: RemovalReason,
+    },
+    /// The round-end bleed tick advanced a dying combatant one point
+    /// (`BattleRoundChecks`, `ovr009.cs:369-382`); `died` is the `bleeding > 9`
+    /// bleed-out that flips it to `dead` (the "is killed" message). Before this
+    /// slice that tick mutated the roster with **zero emissions** — a presented
+    /// board advanced by events alone would have silently missed it.
+    Bled { combatant_id: usize, died: bool },
+    /// The round-end "Continue Battle:" prompt fired (`ovr009.cs:404-410`, doc
+    /// §48) and was answered. Emitted **whenever the prompt occurs**, including
+    /// the schedule-answered replay path — the original *displays* the prompt
+    /// either way, and the scene must show it. (D-CV5's live suspension replaces
+    /// the schedule as the answer source; it does not change this emission.)
+    ContinueBattlePrompt { answered_yes: bool },
+    /// A ranged swing launched a missile (`DrawRangedAttack`/`draw_missile_attack`,
+    /// `ovr014.cs:1590-1671`), emitted beside the missile camera's persistent
+    /// effect at both firing sites (the readied ranged item, and a Sling/
+    /// StaffSling primary's second shot).
+    ///
+    /// **Payload note (finalized at implementation):** D-CV2's table names this
+    /// `weapon_class`; the field carries the raw **ITEMS type** instead. The
+    /// class is a pure function of the type — `DrawRangedAttack`'s switch picks
+    /// the COMSPR slot, frame count, per-step delay and launch sound from it
+    /// (§1.4: arrow/dart/quarrel/spear vs the 4-frame spin vs sling vs oil) —
+    /// and that table is not transcribed anywhere in-repo yet. Classifying here
+    /// would mean inventing it; carrying the type is lossless, so the table
+    /// lands **scene-side with the animation rows it feeds**, the same way §1.4
+    /// puts the transient mid-flight camera pan in the scene as a coab
+    /// transcription. No vocabulary change is needed when it does.
+    Missile {
+        attacker_id: usize,
+        target_id: usize,
+        weapon_type: u8,
+    },
+    /// A cast with a nonzero `castingDelay / 3` QUEUED — the "Begins Casting"
+    /// message (`ovr014.cs:1414-1427`). Carries no spell id because the
+    /// original's message does not name the spell (§1.5); the id shows at
+    /// resolution, in [`ActionEvent::Cast`].
+    BeginsCasting { caster_id: usize },
+    /// A cast RESOLVED (`sub_5D2E1`, `ovr023.cs:674-812`) — "Casts a Spell" /
+    /// "Spell:&lt;name&gt;". Emitted once the targeting pass has run, immediately
+    /// before this cast's [`ActionEvent::SpellTarget`] run; a QuickFight cast
+    /// that found no target ("Spell Aborted", `ovr023.cs:792`) emits `Cast` with
+    /// an empty run. A miscast (`ovr023:0714`) emits nothing at all — no cast
+    /// happened.
+    Cast { caster_id: usize, spell_id: u8 },
+    /// One entry of the cast's target list (`gbl.spellTargets`), emitted in pick
+    /// order directly after that cast's [`ActionEvent::Cast`]. One event per
+    /// pick rather than a list payload — `ActionEvent` stays `Copy` (D-CV2).
+    SpellTarget { target_id: usize },
+    /// A combatant was healed. `amount` is the **rolled** heal (the number the
+    /// original's message reports), not the post-cap hp delta; `Bandage` carries
+    /// `0` — it restores no hp, it lifts `dying → unconscious` and zeroes
+    /// `bleeding` (`ovr025.cs:1628`).
+    Healed {
+        healer_id: usize,
+        target_id: usize,
+        amount: i32,
+        kind: HealKind,
+    },
+    /// The held-target slay (`sub_3F4EB` head @`ovr014:152C-15E0`, doc §49) —
+    /// "slays helpless" (§1.5), a guaranteed draw-free kill. Emitted at the head
+    /// of the branch, before the damage cascade its `Removed` comes out of.
+    SlayHelpless {
+        attacker_id: usize,
+        target_id: usize,
+    },
+    /// A sound effect fired at a faithful site (ids per `Gbl.cs:45-64`, §1.4);
+    /// the scene passes it through to `Frame.sounds` (D-UI1). See the
+    /// [`sound`] module for the emitted ids and for the two §1.4 sounds that are
+    /// deliberately **not** emitted here (missile launch and spell cast, whose
+    /// ids come off tables that live scene-side with their animations).
+    Sound { id: u8 },
+}
+
+/// Why a combatant left the board — the [`ActionEvent::Removed`] payload.
+///
+/// D-CV2's table writes this `Killed | Downed(dying|dead) | Fled | Surrendered`;
+/// resolved at implementation as three damage-path outcomes (the health-status
+/// ladder's `dead` / `dying` / `unconscious`, `ovr025.cs:1197-1216`) plus the two
+/// `RemoveFromCombat` callers, which is exactly the message choice §1.5 needs:
+/// "goes down" + "and is Dying" / "is killed".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemovalReason {
+    /// The damage path left it `dead` — "is killed".
+    Killed,
+    /// The damage path left it `dying` (`dying: true`, still bleeding and
+    /// bandageable) or `unconscious` (an exact drop to 0) — "goes down".
+    Downed { dying: bool },
+    /// `flee_battle`'s Got-Away removal (`RemoveFromCombat(_, running)`,
+    /// `ovr014:0D90`) — the fleer walks off with its hp intact.
+    Fled,
+    /// The `FleeCheck_001` surrender branch (`RemoveFromCombat("Surrenders",
+    /// unconscious)`, `ovr010:1501-1519`, doc §28 item 7).
+    Surrendered,
+}
+
+/// What healed a combatant — the [`ActionEvent::Healed`] payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HealKind {
+    /// A cure spell (`SpellCureLight`, `ovr023:1DBC`).
+    Cure,
+    /// The combat bandage turn (`bandage(true)`, `ovr025:335F`) — "is bandaged".
+    Bandage,
+}
+
+/// The [`ActionEvent::Sound`] ids the combat core emits (`Gbl.cs:45-64`, §1.4).
+///
+/// Only sounds whose id §1.4 pins **and** whose site is already modeled are
+/// emitted from here. Two of §1.4's rows are deliberately absent:
+///
+/// - **missile launch** (`0x0C` arrow/dart/quarrel/spear, `9` axe/club/glaive
+///   and the default arm, `6` oil/sling) — the id is selected by the same
+///   `DrawRangedAttack` weapon-class table that picks the flight animation, so
+///   it rides with [`ActionEvent::Missile`]'s `weapon_type` into the scene;
+/// - **spell cast** (`2` / `8` / `0x0B` "by spell") — the per-spell mapping is
+///   not transcribed in [`spell_entry`](super::spells) or anywhere else in-repo;
+///   it rides with [`ActionEvent::Cast`]'s `spell_id`.
+///
+/// Emitting a guessed class or table here would be a fidelity claim the repo
+/// cannot back; carrying the operand instead is lossless.
+pub mod sound {
+    /// A melee/ranged swing connected (`ovr014` attack display).
+    pub const HIT: u8 = 7;
+    /// A swing missed. (Shares its id with the axe/club launch sound.)
+    pub const MISS: u8 = 9;
+    /// A combatant went down on the damage path (`CombatantKilled`).
+    ///
+    /// Emitted for every damage-path removal. Whether the original gates this on
+    /// `dead` rather than `dying`/`unconscious` is unpinned — the co-emitted
+    /// [`ActionEvent::Removed`](super::ActionEvent::Removed) reason lets the
+    /// scene narrow it without a vocabulary change.
+    pub const DEATH: u8 = 5;
+    /// One movement step (`sub_3E748`, `ovr014.cs:251-321`).
+    pub const STEP: u8 = 0x0A;
 }
 
 /// The engine's action-trace seam (D-OR3, task deliverable 4), mirroring
@@ -1190,6 +1351,30 @@ impl CombatState {
     /// The current round counter (`byte_1D8B7`).
     pub fn combat_round(&self) -> u16 {
         self.combat_round
+    }
+
+    /// The combat camera: the map cell at the top-left of the 7×7 window
+    /// (`gbl.mapToBackGroundTile.mapScreenTopLeft`, doc §36.3). The window spans
+    /// `[top_left, top_left + (6,6)]`.
+    ///
+    /// A plain boundary read — no behavior change; the field is already
+    /// maintained draw-exactly by the `facing.rs` scroll sites. **Read it after
+    /// the first [`step`](Self::step)** (D-CV2's entry snapshot): the setup
+    /// camera initializes lazily inside [`combat_setup`](Self::combat_setup) on
+    /// that first call (`ovr011.cs:1209`), so before it the field still holds its
+    /// constructor value. Thereafter the scene tracks the camera from
+    /// [`ActionEvent::Camera`] during playback and may re-read here at step
+    /// boundaries (mid-playback reads are forbidden — the §49 end-of-STEP trap).
+    pub fn camera_top_left(&self) -> GridPos {
+        self.map_screen_top_left
+    }
+
+    /// The camera-follow flag (`gbl.focusCombatAreaOnPlayer`, `byte_1D910`) — the
+    /// companion boundary read to [`camera_top_left`](Self::camera_top_left).
+    /// Gates the focus-dependent scroll sites, so the scene needs it to explain
+    /// a step whose camera did *not* move.
+    pub fn camera_focus(&self) -> bool {
+        self.focus
     }
 
     /// The roster in iteration order (read-only; draw order depends on it). An

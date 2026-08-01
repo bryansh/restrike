@@ -214,6 +214,30 @@ impl ActionSink for CollectorActionSink {
             // Stub tripwires are replay diagnostics, not `.gbxtrace` vocabulary
             // (the capture side has no such event) — dropped from the trace.
             ActionEvent::StubTripped { .. } => return,
+
+            // --- engine-local presentation vocabulary (D-CV2) ---------------
+            //
+            // The `.gbxtrace` `action` profile is **FROZEN** at the translated
+            // set above: the equality surface never grows for presentation's
+            // sake, and the capture side has no counterpart for any of these.
+            // Each therefore gets its **own explicit drop arm**, exactly as
+            // `StubTripped` does. A `_ => return` catch-all here is FORBIDDEN
+            // (D-CV2 vocabulary mechanics): it would silently swallow a future
+            // trace-worthy variant instead of failing this match at compile
+            // time. That compile-time failure IS the exhaustiveness test —
+            // adding a variant to `ActionEvent` without deciding, here, whether
+            // it belongs on the wire does not build.
+            ActionEvent::Camera { .. } => return,
+            ActionEvent::Removed { .. } => return,
+            ActionEvent::Bled { .. } => return,
+            ActionEvent::ContinueBattlePrompt { .. } => return,
+            ActionEvent::Missile { .. } => return,
+            ActionEvent::BeginsCasting { .. } => return,
+            ActionEvent::Cast { .. } => return,
+            ActionEvent::SpellTarget { .. } => return,
+            ActionEvent::Healed { .. } => return,
+            ActionEvent::SlayHelpless { .. } => return,
+            ActionEvent::Sound { .. } => return,
         };
         self.events.borrow_mut().push(translated);
     }
