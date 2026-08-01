@@ -428,6 +428,19 @@ prints whole. The scene consumes whole ticks; it never sleeps, never reads a
 clock (D9), and a reel host may run it at N× by ticking faster — determinism
 is per-tick, so speed never changes frames, only wall time.
 
+**The speed/skip door is explicitly OPEN (Bryan, 2026-08-01).** Because
+presentation is draw-free and the presented board reconciles at every step
+boundary, both acceleration forms are architecturally safe and may land
+whenever wanted: (a) **host tick-multiplier** — reel/turbo runs ticks faster,
+frames unchanged; (b) **timeline fast-drain** — "skip" collapses the current
+step's remaining beats to zero ticks and jumps the presented board to the
+already-reconciled state; nothing downstream can observe the difference. The
+D-CV2 lockstep invariant is *satisfied* by a skip (playback completes, just
+instantly) — it forbids computing step N+1 before N's playback has drained,
+not draining fast. The faithful Speed menu (0–9) ships with M6c;
+player-facing turbo/skip-animation UI is M8 QoL, default-off per D4 —
+deferred, never foreclosed.
+
 ### D-CV4 — Faithful-first rendering; synthetic-fixture goldens
 
 The scene draws the original screen (§1.1–§1.3): palette 0↔8 swap for the
@@ -614,12 +627,24 @@ implements; Fable audits; guard referees every commit):
 7. Suspensions + TurnCmd + menus/aim (dark-landing first, guard-exact, then
    UI; M6c closes with the manual capture campaign).
 
-Model/effort per PLAN §9: slices 1/3/4/5 are Opus 4.8 implementation
-sessions off this door; slice 2 is small enough to ride with 3; slices 6/7
-get a short Fable spec-refresh each (the shell-flow state chart and the
-TurnCmd legality table deserve their own §-sections in this doc before
-implementation, same as §26/§28/§34/§36 did in M5). Staging the manual-turn
-capture is Bryan+Fable, one launch (the §25 runbook applies unchanged).
+**Who does what (the agent plan, per the standing working model — Fable
+specs/audits/merges, Opus implements, Bryan launches/playtests/ratifies):**
+
+| Slice | Work | Implementer | Spec source | Bryan | Closes |
+|---|---|---|---|---|---|
+| 1 | COMSPR/CPIC/CHEAD/CBODY + tile decoders, 24×24 atlas, boot/entry art loading; opens with the `dump-image` shape check (§6.1) | **Opus 4.8 @ high**, worktree | doc §1.2–1.3 + D-CV4 | — | — |
+| 2 | Camera getter, new presentation events + collector drop arms, `Move`-emit relocation — all draw-neutral, guard-proven | **Opus 4.8 @ high** (may ride with slice 3, or run parallel to slice 1 — disjoint crates) | D-CV2 | — | — |
+| 3 | `CombatScene` core: layout/tiles/icons/presented board; fixture pixel goldens | **Opus 4.8 @ high** | §1.1–1.3 + D-CV4 | — | — |
+| 4 | Playback timeline: beats/messages/missiles/death flash/sounds; timeline units + **the draw-parity invariant test** | **Opus 4.8 @ high** | §1.4–1.5 + D-CV2/3 | — | — |
+| 5 | Reel host (`Engine::new_reel`), knob/loadout library-ification, versioned sidecar (+ hand-pinned CPIC ids ×15) | **Opus 4.8 @ high** | D-CV1(2) + §4 M6a | watches the first reel (demo payoff) | **M6a** |
+| 6 | Shell combat flow + faithful floor-gen + real party kits + serde budget + sequencing obligations | **Fable 5 @ xhigh spec-refresh first** (shell-flow state chart §-section), then **Opus 4.8 @ high** | D-CV1(1)/6/7 + the new § | boot→bar playtest | **M6b** |
+| 7 | Suspensions + `TurnCmd` core (dark-landing, guard-exact) then menus/aim UI | **Fable 5 @ xhigh spec-refresh first** (TurnCmd legality table §-section), then **Opus 4.8 @ high** | D-CV5 + §1.7 + the new § | stages the manual-turn capture w/ Fable (one launch, §25 runbook); manual-fight playtest | **M6c** |
+
+Constant per slice: **Fable acceptance-audits and merges** (the no-PR model),
+the guard runs 15/15 exact at every commit, all six CI gates green.
+Sequencing: 1 and 2 can parallelize; 3 needs both; 4 needs 3; 5 needs 4;
+6 needs 5's scene surface plus its spec-refresh; 7 last. Implementer
+sessions resume-don't-respawn on infra drops (the M5 pattern).
 
 ## 6. Open questions → docket seeds
 
@@ -647,7 +672,8 @@ capture is Bryan+Fable, one launch (the §25 runbook applies unchanged).
 - No spell-menu UI beyond what M6c's Cast needs from the already-modeled
   memorized lists; exotic spell visuals land with their circle-back rows
   (unknown spell id still trips `spell-entry`).
-- No QoL rendering (zoom/log/health bars) — M8.
+- No QoL rendering (zoom/log/health bars, turbo/skip UI) — M8; deferred, not
+  foreclosed (the D-CV3 speed/skip door is explicitly open).
 - No sound synthesis — M8; M6 emits `SoundEvent`s only.
 - The egui inspector combat pane is welcome as a byproduct, never the
   deliverable.
