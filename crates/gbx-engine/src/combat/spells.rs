@@ -304,7 +304,9 @@ impl CombatState {
     /// `delay` clamps to `min(current, cast_delay)` with a floor of 1, so the
     /// caster stays in the pick pool and the cast resolves at its NEXT pick
     /// (the capture's d4+d7 mini-turn, doc §48). Returns `casting_spell`.
-    fn spell_menu3(&mut self, rng: &mut EngineRng, actor: usize, spell_id: u8) -> bool {
+    /// (`pub(super)` so the D-CV2 emission-order tests can drive the queue and
+    /// immediate arms directly, without steering the selection loop by seed.)
+    pub(super) fn spell_menu3(&mut self, rng: &mut EngineRng, actor: usize, spell_id: u8) -> bool {
         let entry = spell_entry(spell_id).expect("caller guarantees a transcribed id");
         // Camp-only spell reached in combat (@1385) — coab zeroes spell_id, so
         // casting_spell stays false. Unreachable for the transcribed rows.

@@ -501,7 +501,9 @@ impl CombatState {
     /// `flee_battle` (`ovr014.cs:426`): the escape check, drawing a `d2` tiebreak
     /// (`:443`) only when the fastest opponent exactly matches the fleer's speed.
     /// Reached only from the flee path; removes the fleer on success (**Got Away**).
-    fn flee_battle(&mut self, rng: &mut EngineRng, actor: usize) {
+    /// (`pub(super)` so the D-CV2 emission-order tests can drive the Got-Away
+    /// removal directly, as [`bandage`](Self::bandage) already is for §47.)
+    pub(super) fn flee_battle(&mut self, rng: &mut EngineRng, actor: usize) {
         let gets_away = if self.build_near(actor, 0xff, false).is_empty() {
             true
         } else {

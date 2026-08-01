@@ -422,6 +422,97 @@ mod tests {
         assert_eq!(trace.rng_event_count(), 3, "one d20 + two d6");
     }
 
+    /// D-CV2's frozen-vocabulary rule, runtime half: every engine-local
+    /// presentation event is dropped, so the `.gbxtrace` `action` profile never
+    /// grows for presentation's sake and a scene-driven run writes exactly the
+    /// trace a headless one does.
+    ///
+    /// The **compile-time** half is the match in [`CollectorActionSink`] itself:
+    /// it is exhaustive over `ActionEvent` with a per-variant arm and no `_ =>`
+    /// catch-all, so a new variant added upstream breaks this build until
+    /// somebody decides, at that match, whether it belongs on the wire. That is
+    /// the guarantee — this test only pins the decision already made for the
+    /// eleven engine-local variants.
+    #[test]
+    fn engine_local_presentation_events_are_dropped_from_the_trace() {
+        use gbx_engine::combat::{ActionEvent, GridPos, HealKind, RemovalReason};
+
+        let collector = TraceCollector::new();
+        let mut sink = collector.action_sink();
+        let dropped = [
+            ActionEvent::StubTripped {
+                combatant_id: 0,
+                stub: "0-hd-sweep",
+            },
+            ActionEvent::Camera {
+                top_left: GridPos::new(3, 3),
+            },
+            ActionEvent::Removed {
+                combatant_id: 1,
+                reason: RemovalReason::Killed,
+            },
+            ActionEvent::Removed {
+                combatant_id: 1,
+                reason: RemovalReason::Downed { dying: true },
+            },
+            ActionEvent::Removed {
+                combatant_id: 1,
+                reason: RemovalReason::Fled,
+            },
+            ActionEvent::Removed {
+                combatant_id: 1,
+                reason: RemovalReason::Surrendered,
+            },
+            ActionEvent::Bled {
+                combatant_id: 2,
+                died: true,
+            },
+            ActionEvent::ContinueBattlePrompt { answered_yes: true },
+            ActionEvent::Missile {
+                attacker_id: 0,
+                target_id: 1,
+                weapon_type: 43,
+            },
+            ActionEvent::BeginsCasting { caster_id: 0 },
+            ActionEvent::Cast {
+                caster_id: 0,
+                spell_id: 3,
+            },
+            ActionEvent::SpellTarget { target_id: 2 },
+            ActionEvent::Healed {
+                healer_id: 0,
+                target_id: 1,
+                amount: 4,
+                kind: HealKind::Cure,
+            },
+            ActionEvent::Healed {
+                healer_id: 0,
+                target_id: 1,
+                amount: 0,
+                kind: HealKind::Bandage,
+            },
+            ActionEvent::SlayHelpless {
+                attacker_id: 0,
+                target_id: 1,
+            },
+            ActionEvent::Sound { id: 7 },
+        ];
+        for event in dropped {
+            sink.on_action(event);
+        }
+        assert_eq!(collector.len(), 0, "none of these reach the trace");
+
+        // A wire event through the same sink still lands — the drop arms are
+        // per-variant, not a blanket mute.
+        sink.on_action(ActionEvent::Init {
+            combatant_id: 0,
+            delay: 3,
+            dex_adj: 0,
+            surprise: false,
+        });
+        assert_eq!(collector.len(), 1);
+    }
+
     #[test]
     fn detaching_the_sink_stops_capture() {
         let collector = TraceCollector::new();
