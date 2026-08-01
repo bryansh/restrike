@@ -5,6 +5,7 @@
 
 pub mod affects;
 pub mod anim;
+pub mod combat_art;
 pub mod dax;
 pub mod detect;
 pub mod ecl_text;
