@@ -46,10 +46,6 @@ enum Expect {
     /// Replays operand-exact, draw-for-draw, equal length, zero stub trips.
     Closed,
     /// Diverges at **exactly** this draw index (operand or `(before,after)`).
-    /// Unconstructed since doc §49 closed the full 14-capture matrix — kept as
-    /// the pin type every future capture with an open frontier re-enters
-    /// through.
-    #[allow(dead_code)]
     Frontier(usize),
 }
 
@@ -435,6 +431,28 @@ const PINS: &[Pin] = &[
         // d1s are the @193 fork the intake pin sat on.
         auto_cast_toggles: &[3],
         area_field_6e4: 0,
+        continue_battle: &[],
+    },
+    Pin {
+        // The campaign-3 capture (doc §46's last gate): the slot-H party —
+        // staged from slot I, a position-only teleport clone of the same
+        // records/gear — walks into 5 evil OTYUGHS (alignment 0x08, all
+        // size-1; not the sewer-fight-4 pack) CAMP-BUFFED: bless (0x01) on
+        // all six PCs, protection_from_evil (0x08) on MATHEW ×1 and MARK ×2
+        // (a DUPLICATE node — the find-FIRST pin), TRAVIS's dwarf racials
+        // (0x61/0x1A/0x2F) and LEDERA's 0x6B riding along. 1,089 post-entry
+        // draws / 5 rounds; 58C=75 / 6E4=0xFD→−3 / md=6 all emitted
+        // in-trace; the '2' press is recorded between post-entry draws 22
+        // and 23. Intake Frontier(29): the slot-H party kits key only to
+        // the cleric basenames — LEDERA's first swing (turn 0: walk + d5/d1
+        // near-pick + d20 hit) punches d2 where the capture swords d8 (the
+        // cleric-guildwar intake signature on a new basename).
+        capture: "buffed-otyugh.gbxtrace",
+        expect: Expect::Frontier(29),
+        map_direction: 6,
+        auto_cast: false,
+        auto_cast_toggles: &[],
+        area_field_6e4: -3,
         continue_battle: &[],
     },
 ];
