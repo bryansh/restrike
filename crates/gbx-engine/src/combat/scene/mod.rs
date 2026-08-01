@@ -160,6 +160,12 @@ impl EntrySnapshot {
             .iter()
             .enumerate()
             .map(|(i, c)| {
+                // A short list would silently give a monster a party icon
+                // slot; the host owns both halves of this pairing.
+                debug_assert!(
+                    i < identities.len(),
+                    "combatant {i} has no supplied identity (name + icon slot)"
+                );
                 let identity = identities.get(i);
                 PresentedCombatant {
                     id: c.id,
