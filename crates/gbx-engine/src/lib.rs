@@ -15,6 +15,7 @@
 pub mod boot;
 pub mod charsheet;
 pub mod combat;
+pub mod combat_art;
 pub mod corridor;
 pub mod draw;
 pub mod engine;
