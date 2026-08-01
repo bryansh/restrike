@@ -357,7 +357,9 @@ pub fn load_comspr_icons(data: &GameData) -> Result<CombatIcons, CombatArtLoadEr
 
 /// `SetupGroundTiles` (`ovr011.cs:757-768`): the dungeon or wilderness set
 /// at slot 0, then RANDCOM's six at slot `0x22` (table, chair, cloudkill,
-/// [unnamed — doc §6 item 3], stinking cloud, dead body).
+/// **blank**, stinking cloud, dead body — the fourth was doc §6 item 3's
+/// "unnamed" tile; it is an all-palette-0 cell, identified in slice 3 and
+/// written up on [`crate::combat::BACKGROUND_TILE_INDEX`]).
 pub fn load_ground_tiles(
     data: &GameData,
     in_dungeon: bool,

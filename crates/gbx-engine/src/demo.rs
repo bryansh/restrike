@@ -1355,3 +1355,194 @@ fn watch_a_real_data_fight() {
         "the unified engine fought on real MON2CHA data"
     );
 }
+
+/// M6 slice 3's eyeball pass (local-only, `GBX_DATA_DIR`): build a
+/// [`CombatScene`](crate::combat::scene::CombatScene) over the **real** art —
+/// boot's COMSPR icons, `DUNGCOM`+`RANDCOM` ground tiles, `CHEAD`/`CBODY`
+/// party icons and a `CPIC` monster — and dump the rendered screens as `.ppm`
+/// **outside the repo** (D10: no real art ever lands in-tree, so this is a
+/// demo, not a golden — the goldens run on synthetic fixtures).
+///
+/// Also dumps the six `RANDCOM` tiles side by side, which is how doc §6 item
+/// 3 ("atlas slot 0x25 is unnamed in coab — identify from pixels") gets
+/// answered.
+///
+/// Run: `GBX_DATA_DIR=~/goldbox-data/cotab cargo test -p gbx-engine \
+///   -- --nocapture watch_a_real_art_combat_scene`
+#[test]
+fn watch_a_real_art_combat_scene() {
+    use crate::combat::scene::{
+        layout, render, CombatScene, EntrySnapshot, FocusCursor, PanelSummary, PresentedCombatant,
+    };
+    use crate::combat::{CombatMap, GridPos, HealthStatus, Team};
+    use crate::combat_art::{self, IconPose};
+    use crate::party::IconInfo;
+    use gbx_formats::combat_art::CELL_PX;
+
+    let Some(dir) = std::env::var_os("GBX_DATA_DIR") else {
+        eprintln!(
+            "SKIPPED: the scene demo runs in the local tier (GBX_DATA_DIR) — \
+             watch_a_real_art_combat_scene"
+        );
+        return;
+    };
+    let data = load_dir(std::path::Path::new(&dir)).expect("GBX_DATA_DIR must be readable");
+    let assets = boot(&data).expect("boot must succeed against real CotAB data");
+
+    let out_dir = std::env::var_os("RESTRIKE_SCENE_DEMO_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+
+    // --- the art: boot's COMSPR slots, then the combat-entry loads ---------
+    let mut icons = assets.combat_icons.clone();
+    let colours: [u8; 6] = [0x91, 0xA2, 0xB3, 0xC4, 0xE6, 0xF7];
+    for (slot, (head, weapon)) in [(0u8, 0u8), (3, 5), (7, 12)].into_iter().enumerate() {
+        let info = IconInfo {
+            head_icon: head,
+            weapon_icon: weapon,
+            icon_id: slot as u8,
+            icon_size: 1,
+            colours,
+        };
+        icons.set(
+            slot,
+            combat_art::load_party_icon(&data, &info, true).expect("party icon"),
+        );
+    }
+    // A monster type in slot 8 — CPIC2 block 0 is Tilverton's first picture.
+    icons.set(
+        8,
+        combat_art::load_monster_icon(&data, 2, 0).expect("monster icon"),
+    );
+    let tiles = combat_art::load_ground_tiles(&data, true).expect("dungeon ground tiles");
+
+    // --- the RANDCOM strip (doc §6 item 3) --------------------------------
+    let mut strip = Framebuffer::new();
+    for (i, slot) in (0x22..0x28usize).enumerate() {
+        let tile = tiles.tile(slot).expect("RANDCOM slot");
+        for y in 0..CELL_PX {
+            for x in 0..CELL_PX {
+                let v = tile[y * CELL_PX + x];
+                // 2× nearest-neighbour, laid out left to right with a gap.
+                for (dy, dx) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+                    strip.set_pixel(8 + i * 52 + x * 2 + dx, 40 + y * 2 + dy, v);
+                }
+            }
+        }
+    }
+    draw_string(
+        &mut strip,
+        &assets.font,
+        "RANDCOM 22 23 24 25 26 27",
+        2,
+        1,
+        0,
+        10,
+    );
+    let path = out_dir.join("restrike-scene-randcom-strip.ppm");
+    write_ppm(&strip, &path);
+    eprintln!("RANDCOM tiles 0x22..0x27 -> {}", path.display());
+    // Doc §6 item 3: slot 0x25 (background tile 0x1D) is unnamed in coab.
+    // These six lines are the identification — slot 0x16 (the DUNGCOM floor
+    // ground tile 0x17 maps to) is printed alongside as the comparison.
+    for slot in [0x16usize, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27] {
+        let tile = tiles.tile(slot).expect("atlas slot");
+        let seen: std::collections::BTreeSet<u8> = tile.iter().copied().collect();
+        eprintln!(
+            "  atlas slot 0x{slot:02X}: palette codes {seen:?}, {} non-zero pixels",
+            tile.iter().filter(|&&p| p != 0).count()
+        );
+    }
+
+    // --- a small room of real dungeon tiles --------------------------------
+    // Ground value 0x17 is a cost-1 floor; 1 is a wall. Both come off the
+    // real `BackGroundTiles` table, so the picture is real dungeon art laid
+    // out by hand (faithful floor *generation* is slice 6).
+    let mut map = CombatMap::uniform(0x17);
+    for x in 18..30 {
+        map.set_tile(GridPos::new(x, 9), 1);
+        map.set_tile(GridPos::new(x, 17), 1);
+    }
+    for y in 9..18 {
+        map.set_tile(GridPos::new(18, y), 1);
+        map.set_tile(GridPos::new(29, y), 1);
+    }
+    map.set_tile(GridPos::new(22, 12), 0x1A); // a table (RANDCOM 0x22)
+    map.set_tile(GridPos::new(23, 12), 0x1B); // a chair (RANDCOM 0x23)
+
+    let combatant =
+        |id: usize, team: Team, x: i32, y: i32, slot: usize, dir: u8| PresentedCombatant {
+            id,
+            name: ["KETHRA", "DOLAN", "SABLE", "BRIGAND"][id].to_string(),
+            team,
+            non_team_member: false,
+            icon_slot: slot,
+            size: 1,
+            pos: GridPos::new(x, y),
+            direction: dir,
+            pose: IconPose::Normal,
+            hp_current: if id == 0 { 17 } else { 22 },
+            hp_max: 22,
+            ac: 0x36,
+            health_status: HealthStatus::Okey,
+            in_combat: true,
+        };
+    let snapshot = EntrySnapshot {
+        roster: vec![
+            combatant(0, Team::Party, 21, 13, 0, 2),
+            combatant(1, Team::Party, 21, 14, 1, 2),
+            combatant(2, Team::Party, 20, 12, 2, 6),
+            combatant(3, Team::Monster, 25, 13, 8, 6),
+        ],
+        map,
+        camera_top_left: GridPos::new(19, 10),
+    };
+    let mut scene = CombatScene::new(snapshot, crate::combat::scene::SceneArt::new(tiles, icons));
+
+    let mut fb = Framebuffer::new();
+    scene
+        .render(&mut fb, &assets.symbol_sets)
+        .expect("the real-art scene must render");
+    scene.clear_text_surfaces(&mut fb);
+    scene.draw_panel(
+        &mut fb,
+        &assets.font,
+        &PanelSummary {
+            name: "KETHRA".to_string(),
+            team: Team::Party,
+            in_combat: true,
+            hp_current: 17,
+            hp_max: 22,
+            ac: 0x36,
+            health_status: HealthStatus::Okey,
+            readied_weapon: Some("Long Sword".to_string()),
+            held: false,
+        },
+    );
+    let path = out_dir.join("restrike-scene-real-art.ppm");
+    write_ppm(&fb, &path);
+    eprintln!("combat scene (real art) -> {}", path.display());
+
+    // The same screen with the focus box on the brigand — the Aim view.
+    scene.set_focus(Some(FocusCursor {
+        pos: GridPos::new(25, 13),
+        size: 1,
+    }));
+    let mut aim = Framebuffer::new();
+    scene
+        .render(&mut aim, &assets.symbol_sets)
+        .expect("aim view");
+    render::clear_status_line(&mut aim);
+    draw_string(
+        &mut aim,
+        &assets.font,
+        "Range = 4",
+        layout::STATUS_ROW,
+        0,
+        0,
+        10,
+    );
+    let path = out_dir.join("restrike-scene-real-art-aim.ppm");
+    write_ppm(&aim, &path);
+    eprintln!("combat scene, aim cursor (real art) -> {}", path.display());
+}

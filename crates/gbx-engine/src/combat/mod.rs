@@ -44,6 +44,7 @@ mod ai;
 mod attack;
 pub use ai::field_15_mode_gate;
 mod facing;
+pub mod scene;
 mod spells;
 
 /// One `roll_dice(size, count)` (`ovr024.cs:586-598`): `count` dice, each
@@ -2144,6 +2145,46 @@ pub const BACKGROUND_MOVE_COST: [u8; 74] = [
     2, 2, 2, 2, 1, 1, 1, 1, 2, 2, // 50..59
     4, 4, 4, 4, 1, 1, 0, 255, 0, 255, // 60..69
     0, 255, 0, 0, // 70..73
+];
+
+/// `BackGroundTiles[tile].tile_index` (`Struct_189B4.field_3`) — the **24×24
+/// atlas slot** `DrawIsoTile` blits for a map cell (`ovr034.cs:30-40`, doc
+/// §1.2), read off the same `Gbl.cs:186-257` `unk_189B4` table
+/// [`BACKGROUND_MOVE_COST`] takes its first column from. Purely
+/// presentational: no movement or placement path reads it.
+///
+/// Slots `0x00..=0x18` are the dungeon set (`DUNGCOM` block 1) or the first 25
+/// of the wilderness set (`WILDCOM` block 1, which fills `0x00..=0x20`);
+/// `0x22..=0x27` are RANDCOM's six (table, chair, cloudkill, **blank**,
+/// stinking cloud, dead body) — which is why ground tile `0x1F`
+/// ([`TILE_DOWN_PLAYER`]) maps to atlas slot `0x27` and `0x1E`
+/// ([`TILE_STINKING_CLOUD`]) to `0x26`.
+///
+/// **Doc §6 item 3 discharged** (M6 slice 3, read off the real data set
+/// 2026-08-01 by `demo::watch_a_real_art_combat_scene`): RANDCOM's fourth
+/// item — atlas slot `0x25`, reached only from ground tile `0x1D` — is
+/// **entirely palette code 0**, 0 of 576 pixels non-zero. That is pixel-
+/// identical to `DUNGCOM`'s own floor tile (slot `0x16`, also all-zero), so
+/// under the combat palette swap it paints a plain grey floor cell. Nothing
+/// in coab ever *writes* ground tile `0x1D` either (the four
+/// `Tile_{Table,Chair,CloudKill,StinkingCloud,DownPlayer}` constants at
+/// `Gbl.cs:676-680` skip it, and no other site assigns it), so it is a blank
+/// spacer inside the cloud group — not a missing name.
+///
+/// The sentinel rows at the tail (66, 67, 69, 71) carry `0xFF` tile indices —
+/// past `DrawIsoTile`'s `> 0x7f` fork into the `dword_1C8FC` overlay path,
+/// which is **stubbed in coab and unknown** (doc §6 item 2). The scene
+/// loud-fails there rather than inventing it
+/// ([`scene::SceneError::IsoTileOverlayPath`]).
+pub const BACKGROUND_TILE_INDEX: [u8; 74] = [
+    0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // 0..9
+    0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, // 10..19
+    0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x22, 0x23, 0x24, 0x25, // 20..29
+    0x26, 0x27, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, // 30..39
+    0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, // 40..49
+    0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, // 50..59
+    0x1C, 0x1D, 0x1E, 0x1F, 0x20, 0x21, 0xFF, 0xFF, 0x01, 0xFF, // 60..69
+    0x00, 0xFF, 0x00, 0x01, // 70..73
 ];
 
 /// The three placement/movement-relevant states of a combat-map cell. The
