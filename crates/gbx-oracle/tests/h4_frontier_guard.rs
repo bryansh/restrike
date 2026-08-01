@@ -1,9 +1,8 @@
 //! **The frontier-pin regression guard.** A committed manifest of the exact H4
-//! replay outcome for every local capture — NINE closed captures (the full
-//! bar/terrain matrix, doc §44, plus `sewer-fight-1` 1526/1526, doc §45 — the
-//! first sewer fight: Fire Knife archers, casting disruption, the party-gated
-//! area move modifier #21) that cannot silently regress, plus the campaign-1
-//! sewer captures under active peel (doc §47).
+//! replay outcome for every local capture — FIFTEEN closed captures (the full
+//! bar/terrain matrix, doc §44; the four campaign-1 sewer rosters, doc
+//! §45/§47; the two campaign-2 cleric fights, doc §48/§49; and the campaign-3
+//! buffed-party otyugh fight, doc §50) that cannot silently regress.
 //!
 //! ## The exact-pin rule (read before editing [`PINS`])
 //!
@@ -46,6 +45,10 @@ enum Expect {
     /// Replays operand-exact, draw-for-draw, equal length, zero stub trips.
     Closed,
     /// Diverges at **exactly** this draw index (operand or `(before,after)`).
+    /// Unconstructed since doc §50 closed the full 15-capture matrix — kept as
+    /// the pin type every future capture with an open frontier re-enters
+    /// through.
+    #[allow(dead_code)]
     Frontier(usize),
 }
 
@@ -447,11 +450,27 @@ const PINS: &[Pin] = &[
         // the cleric basenames — LEDERA's first swing (turn 0: walk + d5/d1
         // near-pick + d20 hit) punches d2 where the capture swords d8 (the
         // cleric-guildwar intake signature on a new basename).
+        //
+        // ★ CLOSED 1089/1089 (doc §50): the kit keying (slot_h_party_kit
+        // across all three slot-H basenames — slot I is a position-only
+        // teleport clone of the same records) + the derived toggle carried
+        // 29 → draw-exact end-to-end; the last 21 stub trips fell to the
+        // camp-buff handlers (bless dispatches on all 19 party swings — the
+        // listing-verified +1 crosses no boundary roll here; prot-evil's
+        // Type_11 writes stay stale with a byte-pinned evil attacker) and
+        // to the SURRENDER proof: two slow Int-10 otyughs hit the §28
+        // speed-fork branch and "Surrender" (removed unconscious), the
+        // fight replaying draw-for-draw through both removals — the
+        // `surrender-int5` wire retired capture-proven.
         capture: "buffed-otyugh.gbxtrace",
-        expect: Expect::Frontier(29),
+        expect: Expect::Closed, // was Frontier(29); kits + toggle + camp-buff handlers (§50)
         map_direction: 6,
         auto_cast: false,
-        auto_cast_toggles: &[],
+        // The §38 toggle pin, DERIVED (h4_toggle_ordinal): the recorded flip
+        // sits between post-entry draws 22/23 and draw 22 IS the head of
+        // global turn 0 (LEDERA's) — the head poll sees the press, exactly
+        // the cleric-fk shape.
+        auto_cast_toggles: &[0],
         area_field_6e4: -3,
         continue_battle: &[],
     },
@@ -621,7 +640,8 @@ fn replay(
     struct TripTap(Rc<RefCell<usize>>);
     impl gbx_engine::combat::ActionSink for TripTap {
         fn on_action(&mut self, e: gbx_engine::combat::ActionEvent) {
-            if matches!(e, gbx_engine::combat::ActionEvent::StubTripped { .. }) {
+            if let gbx_engine::combat::ActionEvent::StubTripped { combatant_id, stub } = e {
+                eprintln!("GUARD-TRIP stub={stub} ci={combatant_id}");
                 *self.0.borrow_mut() += 1;
             }
         }

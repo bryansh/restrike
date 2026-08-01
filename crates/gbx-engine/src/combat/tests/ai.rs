@@ -733,13 +733,16 @@ fn stub_tripwires_fire_when_unmodeled_mechanics_are_reached() {
     world.fighters[2].hit_dice = 0;
     assert!(!world.try_sweep_attack(2, 1));
 
-    // 3. surrender-int5: an NPC whose fastest opponent outruns half its own
-    // moves lands in the binary's Int>5 surrender branch. Party fighter 0 is
-    // down, so make the survivor fast via a fresh party opponent. fighter 1 is
-    // an NPC (control_morale 0x80 → the faithful gate-2 seed is 0, so gate 1
-    // passes via `== 0`); enemy_health_pct 5 < 100 − field_58C(0) → gate 2
-    // passes; max_opp = calc_moves(48)/2 = 48 > calc_moves(12)/2 = 12 → the
-    // surrender fork.
+    // 3. the surrender branch's Int ≤ 5 fall-through (the wire that lived
+    // here retired capture-proven, doc §50 — see
+    // `surrender_branch_int_gate_both_arms`): an NPC whose fastest opponent
+    // outruns half its own moves lands in the binary's surrender branch.
+    // Party fighter 0 is down, so make the survivor fast via a fresh party
+    // opponent. fighter 1 is an NPC (control_morale 0x80 → the faithful
+    // gate-2 seed is 0, so gate 1 passes via `== 0`); enemy_health_pct 5 <
+    // 100 − field_58C(0) → gate 2 passes; max_opp = calc_moves(48)/2 = 48 >
+    // calc_moves(12)/2 = 12 → the surrender fork; int_score 0 (synthetic) →
+    // no surrender, fall through false.
     world.fighters[0].in_combat = true; // revive the opponent for the ladder
     world.fighters[0].movement = 48;
     world.enemy_health_pct = 5;
@@ -787,8 +790,57 @@ fn stub_tripwires_fire_when_unmodeled_mechanics_are_reached() {
         "the downed-pc wire was retired (§26/§27): {got:?}"
     );
     assert!(got.contains(&"0-hd-sweep"), "trips: {got:?}");
-    assert!(got.contains(&"surrender-int5"), "trips: {got:?}");
+    assert!(
+        !got.contains(&"surrender-int5"),
+        "the surrender wire was retired capture-proven (doc §50): {got:?}"
+    );
     assert!(got.contains(&"spell-entry"), "trips: {got:?}");
+}
+
+/// §50 — the surrender branch (loc_364F7, §28 item 7), CAPTURE-PROVEN by
+/// buffed-otyugh: two slow Int-10 otyughs surrender against the faster party
+/// and the fight replays draw-for-draw through both removals. Int > 5 →
+/// `RemoveFromCombat("Surrenders", unconscious)` ends the turn; the removal
+/// repaints occupancy but stamps no `Tile_DownPlayer` (§28); Int ≤ 5 falls
+/// through (pinned above in the tripwire test, wire-free).
+#[test]
+fn surrender_branch_int_gate_both_arms() {
+    let mk = |team, npc, pos, movement| {
+        Fighter::new_melee(0, team, npc, pos, 30, 5, 20, movement, (1, 4, 2), 5, 1)
+    };
+    let mut world = CombatWorld::new(
+        CombatMap::uniform(FLOOR),
+        vec![
+            {
+                let mut f = mk(Team::Party, false, GridPos::new(25, 12), 48);
+                f.id = 0;
+                f
+            },
+            {
+                let mut f = mk(Team::Monster, true, GridPos::new(26, 12), 12);
+                f.id = 1;
+                f
+            },
+        ],
+    );
+    world.enemy_health_pct = 5;
+    world.area_field_58c = 0;
+    // Int 10 — the otyugh record value (@0x13). Gates as in the tripwire
+    // test: seed 0 → gate 1; pct 5 < 100 → gate 2; 48-move opponent → the
+    // speed fork's surrender arm; Int > 5 → surrenders.
+    world.fighters[1].int_score = 10;
+    assert!(world.flee_check(1), "Int>5 → the surrender turn ends");
+    assert!(!world.fighters[1].in_combat, "removed from combat");
+    assert_eq!(
+        world.fighters[1].health_status,
+        HealthStatus::Unconscious,
+        "\"Surrenders\" = status 4 (§28 item 7)"
+    );
+    assert_eq!(
+        world.map.ground_tile(GridPos::new(26, 12)),
+        FLOOR,
+        "surrender removal stamps no Tile_DownPlayer (§28)"
+    );
 }
 
 /// §38 — the mid-combat "Magic On" toggle schedule: each listed global

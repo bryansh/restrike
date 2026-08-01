@@ -81,7 +81,12 @@ pub fn loadout_for(capture: &str, name: &str) -> Option<Loadout> {
         // list per copy). `cleric-fk` is sewer-fight-1's 5-FIRE-KNIFE ambush
         // script; `cleric-guildwar` is sewer-fight-2's guild-war brawl (both
         // allied and enemy THIEFs are the same rowless ITM block 2).
-        ("cleric-fk.gbxtrace" | "cleric-guildwar.gbxtrace", n) => {
+        // `buffed-otyugh` (campaign 3, doc §50) is the SAME slot-H party —
+        // staged from slot I, a position-only teleport clone of the same
+        // records/gear — so the kits key across all three basenames. The
+        // OTYUGH roster is itemless (natural attacks straight from the
+        // records, exactly as in sewer-fight-4): no monster row.
+        ("cleric-fk.gbxtrace" | "cleric-guildwar.gbxtrace" | "buffed-otyugh.gbxtrace", n) => {
             slot_h_party_kit(n).or_else(|| sewer_monster_kit(n))
         }
         (c, n) if c.starts_with("sewer-fight-") => sewer_monster_kit(n),
@@ -234,6 +239,7 @@ pub fn capture_has_loadout(capture: &str) -> bool {
             | "sewer-fight-2.gbxtrace"
             | "cleric-fk.gbxtrace"
             | "cleric-guildwar.gbxtrace"
+            | "buffed-otyugh.gbxtrace"
     )
 }
 

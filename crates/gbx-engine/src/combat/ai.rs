@@ -202,15 +202,13 @@ impl CombatState {
                 // remove_affect(0x4B) (:14DC/:14F0) — §39.5, wired below.
                 let max_opp = self.max_opposition_moves(actor);
                 if max_opp > self.calc_moves_actor(actor) / 2 {
-                    // Surrender branch (loc_364F7, :14F7-1529, §28 item 7). The
-                    // `surrender-int5` wire (kept, repurposed) fires whenever this
-                    // implemented-but-capture-unproven branch executes — the rout
-                    // capture never reaches it (its 12-vs-12 speed tie always takes
-                    // the flee fork), so a firing marks an untested path.
-                    self.emit(ActionEvent::StubTripped {
-                        combatant_id: actor,
-                        stub: "surrender-int5",
-                    });
+                    // Surrender branch (loc_364F7, :14F7-1529, §28 item 7) —
+                    // CAPTURE-PROVEN (doc §50): buffed-otyugh's slow (6-move)
+                    // Int-10 otyughs hit it against the faster party, TWO
+                    // surrender ("Surrenders", removed unconscious) and the
+                    // whole fight replays draw-for-draw through both removals.
+                    // The `surrender-int5` wire (§28/§29) retired with that
+                    // proof; unit tests pin both Int arms in its place.
                     // :14FA `cmp byte es:[di+13h], 5; jbe → return false` — surrender
                     // only when `Int@0x13 > 5`.
                     if self.fighters[actor].int_score > 5 {
