@@ -343,6 +343,10 @@ impl CombatState {
             } else {
                 f.delay = 1;
             }
+            // D-CV2 `BeginsCasting` — the queued-cast message. No spell id: the
+            // original's "Begins Casting" does not name the spell (§1.5); the id
+            // shows at resolution, with `Cast`, one or more picks later.
+            self.emit(ActionEvent::BeginsCasting { caster_id: actor });
             true
         }
     }
@@ -379,6 +383,19 @@ impl CombatState {
         // gbl.spellTargets (the multi-target loop draws its find_target picks
         // here, doc §48).
         let targets = self.spell_target(rng, actor, spell_id);
+        // D-CV2 `Cast` + one `SpellTarget` per pick, emitted once the targeting
+        // pass has run (its `find_target` d10s are already drawn) and before the
+        // missile camera below — message, then the targets it highlights, then
+        // the projectile. The abort path emits `Cast` with an empty run: the
+        // original shows the casting text and then "Spell Aborted"
+        // (`ovr023.cs:792`). One event per pick keeps `ActionEvent: Copy`.
+        self.emit(ActionEvent::Cast {
+            caster_id: actor,
+            spell_id,
+        });
+        for &t in &targets {
+            self.emit(ActionEvent::SpellTarget { target_id: t });
+        }
         if targets.is_empty() {
             // QuickFight abort (@0792): "Spell Aborted" — ClearSpell (the slot
             // is STILL consumed), turn ends, no cast.
@@ -412,7 +429,7 @@ impl CombatState {
 
         // gbl.spellTable[spell_id] (@0780-0781) — the per-spell function.
         match spell_id {
-            0x03 => self.spell_cure_light(rng, &targets),
+            0x03 => self.spell_cure_light(rng, actor, &targets),
             0x0F => self.spell_magic_missile(rng, actor, spell_id, target),
             0x17 => self.spell_hold_x(rng, actor, spell_id, &targets),
             _ => unreachable!("spell_entry gated"),
@@ -572,7 +589,7 @@ impl CombatState {
     /// `heal_player(0, roll, spellTargets[0])` — the hp write caps at max
     /// (`heal_player`, `ovr024.cs:1336`; status gate okey/animated/unconscious/
     /// dying). cleric-fk round 2: SHARA 51 → 55 on a d8 roll of 4.
-    fn spell_cure_light(&mut self, rng: &mut EngineRng, targets: &[usize]) {
+    fn spell_cure_light(&mut self, rng: &mut EngineRng, actor: usize, targets: &[usize]) {
         let target = targets[0];
         let heal = roll_dice(rng, 8, 1) as i32;
         // heal_player status gate: dead/gone targets don't heal. All modeled
@@ -583,6 +600,16 @@ impl CombatState {
         }
         let f = &mut self.fighters[target];
         f.hp_current = (f.hp_current + heal).min(f.hp_max);
+        // D-CV2 `Healed`, after the write the gate above let through. `amount` is
+        // the **rolled** d8, which is what the original reports — not the
+        // post-cap delta (SHARA's 51 → 55 on a 4 is a full-value heal; a heal
+        // that caps still says its roll).
+        self.emit(ActionEvent::Healed {
+            healer_id: actor,
+            target_id: target,
+            amount: heal,
+            kind: HealKind::Cure,
+        });
     }
 
     /// `SpellHoldX` (`is_held` @`ovr023:2444`, listing-verified doc §48): the

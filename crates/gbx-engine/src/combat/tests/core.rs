@@ -523,7 +523,7 @@ fn resolve_attack_hit_draws_d20_then_damage_and_emits_both_events() {
     assert_eq!(out.damage.unwrap().amount, dmg as i32);
 
     let ev = actions.events();
-    assert_eq!(ev.len(), 2, "Attack then Dmg");
+    assert_eq!(ev.len(), 3, "Attack then Dmg then the hit sound");
     assert!(matches!(
         ev[0],
         ActionEvent::Attack {
@@ -542,6 +542,8 @@ fn resolve_attack_hit_draws_d20_then_damage_and_emits_both_events() {
             ..
         }
     ));
+    // The D-CV2 hit sound trails the pair it belongs to (§1.4 id 7).
+    assert!(matches!(ev[2], ActionEvent::Sound { id: sound::HIT }));
 }
 
 #[test]
@@ -570,8 +572,9 @@ fn resolve_attack_miss_draws_only_the_d20_and_emits_no_dmg() {
     assert_eq!(log.ns(), vec![20], "a miss draws no damage dice");
 
     let ev = actions.events();
-    assert_eq!(ev.len(), 1);
+    assert_eq!(ev.len(), 2, "Attack then the miss sound — no Dmg");
     assert!(matches!(ev[0], ActionEvent::Attack { hit: false, .. }));
+    assert!(matches!(ev[1], ActionEvent::Sound { id: sound::MISS }));
 }
 
 #[test]

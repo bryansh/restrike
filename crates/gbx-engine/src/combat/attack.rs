@@ -178,6 +178,23 @@ impl CombatState {
         // happens AT removal, so a corpse's cells free up immediately (a later
         // mover's `CanMove` must see them empty), not at the next position change.
         self.rebuild_occupancy();
+        // D-CV2 `Removed` + the §1.4 death sound, at the tail of the
+        // `CombatantKilled` path — after the on-screen-gated scroll above, so the
+        // `Camera` that brings an off-screen death into view precedes them.
+        // `reason` reads the ladder's verdict (`ovr025.cs:1197-1216`): the
+        // message is "is killed" for `dead` and "goes down" (+ "and is Dying")
+        // for the two downed states. `is_conscious` returned early above, so
+        // nothing else can reach here.
+        let reason = match self.fighters[target].health_status {
+            HealthStatus::Dead => RemovalReason::Killed,
+            HealthStatus::Dying => RemovalReason::Downed { dying: true },
+            _ => RemovalReason::Downed { dying: false },
+        };
+        self.emit(ActionEvent::Sound { id: sound::DEATH });
+        self.emit(ActionEvent::Removed {
+            combatant_id: target,
+            reason,
+        });
     }
 
     /// `AttackTarget`'s direction bookkeeping (`sub_3F9DB` @`ovr014:19FE-1AD2`,
@@ -355,6 +372,20 @@ impl CombatState {
         // `mapScreenTopLeft` effect is ported ([`draw_missile_camera`]). A plain
         // melee swing (null item) fires no missile.
         if matches!(ranged_item, AttackItemRef::Ammo | AttackItemRef::SelfWeapon) {
+            // D-CV2 `Missile` — emitted BEFORE the camera port, so the scene sees
+            // "a missile is launched" and then the scroll it causes, which is the
+            // order the original animates (`draw_missile_attack` pans mid-flight,
+            // §1.4). `weapon_type` is the readied ITEMS type driving the flight
+            // row; a `SelfWeapon` with no readied entry can't reach here.
+            let weapon_type = self.fighters[actor]
+                .readied_weapon
+                .map(|(t, _)| t)
+                .unwrap_or(0);
+            self.emit(ActionEvent::Missile {
+                attacker_id: actor,
+                target_id: target,
+                weapon_type,
+            });
             self.draw_missile_camera(actor, target);
         }
         // ...and `sub_3F9DB` fires `sub_40BF1` a SECOND time, with the readied
@@ -374,6 +405,17 @@ impl CombatState {
             Some(ITEM_SLING) | Some(ITEM_STAFF_SLING)
         );
         if sling_primary {
+            // The sling's own second missile — its own `Missile`, carrying the
+            // primary's type (the sling itself IS the projectile source here).
+            let weapon_type = self.fighters[actor]
+                .readied_weapon
+                .map(|(t, _)| t)
+                .unwrap_or(0);
+            self.emit(ActionEvent::Missile {
+                attacker_id: actor,
+                target_id: target,
+                weapon_type,
+            });
             self.draw_missile_camera(actor, target);
         }
         // `AttackTarget01` sets `actions.field_8 = true` (`ovr014.cs:738`) — the
@@ -402,6 +444,16 @@ impl CombatState {
         // invisibility strip (@`15AB-15B1`); then BOTH attacks-left cells
         // zero (@`15BC-15D3`) and turn-complete. Entirely draw-free.
         if self.is_held(target) {
+            // D-CV2 `SlayHelpless` — at the head of the branch, matching the
+            // listing order (the attackHeld sound and the "slays helpless"
+            // message precede the damage, §1.5). The kill's own `Removed` comes
+            // out of the `apply_damage` cascade below. Draw-free, like the whole
+            // branch. (The attackHeld sound id is not pinned in §1.4's table, so
+            // no `Sound` rides along; this event names the beat.)
+            self.emit(ActionEvent::SlayHelpless {
+                attacker_id: actor,
+                target_id: target,
+            });
             let start = self.fighters[actor].attack_idx;
             let idx = if start >= 2 && self.fighters[actor].attack2_left > 0 {
                 2
@@ -766,10 +818,14 @@ impl CombatState {
             self.redraw_combat_area(8, 2, old);
         }
         self.fighters[actor].pos = new;
-        self.rebuild_occupancy();
-        if self.focus {
-            self.redraw_combat_area(8, 3, new);
-        }
+        // D-CV2: `Move` emits **here**, right after the position write, not after
+        // the second scroll site below. The step's presentation order is
+        // scroll-to-old → step → scroll-to-new; emitting last played back as
+        // scroll-then-move. Draw-neutral — no draw sits between the two points
+        // (`rebuild_occupancy` and `redraw_combat_area` are both dice-free), so
+        // this only reorders what the sink observes. The step sound (§1.4,
+        // `ovr014.cs:251-321` — "no timer, redraw radius 1 + step sound") lands
+        // with the step it belongs to.
         self.emit(ActionEvent::Move {
             combatant_id: actor,
             from_x: old.x,
@@ -778,6 +834,11 @@ impl CombatState {
             to_y: new.y,
             cost,
         });
+        self.emit(ActionEvent::Sound { id: sound::STEP });
+        self.rebuild_occupancy();
+        if self.focus {
+            self.redraw_combat_area(8, 3, new);
+        }
         // sub_3E748 @`ovr014:0902-090F`: the mover's own swarm state zeroes after
         // the pos write — `AttacksReceived = 0` (@`0902`) and `directionChanges = 0`
         // (@`090F`). Swarm/facing bookkeeping is per-position.

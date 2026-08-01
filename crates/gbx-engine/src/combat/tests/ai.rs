@@ -1050,7 +1050,7 @@ fn bandage_skips_dying_allied_non_team_members() {
     // Only the allied NPC is dying → NOT bandageable, NOT even "bleeding".
     world.fighters[1].health_status = HealthStatus::Dying;
     assert!(
-        !world.bandage(true),
+        !world.bandage(Some(0), true),
         "a dying allied non-team NPC must not report as bleeding (ovr025.cs:1634)"
     );
     assert_eq!(
@@ -1061,7 +1061,10 @@ fn bandage_skips_dying_allied_non_team_members() {
 
     // A dying REAL party member still bandages exactly as before.
     world.fighters[0].health_status = HealthStatus::Dying;
-    assert!(world.bandage(true), "a real team member reports and heals");
+    assert!(
+        world.bandage(Some(0), true),
+        "a real team member reports and heals"
+    );
     assert_eq!(world.fighters[0].health_status, HealthStatus::Unconscious);
     assert_eq!(
         world.fighters[1].health_status,

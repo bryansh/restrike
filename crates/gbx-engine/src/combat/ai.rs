@@ -109,7 +109,12 @@ impl CombatState {
     ///
     /// (Callers: the FleeCheck surrender branch with `Unconscious`, and
     /// [`flee_battle`]'s Got-Away removal with [`HealthStatus::Running`].)
-    fn remove_from_combat(&mut self, actor: usize, status: HealthStatus) {
+    ///
+    /// `reason` is the D-CV2 [`ActionEvent::Removed`] tag — passed in by the
+    /// caller rather than sniffed from `status`, because the two callers are the
+    /// only thing that distinguishes a surrender from a rout and the binary's
+    /// own display string ("Surrenders" / "Got Away") is chosen the same way.
+    fn remove_from_combat(&mut self, actor: usize, status: HealthStatus, reason: RemovalReason) {
         if !self.fighters[actor].in_combat {
             return; // :14C0-14CB — already out of combat.
         }
@@ -136,6 +141,13 @@ impl CombatState {
         // `RemoveCombatAffects(player)` (coab ovr024.cs:645) — the strip on the
         // flee/surrender removal path. Draw-free (empty lists).
         self.remove_combat_affects(actor);
+        // D-CV2 `Removed`, at the tail — after site 6's focus-gated scroll, so a
+        // `Camera` that pans to the leaver precedes it. No death sound: nobody
+        // died on this path (the Got-Away case keeps its hp).
+        self.emit(ActionEvent::Removed {
+            combatant_id: actor,
+            reason,
+        });
     }
 
     /// `FleeCheck_001` (`sub_3637F` @`ovr010:137F`, coab `ovr010.cs:760`) — the
@@ -215,7 +227,11 @@ impl CombatState {
                         // :1501-1519 `RemoveFromCombat("Surrenders", status=4
                         // unconscious)`; :1524 clear_actions; return true (turn
                         // over — melee_ai_turn step 2 returns on it).
-                        self.remove_from_combat(actor, HealthStatus::Unconscious);
+                        self.remove_from_combat(
+                            actor,
+                            HealthStatus::Unconscious,
+                            RemovalReason::Surrendered,
+                        );
                         return true;
                     }
                 } else {
@@ -503,7 +519,7 @@ impl CombatState {
             // zeroed (the running special-case) and its footprint frees immediately
             // (`sub_743E7`, visible to every later `CanMove` this same round). No
             // downed-tile stamp.
-            self.remove_from_combat(actor, HealthStatus::Running);
+            self.remove_from_combat(actor, HealthStatus::Running, RemovalReason::Fled);
         }
         // `:0DBD func_end` — clear_actions unconditionally (idempotent after the
         // removal's own clear_actions on the Got-Away path).
@@ -527,19 +543,36 @@ impl CombatState {
     /// an allied thief CAN spend its turn bandaging a real party member.
     /// Draw-free (the "is bandaged" status string, `ovr025:33D6`, is display-only).
     /// (`pub(super)` for the §47 gate test only — engine callers stay in-module.)
-    pub(super) fn bandage(&mut self, apply_bandage: bool) -> bool {
+    ///
+    /// `healer` is the combatant spending the turn — carried only for D-CV2's
+    /// [`ActionEvent::Healed`] tag; the scan itself never reads it (the original
+    /// picks the *first* bandageable member regardless of who is bandaging).
+    /// A display-only `bandage(false)` scan passes `None` and emits nothing.
+    pub(super) fn bandage(&mut self, healer: Option<usize>, apply_bandage: bool) -> bool {
         let mut someone_bleeding = false;
         let mut apply = apply_bandage;
-        for f in &mut self.fighters {
+        let mut bandaged = None;
+        for (i, f) in self.fighters.iter_mut().enumerate() {
             if f.team == Team::Party && !f.non_team_member && f.health_status == HealthStatus::Dying
             {
                 someone_bleeding = true;
                 if apply {
                     f.health_status = HealthStatus::Unconscious;
                     f.bleeding = 0;
+                    bandaged = Some(i);
                     apply = false; // one bandage per call (ovr025:33E5)
                 }
             }
+        }
+        // "is bandaged" (`ovr025:33D6`) — no hp is restored, so `amount` is 0;
+        // the beat is `dying → unconscious` + `bleeding = 0`.
+        if let (Some(healer_id), Some(target_id)) = (healer, bandaged) {
+            self.emit(ActionEvent::Healed {
+                healer_id,
+                target_id,
+                amount: 0,
+                kind: HealKind::Bandage,
+            });
         }
         someone_bleeding
     }
@@ -561,7 +594,7 @@ impl CombatState {
         // the move-attack loop below never runs (no movement, no attack, no draws
         // beyond the turn head the caller already rolled). Draw-free itself.
         self.check_affects_effect(actor, CheckType::Type14);
-        if self.fighters[actor].team == Team::Party && self.bandage(true) {
+        if self.fighters[actor].team == Team::Party && self.bandage(Some(actor), true) {
             self.fighters[actor].delay = 0; // ovr010:0DFF — actions.delay = 0
         }
         let mut counter = 0;

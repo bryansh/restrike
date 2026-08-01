@@ -1619,12 +1619,24 @@ impl CombatState {
         // `bleeding > 9` (the `cmp bleeding, 9; jbe` — dead only past 9). A dead
         // (vs still-dying) ally is no longer bandageable, so this feeds §26.3.
         // Draw-free.
-        for f in &mut self.fighters {
-            if f.health_status == HealthStatus::Dying {
+        //
+        // D-CV2 `Bled`: this tick is the one place the roster changes with no
+        // event at all, so a presented board advanced by events alone would drift
+        // (a bleed-out would simply never be shown). The index loop is only so
+        // the emit can borrow `self` after the mutation — the mutation itself is
+        // unchanged, and emitting is observation-only.
+        for i in 0..self.fighters.len() {
+            if self.fighters[i].health_status == HealthStatus::Dying {
+                let f = &mut self.fighters[i];
                 f.bleeding += 1;
-                if f.bleeding > 9 {
+                let died = f.bleeding > 9;
+                if died {
                     f.health_status = HealthStatus::Dead;
                 }
+                self.emit(ActionEvent::Bled {
+                    combatant_id: i,
+                    died,
+                });
             }
         }
         // CountCombatTeamMembers (the ovr009.cs:391 round-end refresh site),
@@ -1641,9 +1653,15 @@ impl CombatState {
         if party > 1 && monsters == 0 {
             let occurrence = self.continue_prompts_seen;
             self.continue_prompts_seen += 1;
-            if self.continue_battle_yes.contains(&occurrence) {
+            let answered_yes = self.continue_battle_yes.contains(&occurrence);
+            if answered_yes {
                 battle_over = false;
             }
+            // D-CV2 `ContinueBattlePrompt`: emitted whenever the prompt fires,
+            // schedule-answered replays included — the original *displays* the
+            // prompt and its answer either way, so the scene must too. D-CV5's
+            // live suspension only changes where the answer comes from.
+            self.emit(ActionEvent::ContinueBattlePrompt { answered_yes });
         }
         let round = self.combat_round;
         self.phase = if battle_over {
@@ -1991,6 +2009,16 @@ pub fn resolve_attack(
     } else {
         None
     };
+
+    // §1.4's hit/miss sound, LAST — the original plays it inside
+    // `DisplayAttackMessage`, the beat that also reports the damage, so it lands
+    // after this swing's `Dmg` and leaves the D-OR3 `Attack`→`Dmg` pair adjacent
+    // for everything that reads the stream positionally.
+    if let Some(s) = sink.as_mut() {
+        s.on_action(ActionEvent::Sound {
+            id: if to_hit.hit { sound::HIT } else { sound::MISS },
+        });
+    }
 
     AttackOutcome { to_hit, damage }
 }

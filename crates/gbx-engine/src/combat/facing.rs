@@ -71,6 +71,13 @@ impl CombatState {
                 }
             }
             self.map_screen_top_left = GridPos::new(cx - SCREEN_HALF, cy - SCREEN_HALF);
+            // D-CV2 `Camera`: this is the one write every modeled scroll site in
+            // this file funnels through, so emitting here covers all of §1.2 in
+            // one place — and only when the window really moved (the box-test
+            // no-op path below emits nothing, matching "returns whether it
+            // scrolled"). Observation-only: the sink cannot reach the PRNG.
+            let top_left = self.map_screen_top_left;
+            self.emit(ActionEvent::Camera { top_left });
             return true;
         }
         false
