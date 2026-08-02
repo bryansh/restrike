@@ -544,10 +544,21 @@ pub enum PanelOp {
     /// `DisplayPlayerStatusString(false, row, text, who)`
     /// (`ovr025.cs:786-800`): clear from `row` down, print `who`'s name on
     /// `row`, wrap `text` from `row + 1` to the region's foot.
-    Status { row: Row, who: usize, text: String },
+    Status {
+        row: Row,
+        who: usize,
+        /// `displayPlayerName`'s colour **as of the moment this print
+        /// happened** (`ovr025.cs:827-838`), captured when the beat was
+        /// composed rather than re-derived at draw time. It has to be: the
+        /// removal tail prints the victim's name twice, once while it is
+        /// still in combat and once after — two different colours — and a
+        /// script replayed from the finished board would draw both the same.
+        color: u8,
+        text: String,
+    },
     /// `displayPlayerName(false, row, 0x17, who)` (`ovr014.cs:132`) — the
     /// target's name on its own row, with no clear and no text.
-    Name { row: Row, who: usize },
+    Name { row: Row, who: usize, color: u8 },
     /// `press_any_key(text, true, 10, row + 3, 0x26, row, 0x17)`
     /// (`ovr014.cs:177`) — the damage/miss line, wrapped into four rows.
     Wrapped { row: Row, text: String },
@@ -583,7 +594,12 @@ pub fn draw_panel_messages(
     for op in ops {
         match op {
             PanelOp::Clear => clear_message_region(fb),
-            PanelOp::Status { row, who, text } => {
+            PanelOp::Status {
+                row,
+                who,
+                color,
+                text,
+            } => {
                 let row = resolve(row, mark);
                 if row > MESSAGE_REGION.y_end {
                     continue;
@@ -597,7 +613,7 @@ pub fn draw_panel_messages(
                     MESSAGE_REGION.x_start,
                     MESSAGE_REGION.x_end,
                 );
-                draw_name(fb, font, board, *who, row);
+                draw_name(fb, font, board, *who, row, *color);
                 cursor = TextCursor {
                     col: PANEL_COL,
                     row: row + 1,
@@ -610,10 +626,10 @@ pub fn draw_panel_messages(
                 };
                 run_text(fb, font, text, LABEL_COLOR, region, &mut cursor);
             }
-            PanelOp::Name { row, who } => {
+            PanelOp::Name { row, who, color } => {
                 let row = resolve(row, mark);
                 if row <= MESSAGE_REGION.y_end {
-                    draw_name(fb, font, board, *who, row);
+                    draw_name(fb, font, board, *who, row, *color);
                 }
             }
             PanelOp::Wrapped { row, text } => {
@@ -647,17 +663,16 @@ pub fn draw_panel_messages(
 /// `displayPlayerName(false, row, 0x17, who)` off the presented roster — an
 /// id the board doesn't hold prints nothing, which is the original's own
 /// null-player behavior.
-fn draw_name(fb: &mut Framebuffer, font: &Font, board: &PresentedBoard, who: usize, row: usize) {
+fn draw_name(
+    fb: &mut Framebuffer,
+    font: &Font,
+    board: &PresentedBoard,
+    who: usize,
+    row: usize,
+    color: u8,
+) {
     if let Some(c) = board.combatant(who) {
-        draw_string(
-            fb,
-            font,
-            &c.name,
-            row,
-            PANEL_COL,
-            0,
-            name_color(c.in_combat, c.team),
-        );
+        draw_string(fb, font, &c.name, row, PANEL_COL, 0, color);
     }
 }
 

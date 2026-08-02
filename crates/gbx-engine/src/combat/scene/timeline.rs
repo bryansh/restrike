@@ -482,6 +482,16 @@ impl Composer<'_> {
 
     // --- beats -------------------------------------------------------------
 
+    /// `displayPlayerName`'s colour for `who` **right now** (`ovr025.cs:827-838`),
+    /// captured off the shadow board so it records the state the print
+    /// actually happened in.
+    fn name_color(&self, who: usize) -> u8 {
+        self.board
+            .combatant(who)
+            .map(|c| super::render::name_color(c.in_combat, c.team))
+            .unwrap_or(super::layout::NAME_COLOR_PARTY)
+    }
+
     /// `string_print01(text)` (`ovr025.cs:775-784`): clear the prompt row,
     /// print, `GameDelay`, clear.
     fn prompt_beat(&mut self, text: &str) {
@@ -499,9 +509,11 @@ impl Composer<'_> {
     /// `DisplayPlayerStatusString(true, 10, text, who)` — the panel message
     /// with its own `GameDelay` and clear (`ovr025.cs:786-810`).
     fn status_beat(&mut self, who: usize, text: String) {
+        let color = self.name_color(who);
         self.push(Op::Message(PanelOp::Status {
             row: Row::At(MESSAGE_ROW),
             who,
+            color,
             text,
         }));
         self.game_delay();
@@ -561,14 +573,18 @@ impl Composer<'_> {
     /// The head of every `DisplayAttackMessage`: attacker + verb on row 10,
     /// target's name on row 12 (`ovr014.cs:129-132`).
     fn message_head(&mut self, run: &AttackRun) {
+        let attacker_color = self.name_color(run.attacker);
+        let target_color = self.name_color(run.target);
         self.push(Op::Message(PanelOp::Status {
             row: Row::At(MESSAGE_ROW),
             who: run.attacker,
+            color: attacker_color,
             text: Self::verb(run).to_string(),
         }));
         self.push(Op::Message(PanelOp::Name {
             row: Row::At(TARGET_NAME_ROW),
             who: run.target,
+            color: target_color,
         }));
     }
 
@@ -662,9 +678,15 @@ impl Composer<'_> {
                     .map(|c| c.health_status == HealthStatus::Dying)
                     .unwrap_or(false)
                     || matches!(reason, RemovalReason::Downed { dying: true });
+                // The tail prints under `target.in_combat == false`
+                // (`ovr014.cs:188`), so both names take the removed colour —
+                // unlike the row-12 name above, which printed while the target
+                // was still up.
+                let color = crate::combat::scene::layout::NAME_COLOR_REMOVED;
                 self.push(Op::Message(PanelOp::Status {
                     row: Row::FromMark(0),
                     who: id,
+                    color,
                     text: strings::GOES_DOWN.to_string(),
                 }));
                 if dying {
@@ -676,6 +698,7 @@ impl Composer<'_> {
                     self.push(Op::Message(PanelOp::Status {
                         row: Row::FromMark(2),
                         who: id,
+                        color,
                         text: strings::IS_KILLED.to_string(),
                     }));
                 }
@@ -839,6 +862,7 @@ impl Composer<'_> {
 pub fn burst_instructions(
     clock: BeatClock,
     who: usize,
+    color: u8,
     cell: (i32, i32),
     text: &str,
     stars: bool,
@@ -851,6 +875,7 @@ pub fn burst_instructions(
     out.push(Instruction::now(Op::Message(PanelOp::Status {
         row: Row::At(MESSAGE_ROW),
         who,
+        color,
         text: text.to_string(),
     })));
     let passes = if stars { clock.star_burst_passes() } else { 1 };

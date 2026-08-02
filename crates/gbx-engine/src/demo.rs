@@ -1546,3 +1546,166 @@ fn watch_a_real_art_combat_scene() {
     write_ppm(&aim, &path);
     eprintln!("combat scene, aim cursor (real art) -> {}", path.display());
 }
+
+/// M6 slice 4's eyeball pass (local-only, `GBX_DATA_DIR`): play a real fight
+/// through the [`CombatScene`](crate::combat::scene::CombatScene) timeline and
+/// dump the frames as a numbered `.ppm` sequence **outside the repo** (D10) —
+/// the slice-3 still picture, now moving.
+///
+/// Every frame is one tick of `scene.tick(1)`, so the sequence IS the schedule:
+/// six frames of an attack pose, twenty-four of a message, nine one-frame
+/// death-flash alternations. Play it back at 60 fps and it is the original's
+/// pacing.
+///
+/// Run: `GBX_DATA_DIR=~/goldbox-data/cotab cargo test -p gbx-engine \
+///   -- --nocapture watch_a_real_art_combat_reel`
+/// then e.g. `ffmpeg -framerate 60 -i /tmp/restrike-reel-%04d.ppm reel.mp4`.
+#[test]
+fn watch_a_real_art_combat_reel() {
+    use crate::combat::scene::{CombatScene, CombatantIdentity, EntrySnapshot, SceneArt};
+    use crate::combat::{
+        ActionEvent, ActionSink, CombatMap, CombatState, CombatStep, Combatant, GridPos, Team,
+    };
+    use crate::combat_art;
+    use crate::party::IconInfo;
+    use crate::rng::EngineRng;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let Some(dir) = std::env::var_os("GBX_DATA_DIR") else {
+        eprintln!(
+            "SKIPPED: the reel demo runs in the local tier (GBX_DATA_DIR) — \
+             watch_a_real_art_combat_reel"
+        );
+        return;
+    };
+    let data = load_dir(std::path::Path::new(&dir)).expect("GBX_DATA_DIR must be readable");
+    let assets = boot(&data).expect("boot must succeed against real CotAB data");
+    let out_dir = std::env::var_os("RESTRIKE_SCENE_DEMO_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+
+    // --- the art (as slice 3's still does) --------------------------------
+    let mut icons = assets.combat_icons.clone();
+    let colours: [u8; 6] = [0x91, 0xA2, 0xB3, 0xC4, 0xE6, 0xF7];
+    for (slot, (head, weapon)) in [(0u8, 0u8), (3, 5), (7, 12)].into_iter().enumerate() {
+        let info = IconInfo {
+            head_icon: head,
+            weapon_icon: weapon,
+            icon_id: slot as u8,
+            icon_size: 1,
+            colours,
+        };
+        icons.set(
+            slot,
+            combat_art::load_party_icon(&data, &info, true).expect("party icon"),
+        );
+    }
+    icons.set(
+        8,
+        combat_art::load_monster_icon(&data, 2, 0).expect("monster icon"),
+    );
+    let tiles = combat_art::load_ground_tiles(&data, true).expect("dungeon ground tiles");
+
+    // --- a small walled room, and a fight inside it ------------------------
+    let mut map = CombatMap::uniform(0x17);
+    for x in 17..31 {
+        map.set_tile(GridPos::new(x, 8), 1);
+        map.set_tile(GridPos::new(x, 17), 1);
+    }
+    for y in 8..18 {
+        map.set_tile(GridPos::new(17, y), 1);
+        map.set_tile(GridPos::new(30, y), 1);
+    }
+    let names = ["KETHRA", "DOLAN", "SABLE", "BRIGAND", "CUTPURSE"];
+    let mut fighters: Vec<Combatant> = Vec::new();
+    for (i, (team, x, y, hp, ac, hit, dice)) in [
+        (Team::Party, 19, 11, 18, 5, 16, (1, 8, 1)),
+        (Team::Party, 19, 12, 22, 4, 15, (2, 4, 0)),
+        (Team::Party, 19, 13, 14, 6, 17, (1, 6, 0)),
+        (Team::Monster, 27, 12, 11, 7, 18, (1, 6, 0)),
+        (Team::Monster, 27, 13, 9, 7, 18, (1, 4, 1)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        fighters.push(Combatant::new_melee(
+            i,
+            team,
+            team == Team::Monster,
+            GridPos::new(x, y),
+            hp,
+            ac,
+            hit,
+            10,
+            dice,
+            3,
+            1,
+        ));
+    }
+    // `CombatState::new` already selects the real melee AI driver.
+    let mut state = CombatState::new(map, fighters);
+
+    #[derive(Clone, Default)]
+    struct Batch(Rc<RefCell<Vec<ActionEvent>>>);
+    struct BatchSink(Rc<RefCell<Vec<ActionEvent>>>);
+    impl ActionSink for BatchSink {
+        fn on_action(&mut self, event: ActionEvent) {
+            self.0.borrow_mut().push(event);
+        }
+    }
+    let batch = Batch::default();
+    state.attach_action_sink(Box::new(BatchSink(Rc::clone(&batch.0))));
+
+    let mut rng = EngineRng::new(0x0C0F_FEE0);
+    assert_ne!(state.step(&mut rng), CombatStep::Ended);
+    let identities: Vec<CombatantIdentity> = (0..state.roster().len())
+        .map(|i| CombatantIdentity::new(names[i], if i < 3 { i } else { 8 }))
+        .collect();
+    let mut scene = CombatScene::new(
+        EntrySnapshot::from_state(&state, &identities),
+        SceneArt::new(tiles, icons),
+    );
+    scene.set_weapon_names(
+        [(1u8, "Long Sword".to_string()), (7, "Club".to_string())]
+            .into_iter()
+            .collect(),
+    );
+    scene.refresh_panels(&state);
+    scene.reconcile(&state).expect("the entry snapshot matches");
+
+    // --- play it, one .ppm per tick ---------------------------------------
+    const MAX_FRAMES: usize = 900; // 15 seconds at 60 Hz — a few turns
+    let mut frames = 0usize;
+    let mut sounds: Vec<u8> = Vec::new();
+    'reel: loop {
+        let events = std::mem::take(&mut *batch.0.borrow_mut());
+        scene.begin_step(&events);
+        while scene.is_playing() {
+            for cue in scene.tick(1) {
+                sounds.push(cue.0);
+            }
+            let mut fb = Framebuffer::new();
+            scene
+                .render_frame(&mut fb, &assets.symbol_sets, &assets.font)
+                .expect("the reel must render");
+            write_ppm(&fb, &out_dir.join(format!("restrike-reel-{frames:04}.ppm")));
+            frames += 1;
+            if frames >= MAX_FRAMES {
+                break 'reel;
+            }
+        }
+        scene.reconcile(&state).expect("the board reconciles");
+        scene.refresh_panels(&state);
+        if state.step(&mut rng) == CombatStep::Ended {
+            break;
+        }
+    }
+
+    eprintln!(
+        "combat reel: {frames} frames -> {}/restrike-reel-*.ppm ({} sound cues)",
+        out_dir.display(),
+        sounds.len()
+    );
+    assert!(frames > 60, "the reel played at least a second of beats");
+}

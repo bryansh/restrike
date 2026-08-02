@@ -275,11 +275,15 @@ fn the_attack_message_is_the_display_attack_message_sequence() {
             PanelOp::Status {
                 row: Row::At(10),
                 who: 0,
+                color: 0x0B,
                 text: "Attacks".to_string(),
             },
+            // The target is still up when its name prints, so it takes the
+            // enemy colour rather than the removed one.
             PanelOp::Name {
                 row: Row::At(12),
                 who: 2,
+                color: 0x0E,
             },
             PanelOp::Wrapped {
                 row: Row::At(13),
@@ -413,6 +417,7 @@ fn a_kill_continues_the_message_into_the_removal_tail() {
         PanelOp::Status {
             row: Row::FromMark(0),
             who: 2,
+            color: 0x0C,
             text: "goes down".to_string(),
         }
     );
@@ -421,6 +426,7 @@ fn a_kill_continues_the_message_into_the_removal_tail() {
         PanelOp::Status {
             row: Row::FromMark(2),
             who: 2,
+            color: 0x0C,
             text: "is killed".to_string(),
         }
     );
@@ -812,7 +818,8 @@ fn the_star_burst_repeats_four_frames_speed_plus_one_times() {
     // §1.4 by hand: 70 ms per frame = 4 ticks, four frames, and the stars
     // repeat `game_speed_var + 1` times.
     for (speed, passes) in [(0u8, 1u32), (4, 5), (9, 10)] {
-        let schedule = burst_instructions(BeatClock::new(speed), 0, (6, 6), "is Healed", true);
+        let schedule =
+            burst_instructions(BeatClock::new(speed), 0, 0x0B, (6, 6), "is Healed", true);
         let frames: Vec<&Instruction> = schedule
             .iter()
             .filter(|i| matches!(&i.op, Op::Overlay(v) if !v.is_empty()))
@@ -823,7 +830,7 @@ fn the_star_burst_repeats_four_frames_speed_plus_one_times() {
         assert_eq!(schedule[0].op, Op::Sound(4), "the stars play sound 4");
     }
     // The plain variant runs one pass and closes with a `GameDelay`.
-    let plain = burst_instructions(BeatClock::default(), 0, (6, 6), "is affected", false);
+    let plain = burst_instructions(BeatClock::default(), 0, 0x0B, (6, 6), "is affected", false);
     assert_eq!(plain[0].op, Op::Sound(3));
     assert_eq!(total_ticks(&plain), 4 * 4 + 24);
 }

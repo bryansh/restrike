@@ -29,7 +29,6 @@
 use super::{CombatScene, CombatantIdentity, EntrySnapshot, SceneArt};
 use crate::combat::{
     ActionEvent, ActionSink, CombatMap, CombatState, CombatStep, Combatant, GridPos, Team,
-    TurnDriver,
 };
 use crate::rng::{EngineRng, RngDraw, RngSink};
 use std::cell::RefCell;
@@ -103,9 +102,8 @@ fn synthetic_fight() -> CombatState {
             1,
         ));
     }
-    let mut state = CombatState::new(CombatMap::uniform(FLOOR), fighters);
-    state.turn = TurnDriver::MeleeAi;
-    state
+    // `CombatState::new` selects the real melee AI driver (`TurnDriver::MeleeAi`).
+    CombatState::new(CombatMap::uniform(FLOOR), fighters)
 }
 
 /// One combatant's final state, presentation-independent.
