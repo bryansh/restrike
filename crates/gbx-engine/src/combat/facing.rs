@@ -46,41 +46,20 @@ impl CombatState {
     /// are display (screenPos is derived live here). Binary-cited: the box test
     /// + clamp bounds, `ovr033.cs:278-314`.
     pub(super) fn screen_map_check(&mut self, radius: i32, pos: GridPos) -> bool {
-        let mut cx = self.map_screen_top_left.x + SCREEN_HALF;
-        let mut cy = self.map_screen_top_left.y + SCREEN_HALF;
-        let var2 = if radius == 0xFF { 0 } else { radius };
-        let (min_x, max_x) = (cx - var2, cx + var2);
-        let (min_y, max_y) = (cy - var2, cy + var2);
-        if radius == 0xFF || pos.x < min_x || pos.x > max_x || pos.y < min_y || pos.y > max_y {
-            if pos.x < min_x {
-                while pos.x < cx && cx > MAP_MIN + SCREEN_HALF {
-                    cx -= 1;
-                }
-            } else if pos.x > max_x {
-                while pos.x > cx && cx < MAP_W - SCREEN_HALF - 1 {
-                    cx += 1;
-                }
+        match scrolled_top_left(self.map_screen_top_left, radius, pos) {
+            Some(top_left) => {
+                self.map_screen_top_left = top_left;
+                // D-CV2 `Camera`: this is the one write every modeled scroll
+                // site in this file funnels through, so emitting here covers all
+                // of §1.2 in one place — and only when the window really moved
+                // (the box-test no-op path emits nothing, matching "returns
+                // whether it scrolled"). Observation-only: the sink cannot reach
+                // the PRNG.
+                self.emit(ActionEvent::Camera { top_left });
+                true
             }
-            if pos.y < min_y {
-                while pos.y < cy && cy > MAP_MIN + SCREEN_HALF {
-                    cy -= 1;
-                }
-            } else if pos.y > max_y {
-                while pos.y > cy && cy < MAP_H - SCREEN_HALF - 1 {
-                    cy += 1;
-                }
-            }
-            self.map_screen_top_left = GridPos::new(cx - SCREEN_HALF, cy - SCREEN_HALF);
-            // D-CV2 `Camera`: this is the one write every modeled scroll site in
-            // this file funnels through, so emitting here covers all of §1.2 in
-            // one place — and only when the window really moved (the box-test
-            // no-op path below emits nothing, matching "returns whether it
-            // scrolled"). Observation-only: the sink cannot reach the PRNG.
-            let top_left = self.map_screen_top_left;
-            self.emit(ActionEvent::Camera { top_left });
-            return true;
+            None => false,
         }
-        false
     }
 
     /// `redrawCombatArea(dir, radius, map)` (`ovr033.cs:344`) reduced to its
@@ -160,4 +139,46 @@ impl CombatState {
             self.screen_map_check(0xFF, center);
         }
     }
+}
+
+/// `ScreenMapCheck`'s pure core — the new `mapScreenTopLeft` when the call
+/// scrolls, `None` when the box test finds nothing to do.
+///
+/// Factored out of [`CombatState::screen_map_check`] so the combat **scene**
+/// can run the same transcription without a `CombatState`: `draw_missile_attack`
+/// re-centres the window mid-flight from purely local values (doc §1.4 — the
+/// transient pan never exists in engine state), and re-deriving the clamp there
+/// would be a second copy of this arithmetic to keep in step.
+///
+/// A forced call (`radius == 0xFF`) always reports `Some`, even when the centre
+/// does not actually move — that is the original's own "it scrolled" answer,
+/// and the [`ActionEvent::Camera`] emission follows it.
+pub fn scrolled_top_left(top_left: GridPos, radius: i32, pos: GridPos) -> Option<GridPos> {
+    let mut cx = top_left.x + SCREEN_HALF;
+    let mut cy = top_left.y + SCREEN_HALF;
+    let var2 = if radius == 0xFF { 0 } else { radius };
+    let (min_x, max_x) = (cx - var2, cx + var2);
+    let (min_y, max_y) = (cy - var2, cy + var2);
+    if radius == 0xFF || pos.x < min_x || pos.x > max_x || pos.y < min_y || pos.y > max_y {
+        if pos.x < min_x {
+            while pos.x < cx && cx > MAP_MIN + SCREEN_HALF {
+                cx -= 1;
+            }
+        } else if pos.x > max_x {
+            while pos.x > cx && cx < MAP_W - SCREEN_HALF - 1 {
+                cx += 1;
+            }
+        }
+        if pos.y < min_y {
+            while pos.y < cy && cy > MAP_MIN + SCREEN_HALF {
+                cy -= 1;
+            }
+        } else if pos.y > max_y {
+            while pos.y > cy && cy < MAP_H - SCREEN_HALF - 1 {
+                cy += 1;
+            }
+        }
+        return Some(GridPos::new(cx - SCREEN_HALF, cy - SCREEN_HALF));
+    }
+    None
 }

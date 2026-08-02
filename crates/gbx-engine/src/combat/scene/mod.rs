@@ -32,7 +32,10 @@
 
 mod board;
 pub mod layout;
+pub mod missile;
 pub mod render;
+pub mod strings;
+pub mod time;
 
 #[cfg(test)]
 mod goldens;

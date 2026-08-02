@@ -44,6 +44,7 @@ mod ai;
 mod attack;
 pub use ai::field_15_mode_gate;
 mod facing;
+pub use facing::scrolled_top_left;
 pub mod scene;
 mod spells;
 
