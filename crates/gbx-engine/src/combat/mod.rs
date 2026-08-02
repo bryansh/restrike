@@ -935,6 +935,62 @@ pub enum ActionEvent {
     /// deliberately **not** emitted here (missile launch and spell cast, whose
     /// ids come off tables that live scene-side with their animations).
     Sound { id: u8 },
+
+    // --- presentation vocabulary (M6 slice 4) ------------------------------
+    //
+    // Two more engine-local variants, added by the timeline slice for the same
+    // reason the slice-2 nine exist: the beat is in §1.4/§1.5 and nothing
+    // already on the wire determines it. Both are draw-neutral emissions at the
+    // original's own display sites, and both get their own drop arm in the
+    // oracle collector (the `.gbxtrace` profile stays FROZEN).
+    /// The head of one `AttackTarget01` swing sequence (`ovr014.cs:729-873`) —
+    /// the pair that is swinging and the `AttackType` fork
+    /// `DisplayAttackMessage` reads (`ovr014.cs:113-127,135-141`).
+    ///
+    /// **Why this can't come off [`Attack`](Self::Attack):** that variant is on
+    /// the frozen `.gbxtrace` wire, so its payload cannot grow; and the fork is
+    /// not recoverable from the swing events either — `Dmg.backstab` reveals a
+    /// backstab only on a HIT, and `Behind` (the "(from behind) " prefix) has no
+    /// observable at all. It also marks where a swing RUN begins, which is what
+    /// makes the original's *one* "and Misses" per attack — not one per swing
+    /// (`var_11`, `ovr014.cs:857-861`) — presentable.
+    ///
+    /// Emitted once per non-held `AttackTarget01`, right after the AC-selection
+    /// fork that decides `attack_type` (`ovr014.cs:797-808`) and before the
+    /// first swing. The held branch emits [`SlayHelpless`](Self::SlayHelpless)
+    /// instead — `AttackType.Slay` is its own message shape.
+    Attacking {
+        attacker_id: usize,
+        target_id: usize,
+        kind: AttackKind,
+    },
+    /// A combatant's morale broke and it is running (§1.5's "flees in panic" /
+    /// "is forced to flee"). `forced` is the `actions.fleeing` branch inside
+    /// `FleeCheck_001` (`ovr010.cs:768-772`, "is forced to flee"); `false` is
+    /// the caller's post-check display (`ovr010.cs:43-47`, "flees in panic").
+    ///
+    /// [`Morale`](Self::Morale) cannot carry this: it is emitted at the
+    /// *advance* gate inside `moralFailureEscape` (`ovr010.cs:386`), a
+    /// different site that fires once per flee STEP, while these two messages
+    /// print once, at the check. The Got-Away removal that may follow is
+    /// [`Removed`](Self::Removed)'s `Fled`.
+    Flees { combatant_id: usize, forced: bool },
+}
+
+/// `DisplayAttackMessage`'s `AttackType` (`ovr014.cs:104-110`) minus `Slay`,
+/// which travels as [`ActionEvent::SlayHelpless`] — the fork that picks the
+/// message verb and the "(from behind) " prefix (§1.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttackKind {
+    /// `AttackType.Normal` — "Attacks".
+    Normal,
+    /// `AttackType.Behind` — "Attacks", with the damage line prefixed
+    /// "(from behind) ". Set by the caller's `attackType != 0` (the departure
+    /// opportunity attack) or the flanking heuristic (`ovr014.cs:783-790`).
+    Behind,
+    /// `AttackType.Backstab` — "-Backstabs-" (`CanBackStabTarget`, and it
+    /// preempts `Behind`, `ovr014.cs:806-809`).
+    Backstab,
 }
 
 /// Why a combatant left the board — the [`ActionEvent::Removed`] payload.
@@ -984,9 +1040,14 @@ pub enum HealKind {
 /// Emitting a guessed class or table here would be a fidelity claim the repo
 /// cannot back; carrying the operand instead is lossless.
 pub mod sound {
-    /// A melee/ranged swing connected (`ovr014` attack display).
+    /// A melee/ranged swing connected — `Sound.sound_attackHeld`
+    /// (`Gbl.cs:56`), played per HITTING swing at `ovr014.cs:826`. The same id
+    /// opens the held-target slay (`ovr014.cs:742`), which is why the name in
+    /// the original's enum is the odd one and §1.4 calls it "hit".
     pub const HIT: u8 = 7;
-    /// A swing missed. (Shares its id with the axe/club launch sound.)
+    /// **The whole attack** missed — `sound_9`, played ONCE after the swing
+    /// loops when no swing connected (`var_11 == false`, `ovr014.cs:859`), not
+    /// once per missing swing. (Shares its id with the axe/club launch sound.)
     pub const MISS: u8 = 9;
     /// A combatant went down on the damage path (`CombatantKilled`).
     ///
@@ -1969,8 +2030,15 @@ pub struct AttackOutcome {
 /// One faithful weapon attack — `AttackTarget01`'s per-swing body
 /// (`ovr014.cs:811-829`): roll to hit via the `>=` path ([`pc_can_hit_target`]);
 /// **on a hit only**, roll damage ([`roll_damage`]). Emits the `attack` event
-/// (always) then, on a hit, the `dmg` event — in resolution order (D-OR3
-/// same-tick contract).
+/// (always) then, on a hit, the hit sound and the `dmg` event — in resolution
+/// order (D-OR3 same-tick contract), which is also the original's own statement
+/// order (`PlaySound(sound_attackHeld)` @`ovr014.cs:826` sits between the
+/// to-hit test and `sub_3E192`).
+///
+/// **No miss sound here.** `sound_9` is not a swing's sound: the original plays
+/// it once per *attack*, after every swing has missed (`var_11 == false`,
+/// `ovr014.cs:857-861`) — a fact only the caller's swing loop knows. The engine
+/// emits it at that site ([`CombatState::attack_target`]).
 ///
 /// **Draw-faithful:** exactly one d20, plus `dice_count` `random(dice_size)`
 /// draws *only on a hit* (the original calls `sub_3E192` only inside the hit
@@ -1997,6 +2065,9 @@ pub fn resolve_attack(
     }
 
     let damage = if to_hit.hit {
+        if let Some(s) = sink.as_mut() {
+            s.on_action(ActionEvent::Sound { id: sound::HIT });
+        }
         let dmg = roll_damage(rng, p.dice_size, p.dice_count, p.damage_bonus, p.backstab);
         if let Some(s) = sink.as_mut() {
             s.on_action(ActionEvent::Dmg {
@@ -2010,16 +2081,6 @@ pub fn resolve_attack(
     } else {
         None
     };
-
-    // §1.4's hit/miss sound, LAST — the original plays it inside
-    // `DisplayAttackMessage`, the beat that also reports the damage, so it lands
-    // after this swing's `Dmg` and leaves the D-OR3 `Attack`→`Dmg` pair adjacent
-    // for everything that reads the stream positionally.
-    if let Some(s) = sink.as_mut() {
-        s.on_action(ActionEvent::Sound {
-            id: if to_hit.hit { sound::HIT } else { sound::MISS },
-        });
-    }
 
     AttackOutcome { to_hit, damage }
 }

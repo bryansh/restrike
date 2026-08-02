@@ -169,6 +169,12 @@ impl CombatState {
         // flee", return false.
         if self.fighters[actor].fleeing {
             self.fighters[actor].moral_failure = true;
+            // D-CV2 `Flees { forced: true }` — the "is forced to flee" display
+            // this branch carries (`ovr010.cs:770`). Draw-free.
+            self.emit(ActionEvent::Flees {
+                combatant_id: actor,
+                forced: true,
+            });
             return false;
         }
         // :13E3 control_morale@0xF7 > 0x7F (unsigned `ja`) else return false —
@@ -773,6 +779,17 @@ impl CombatState {
 
         // 2. FleeCheck_001 (ovr010.cs:40) — draw-free.
         let surrendered = self.flee_check(actor);
+        // D-CV2 `Flees { forced: false }` — "flees in panic" (`ovr010.cs:43-47`),
+        // the caller's own display, gated on the check having broken morale for
+        // a combatant that was NOT already fleeing (the `forced: true` branch
+        // sets both flags, so the two are mutually exclusive). Draw-free, and it
+        // prints before the surrender return the way coab orders them.
+        if self.fighters[actor].moral_failure && !self.fighters[actor].fleeing {
+            self.emit(ActionEvent::Flees {
+                combatant_id: actor,
+                forced: false,
+            });
+        }
         if surrendered {
             return;
         }

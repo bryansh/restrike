@@ -523,7 +523,7 @@ fn resolve_attack_hit_draws_d20_then_damage_and_emits_both_events() {
     assert_eq!(out.damage.unwrap().amount, dmg as i32);
 
     let ev = actions.events();
-    assert_eq!(ev.len(), 3, "Attack then Dmg then the hit sound");
+    assert_eq!(ev.len(), 3, "Attack, the hit sound, then Dmg");
     assert!(matches!(
         ev[0],
         ActionEvent::Attack {
@@ -533,8 +533,11 @@ fn resolve_attack_hit_draws_d20_then_damage_and_emits_both_events() {
             ..
         }
     ));
+    // §1.4's hit sound (id 7 = `sound_attackHeld`) sits between the to-hit test
+    // and the damage roll — `PlaySound` @`ovr014.cs:826`, `sub_3E192` @:828.
+    assert!(matches!(ev[1], ActionEvent::Sound { id: sound::HIT }));
     assert!(matches!(
-        ev[1],
+        ev[2],
         ActionEvent::Dmg {
             attacker_id: 2,
             target_id: 7,
@@ -542,8 +545,6 @@ fn resolve_attack_hit_draws_d20_then_damage_and_emits_both_events() {
             ..
         }
     ));
-    // The D-CV2 hit sound trails the pair it belongs to (§1.4 id 7).
-    assert!(matches!(ev[2], ActionEvent::Sound { id: sound::HIT }));
 }
 
 #[test]
@@ -572,9 +573,12 @@ fn resolve_attack_miss_draws_only_the_d20_and_emits_no_dmg() {
     assert_eq!(log.ns(), vec![20], "a miss draws no damage dice");
 
     let ev = actions.events();
-    assert_eq!(ev.len(), 2, "Attack then the miss sound — no Dmg");
+    // A missing SWING is silent: `sound_9` and the "and Misses" message belong
+    // to the whole attack (`var_11 == false`, `ovr014.cs:857-861`), which only
+    // the caller's swing loop can decide — so this single-swing primitive emits
+    // the `Attack` and nothing else.
+    assert_eq!(ev.len(), 1, "Attack alone — no Dmg, no sound");
     assert!(matches!(ev[0], ActionEvent::Attack { hit: false, .. }));
-    assert!(matches!(ev[1], ActionEvent::Sound { id: sound::MISS }));
 }
 
 #[test]

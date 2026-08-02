@@ -238,6 +238,8 @@ impl ActionSink for CollectorActionSink {
             ActionEvent::Healed { .. } => return,
             ActionEvent::SlayHelpless { .. } => return,
             ActionEvent::Sound { .. } => return,
+            ActionEvent::Attacking { .. } => return,
+            ActionEvent::Flees { .. } => return,
         };
         self.events.borrow_mut().push(translated);
     }

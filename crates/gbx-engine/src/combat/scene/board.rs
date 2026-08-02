@@ -290,7 +290,9 @@ impl PresentedBoard {
             | ActionEvent::Cast { .. }
             | ActionEvent::SpellTarget { .. }
             | ActionEvent::SlayHelpless { .. }
-            | ActionEvent::Sound { .. } => {}
+            | ActionEvent::Sound { .. }
+            | ActionEvent::Attacking { .. }
+            | ActionEvent::Flees { .. } => {}
         }
     }
 

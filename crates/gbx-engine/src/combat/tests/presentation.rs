@@ -703,8 +703,17 @@ fn the_held_slay_announces_itself_before_the_kill() {
 
     let ev = log.events();
     let ev = &ev[log_len..];
+    // `PlaySound(sound_attackHeld)` is the branch's first statement
+    // (`ovr014.cs:742`) — id 7, the same `sound::HIT` a connecting swing plays.
     assert_eq!(
         ev[0],
+        ActionEvent::Sound {
+            id: crate::combat::sound::HIT
+        },
+        "the attackHeld sound opens the beat: {ev:?}"
+    );
+    assert_eq!(
+        ev[1],
         ActionEvent::SlayHelpless {
             attacker_id: 0,
             target_id: 1,
@@ -725,4 +734,190 @@ fn the_held_slay_announces_itself_before_the_kill() {
         "damage = hp + 5 is an overkill of 5, the dying band: {ev:?}"
     );
     assert!(!w.fighters[1].in_combat, "removed either way");
+}
+
+// --- the swing sequence (M6 slice 4) ---------------------------------------
+//
+// `Attack`/`Dmg` existed on the wire but were emitted only by the standalone
+// [`resolve_attack`] primitive, never on the path a fight actually takes — so a
+// scene fed a real batch saw combatants lose hit points with no swing to hang
+// §1.5's attack messages on. Slice 4 emits them at the production swing site,
+// with `Attacking` framing the run and the §1.4 sounds at their own statements.
+
+/// An attacker set up to swing `swings` times at an unreachable AC.
+fn all_missing_attacker(swings: u8) -> (CombatWorld, ActionLog) {
+    let (mut w, log) = scene_world(&[
+        (Team::Party, GridPos::new(20, 12)),
+        (Team::Monster, GridPos::new(21, 12)),
+    ]);
+    w.focus = false;
+    w.fighters[0].delay = 5;
+    w.fighters[0].attack1_left = swings;
+    w.fighters[0].attack_idx = 1;
+    // AC 200 is unreachable even by a nat-20's promotion to 100.
+    w.fighters[1].ac = 200;
+    w.fighters[1].ac_behind = 200;
+    (w, log)
+}
+
+#[test]
+fn an_attack_run_is_framed_and_misses_exactly_once() {
+    let (mut w, log) = all_missing_attacker(3);
+    let log_len = log.events().len();
+    let mut rng = EngineRng::new(SEED);
+    w.attack_target(&mut rng, 0, 1, false, AttackItemRef::None);
+
+    let ev = log.events();
+    let ev = &ev[log_len..];
+    assert_eq!(
+        ev[0],
+        ActionEvent::Attacking {
+            attacker_id: 0,
+            target_id: 1,
+            kind: AttackKind::Normal,
+        },
+        "the run's head frames the swings: {ev:?}"
+    );
+    let attacks = ev
+        .iter()
+        .filter(|e| matches!(e, ActionEvent::Attack { hit: false, .. }))
+        .count();
+    assert_eq!(attacks, 3, "one Attack per swing: {ev:?}");
+    // `var_11 == false` (`ovr014.cs:857-861`): ONE miss sound for the whole
+    // attack, not one per swing — the beat the scene turns into ONE "and
+    // Misses" message.
+    assert_eq!(
+        ev.iter()
+            .filter(|e| matches!(e, ActionEvent::Sound { id: sound::MISS }))
+            .count(),
+        1,
+        "one miss sound for the whole attack: {ev:?}"
+    );
+    assert_eq!(
+        ev.last(),
+        Some(&ActionEvent::Sound { id: sound::MISS }),
+        "and it closes the run: {ev:?}"
+    );
+}
+
+#[test]
+fn a_connecting_swing_emits_attack_then_the_hit_sound_then_dmg() {
+    let (mut w, log) = scene_world(&[
+        (Team::Party, GridPos::new(20, 12)),
+        (Team::Monster, GridPos::new(21, 12)),
+    ]);
+    w.focus = false;
+    w.fighters[0].delay = 5;
+    w.fighters[0].attack1_left = 1;
+    w.fighters[0].attack_idx = 1;
+    w.fighters[0].hit_bonus = 40; // certain hit
+    w.fighters[1].hp_current = 200; // survives, so no removal cascade follows
+
+    let log_len = log.events().len();
+    let mut rng = EngineRng::new(SEED);
+    w.attack_target(&mut rng, 0, 1, false, AttackItemRef::None);
+
+    let ev = log.events();
+    let ev = &ev[log_len..];
+    assert!(matches!(ev[0], ActionEvent::Attacking { .. }));
+    assert!(matches!(ev[1], ActionEvent::Attack { hit: true, .. }));
+    // `PlaySound(sound_attackHeld)` @`ovr014.cs:826` sits between the to-hit
+    // test and `sub_3E192`'s damage roll.
+    assert_eq!(ev[2], ActionEvent::Sound { id: sound::HIT });
+    assert!(matches!(ev[3], ActionEvent::Dmg { .. }), "{ev:?}");
+    assert!(
+        !ev.iter()
+            .any(|e| matches!(e, ActionEvent::Sound { id: sound::MISS })),
+        "a hit suppresses the attack's miss sound: {ev:?}"
+    );
+}
+
+#[test]
+fn attacking_reports_the_message_fork() {
+    // The caller's `attackType != 0` (the departure opportunity attack) is
+    // `AttackType.Behind` — the "(from behind) " damage-line prefix.
+    let (mut w, log) = all_missing_attacker(1);
+    let log_len = log.events().len();
+    let mut rng = EngineRng::new(SEED);
+    w.attack_target(&mut rng, 0, 1, true, AttackItemRef::None);
+    assert_eq!(
+        log.events()[log_len],
+        ActionEvent::Attacking {
+            attacker_id: 0,
+            target_id: 1,
+            kind: AttackKind::Behind,
+        }
+    );
+
+    // Backstab preempts it (`ovr014.cs:806-809`): a thief, bare-handed, whose
+    // target has been attacked twice and is facing away.
+    let (mut w, log) = all_missing_attacker(1);
+    w.fighters[0].thief_skill_level = 5;
+    w.fighters[1].attacks_received = 2;
+    w.fighters[1].direction = target_direction(w.fighters[0].pos, w.fighters[1].pos);
+    assert!(w.can_backstab(1, 0));
+    let log_len = log.events().len();
+    w.attack_target(&mut rng, 0, 1, true, AttackItemRef::None);
+    assert_eq!(
+        log.events()[log_len],
+        ActionEvent::Attacking {
+            attacker_id: 0,
+            target_id: 1,
+            kind: AttackKind::Backstab,
+        },
+        "backstab preempts behind"
+    );
+}
+
+// --- Flees -----------------------------------------------------------------
+
+#[test]
+fn flees_emits_at_both_of_its_display_sites() {
+    // "is forced to flee" (`ovr010.cs:770`) — inside the check, for a combatant
+    // already carrying the fleeing flag.
+    let (mut w, log) = scene_world(&[(Team::Monster, GridPos::new(20, 12))]);
+    w.fighters[0].fleeing = true;
+    assert!(!w.flee_check(0), "the fleeing branch never surrenders");
+    assert_eq!(
+        log.events(),
+        vec![ActionEvent::Flees {
+            combatant_id: 0,
+            forced: true,
+        }]
+    );
+
+    // "flees in panic" (`ovr010.cs:43-47`) — the caller's display, after a
+    // check that broke morale without the flag. `control_morale` 0x80 seeds a
+    // zero morale, which takes both gates; a slower opposition takes the flee
+    // fork rather than the surrender one.
+    let (mut w, log) = scene_world(&[
+        (Team::Monster, GridPos::new(20, 12)),
+        (Team::Party, GridPos::new(30, 12)),
+    ]);
+    w.fighters[0].control_morale = 0x80;
+    w.fighters[0].delay = 0; // the turn body is skipped; only the check runs
+                             // Gate 2 (`ovr010.cs:788-793`) reads the round's enemy-health percentage;
+                             // a wiped-out opposition (0) takes it. The speed fork below
+                             // (`ovr010.cs:797-808`) then sends a combatant faster than its opposition
+                             // down the FLEE branch rather than the surrender one.
+    w.enemy_health_pct = 0;
+    w.fighters[0].movement = 24;
+    w.fighters[1].movement = 1;
+    let mut rng = EngineRng::new(SEED);
+    w.melee_ai_turn(&mut rng, 0);
+    // (`moral_failure` itself is not observable afterwards — the turn's tail
+    // `clear_actions` wipes the whole `Action` record, which is exactly why the
+    // display has to be an event and not a post-hoc state read.)
+    assert_eq!(
+        log.events()
+            .iter()
+            .filter(|e| matches!(e, ActionEvent::Flees { .. }))
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![ActionEvent::Flees {
+            combatant_id: 0,
+            forced: false,
+        }],
+        "one panic display, and it is not the forced one"
+    );
 }

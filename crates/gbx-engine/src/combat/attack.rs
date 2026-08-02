@@ -448,8 +448,13 @@ impl CombatState {
             // listing order (the attackHeld sound and the "slays helpless"
             // message precede the damage, §1.5). The kill's own `Removed` comes
             // out of the `apply_damage` cascade below. Draw-free, like the whole
-            // branch. (The attackHeld sound id is not pinned in §1.4's table, so
-            // no `Sound` rides along; this event names the beat.)
+            // branch.
+            //
+            // The sound leads it: `PlaySound(sound_attackHeld)` is the branch's
+            // very first statement (`ovr014.cs:742`) and `sound_attackHeld` IS
+            // §1.4's "hit 7" ([`sound::HIT`]) — the id slice 2 could not pin
+            // from §1.4's table alone.
+            self.emit(ActionEvent::Sound { id: sound::HIT });
             self.emit(ActionEvent::SlayHelpless {
                 attacker_id: actor,
                 target_id: target,
@@ -511,10 +516,13 @@ impl CombatState {
         // the caller's `attackType != 0` (`behind`) OR the flanking heuristic.
         // Then `target_ac += RangedDefenseBonus` on EVERY path (`ovr014.cs:799`).
         let can_backstab = self.can_backstab(target, actor);
+        // `BehindAttack` (`ovr014.cs:781-790`) — the caller's `attackType != 0`
+        // or the flanking heuristic. Computed once: the AC pick reads it, and so
+        // does `attack_type` below (the binary's own `var_13`).
+        let behind_attack = behind || self.is_flanking(target, actor);
         let base_ac = if can_backstab {
             self.fighters[target].ac_behind as i32 - 4
         } else {
-            let behind_attack = behind || self.is_flanking(target, actor);
             (if behind_attack {
                 self.fighters[target].ac_behind
             } else {
@@ -522,6 +530,23 @@ impl CombatState {
             }) as i32
         };
         let target_ac = (base_ac + self.ranged_defense_bonus(actor, target)).clamp(0, 255) as u8;
+        // D-CV2 `Attacking` (slice 4) — `attack_type` (`ovr014.cs:797-808`) is
+        // decided by exactly the two flags just computed, in the original's own
+        // precedence: backstab preempts behind. Emitted here, after the fork and
+        // before the first swing, so the scene sees the message verb (and the
+        // run boundary the single "and Misses" hangs off) ahead of the swings it
+        // frames. Draw-free.
+        self.emit(ActionEvent::Attacking {
+            attacker_id: actor,
+            target_id: target,
+            kind: if can_backstab {
+                AttackKind::Backstab
+            } else if behind_attack {
+                AttackKind::Behind
+            } else {
+                AttackKind::Normal
+            },
+        });
         // vs-LARGE damage cells (`sub_3F4EB` @`ovr014:15E3-1662`, §49 residue,
         // spotted during the held-branch read): a READIED weapon
         // (`field_151` non-null) attacking a `field_DE > 0x80` or
@@ -540,6 +565,10 @@ impl CombatState {
         }
         let hit_bonus = self.fighters[actor].hit_bonus;
         let mut target_gone = false;
+        // `var_11` (`ovr014.cs:734`) — "some swing connected". Its only effect is
+        // presentational: the whole attack shows ONE "and Misses" (and plays ONE
+        // `sound_9`) when it stays false, never one per missing swing.
+        let mut any_hit = false;
         // `bytes_1D900[1]` — the attack-1 swing count (each swing, hit or miss),
         // the ammo the write-back subtracts (§34.6, coab≠binary #16).
         let mut swings_attack1: i32 = 0;
@@ -571,7 +600,22 @@ impl CombatState {
                 // pure d20; host those affect ops around it, per swing. Draw-free.
                 self.remove_invisibility(actor);
                 let th = self.roll_to_hit(rng, actor, target, target_ac, hit_bonus);
+                // The D-OR3 `attack` event, bracketing this swing's one d20 —
+                // the same payload [`resolve_attack`] emits, now on the path
+                // fights actually take (slice 4: the timeline needs the swing
+                // stream to present §1.5's attack sequence at all). Emission is
+                // observation-only, so the draw stream is untouched.
+                self.emit(ActionEvent::Attack {
+                    attacker_id: actor,
+                    target_id: target,
+                    roll: th.d20,
+                    hit: th.hit,
+                });
                 if th.hit {
+                    any_hit = true; // var_11 = true (ovr014.cs:828)
+                                    // `PlaySound(sound_attackHeld)` (`ovr014.cs:826`) — per
+                                    // HITTING swing, before the damage roll.
+                    self.emit(ActionEvent::Sound { id: sound::HIT });
                     // `sub_3E192(idx)` damage cells (§34.6): idx 1 = @0x19E/0x1A0/
                     // 0x1A2 (our decoded profile-1), idx 2 = @0x19F/0x1A1/0x1A3
                     // (`attack2_dice`, all zero in this party).
@@ -594,6 +638,15 @@ impl CombatState {
                         None
                     };
                     let dmg = roll_damage(rng, ds, dc, db, backstab);
+                    // The D-OR3 `dmg` event, bracketing the damage dice — the
+                    // number `DisplayAttackMessage`'s "Hitting for N point(s) of
+                    // damage" reports (`ovr014.cs:158-171`).
+                    self.emit(ActionEvent::Dmg {
+                        attacker_id: actor,
+                        target_id: target,
+                        amount: dmg.amount,
+                        backstab: dmg.backstab,
+                    });
                     // §39.5 site 6: the tail of `sub_3E192` (the damage function),
                     // after the roll/backstab and `damage_flags = 0`, before the
                     // caller applies it: `CheckAffectsEffect(attacker,
@@ -622,6 +675,12 @@ impl CombatState {
                     }
                 }
             }
+        }
+        // The all-missed tail (`ovr014.cs:857-861`): ONE `sound_9` and ONE
+        // `DisplayAttackMessage(false, …)` for the whole attack. The scene reads
+        // this `Sound` as the end of the swing run — its "and Misses" beat.
+        if !any_hit {
+            self.emit(ActionEvent::Sound { id: sound::MISS });
         }
 
         // Ammo write-back (`sub_3F9DB` @`ovr014:1BB3-1BC7`, coab≠binary #16 —
