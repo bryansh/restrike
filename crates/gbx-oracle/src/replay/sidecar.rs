@@ -52,6 +52,7 @@
 //! rather than migrated (the D-SAVE2 reject-not-migrate rule — a silently
 //! misread input knob is exactly the class of bug the guard exists to prevent).
 
+use gbx_engine::combat::reel::MONSTER_FIRST_ICON_SLOT;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -263,10 +264,6 @@ impl CaptureSidecar {
         Ok(())
     }
 }
-
-/// Mirrors `gbx_engine::combat::reel::MONSTER_FIRST_ICON_SLOT` — kept local so
-/// the validation reads without a hop.
-const MONSTER_FIRST_ICON_SLOT: u8 = 8;
 
 /// One row of the committed table, in a `const`-friendly shape.
 struct Row {
