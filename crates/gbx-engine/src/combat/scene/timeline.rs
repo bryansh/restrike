@@ -256,9 +256,20 @@ pub fn compose(
     while c.at < events.len() {
         let event = events[c.at];
         c.at += 1;
+        // A cast's projectile flies once its target run is complete and before
+        // the spell's own effect resolves (`sub_5D2E1` @`ovr023.cs:762` runs
+        // `draw_missile_attack` and only then calls the handler), so the run
+        // ends at the first event that is not another pick.
+        if c.cast.is_some() && !matches!(event, ActionEvent::SpellTarget { .. }) {
+            c.finish_cast();
+        }
         c.event(event);
     }
     c.finish_cast();
+    // `AttackTarget`'s tail puts the attacker's Normal frame back
+    // (`ovr014.cs:1000-1004`) — a run left open by the end of the batch still
+    // closes, so the pose never outlives the step that raised it.
+    c.close_run();
     c.out
 }
 
@@ -422,7 +433,6 @@ impl Composer<'_> {
             ActionEvent::Healed {
                 target_id, kind, ..
             } => {
-                self.finish_cast();
                 self.board_op(event);
                 let text = match kind {
                     // `bandage(true)` (`ovr025.cs:1645`).

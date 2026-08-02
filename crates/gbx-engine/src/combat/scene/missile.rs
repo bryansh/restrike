@@ -701,3 +701,71 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod camera_agreement {
+    //! The one claim `plan_flight` makes about engine state: where a flight
+    //! leaves the window has to be where `draw_missile_camera` — the engine's
+    //! own port of the same site — puts `mapScreenTopLeft`. If they ever
+    //! disagreed, the timeline's `debug_assert` would fire mid-fight and the
+    //! step-boundary reconciliation would fail on the camera; this pins the
+    //! agreement directly, over the geometries that fork the site.
+
+    use super::*;
+    use crate::combat::{CombatMap, CombatState, Combatant, Team};
+
+    /// Where the ENGINE's camera ends up after a shot from `a` at `t`, with
+    /// the window parked at `camera`.
+    fn engine_camera(camera: GridPos, a: GridPos, t: GridPos) -> GridPos {
+        let fighters = vec![
+            Combatant::new_melee(0, Team::Party, false, a, 20, 5, 20, 12, (1, 6, 0), 5, 1),
+            Combatant::new_melee(1, Team::Monster, true, t, 20, 5, 20, 12, (1, 6, 0), 5, 1),
+        ];
+        let mut state = CombatState::new(CombatMap::uniform(0x17), fighters);
+        state.combat_setup_done = true;
+        state.screen_map_check(0xFF, GridPos::new(camera.x + 3, camera.y + 3));
+        assert_eq!(state.camera_top_left(), camera, "the window parked");
+        state.draw_missile_camera(0, 1);
+        state.camera_top_left()
+    }
+
+    /// ...and where the SCENE's flight leaves it.
+    fn scene_camera(camera: GridPos, a: GridPos, t: GridPos) -> GridPos {
+        let class = missile_class(0x49, 2); // arrow — the class never affects the pan
+        let mut window = camera;
+        for step in plan_flight(a, t, camera, &class) {
+            if let FlightStep::Camera { top_left } = step {
+                window = top_left;
+            }
+        }
+        window
+    }
+
+    #[test]
+    fn the_flights_window_is_the_engines_window() {
+        for (camera, a, t, what) in [
+            // Both endpoints on screen — neither side scrolls.
+            ((17, 9), (18, 12), (22, 12), "in-window"),
+            // One endpoint off screen, span <= 6 — the midpoint recentre.
+            ((10, 10), (12, 13), (18, 13), "midpoint"),
+            ((10, 10), (11, 11), (13, 17), "midpoint, vertical"),
+            // Span > 6 — the flight leaves the window and pans to the target.
+            ((10, 10), (11, 13), (30, 13), "target-anchored"),
+            ((10, 10), (12, 12), (12, 24), "target-anchored, vertical"),
+            // Against the map's own clamp, where the centre cannot follow.
+            ((3, 3), (4, 4), (24, 4), "clamped at the top-left"),
+            ((43, 18), (45, 20), (25, 20), "clamped at the bottom-right"),
+            // Too short to draw: the routine returns before any scroll.
+            ((17, 9), (20, 12), (21, 12), "adjacent"),
+        ] {
+            let camera = GridPos::new(camera.0, camera.1);
+            let a = GridPos::new(a.0, a.1);
+            let t = GridPos::new(t.0, t.1);
+            assert_eq!(
+                scene_camera(camera, a, t),
+                engine_camera(camera, a, t),
+                "{what}: {a:?} -> {t:?} seen from {camera:?}"
+            );
+        }
+    }
+}
