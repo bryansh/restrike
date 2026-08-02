@@ -24,10 +24,9 @@ use gbx_engine::combat::{
     combat_state_from_records, CombatMap, CombatStep, GridPos, RecordCombatant, Team,
 };
 use gbx_engine::rng::{EngineRng, RngDraw, RngSink};
+use gbx_oracle::replay;
 use gbx_rules::adnd1::flavor_impl::Adnd1;
 use gbx_rules::pack::RuleSet;
-
-mod common;
 
 const DEFAULT_CAPTURE: &str = "goldbox-data/traces/combat4.gbxtrace";
 
@@ -253,31 +252,37 @@ fn parse_capture(text: &str) -> Capture {
 /// `RESTRIKE_AUTO_CAST_TOGGLES=<n,...>` schedules mid-fight presses by global
 /// turn ordinal (the §38 flip-window model).
 fn apply_capture_knobs(state: &mut gbx_engine::combat::CombatState, cap: &Capture) {
-    state.area_field_58c = cap.field_58c;
-    state.map_direction = std::env::var("RESTRIKE_MAP_DIR")
-        .ok()
-        .and_then(|s| s.parse::<u8>().ok())
-        .or(cap.map_direction)
-        .unwrap_or(2);
-    state.auto_pcs_cast_magic = std::env::var("RESTRIKE_AUTO_CAST")
-        .map(|v| v == "1")
-        .unwrap_or(false);
-    if let Ok(v) = std::env::var("RESTRIKE_AUTO_CAST_TOGGLES") {
-        state.auto_cast_toggles = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
-    }
-    // The "Continue Battle:" 'Y' schedule (doc §48) — mirrors h4_replay.
-    if let Ok(v) = std::env::var("RESTRIKE_CONTINUE_BATTLE") {
-        state.continue_battle_yes = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
-    }
-    // coab≠binary #21 (doc §45): the party-only area movement modifier.
-    // Precedence mirrors h4_replay: knob (explicit trial override) > the
-    // capture's emitted area2_field_6e4 through the §47 byte-bridge (the ECL
-    // stores a byte; raw 253 = 0xFD means −3) > 0.
-    state.area_field_6e4 = std::env::var("RESTRIKE_AREA_6E4")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .or(cap.field_6e4.map(common::area_6e4_from_word))
-        .unwrap_or(0);
+    // The knob merge is the library's (`replay::knobs_for`'s precedence, with
+    // this file's own `Capture` standing in for the typed reader's event):
+    // the capture's emitted values win, then the committed sidecar row, then
+    // the documented defaults — and the `RESTRIKE_*` trial overrides win over
+    // everything (`apply_env_overrides`). Wiring the sidecar in means the
+    // localizer no longer needs an exported toggle schedule to reproduce the
+    // fight the guard replays; an explicit export still takes precedence.
+    let capture = capture_basename();
+    let sidecar = replay::sidecar_or_default(&capture);
+    let mut knobs = gbx_engine::combat::reel::ReelKnobs {
+        map_direction: cap.map_direction.unwrap_or(sidecar.knobs.map_direction),
+        auto_cast: sidecar.knobs.auto_cast,
+        auto_cast_toggles: sidecar.knobs.auto_cast_toggles.clone(),
+        continue_battle: sidecar.knobs.continue_battle.clone(),
+        area_field_58c: cap.field_58c,
+        // coab≠binary #21 (doc §45): the party-only area movement modifier,
+        // through the §47 byte-bridge when the capture emitted it.
+        area_field_6e4: cap
+            .field_6e4
+            .map(replay::area_6e4_from_word)
+            .unwrap_or(sidecar.knobs.area_field_6e4),
+    };
+    replay::apply_env_overrides(&mut knobs);
+
+    state.area_field_58c = knobs.area_field_58c;
+    state.map_direction = knobs.map_direction;
+    state.auto_pcs_cast_magic = knobs.auto_cast;
+    state.auto_cast_toggles = knobs.auto_cast_toggles;
+    state.continue_battle_yes = knobs.continue_battle;
+    state.area_field_6e4 = knobs.area_field_6e4;
+
     if cap.field_6e0.unwrap_or(0) != 0 || cap.field_6e2.unwrap_or(0) != 0 {
         eprintln!(
             "WARNING: capture carries a nonzero area2 to-hit pair (6e0={:?}, 6e2={:?}) — \
@@ -286,16 +291,17 @@ fn apply_capture_knobs(state: &mut gbx_engine::combat::CombatState, cap: &Captur
         );
     }
     // §34.1: the ITEMS table + per-capture ranged loadouts (one shared place,
-    // `common`) — applied here so EVERY replay/diagnostic in this file shares
-    // the same ranged inputs (the §30 lesson). `None` loadouts are melee-
-    // identical; armed-bar arms MATHEW/TRAVIS's bows.
-    let records: Vec<&[u8]> = cap.entry.iter().map(|c| c.record.as_slice()).collect();
-    common::apply_loadouts(
-        state,
-        &capture_basename(),
-        &records,
-        common::load_item_data(),
-    );
+    // `replay::kits`) — applied here so EVERY replay/diagnostic in this file
+    // shares the same ranged inputs (the §30 lesson). `None` loadouts are
+    // melee-identical; armed-bar arms MATHEW/TRAVIS's bows.
+    state.item_data = replay::load_item_data();
+    for (id, rec) in cap.entry.iter().enumerate() {
+        if let Ok(r) = gbx_formats::save_orig::decode_char_record(&rec.record) {
+            if let Some(l) = replay::loadout_for(&capture, &r.name) {
+                state.set_loadout(id, l);
+            }
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -372,7 +378,7 @@ fn run(cap: &Capture, map: CombatMap) -> RunResult {
             team: team_of(c.team),
             pos: GridPos::new(c.x, c.y),
             record: &c.record,
-            affects: common::decode_affect_nodes(&c.affects),
+            affects: replay::decode_affect_nodes(&c.affects),
         })
         .collect();
 
@@ -561,7 +567,7 @@ fn h4_first_turn_trace() {
             team: team_of(c.team),
             pos: GridPos::new(c.x, c.y),
             record: rec,
-            affects: common::decode_affect_nodes(&c.affects),
+            affects: replay::decode_affect_nodes(&c.affects),
         })
         .collect();
     let rules = RuleSet::load();
@@ -744,7 +750,7 @@ fn h4_round0_moves() {
             team: team_of(c.team),
             pos: GridPos::new(c.x, c.y),
             record: rec,
-            affects: common::decode_affect_nodes(&c.affects),
+            affects: replay::decode_affect_nodes(&c.affects),
         })
         .collect();
     let rules = RuleSet::load();
@@ -831,7 +837,7 @@ fn h4_locate_draw() {
             team: team_of(c.team),
             pos: GridPos::new(c.x, c.y),
             record: rec,
-            affects: common::decode_affect_nodes(&c.affects),
+            affects: replay::decode_affect_nodes(&c.affects),
         })
         .collect();
     let rules = RuleSet::load();
@@ -1004,7 +1010,7 @@ fn h4_toggle_ordinal() {
             team: team_of(c.team),
             pos: GridPos::new(c.x, c.y),
             record: rec,
-            affects: common::decode_affect_nodes(&c.affects),
+            affects: replay::decode_affect_nodes(&c.affects),
         })
         .collect();
     let rules = RuleSet::load();
@@ -1392,7 +1398,7 @@ fn h4_pos_at_draws() {
             team: team_of(c.team),
             pos: GridPos::new(c.x, c.y),
             record: &c.record,
-            affects: common::decode_affect_nodes(&c.affects),
+            affects: replay::decode_affect_nodes(&c.affects),
         })
         .collect();
     let rules = RuleSet::load();

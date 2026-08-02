@@ -18,19 +18,28 @@
 //! **D10:** the capture holds real character/monster record bytes and is
 //! **local-only** — never in the repo/CI. The test gates on its presence and
 //! loud-skips when absent, like every local-tier test.
+//!
+//! **Assembly** (M6a, `combat-visualizer.md` §4): the capture → `CombatState`
+//! path is the library's — `gbx_oracle::replay::reel_input` →
+//! `gbx_engine::combat::reel::build_state` — shared verbatim with the frontier
+//! guard and the M6a reel. Knob precedence is unchanged: the `RESTRIKE_*` trial
+//! overrides win, then whatever the staging hook emitted, then the capture's
+//! committed sidecar row, then the documented defaults (heading 2, 58C 99,
+//! 6E4 0). An unpinned capture named through `GBX_H4_CAPTURE` therefore behaves
+//! exactly as it did before the sidecar existed.
 
 use std::path::{Path, PathBuf};
 
+use gbx_engine::combat::reel::{self, draws_agree, mechanic_for, ExpectedDraw};
+use gbx_engine::combat::Team;
 use gbx_engine::combat::DEFAULT_NO_ACTION_LIMIT;
-use gbx_engine::combat::{combat_state_from_records, CombatMap, RecordCombatant, Team};
 use gbx_engine::rng::{EngineRng, RngDraw, RngSink};
+use gbx_oracle::replay;
 use gbx_oracle::Trace;
 use gbx_rules::adnd1::flavor_impl::Adnd1;
 use gbx_rules::pack::RuleSet;
 use std::cell::RefCell;
 use std::rc::Rc;
-
-mod common;
 
 /// The canonical local-only capture (D10): the `combat4` bar brawl (16
 /// combatants, seed `0x80ee4cee`, 3,075 draws, real terrain + board snapshots).
@@ -57,26 +66,6 @@ fn capture_path() -> Option<PathBuf> {
     )
 }
 
-/// Open-floor fallback tile (`0x17` = passable floor, move_cost 1) — used only
-/// when the capture predates the `combat_entry.terrain` field. Terrain is
-/// load-bearing for movement (doc §14), so a modern capture's replay always
-/// builds its map from the captured ground grid.
-const FLOOR: u8 = 0x17;
-
-/// Decode the `combat_entry.terrain` lowercase-hex ground grid.
-fn decode_terrain(hex: &str) -> Vec<u8> {
-    let b = hex.as_bytes();
-    let val = |c: u8| match c {
-        b'0'..=b'9' => c - b'0',
-        b'a'..=b'f' => c - b'a' + 10,
-        b'A'..=b'F' => c - b'A' + 10,
-        _ => 0,
-    };
-    b.chunks_exact(2)
-        .map(|p| (val(p[0]) << 4) | val(p[1]))
-        .collect()
-}
-
 /// A draw tap recording every `(before, after, n)` at the engine seam.
 #[derive(Clone, Default)]
 struct DrawTap {
@@ -85,70 +74,6 @@ struct DrawTap {
 impl RngSink for DrawTap {
     fn on_draw(&mut self, draw: RngDraw) {
         self.draws.borrow_mut().push(draw);
-    }
-}
-
-/// The capture's combat draws: `(before, after, operand)` per `rng` event that
-/// appears **after** the `combat_entry` snapshot, in file order. `operand` is
-/// `ss_sp_words[3]` (the draw's `Random(n)` argument, diagnostic only) — an
-/// unknown field to the typed reader, so it is pulled from the raw JSON here.
-struct CaptureDraw {
-    before: u32,
-    after: u32,
-    operand: Option<u16>,
-}
-
-/// Pull the capture's post-`combat_entry` draws straight from the raw JSONL, so
-/// the diagnostic operand (`ss_sp_words[3]`) is available alongside
-/// `(before, after)`. Ordering matches the typed reader's event order.
-fn capture_combat_draws(text: &str) -> Vec<CaptureDraw> {
-    let mut out = Vec::new();
-    let mut seen_entry = false;
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let v: serde_json::Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        match v.get("e").and_then(|e| e.as_str()) {
-            Some("combat_entry") => seen_entry = true,
-            Some("rng") if seen_entry => {
-                let before = v["before"].as_u64().unwrap() as u32;
-                let after = v["after"].as_u64().unwrap() as u32;
-                let operand = v
-                    .get("ss_sp_words")
-                    .and_then(|w| w.as_array())
-                    .and_then(|w| w.get(3))
-                    .and_then(|n| n.as_u64())
-                    .map(|n| n as u16);
-                out.push(CaptureDraw {
-                    before,
-                    after,
-                    operand,
-                });
-            }
-            _ => {}
-        }
-    }
-    out
-}
-
-/// Infer which combat mechanic drew, from the `Random(n)` operand — the honest
-/// die tells the mechanic (§2/§4/§9 draw map).
-fn mechanic_for(operand: Option<u16>) -> &'static str {
-    match operand {
-        Some(6) => "initiative d6 (CalculateInitiative)",
-        Some(100) => "d100 (FindNextCombatant selection, or FleeCheck/advance morale)",
-        Some(20) => "d20 (to-hit PC_CanHitTarget, or a saving throw)",
-        Some(7) => "d7 (QuickFight AI mode-gate / wand-scan / spell-priority)",
-        Some(n) => match n {
-            0 => "random(0) edge draw",
-            _ => "damage die (weapon/monster attack dice)",
-        },
-        None => "unknown (operand not recorded)",
     }
 }
 
@@ -175,94 +100,46 @@ fn h4_melee_replays_the_bar_brawl_capture_draw_for_draw() {
         .combat_entry()
         .expect("the capture carries a combat_entry snapshot");
 
-    // Build the replay roster in the captured order, at the captured positions.
-    let entries: Vec<RecordCombatant> = entry
+    let capture_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    // The whole assembly (roster, terrain, knobs, kits, the ITEMS table) is
+    // the library's — the same call the frontier guard and the M6a reel make.
+    // `sidecar_or_default` gives an unpinned capture the documented defaults
+    // (heading 2, magic off, no schedules), which is exactly what this harness
+    // applied before the sidecar table existed; the `RESTRIKE_*` trial
+    // overrides then sit on top of everything.
+    let sidecar = replay::sidecar_or_default(&capture_name);
+    let item_data = replay::load_item_data();
+    // A ranged capture cannot replay without the ITEMS table — without this
+    // loud skip a missing game file surfaces as a baffling divergence at draw
+    // ~58 (the guard already skips the same way).
+    if replay::capture_has_loadout(&capture_name) && item_data.is_none() {
+        eprintln!(
+            "SKIPPED (ITEMS absent, D10): {capture_name} carries a ranged loadout \
+             and needs the local game data (~/goldbox-data/cotab/ITEMS or GBX_ITEMS_FILE)"
+        );
+        return;
+    }
+    let mut input = replay::reel_input(&capture_name, entry, &sidecar, item_data)
+        .unwrap_or_else(|e| panic!("{capture_name}: {e}"));
+    // The investigator's knobs (`RESTRIKE_MAP_DIR`, `RESTRIKE_AUTO_CAST`,
+    // `RESTRIKE_AUTO_CAST_TOGGLES`, `RESTRIKE_CONTINUE_BATTLE`,
+    // `RESTRIKE_AREA_6E4`) — an explicit trial override for a session probing
+    // an open frontier. The guard deliberately does NOT read these.
+    replay::apply_env_overrides(&mut input.knobs);
+
+    let n_combatants = input.combatants.len();
+    let (party, monsters) = input
         .combatants
         .iter()
-        .map(|c| RecordCombatant {
-            team: match c.team {
-                0 => Team::Party,
-                1 => Team::Monster,
-                other => panic!("combat_entry has an unknown team byte {other}"),
-            },
-            pos: gbx_engine::combat::GridPos::new(c.x as i32, c.y as i32),
-            record: &c.record,
-            affects: common::decode_affect_nodes(&c.affects),
-        })
-        .collect();
+        .fold((0, 0), |(p, m), e| match e.team {
+            Team::Party => (p + 1, m),
+            Team::Monster => (p, m + 1),
+        });
 
-    let n_combatants = entries.len();
-    let (party, monsters) = entries.iter().fold((0, 0), |(p, m), e| match e.team {
-        Team::Party => (p + 1, m),
-        Team::Monster => (p, m + 1),
-    });
-
-    let rules = RuleSet::load();
-    let flavor = Adnd1::new(&rules);
-    // Real terrain when the capture carries it (§14: load-bearing), else the
-    // documented open-floor fallback for pre-terrain captures.
-    let map = match entry.terrain.as_deref() {
-        Some(hex) => CombatMap::from_ground(decode_terrain(hex)),
-        None => CombatMap::uniform(FLOOR),
-    };
-    let mut state = combat_state_from_records(&entries, map, &flavor).expect("records decode");
-    // `area2.field_58C` — the faithful FleeCheck_001 gate-2 morale threshold
-    // (doc §28). Captures that carry it (the rout capture pokes 50) use it;
-    // legacy captures without the field default to 99 (the measured bar value,
-    // under which the natural rout is mathematically impossible → the four
-    // closed captures stay closed).
-    state.area_field_58c = entry.area2_field_58c.map(|v| v as i32).unwrap_or(99);
-    // `gbl.mapDirection` (the party's world facing, half-encoded {0 N, 2 E, 4 S,
-    // 6 W} per coab `Gbl.cs:354`, `byte_1D53B`) — the flee HEADING input
-    // (`moralFailureEscape`, `sub_359D1` @`ovr010:0B14`). Precedence:
-    // `RESTRIKE_MAP_DIR` (explicit trial override) > the capture's emitted
-    // `map_direction` (hooks from 8ab275e on; the armed/caster staging captures
-    // carry it, closing the §29 TODO) > the provisional geometry-matched
-    // default 2 (E — the heading whose bar-rout positions match, §29/§30, now
-    // capture-CONFIRMED by armed-bar's emitted md=2 from the same room).
-    state.map_direction = std::env::var("RESTRIKE_MAP_DIR")
-        .ok()
-        .and_then(|s| s.parse::<u8>().ok())
-        .or(entry.map_direction)
-        .unwrap_or(2);
-    // `gbl.AutoPCsCastMagic` (`byte_1D904`) — `BattleSetup` resets it false
-    // (`ovr011.cs:1186`); the '2' key toggles it mid-fight. Not in the capture
-    // snapshot (staging-hook TODO), so `RESTRIKE_AUTO_CAST=1` arms it for fights
-    // where the player did (caster-bar: pressed in round 1 BEFORE the first
-    // caster turn — "on from entry" is draw-equivalent for that capture, doc
-    // §33). Default false = the faithful entry state.
-    state.auto_pcs_cast_magic = std::env::var("RESTRIKE_AUTO_CAST")
-        .map(|v| v == "1")
-        .unwrap_or(false);
-    // Mid-fight presses (doc §38): `RESTRIKE_AUTO_CAST_TOGGLES=16` (comma
-    // list of 0-based global turn ordinals) flips the flag at each listed
-    // turn's head — the flip-window model for captures where the '2' press
-    // landed mid-fight (caster-bar: between PHILIPPE's round-1 and round-2
-    // turns, so ordinal 16 = his round-2 turn head).
-    if let Ok(v) = std::env::var("RESTRIKE_AUTO_CAST_TOGGLES") {
-        state.auto_cast_toggles = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
-    }
-    // The "Continue Battle:" prompt schedule (doc §48): comma list of 0-based
-    // OCCURRENCE indices answered 'Y' (cleric-fk: 0 — one Y at round 3's
-    // end). An input like the toggle schedule, not in the capture.
-    if let Ok(v) = std::env::var("RESTRIKE_CONTINUE_BATTLE") {
-        state.continue_battle_yes = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
-    }
-    // `area2.field_6E4` — the PARTY-only area movement modifier (coab≠binary
-    // #21, doc §45). ECL-set at the ambush, reset at combat end. Precedence:
-    // `RESTRIKE_AREA_6E4` (explicit trial override) > the capture's emitted
-    // `area2_field_6e4` (hooks from cc0c9cd on, the doc §46 prep), through
-    // the §47 byte-bridge (the ECL stores a byte; sewer-fight-3's raw 253 =
-    // 0xFD means −3 under sub_3E124's word-add + AL-store) > 0 (the bar
-    // value). Pre-trio captures ride the knob: `RESTRIKE_AREA_6E4=-3`
-    // for sewer-fight-1 (pinned by three independent round-5 chase walks).
-    state.area_field_6e4 = std::env::var("RESTRIKE_AREA_6E4")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .or(entry
-            .area2_field_6e4
-            .map(|v| common::area_6e4_from_word(i32::from(v))))
-        .unwrap_or(0);
     // The 6E0/6E2 per-team to-hit pair is parse-only (unmodeled — the gate
     // needs listing verification before engine wiring, the #21 lesson). A
     // capture carrying nonzero values WILL diverge at its first hit test;
@@ -274,31 +151,15 @@ fn h4_melee_replays_the_bar_brawl_capture_draw_for_draw() {
             entry.area2_field_6e0, entry.area2_field_6e2
         );
     }
-    // §34.1: the ITEMS table + per-capture ranged loadouts (one shared place,
-    // `common`). `None` loadouts leave a combatant melee-identical; armed-bar
-    // arms MATHEW/TRAVIS's bows.
-    let capture_name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    // A ranged capture cannot replay without the ITEMS table — without this
-    // loud skip a missing game file surfaces as a baffling divergence at draw
-    // ~58 (the guard already skips the same way).
-    let item_data = common::load_item_data();
-    if common::capture_has_loadout(&capture_name) && item_data.is_none() {
-        eprintln!(
-            "SKIPPED (ITEMS absent, D10): {capture_name} carries a ranged loadout \
-             and needs the local game data (~/goldbox-data/cotab/ITEMS or GBX_ITEMS_FILE)"
-        );
-        return;
-    }
-    let records: Vec<&[u8]> = entries.iter().map(|e| e.record).collect();
-    common::apply_loadouts(&mut state, &capture_name, &records, item_data);
+
+    let rules = RuleSet::load();
+    let flavor = Adnd1::new(&rules);
+    let mut state = reel::build_state(&input, &flavor).expect("records decode");
 
     // Seed gbx-prng with the snapshot's rng_state and tap every draw.
     let tap = DrawTap::default();
     let draws = tap.draws.clone();
-    let mut rng = EngineRng::new(entry.rng_state);
+    let mut rng = EngineRng::new(input.rng_state);
     rng.attach_sink(Box::new(tap.clone()));
 
     // Stub tripwires (doc §24): collect every `StubTripped` with the draw index
@@ -343,12 +204,12 @@ fn h4_melee_replays_the_bar_brawl_capture_draw_for_draw() {
 
     // The two draw streams.
     let ours = draws.borrow();
-    let capture = capture_combat_draws(&text);
+    let capture: Vec<ExpectedDraw> = replay::capture_draws(&text);
 
     eprintln!(
         "H4 replay: {n_combatants} combatants ({party} party, {monsters} monster), \
          seed {:#010x}; our fight = {} draws ({:?}), capture = {} draws",
-        entry.rng_state,
+        input.rng_state,
         ours.len(),
         outcome,
         capture.len()
@@ -373,13 +234,10 @@ fn h4_melee_replays_the_bar_brawl_capture_draw_for_draw() {
     for i in 0..max {
         match (ours.get(i), capture.get(i)) {
             (Some(o), Some(c)) => {
-                let operand_ok = match (o.n, c.operand) {
-                    (Some(a), Some(b)) => a == b,
-                    // One side lacks a recorded operand → fall back to
-                    // (before, after) only for this draw.
-                    _ => true,
-                };
-                if o.before == c.before && o.after == c.after && operand_ok {
+                // `draws_agree` is the shared surface: `(before, after)` always,
+                // plus the operand when BOTH sides carry one (one side lacking a
+                // recorded operand falls back to the chain for that draw).
+                if draws_agree(o, c) {
                     continue;
                 }
                 // First divergence — print it in full and stop.

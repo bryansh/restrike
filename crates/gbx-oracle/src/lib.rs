@@ -15,6 +15,9 @@
 //!   single-trace chain-continuity check.
 //! - [`sink`] — the [`gbx_engine::rng::RngSink`] implementation that turns live
 //!   engine draws into a trace.
+//! - [`replay`] — capture → `gbx_engine::combat::reel::ReelInput`: the per-capture
+//!   loadout kits, the versioned knob/icon sidecar, and the assembly the H4
+//!   harnesses and the M6a reel both build their fights through.
 //!
 //! Action-profile vocabulary lands incrementally as combat systems do (D-OR3,
 //! step 5). The **initiative slice** pins [`format::InitEvent`] /
@@ -26,6 +29,7 @@
 
 pub mod compare;
 pub mod format;
+pub mod replay;
 pub mod sink;
 
 pub use compare::{check_chain, compare, ChainBreak, Comparison, Divergence, Incomparable};

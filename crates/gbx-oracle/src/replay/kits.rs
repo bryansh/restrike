@@ -1,31 +1,19 @@
-//! Shared test support for the H4 replay harnesses (M5 armed slice, doc §34).
+//! **The per-capture ranged loadouts** (doc §34.1/§45/§48) — the kits a
+//! `combat_entry` snapshot cannot recover.
 //!
-//! The **one shared place** the per-capture ranged loadouts and the `ITEMS`
-//! table loader live, so `h4_replay`, `h4_frontier_guard`, and `h4_turndiff`
-//! feed the engine the SAME ranged inputs (the §30 lesson: every replay must
-//! share input knobs, or an instrument replays a different fight). D10: the
-//! `ITEMS` file and capture bytes are local-only; nothing here enters the repo.
+//! Item identity and ammo counts live behind runtime far pointers the capture
+//! does not chase, so a fight with readied ranged weapons supplies them here.
+//! This was `gbx-oracle/tests/common/mod.rs` through M5; M6a's reel needs the
+//! same rows outside a test binary, so the table moved into the library
+//! unchanged (doc §4 M6a's library-ification). The **one shared place** rule is
+//! the point (the §30 lesson: every replay must share input knobs, or an
+//! instrument replays a different fight) — `h4_replay`, `h4_turndiff`, the
+//! frontier guard and the reel all read these rows.
+//!
+//! D10: the `ITEMS` file and the capture bytes stay local-only; nothing here is
+//! game data — only the identifications a research session earned.
 
-#![allow(dead_code)] // each test binary uses a different subset of these.
-
-use gbx_engine::combat::{CombatState, Loadout};
-use gbx_formats::items::ItemDataTable;
-use gbx_formats::save_orig::decode_char_record;
-use std::path::{Path, PathBuf};
-
-/// Load the resident `ITEMS` table from the local game dir (D10). `GBX_ITEMS_FILE`
-/// overrides the default `~/goldbox-data/cotab/ITEMS`. `None` when the file is
-/// absent — a caller then replays melee-only (and should skip loadout-bearing
-/// captures via [`capture_has_loadout`]).
-pub fn load_item_data() -> Option<ItemDataTable> {
-    let path = std::env::var_os("GBX_ITEMS_FILE")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|h| Path::new(&h).join("goldbox-data/cotab/ITEMS"))
-        })?;
-    let bytes = std::fs::read(path).ok()?;
-    ItemDataTable::parse(&bytes).ok()
-}
+use gbx_engine::combat::Loadout;
 
 /// The per-capture ranged loadout table (doc §34.1), keyed by capture basename
 /// and combatant name. `None` for every combatant not listed = today's melee
@@ -193,39 +181,6 @@ fn sewer_monster_kit(name: &str) -> Option<Loadout> {
     }
 }
 
-/// Decode a capture combatant's raw affect chain (hex-encoded 9-byte nodes,
-/// the §44.2 hook channel) into engine [`AffectRecord`]s, order preserved
-/// (find-FIRST is order-observable, §39.2/§47.7). Nodes too short to decode
-/// are skipped (defensive; real nodes are always 9 bytes).
-pub fn decode_affect_nodes(hex_nodes: &[String]) -> Vec<gbx_formats::affects::AffectRecord> {
-    hex_nodes
-        .iter()
-        .filter_map(|h| {
-            let bytes: Vec<u8> = (0..h.len().saturating_sub(1))
-                .step_by(2)
-                .filter_map(|i| u8::from_str_radix(&h[i..i + 2], 16).ok())
-                .collect();
-            gbx_formats::affects::AffectRecord::decode(&bytes)
-        })
-        .collect()
-}
-
-/// The engine-semantic `area2.field_6E4` from the captured raw word — the
-/// **byte-bridge** (doc §47). The ECL stores a BYTE (sewer-fight-3 records the
-/// word 253 = 0x00FD), and the binary's add (`sub_3E124` @`ovr014:0140-014E`,
-/// listing-verified) is `mov al,movement; xor ah,ah; add ax,[6E4]word;
-/// mov [movement],al` — a WORD add whose result is truncated to AL on store.
-/// `(movement + word) & 0xFF ≡ (movement + sign_extended_low_byte) & 0xFF`
-/// identically (the high byte cannot reach the low byte of a sum), so the
-/// engine's i32 domain takes the low byte sign-extended: 0xFD → −3. The
-/// mapping is also invariant to how the hook signed the word (+253 and −3
-/// share a low byte). The subsequent clamp (`<1 || >0x60 → 1`,
-/// `ovr014:0156-0166`) is [`gbx_engine::combat::calc_moves`]'s, already
-/// faithful in the i32 domain for every value whose word sum stays under 256.
-pub fn area_6e4_from_word(raw: i32) -> i32 {
-    i32::from((raw & 0xFF) as u8 as i8)
-}
-
 /// True if any combatant in this capture carries a loadout — lets a harness
 /// skip a ranged capture when the `ITEMS` file is absent (it cannot replay
 /// ranged combat without the weapon table). `sewer-fight-3` (trolls +
@@ -243,23 +198,77 @@ pub fn capture_has_loadout(capture: &str) -> bool {
     )
 }
 
-/// Apply the `ITEMS` table and the per-capture loadouts to a freshly-built
-/// state (doc §34.1). Sets `state.item_data`, then decodes each roster record
-/// for its name and applies its loadout (if any). `records` is the roster's raw
-/// `0x1A6` bytes in roster order. `None`-loadout combatants are left exactly as
-/// today's engine — draw-identical.
-pub fn apply_loadouts(
-    state: &mut CombatState,
-    capture: &str,
-    records: &[&[u8]],
-    items: Option<ItemDataTable>,
-) {
-    state.item_data = items;
-    for (id, rec) in records.iter().enumerate() {
-        if let Ok(r) = decode_char_record(rec) {
-            if let Some(l) = loadout_for(capture, &r.name) {
-                state.set_loadout(id, l);
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_armed_bar_pcs_carry_their_bows() {
+        let m = loadout_for("armed-bar.gbxtrace", "MATHEW").expect("MATHEW is armed");
+        assert_eq!(m.ranged, Some((43, 0)));
+        assert!(m.entry_ranged_readied);
+        let t = loadout_for("armed-bar.gbxtrace", "TRAVIS").expect("TRAVIS is armed");
+        assert_eq!(t.ammo_count, 10, "the capture-fitted quiver");
+        assert!(loadout_for("armed-bar.gbxtrace", "MARK").is_none());
+    }
+
+    #[test]
+    fn the_slot_h_kits_key_across_all_three_campaign_basenames() {
+        for capture in [
+            "cleric-fk.gbxtrace",
+            "cleric-guildwar.gbxtrace",
+            "buffed-otyugh.gbxtrace",
+        ] {
+            let l = loadout_for(capture, "SHARA").expect("SHARA has a kit in every campaign fight");
+            assert_eq!(l.melee, Some((23, 1)), "{capture}: mace +1");
+            assert_eq!(l.ranged, None, "{capture}: the sling is cleric-forbidden");
+            assert!(!l.entry_ranged_readied);
+        }
+    }
+
+    #[test]
+    fn fire_knives_are_archers_in_every_sewer_basename() {
+        for capture in [
+            "sewer-fight-1.gbxtrace",
+            "sewer-fight-2.gbxtrace",
+            "cleric-fk.gbxtrace",
+            "cleric-guildwar.gbxtrace",
+        ] {
+            let l = loadout_for(capture, "FIRE KNIFE").expect("{capture}: the MON2ITM block-1 kit");
+            assert_eq!(l.ranged, Some((44, 0)), "{capture}");
+            assert_eq!(l.ammo_count, 7, "{capture}: the data-derived quiver");
+        }
+        // The rowless-by-data rosters stay rowless.
+        assert!(loadout_for("sewer-fight-2.gbxtrace", "THIEF").is_none());
+        assert!(loadout_for("sewer-fight-3.gbxtrace", "TROLL").is_none());
+        assert!(loadout_for("sewer-fight-4.gbxtrace", "OTYUGH").is_none());
+    }
+
+    #[test]
+    fn the_bar_matrix_carries_no_kits_at_all() {
+        for capture in [
+            "combat4.gbxtrace",
+            "caster-bar.gbxtrace",
+            "bar-fists-2.gbxtrace",
+        ] {
+            for name in ["MATHEW", "TRAVIS", "BAR PATRON"] {
+                assert!(loadout_for(capture, name).is_none(), "{capture}/{name}");
+            }
+            assert!(!capture_has_loadout(capture));
+        }
+    }
+
+    #[test]
+    fn the_items_gate_lists_exactly_the_ranged_captures() {
+        for capture in crate::replay::sidecar::pinned_captures() {
+            let needs = capture_has_loadout(capture);
+            // sewer-fight-3's itemless rosters are the documented exception:
+            // it replays with no `ITEMS` file at all.
+            if capture == "sewer-fight-3.gbxtrace" || capture == "sewer-fight-4.gbxtrace" {
+                assert!(!needs, "{capture} is itemless");
             }
         }
+        assert!(capture_has_loadout("armed-bar.gbxtrace"));
+        assert!(capture_has_loadout("buffed-otyugh.gbxtrace"));
     }
 }

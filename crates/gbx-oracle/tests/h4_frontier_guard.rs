@@ -21,19 +21,30 @@
 //! is local-tier: it loud-skips per-capture when a file is absent, so plain CI
 //! (no `GBX_DATA_DIR`) stays green.
 //!
-//! The replay+compare here mirrors `h4_replay`'s milestone machinery deliberately
-//! (a compact copy — factoring the milestone test into a shared module would churn
-//! it for little gain); the equality surface is identical: `(before, after)` plus
-//! the `Random(n)` **operand** whenever both sides carry one.
+//! ## Where the input knobs went (M6a, `combat-visualizer.md` §4)
+//!
+//! Each `Pin` used to carry this fight's input knobs (`map_direction`,
+//! `auto_cast*`, `area_field_6e4`, `continue_battle`) beside its expectation.
+//! They now live in **`gbx_oracle::replay::sidecar`**'s committed table, because
+//! the M6a reel needs the identical inputs outside a test binary — and a second
+//! copy of an input knob is exactly the §30 failure ("every replay must share
+//! input knobs, or an instrument replays a different fight"). **The exact-pin
+//! rule extends to that table verbatim**: a knob there moves only alongside the
+//! fix that earns it, and this guard is still what fails when one drifts. Each
+//! pin's comment below keeps the peel history that earned its value.
+//!
+//! The replay itself now runs through the library-ified path
+//! (`replay::reel_input` → `gbx_engine::combat::reel::build_state`), the same
+//! one `h4_replay` and the reel use; the equality surface is unchanged:
+//! `(before, after)` plus the `Random(n)` **operand** whenever both sides carry
+//! one.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-mod common;
-
-use gbx_engine::combat::{
-    combat_state_from_records, CombatMap, GridPos, RecordCombatant, Team, DEFAULT_NO_ACTION_LIMIT,
-};
+use gbx_engine::combat::reel::{self, draws_agree};
+use gbx_engine::combat::DEFAULT_NO_ACTION_LIMIT;
 use gbx_engine::rng::{EngineRng, RngDraw, RngSink};
+use gbx_oracle::replay;
 use gbx_oracle::Trace;
 use gbx_rules::adnd1::flavor_impl::Adnd1;
 use gbx_rules::pack::RuleSet;
@@ -52,29 +63,16 @@ enum Expect {
     Frontier(usize),
 }
 
-/// One manifest row: capture basename, its pinned outcome, the flee heading
-/// (`map_direction`) to apply in-process, and the `AutoPCsCastMagic` input
-/// state — the entry value (`auto_cast`, doc §33) plus any mid-fight '2'
-/// presses as a toggle schedule (`auto_cast_toggles`, global turn ordinals,
-/// doc §38). Only `bar-rout-58c50` routs, so the heading is load-bearing there
-/// (md=2, the geometry-matched value, doc §29); for the non-routing captures
-/// it is inert but set uniformly for clarity. The magic flag today feeds only
-/// the `memorized-spells` wire (no draws), but the manifest carries each
-/// fight's true input state so the caster peel inherits it.
+/// One manifest row: a capture basename and its pinned outcome.
+///
+/// The fight's *input* knobs (flee heading, the `AutoPCsCastMagic` entry state
+/// and '2'-press schedule, `area2.field_6E4`, the "Continue Battle:" answers)
+/// live in `gbx_oracle::replay::sidecar`'s committed table — see the module doc.
+/// Each row's comment keeps the peel history that earned both its expectation
+/// and its knobs.
 struct Pin {
     capture: &'static str,
     expect: Expect,
-    map_direction: u8,
-    auto_cast: bool,
-    auto_cast_toggles: &'static [u32],
-    /// `area2.field_6E4` — the PARTY-only area movement modifier (coab≠binary
-    /// #21, doc §45). ECL-set per area, not in the capture snapshot (hook
-    /// TODO): bar 0, sewers −3 (pinned by three independent chase walks).
-    area_field_6e4: i32,
-    /// The "Continue Battle:" prompt schedule (doc §48): 0-based occurrence
-    /// indices answered 'Y'. An operator input like the toggle schedule —
-    /// empty for every capture where the prompt never extended the fight.
-    continue_battle: &'static [u16],
 }
 
 /// **The manifest.** Current truth (doc §29). Edit ONLY alongside the fix that
@@ -83,29 +81,14 @@ const PINS: &[Pin] = &[
     Pin {
         capture: "combat4.gbxtrace",
         expect: Expect::Closed,
-        map_direction: 2,
-        auto_cast: false,
-        auto_cast_toggles: &[],
-        area_field_6e4: 0,
-        continue_battle: &[],
     },
     Pin {
         capture: "combat3+terrain4.gbxtrace",
         expect: Expect::Closed,
-        map_direction: 2,
-        auto_cast: false,
-        auto_cast_toggles: &[],
-        area_field_6e4: 0,
-        continue_battle: &[],
     },
     Pin {
         capture: "combat2+terrain4.gbxtrace",
         expect: Expect::Closed,
-        map_direction: 2,
-        auto_cast: false,
-        auto_cast_toggles: &[],
-        area_field_6e4: 0,
-        continue_battle: &[],
     },
     Pin {
         // ★ CLOSED (doc §44): the oldest open frontier (@368 since the wire-gates
@@ -118,11 +101,6 @@ const PINS: &[Pin] = &[
         // signature as caster-bar's @2174/@2176, closed by the same fix.
         capture: "combat+terrain4.gbxtrace",
         expect: Expect::Closed, // was Frontier(368); near-list filter placement (#20)
-        map_direction: 2,
-        auto_cast: false,
-        auto_cast_toggles: &[],
-        area_field_6e4: 0,
-        continue_battle: &[],
     },
     Pin {
         // ★ CLOSED 3521/3521 (doc §32): the rout capture replays operand-exact
@@ -130,11 +108,6 @@ const PINS: &[Pin] = &[
         // #14), and the cross-round guard (§32 bug #15) all landed.
         capture: "bar-rout-58c50.gbxtrace",
         expect: Expect::Closed, // was Frontier(2895); guarding-survives-initiative (§32 bug #15)
-        map_direction: 2,
-        auto_cast: false,
-        auto_cast_toggles: &[],
-        area_field_6e4: 0,
-        continue_battle: &[],
     },
     Pin {
         // The armed-slice driver (doc §25 runbook item 3): MATHEW's first turn
@@ -148,11 +121,6 @@ const PINS: &[Pin] = &[
         // CLOSED, operand-exact — the last H4 bar-fight frontier.
         capture: "armed-bar.gbxtrace",
         expect: Expect::Closed,
-        map_direction: 2,
-        auto_cast: false,
-        auto_cast_toggles: &[],
-        area_field_6e4: 0,
-        continue_battle: &[],
     },
     Pin {
         // The caster driver, fully peeled (doc §41). sub_3560B's selection loop
@@ -175,11 +143,6 @@ const PINS: &[Pin] = &[
         // draws replay operand-exact.
         capture: "caster-bar.gbxtrace",
         expect: Expect::Closed, // was Frontier(2176); near-list filter placement (#20)
-        map_direction: 2,
-        auto_cast: false,
-        auto_cast_toggles: &[16],
-        area_field_6e4: 0,
-        continue_battle: &[],
     },
     Pin {
         // A third independent fist seed, free from the caster staging (doc
@@ -187,11 +150,6 @@ const PINS: &[Pin] = &[
         // capture-proof that the gated memorized-spells wire stays silent.
         capture: "bar-fists-2.gbxtrace",
         expect: Expect::Closed,
-        map_direction: 2,
-        auto_cast: false,
-        auto_cast_toggles: &[],
-        area_field_6e4: 0,
-        continue_battle: &[],
     },
     Pin {
         // The first post-matrix capture (doc §45): 5 Fire Knives jump the
@@ -228,11 +186,6 @@ const PINS: &[Pin] = &[
         // operand-exact — the first sewer roster proven draw-for-draw.
         capture: "sewer-fight-1.gbxtrace",
         expect: Expect::Closed, // was Frontier(1152); party-gated field_6E4 (#21)
-        map_direction: 0,
-        auto_cast: false,
-        auto_cast_toggles: &[2],
-        area_field_6e4: -3,
-        continue_battle: &[],
     },
     Pin {
         // The campaign-1 thief brawl (doc §47): the biggest capture yet —
@@ -262,11 +215,6 @@ const PINS: &[Pin] = &[
         // fight ends BY the no-action rule, length-equal with the capture.
         capture: "sewer-fight-2.gbxtrace",
         expect: Expect::Closed, // was Frontier(7938); bandage gate + stalemate horizon
-        map_direction: 2,
-        auto_cast: false,
-        auto_cast_toggles: &[17],
-        area_field_6e4: 0,
-        continue_battle: &[],
     },
     Pin {
         // The campaign-1 troll tussock (doc §47): 4 TROLLS + 7 CROCODILES,
@@ -300,11 +248,6 @@ const PINS: &[Pin] = &[
         // death-3d6/rise machinery stays tripwired).
         capture: "sewer-fight-3.gbxtrace",
         expect: Expect::Closed, // was Frontier(115); size slice + racials + troll regen
-        map_direction: 2,
-        auto_cast: false,
-        auto_cast_toggles: &[16],
-        area_field_6e4: -3,
-        continue_battle: &[],
     },
     Pin {
         // The campaign-1 otyugh attack, RESTAGED with QuickFight from turn 1
@@ -318,11 +261,6 @@ const PINS: &[Pin] = &[
         // d20/d4) and the whole 5-monster brawl replay draw-for-draw.
         capture: "sewer-fight-4.gbxtrace",
         expect: Expect::Closed, // was Frontier(22) on the manual-turn staging; size slice
-        map_direction: 4,
-        auto_cast: false,
-        auto_cast_toggles: &[],
-        area_field_6e4: -3,
-        continue_battle: &[],
     },
     Pin {
         // The campaign-2 opener (doc §48): the slot-H UPGRADED party walks into
@@ -377,13 +315,8 @@ const PINS: &[Pin] = &[
         // operand-exact.
         capture: "cleric-fk.gbxtrace",
         expect: Expect::Closed, // was Frontier(233); the cleric spell slice
-        map_direction: 4,
-        auto_cast: false,
-        auto_cast_toggles: &[0],
-        area_field_6e4: -3,
-        // Bryan answered the round-3-end "Continue Battle:" prompt 'Y' once
-        // (round 4 exists in the capture), 'N' at round 4's end.
-        continue_battle: &[0],
+                                // Bryan answered the round-3-end "Continue Battle:" prompt 'Y' once
+                                // (round 4 exists in the capture), 'N' at round 4's end.
     },
     Pin {
         // The campaign-2 second capture (doc §48.5's hunt for a LANDED hold):
@@ -425,16 +358,11 @@ const PINS: &[Pin] = &[
         // no Continue-Battle 'Y' (the fight never stalls to the prompt).
         capture: "cleric-guildwar.gbxtrace",
         expect: Expect::Closed, // was Frontier(228); the held-target slice (§49)
-        map_direction: 2,
-        auto_cast: false,
-        // The §38 toggle pin, DERIVED (h4_toggle_ordinal): the recorded
-        // magic_toggle flip sits between post-entry draws 153/154, and draw
-        // 153 IS the head of global turn 3 ([20]'s) — the poll at that head
-        // sees the press. Turn 4 (head @189) is PHILIPPE's: his selection
-        // d1s are the @193 fork the intake pin sat on.
-        auto_cast_toggles: &[3],
-        area_field_6e4: 0,
-        continue_battle: &[],
+                                // The §38 toggle pin, DERIVED (h4_toggle_ordinal): the recorded
+                                // magic_toggle flip sits between post-entry draws 153/154, and draw
+                                // 153 IS the head of global turn 3 ([20]'s) — the poll at that head
+                                // sees the press. Turn 4 (head @189) is PHILIPPE's: his selection
+                                // d1s are the @193 fork the intake pin sat on.
     },
     Pin {
         // The campaign-3 capture (doc §46's last gate): the slot-H party —
@@ -464,44 +392,12 @@ const PINS: &[Pin] = &[
         // `surrender-int5` wire retired capture-proven.
         capture: "buffed-otyugh.gbxtrace",
         expect: Expect::Closed, // was Frontier(29); kits + toggle + camp-buff handlers (§50)
-        map_direction: 6,
-        auto_cast: false,
-        // The §38 toggle pin, DERIVED (h4_toggle_ordinal): the recorded flip
-        // sits between post-entry draws 22/23 and draw 22 IS the head of
-        // global turn 0 (LEDERA's) — the head poll sees the press, exactly
-        // the cleric-fk shape.
-        auto_cast_toggles: &[0],
-        area_field_6e4: -3,
-        continue_battle: &[],
+                                // The §38 toggle pin, DERIVED (h4_toggle_ordinal): the recorded flip
+                                // sits between post-entry draws 22/23 and draw 22 IS the head of
+                                // global turn 0 (LEDERA's) — the head poll sees the press, exactly
+                                // the cleric-fk shape.
     },
 ];
-
-/// Open-floor fallback tile (matches `h4_replay`) for pre-terrain captures.
-const FLOOR: u8 = 0x17;
-
-/// Resolve the traces directory, or `None` when the local tier is not active
-/// (neither `GBX_TRACES_DIR` nor `GBX_DATA_DIR` set → plain CI skips, D10).
-fn traces_dir() -> Option<PathBuf> {
-    if let Some(d) = std::env::var_os("GBX_TRACES_DIR") {
-        return Some(PathBuf::from(d));
-    }
-    std::env::var_os("GBX_DATA_DIR")?;
-    let home = std::env::var_os("HOME")?;
-    Some(Path::new(&home).join("goldbox-data/traces"))
-}
-
-fn decode_terrain(hex: &str) -> Vec<u8> {
-    let b = hex.as_bytes();
-    let val = |c: u8| match c {
-        b'0'..=b'9' => c - b'0',
-        b'a'..=b'f' => c - b'a' + 10,
-        b'A'..=b'F' => c - b'A' + 10,
-        _ => 0,
-    };
-    b.chunks_exact(2)
-        .map(|p| (val(p[0]) << 4) | val(p[1]))
-        .collect()
-}
 
 #[derive(Clone, Default)]
 struct DrawTap {
@@ -513,102 +409,37 @@ impl RngSink for DrawTap {
     }
 }
 
-/// The capture's post-`combat_entry` draws with the diagnostic operand
-/// (`ss_sp_words[3]`), pulled from the raw JSONL (mirrors `h4_replay`).
-fn capture_draws(text: &str) -> Vec<(u32, u32, Option<u16>)> {
-    let mut out = Vec::new();
-    let mut seen = false;
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let v: serde_json::Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        match v.get("e").and_then(|e| e.as_str()) {
-            Some("combat_entry") => seen = true,
-            Some("rng") if seen => {
-                let before = v["before"].as_u64().unwrap() as u32;
-                let after = v["after"].as_u64().unwrap() as u32;
-                let operand = v
-                    .get("ss_sp_words")
-                    .and_then(|w| w.as_array())
-                    .and_then(|w| w.get(3))
-                    .and_then(|n| n.as_u64())
-                    .map(|n| n as u16);
-                out.push((before, after, operand));
-            }
-            _ => {}
-        }
-    }
-    out
-}
-
 /// Replay a capture and return `(first_divergence_index, trip_count)`.
 /// `None` divergence == closed (all draws equal on `(before, after, operand)` and
-/// equal length). The comparison is `h4_replay`'s: `(before, after)` always, plus
-/// the operand when both sides carry one.
-#[allow(clippy::too_many_arguments)]
-fn replay(
-    path: &Path,
-    capture: &str,
-    map_direction: u8,
-    auto_cast: bool,
-    auto_cast_toggles: &[u32],
-    area_field_6e4: i32,
-    continue_battle: &[u16],
-) -> (Option<usize>, usize) {
+/// equal length).
+///
+/// The assembly is the library's (`replay::reel_input` →
+/// `reel::build_state`) — the same one `h4_replay` and the M6a reel use. This
+/// function keeps only what is the *guard's* job: the two intake asserts, the
+/// stub-trip count, and the comparison.
+fn replay(path: &Path, capture: &str) -> (Option<usize>, usize) {
     let text = std::fs::read_to_string(path).expect("capture readable");
     let trace = Trace::parse(&text).expect("capture parses");
     let entry = trace
         .combat_entry()
         .expect("capture carries a combat_entry snapshot");
+    let sidecar = replay::sidecar_for(capture)
+        .unwrap_or_else(|| panic!("{capture}: every pinned capture has a committed sidecar row"));
 
-    let entries: Vec<RecordCombatant> = entry
-        .combatants
-        .iter()
-        .map(|c| RecordCombatant {
-            team: match c.team {
-                0 => Team::Party,
-                1 => Team::Monster,
-                other => panic!("unknown team byte {other}"),
-            },
-            pos: GridPos::new(c.x as i32, c.y as i32),
-            record: &c.record,
-            affects: common::decode_affect_nodes(&c.affects),
-        })
-        .collect();
-
-    let rules = RuleSet::load();
-    let flavor = Adnd1::new(&rules);
-    let map = match entry.terrain.as_deref() {
-        Some(hex) => CombatMap::from_ground(decode_terrain(hex)),
-        None => CombatMap::uniform(FLOOR),
-    };
-    let mut state = combat_state_from_records(&entries, map, &flavor).expect("records decode");
-    state.area_field_58c = entry.area2_field_58c.map(|v| v as i32).unwrap_or(99);
-    // The capture's own emitted heading wins (hooks from 8ab275e on); the pin's
-    // value covers legacy captures without the field.
-    state.map_direction = entry.map_direction.unwrap_or(map_direction);
-    state.auto_pcs_cast_magic = auto_cast;
-    state.auto_cast_toggles = auto_cast_toggles.to_vec();
-    state.continue_battle_yes = continue_battle.to_vec();
     // coab≠binary #21 (doc §45): the party-only area movement modifier. The
-    // pin stays the documented input, but when the capture carries the field
-    // (post-cc0c9cd hooks, the doc §46 prep) the two must AGREE — a silent
-    // capture-vs-pin mismatch would let a stale pin mask the real input.
-    // Compared in ONE domain — the engine's — through the §47 byte-bridge:
-    // the ECL stores a byte (sewer-fight-3 records the raw word 253 = 0xFD),
-    // the pin records the engine-semantic −3; comparing raw-vs-semantic would
-    // fire spuriously on every byte-negative area.
+    // sidecar stays the documented input, but when the capture carries the
+    // field (post-cc0c9cd hooks, the doc §46 prep) the two must AGREE — a
+    // silent capture-vs-sidecar mismatch would let a stale pin mask the real
+    // input. Compared in ONE domain — the engine's — through the §47
+    // byte-bridge: the ECL stores a byte (sewer-fight-3 records the raw word
+    // 253 = 0xFD), the sidecar records the engine-semantic −3; comparing
+    // raw-vs-semantic would fire spuriously on every byte-negative area.
     if let Some(cap_6e4) = entry.area2_field_6e4 {
         assert_eq!(
-            common::area_6e4_from_word(i32::from(cap_6e4)),
-            area_field_6e4,
-            "{capture}: pin's area_field_6e4 must record the capture's emitted \
-             area2_field_6e4 (engine domain, §47 byte-bridge) — edit the manifest pin"
+            replay::area_6e4_from_word(i32::from(cap_6e4)),
+            sidecar.knobs.area_field_6e4,
+            "{capture}: the sidecar's area_field_6e4 must record the capture's emitted \
+             area2_field_6e4 (engine domain, §47 byte-bridge) — edit the sidecar row"
         );
     }
     // The 6E0/6E2 per-team to-hit pair is UNMODELED (parse-only; the team
@@ -623,16 +454,22 @@ fn replay(
         (0, 0),
         "{capture}: nonzero area2 to-hit pair (6E0/6E2) is not modeled (doc §46)"
     );
-    state.area_field_6e4 = area_field_6e4;
-    // §34.1: the ITEMS table + per-capture ranged loadouts (one shared place,
-    // `common`). `None` loadouts leave a combatant melee-identical, so the six
-    // non-armed pins are unshifted; armed-bar arms MATHEW/TRAVIS's bows.
-    let records: Vec<&[u8]> = entries.iter().map(|e| e.record).collect();
-    common::apply_loadouts(&mut state, capture, &records, common::load_item_data());
+
+    // §34.1: the ITEMS table + per-capture ranged loadouts ride in the
+    // assembly. `None` loadouts leave a combatant melee-identical, so the
+    // un-armed pins are unshifted; armed-bar arms MATHEW/TRAVIS's bows.
+    // NOTE: no `apply_env_overrides` here — the guard is deliberately hermetic,
+    // so no exported RESTRIKE_* variable can quietly move a pin.
+    let input = replay::reel_input(capture, entry, &sidecar, replay::load_item_data())
+        .unwrap_or_else(|e| panic!("{capture}: {e}"));
+
+    let rules = RuleSet::load();
+    let flavor = Adnd1::new(&rules);
+    let mut state = reel::build_state(&input, &flavor).expect("records decode");
 
     let tap = DrawTap::default();
     let draws = tap.draws.clone();
-    let mut rng = EngineRng::new(entry.rng_state);
+    let mut rng = EngineRng::new(input.rng_state);
     rng.attach_sink(Box::new(tap));
 
     // Count stub trips (a closed capture must fire none).
@@ -652,21 +489,12 @@ fn replay(
 
     let trip_count = *trips.borrow();
     let ours = draws.borrow();
-    let cap = capture_draws(&text);
+    let cap = replay::capture_draws(&text);
     let max = ours.len().max(cap.len());
     let mut frontier = None;
     for i in 0..max {
         match (ours.get(i), cap.get(i)) {
-            (Some(o), Some(c)) => {
-                let operand_ok = match (o.n, c.2) {
-                    (Some(a), Some(b)) => a == b,
-                    _ => true,
-                };
-                if !(o.before == c.0 && o.after == c.1 && operand_ok) {
-                    frontier = Some(i);
-                    break;
-                }
-            }
+            (Some(o), Some(c)) if draws_agree(o, c) => {}
             _ => {
                 frontier = Some(i);
                 break;
@@ -678,7 +506,7 @@ fn replay(
 
 #[test]
 fn h4_frontier_pins_hold() {
-    let Some(dir) = traces_dir() else {
+    let Some(dir) = replay::traces_dir() else {
         eprintln!(
             "SKIPPED: frontier guard needs the local traces dir \
              (set GBX_DATA_DIR or GBX_TRACES_DIR; captures are local-only, D10)"
@@ -695,20 +523,12 @@ fn h4_frontier_pins_hold() {
         }
         // A ranged capture needs the ITEMS table; without it (D10) the replay
         // would fall back to melee and the pin cannot hold — skip loudly.
-        if common::capture_has_loadout(pin.capture) && common::load_item_data().is_none() {
+        if replay::capture_has_loadout(pin.capture) && replay::load_item_data().is_none() {
             eprintln!("SKIPPED (ITEMS absent, D10): {}", pin.capture);
             continue;
         }
         checked += 1;
-        let (frontier, trips) = replay(
-            &path,
-            pin.capture,
-            pin.map_direction,
-            pin.auto_cast,
-            pin.auto_cast_toggles,
-            pin.area_field_6e4,
-            pin.continue_battle,
-        );
+        let (frontier, trips) = replay(&path, pin.capture);
         match pin.expect {
             Expect::Closed => {
                 assert_eq!(
