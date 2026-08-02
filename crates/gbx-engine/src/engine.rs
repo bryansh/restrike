@@ -128,6 +128,11 @@ pub struct Engine {
     /// The save/load screen's pending action, taken by the host after a tick
     /// (D8: the core never does file I/O). Transient, not saved.
     io_request: Option<crate::saveload::SaveLoadRequest>,
+    /// **Watch mode** (`combat-visualizer.md` D-CV1 item 2): when set by
+    /// [`Engine::new_reel`], every tick advances the captured fight's playback
+    /// instead of the UI shell. `None` for a normally-booted engine, which is
+    /// what keeps the walk loop and every existing golden untouched.
+    reel: Option<Box<crate::combat::reel::Reel>>,
 }
 
 /// A trivial single-item `ImageBlock` fixture — [`Engine::new_fixture`]'s
@@ -193,6 +198,56 @@ impl Engine {
             data,
             seed,
         ))
+    }
+
+    /// ★ **Watch mode** (`combat-visualizer.md` D-CV1 item 2): boots an engine
+    /// that replays one captured fight *with pixels* instead of running the
+    /// walk loop.
+    ///
+    /// This is `h4_replay` with a screen attached. The engine owns the
+    /// `CombatState`, the `CombatScene` and the framebuffer exactly as it owns
+    /// the shell in normal play, and exports the same `tick(&[InputEvent]) ->
+    /// Frame` surface — so a frontend stays a thin presenter (D-UI6): it parses
+    /// the capture with `gbx-oracle`, hands over the assembled
+    /// [`ReelInput`](crate::combat::reel::ReelInput), and presents Frames.
+    ///
+    /// **Capture equality is asserted live**, between the step that made a draw
+    /// and the frame that shows it — a reel that stops being the captured fight
+    /// panics with `h4_replay`'s diagnostic rather than scrolling past.
+    ///
+    /// `data` must be a real CotAB set: the reel draws real art (CHEAD/CBODY,
+    /// CPIC, DUNGCOM/RANDCOM) and boots the same resident assets normal play
+    /// does. The PRNG seed is the capture's `rng_state`, so the engine-level
+    /// `boot_seed` provenance names the fight being watched.
+    pub fn new_reel(
+        data: GameData,
+        input: crate::combat::reel::ReelInput,
+    ) -> Result<Self, ReelHostError> {
+        use gbx_rules::adnd1::flavor_impl::Adnd1;
+
+        let mut engine = Engine::new(data, input.rng_state)?;
+        // `Engine::new` drops boot's COMSPR store (normal play never draws a
+        // combat icon); the reel needs it back for missiles, effects and the
+        // grey focus box, so re-run just that load.
+        let boot_icons = crate::combat_art::load_comspr_icons(&engine.data)
+            .map_err(|e| ReelHostError::Reel(crate::combat::reel::ReelError::Art(e)))?;
+        let reel = {
+            let flavor = Adnd1::new(&engine.rules);
+            crate::combat::reel::Reel::new(&engine.data, boot_icons, &input, &flavor)?
+        };
+        engine.reel = Some(Box::new(reel));
+        Ok(engine)
+    }
+
+    /// The reel's progress, when this engine is in watch mode.
+    pub fn reel_progress(&self) -> Option<crate::combat::reel::ReelProgress> {
+        self.reel.as_ref().map(|r| r.progress())
+    }
+
+    /// The reel itself (a **boundary** read — see
+    /// [`Reel::state`](crate::combat::reel::Reel::state)).
+    pub fn reel(&self) -> Option<&crate::combat::reel::Reel> {
+        self.reel.as_deref()
     }
 
     /// The synthetic-fixture seam (task deliverable: hash goldens driven
@@ -271,6 +326,7 @@ impl Engine {
             rules,
             slots: crate::saveload::SlotDirectory::new(),
             io_request: None,
+            reel: None,
         }
     }
 
@@ -311,6 +367,7 @@ impl Engine {
             rules: RuleSet::load(),
             slots: crate::saveload::SlotDirectory::new(),
             io_request: None,
+            reel: None,
         }
     }
 
@@ -495,6 +552,10 @@ impl Engine {
         self.input.push_all(input);
         self.sounds.clear();
 
+        if self.reel.is_some() {
+            return self.tick_reel();
+        }
+
         {
             let mut ctx = FlowCtx {
                 machine: &mut self.machine,
@@ -544,8 +605,64 @@ impl Engine {
         }
     }
 
+    /// The watch-mode tick: the reel advances the captured fight's playback and
+    /// paints the whole combat screen, so none of normal play's tick runs — no
+    /// shell, no VM, and **no exploration status line** over the fight.
+    ///
+    /// Keys are drained rather than dispatched: the reel is a viewer, and the
+    /// combat menu's real keys land with M6c's suspensions.
+    fn tick_reel(&mut self) -> Frame<'_> {
+        self.input.clear();
+        let mut reel = self.reel.take().expect("watch mode was just checked");
+        let cues = reel.tick(&mut self.fb, &self.symbol_sets, &self.font);
+        self.sounds.extend_from_slice(cues);
+        self.reel = Some(reel);
+
+        let hash = self.fb.hash();
+        if self.last_hash != Some(hash) {
+            self.serial += 1;
+            self.last_hash = Some(hash);
+        }
+        Frame {
+            pixels: self.fb.pixels(),
+            palette: self.fb.palette(),
+            sounds: &self.sounds,
+            serial: self.serial,
+        }
+    }
+
     pub fn title(&self) -> &str {
         "Restrike"
+    }
+}
+
+/// [`Engine::new_reel`]'s failure modes: booting the data, or building the reel
+/// over it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReelHostError {
+    Boot(BootError),
+    Reel(crate::combat::reel::ReelError),
+}
+
+impl std::fmt::Display for ReelHostError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReelHostError::Boot(e) => write!(f, "the reel's game data did not boot: {e:?}"),
+            ReelHostError::Reel(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for ReelHostError {}
+
+impl From<BootError> for ReelHostError {
+    fn from(e: BootError) -> Self {
+        ReelHostError::Boot(e)
+    }
+}
+impl From<crate::combat::reel::ReelError> for ReelHostError {
+    fn from(e: crate::combat::reel::ReelError) -> Self {
+        ReelHostError::Reel(e)
     }
 }
 
