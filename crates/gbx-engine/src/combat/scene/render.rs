@@ -27,6 +27,7 @@
 //!   `engine/ovr014.cs:1904` — the prompt and status rows' clears.
 
 use super::layout::*;
+use super::missile::SpriteRef;
 use super::{PresentedBoard, PresentedCombatant, SceneArt, SceneError};
 use crate::combat::{HealthStatus, Team, BACKGROUND_TILE_INDEX};
 use crate::combat_art::{CombatIcon, FOCUS_BOX_SLOT};
@@ -200,7 +201,7 @@ fn draw_combatant(
 /// earlier one, exactly as the original stacks them.
 pub fn draw_combatants(fb: &mut Framebuffer, board: &PresentedBoard, art: &SceneArt) {
     for c in board.combatants() {
-        if c.on_board() && board.combatant_on_screen(c) {
+        if c.on_board() && board.combatant_on_screen(c) && !board.icon_suppressed(c.id) {
             draw_combatant(fb, board, art, c);
         }
     }
@@ -216,7 +217,7 @@ pub fn draw_cell_occupant(
     pos: crate::combat::GridPos,
 ) {
     if let Some(c) = board.occupant_at(pos) {
-        if board.combatant_on_screen(c) {
+        if board.combatant_on_screen(c) && !board.icon_suppressed(c.id) {
             draw_combatant(fb, board, art, c);
         }
     }
@@ -512,4 +513,193 @@ pub(super) fn summary_skeleton(c: &PresentedCombatant) -> PanelSummary {
         readied_weapon: None,
         held: false,
     }
+}
+
+// ===========================================================================
+// The text surfaces and the overlay (M6 slice 4, §1.4–1.5)
+// ===========================================================================
+
+/// Where a panel print lands.
+///
+/// `DisplayAttackMessage` derives its tail rows from the wrap cursor
+/// (`line = gbl.textYCol + 1`, `ovr014.cs:180`) rather than from constants, so
+/// the row a message lands on depends on how many rows the *previous* wrapped
+/// print consumed. Resolving that needs the font and the region, i.e. it can
+/// only happen at draw time — which is why a message beat is a little script
+/// of [`PanelOp`]s replayed here rather than a list of finished lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Row {
+    /// A literal row (10 and 12 are the attack sequence's two constants).
+    At(usize),
+    /// `line + delta`, where `line` is the row [`PanelOp::Mark`] captured.
+    FromMark(usize),
+}
+
+/// One print into the panel's message region — the calls §1.5's beats are
+/// built from, in the original's own vocabulary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PanelOp {
+    /// `ClearPlayerTextArea()` (`ovr025.cs:817`) — rows 10..=0x15.
+    Clear,
+    /// `DisplayPlayerStatusString(false, row, text, who)`
+    /// (`ovr025.cs:786-800`): clear from `row` down, print `who`'s name on
+    /// `row`, wrap `text` from `row + 1` to the region's foot.
+    Status { row: Row, who: usize, text: String },
+    /// `displayPlayerName(false, row, 0x17, who)` (`ovr014.cs:132`) — the
+    /// target's name on its own row, with no clear and no text.
+    Name { row: Row, who: usize },
+    /// `press_any_key(text, true, 10, row + 3, 0x26, row, 0x17)`
+    /// (`ovr014.cs:177`) — the damage/miss line, wrapped into four rows.
+    Wrapped { row: Row, text: String },
+    /// `displayString(text, 0, 10, row, 0x17)` (`ovr014.cs:196`) — one
+    /// unwrapped line, no clear.
+    Line { row: Row, text: String },
+    /// `line = gbl.textYCol + 1` (`ovr014.cs:180`) — remember where the last
+    /// wrapped print ended, so the removal tail can hang off it.
+    Mark,
+}
+
+/// Replays a message script into the panel's message region.
+///
+/// Stateless between calls: the whole script is replayed from a clean region
+/// every frame, so what the screen shows is a pure function of the script the
+/// timeline has accumulated so far. That is what makes a fast-drain and a
+/// played-out beat land on identical pixels.
+pub fn draw_panel_messages(
+    fb: &mut Framebuffer,
+    font: &Font,
+    board: &PresentedBoard,
+    ops: &[PanelOp],
+) {
+    let mut cursor = TextCursor {
+        col: PANEL_COL,
+        row: MESSAGE_REGION.y_start,
+    };
+    let mut mark = MESSAGE_REGION.y_start;
+    let resolve = |row: &Row, mark: usize| match row {
+        Row::At(r) => *r,
+        Row::FromMark(delta) => mark + delta,
+    };
+    for op in ops {
+        match op {
+            PanelOp::Clear => clear_message_region(fb),
+            PanelOp::Status { row, who, text } => {
+                let row = resolve(row, mark);
+                if row > MESSAGE_REGION.y_end {
+                    continue;
+                }
+                // draw8x8_clear_area(0x15, 0x26, lineY, 0x17).
+                cell_rect_fill(
+                    fb,
+                    0,
+                    row,
+                    MESSAGE_REGION.y_end,
+                    MESSAGE_REGION.x_start,
+                    MESSAGE_REGION.x_end,
+                );
+                draw_name(fb, font, board, *who, row);
+                cursor = TextCursor {
+                    col: PANEL_COL,
+                    row: row + 1,
+                };
+                let region = crate::text::TextRegion {
+                    y_start: row + 1,
+                    y_end: MESSAGE_REGION.y_end,
+                    x_start: PANEL_COL,
+                    x_end: MESSAGE_REGION.x_end,
+                };
+                run_text(fb, font, text, LABEL_COLOR, region, &mut cursor);
+            }
+            PanelOp::Name { row, who } => {
+                let row = resolve(row, mark);
+                if row <= MESSAGE_REGION.y_end {
+                    draw_name(fb, font, board, *who, row);
+                }
+            }
+            PanelOp::Wrapped { row, text } => {
+                let row = resolve(row, mark);
+                if row > MESSAGE_REGION.y_end {
+                    continue;
+                }
+                cursor = TextCursor {
+                    col: PANEL_COL,
+                    row,
+                };
+                let region = crate::text::TextRegion {
+                    y_start: row,
+                    y_end: (row + 3).min(MESSAGE_REGION.y_end),
+                    x_start: PANEL_COL,
+                    x_end: MESSAGE_REGION.x_end,
+                };
+                run_text(fb, font, text, LABEL_COLOR, region, &mut cursor);
+            }
+            PanelOp::Line { row, text } => {
+                let row = resolve(row, mark);
+                if row <= MESSAGE_REGION.y_end {
+                    draw_string(fb, font, text, row, PANEL_COL, 0, LABEL_COLOR);
+                }
+            }
+            PanelOp::Mark => mark = cursor.row + 1,
+        }
+    }
+}
+
+/// `displayPlayerName(false, row, 0x17, who)` off the presented roster — an
+/// id the board doesn't hold prints nothing, which is the original's own
+/// null-player behavior.
+fn draw_name(fb: &mut Framebuffer, font: &Font, board: &PresentedBoard, who: usize, row: usize) {
+    if let Some(c) = board.combatant(who) {
+        draw_string(
+            fb,
+            font,
+            &c.name,
+            row,
+            PANEL_COL,
+            0,
+            name_color(c.in_combat, c.team),
+        );
+    }
+}
+
+/// One overlay sprite placement — `OverlayBounded(missile_dax, 5, frame,
+/// cur.y, cur.x)` (`seg040.cs:29-31`), whose cell coordinates are 8-pixel
+/// units off the viewport origin rather than 24-pixel combat cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OverlayDraw {
+    pub sprite: SpriteRef,
+    pub cell_x: i32,
+    pub cell_y: i32,
+}
+
+/// Blits the overlay sprites currently up, over everything else in the
+/// viewport and under the same hard clip (`draw_combat_picture`'s
+/// `[8,176)²`). An unloaded icon slot draws nothing, as everywhere else.
+pub fn draw_overlays(fb: &mut Framebuffer, art: &SceneArt, overlays: &[OverlayDraw]) {
+    for o in overlays {
+        let Some(icon) = art.icons.get(o.sprite.icon_slot) else {
+            continue;
+        };
+        let frame = icon.frame(o.sprite.pose, o.sprite.direction());
+        blit_sprite_px(
+            fb,
+            frame,
+            o.cell_x * 8 + VIEWPORT_ORIGIN_PX.0 as i32,
+            o.cell_y * 8 + VIEWPORT_ORIGIN_PX.1 as i32,
+        );
+    }
+}
+
+/// `string_print01`'s print half (`ovr025.cs:775-784`): the prompt row, all 40
+/// columns, colour 10 — cleared first, exactly as `ClearPromptAreaNoUpdate`
+/// leaves it.
+pub fn draw_prompt(fb: &mut Framebuffer, font: &Font, text: &str) {
+    clear_prompt_line(fb);
+    draw_string(fb, font, text, PROMPT_ROW, 0, 0, LABEL_COLOR);
+}
+
+/// The status row (`ovr023.cs:3122`'s "Spell:<name>", `ovr014.cs:1760`'s
+/// "Range = N") — row 0x17 from column 0, cleared first.
+pub fn draw_status_line(fb: &mut Framebuffer, font: &Font, text: &str) {
+    clear_status_line(fb);
+    draw_string(fb, font, text, STATUS_ROW, 0, 0, LABEL_COLOR);
 }

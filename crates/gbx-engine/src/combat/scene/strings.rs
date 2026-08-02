@@ -86,8 +86,13 @@ pub const FLEE_PROMPT: &str = "Flee:";
 pub const GUARDING: &str = "Guarding";
 /// `bandage(true)`'s panel message (`ovr025.cs:1645`).
 pub const IS_BANDAGED: &str = "is bandaged";
-/// A cure spell's `MagicAttackDisplay` text (`ovr023.cs:2219,2808`).
+/// A cure spell's `MagicAttackDisplay` text (`ovr023.cs:2219,2808`) — the
+/// heal spells that use the stars burst, none of them modeled yet.
 pub const IS_HEALED: &str = "is Healed";
+/// `DescribeHealing` (`ovr025.cs:1246-1259`), the message `SpellCureLight`
+/// actually prints: full at `hp_current == hp_max`, partial below it.
+pub const IS_FULLY_HEALED: &str = "is fully healed";
+pub const IS_PARTIALLY_HEALED: &str = "is partially healed";
 /// Turn-undead's `MagicAttackDisplay` text (`ovr014.cs:655`).
 pub const IS_TURNED: &str = "is turned";
 

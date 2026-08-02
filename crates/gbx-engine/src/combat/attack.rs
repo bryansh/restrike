@@ -366,6 +366,33 @@ impl CombatState {
         // keeps it draw-free. Draw-free; only the *held target* carried into later
         // rounds changes (the §18 re-pick correctly writes only a local `chosen`).
         self.fighters[actor].target = Some(target);
+        // D-CV2 `Attacking` (slice 4) — emitted HERE, at `AttackTarget`'s pose
+        // block (`ovr014.cs:918-940`: the target's redraw, the attacker's
+        // summary, the attacker's Attack frame, `SysDelay(100)`), because that
+        // block runs **before** the missile flies. The event carries the
+        // message fork `AttackTarget01` decides later (`ovr014.cs:797-808`);
+        // its two inputs are already final — `attack_target_facing` above is
+        // the last write to the facings `can_backstab`/`is_flanking` read, and
+        // nothing between here and the AC selection touches
+        // `attacks_received`/`direction_changes`. Backstab preempts behind, as
+        // the binary's `if`/`else` does. Draw-free.
+        //
+        // A HELD target reaches this too (the pose block precedes
+        // `AttackTarget01`'s held branch) and then gets its `SlayHelpless`,
+        // which is the message fork that overrides this one.
+        let can_backstab = self.can_backstab(target, actor);
+        let behind_attack = behind || self.is_flanking(target, actor);
+        self.emit(ActionEvent::Attacking {
+            attacker_id: actor,
+            target_id: target,
+            kind: if can_backstab {
+                AttackKind::Backstab
+            } else if behind_attack {
+                AttackKind::Behind
+            } else {
+                AttackKind::Normal
+            },
+        });
         // Site 5 — the ranged missile camera (`ovr014.cs:945` → `draw_missile_attack`,
         // `sub_67AA4`): a bow/thrown shot animates the missile across the board
         // and scrolls the camera toward the target. Draw-free; only its
@@ -515,11 +542,9 @@ impl CombatState {
         // behind @0x19B — with behindIdx set when `var_13 != 0` (@`16ED-16F3`):
         // the caller's `attackType != 0` (`behind`) OR the flanking heuristic.
         // Then `target_ac += RangedDefenseBonus` on EVERY path (`ovr014.cs:799`).
-        let can_backstab = self.can_backstab(target, actor);
-        // `BehindAttack` (`ovr014.cs:781-790`) — the caller's `attackType != 0`
-        // or the flanking heuristic. Computed once: the AC pick reads it, and so
-        // does `attack_type` below (the binary's own `var_13`).
-        let behind_attack = behind || self.is_flanking(target, actor);
+        // `can_backstab`/`behind_attack` were computed at the pose block above
+        // (with the `Attacking` event that reports them); the AC pick is the
+        // binary's `var_13` fork over the same two flags.
         let base_ac = if can_backstab {
             self.fighters[target].ac_behind as i32 - 4
         } else {
@@ -530,23 +555,6 @@ impl CombatState {
             }) as i32
         };
         let target_ac = (base_ac + self.ranged_defense_bonus(actor, target)).clamp(0, 255) as u8;
-        // D-CV2 `Attacking` (slice 4) — `attack_type` (`ovr014.cs:797-808`) is
-        // decided by exactly the two flags just computed, in the original's own
-        // precedence: backstab preempts behind. Emitted here, after the fork and
-        // before the first swing, so the scene sees the message verb (and the
-        // run boundary the single "and Misses" hangs off) ahead of the swings it
-        // frames. Draw-free.
-        self.emit(ActionEvent::Attacking {
-            attacker_id: actor,
-            target_id: target,
-            kind: if can_backstab {
-                AttackKind::Backstab
-            } else if behind_attack {
-                AttackKind::Behind
-            } else {
-                AttackKind::Normal
-            },
-        });
         // vs-LARGE damage cells (`sub_3F4EB` @`ovr014:15E3-1662`, §49 residue,
         // spotted during the held-branch read): a READIED weapon
         // (`field_151` non-null) attacking a `field_DE > 0x80` or

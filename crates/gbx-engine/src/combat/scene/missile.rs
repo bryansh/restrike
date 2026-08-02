@@ -195,12 +195,19 @@ pub fn missile_class(item_type: u8, dir: u8) -> MissileClass {
 /// buffer's own comment describes, which is also what the doc's §1.4 note says
 /// the buffer holds.
 fn spin_frames(slot: usize) -> Vec<SpriteRef> {
-    vec![
-        SpriteRef::new(slot, IconPose::Normal, false),
-        SpriteRef::new(slot, IconPose::Normal, true),
-        SpriteRef::new(slot, IconPose::Attack, true),
-        SpriteRef::new(slot, IconPose::Attack, false),
-    ]
+    (0..4).map(|i| spin_frame(slot, i)).collect()
+}
+
+/// One slot of a [`spin_frames`] buffer, for callers that build the buffer
+/// themselves (the on-target burst loads the same four frames off icon 0x16 or
+/// 0x17, `ovr025.cs:1123`).
+pub fn spin_frame(slot: usize, frame: usize) -> SpriteRef {
+    match frame % 4 {
+        0 => SpriteRef::new(slot, IconPose::Normal, false),
+        1 => SpriteRef::new(slot, IconPose::Normal, true),
+        2 => SpriteRef::new(slot, IconPose::Attack, true),
+        _ => SpriteRef::new(slot, IconPose::Attack, false),
+    }
 }
 
 /// The sling/default two-frame load (`ovr014.cs:1654-1655,1662-1663`): buffer

@@ -36,18 +36,26 @@ pub mod missile;
 pub mod render;
 pub mod strings;
 pub mod time;
+pub mod timeline;
 
 #[cfg(test)]
 mod goldens;
 #[cfg(test)]
+mod parity;
+#[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod timeline_tests;
 
 pub use board::{DownedTile, PresentedBoard, PresentedCombatant};
-pub use render::{status_string, PanelSummary};
+pub use render::{status_string, OverlayDraw, PanelOp, PanelSummary};
+pub use time::BeatClock;
+pub use timeline::{Instruction, Op, Timeline};
 
 use crate::combat::{ActionEvent, CombatMap, CombatState, GridPos};
 use crate::combat_art::{CombatIcons, IconPose, TileAtlas};
 use crate::framebuffer::Framebuffer;
+use crate::shell::SoundEvent;
 use crate::symbols::{SymbolError, SymbolSets};
 use gbx_formats::font::Font;
 use std::collections::BTreeMap;
@@ -215,6 +223,24 @@ pub struct CombatScene {
     art: SceneArt,
     focus: Option<FocusCursor>,
     weapon_names: BTreeMap<u8, String>,
+    // --- the playback half (slice 4) -----------------------------------
+    clock: BeatClock,
+    timeline: Timeline,
+    /// Boundary-read panel summaries, one per roster index — refreshed at
+    /// step boundaries by [`CombatScene::refresh_panels`], selected during
+    /// playback by [`Op::Panel`].
+    panels: Vec<PanelSummary>,
+    panel_focus: Option<usize>,
+    /// The message script accumulated so far (§1.5's panel channel).
+    messages: Vec<PanelOp>,
+    /// The prompt row's current line (§1.5's other channel).
+    prompt: Option<String>,
+    /// The status row's current line ("Spell:<name>", "Range = N").
+    status: Option<String>,
+    /// Overlay sprites currently up — missile, burst, death flash.
+    overlays: Vec<OverlayDraw>,
+    /// Sound cues produced by the ticks since the last [`CombatScene::tick`].
+    sounds: Vec<SoundEvent>,
 }
 
 impl CombatScene {
@@ -225,6 +251,15 @@ impl CombatScene {
             art,
             focus: None,
             weapon_names: BTreeMap::new(),
+            clock: BeatClock::default(),
+            timeline: Timeline::default(),
+            panels: Vec::new(),
+            panel_focus: None,
+            messages: Vec::new(),
+            prompt: None,
+            status: None,
+            overlays: Vec::new(),
+            sounds: Vec::new(),
         }
     }
 
@@ -340,5 +375,173 @@ impl CombatScene {
     /// (`free_combat_stuff`, `ovr009.cs:9`).
     pub fn restore_palette(&self, fb: &mut Framebuffer) {
         render::palette_normal(fb);
+    }
+
+    // === the playback timeline (slice 4, D-CV3) ==========================
+
+    /// The fight's `game_speed_var` clock.
+    pub fn clock(&self) -> BeatClock {
+        self.clock
+    }
+
+    /// Sets `game_speed_var` (the Speed menu's 0–9, `ovr009.cs:672-704`).
+    /// Affects only how long beats are **held** — never what a frame contains.
+    pub fn set_game_speed(&mut self, speed: u8) {
+        self.clock.set_game_speed(speed);
+    }
+
+    /// **Boundary read.** Caches every combatant's [`PanelSummary`] so the
+    /// timeline can switch the right panel mid-playback without touching
+    /// `CombatState` (D-CV2: the panel draws at turn start, a step boundary).
+    /// Call it at each boundary, beside [`Self::reconcile`].
+    pub fn refresh_panels(&mut self, state: &CombatState) {
+        self.panels = (0..self.board.combatants().len())
+            .map(|id| {
+                self.panel_summary(state, id).unwrap_or_else(|| {
+                    render::summary_skeleton(
+                        self.board.combatant(id).expect("id is a roster index"),
+                    )
+                })
+            })
+            .collect();
+    }
+
+    /// Loads a step's buffered [`ActionEvent`] batch as this step's schedule
+    /// (D-CV2). Anything left of the previous step's schedule is dropped — the
+    /// lockstep invariant says the host drained it before calling `step()`
+    /// again, so there should be nothing left.
+    pub fn begin_step(&mut self, events: &[ActionEvent]) {
+        debug_assert!(
+            !self.timeline.is_playing(),
+            "D-CV2 lockstep: step N's playback must drain before step N+1 is composed"
+        );
+        let schedule = timeline::compose(&self.board, self.clock, events);
+        self.timeline.load(schedule);
+    }
+
+    /// Is a step's playback still running?
+    pub fn is_playing(&self) -> bool {
+        self.timeline.is_playing()
+    }
+
+    /// Ticks still owed by the current schedule.
+    pub fn ticks_remaining(&self) -> u32 {
+        self.timeline.ticks_remaining()
+    }
+
+    /// Advances playback by `dt_ticks` and returns the sound cues those ticks
+    /// produced (D-UI1's `Frame::sounds`). The scene never sleeps and never
+    /// reads a clock — the host's tick rate is the only pacing there is.
+    pub fn tick(&mut self, dt_ticks: u32) -> &[SoundEvent] {
+        self.sounds.clear();
+        let mut pending = Vec::new();
+        self.timeline
+            .advance(dt_ticks, |op| pending.push(op.clone()));
+        for op in pending {
+            self.apply(op);
+        }
+        &self.sounds
+    }
+
+    /// **The fast drain** (D-CV3's open skip door): collapse the rest of this
+    /// step's beats to zero ticks and jump to the state the schedule would
+    /// have reached. Every remaining op is applied, sounds included, so
+    /// nothing downstream can tell a skipped step from a played one — the
+    /// difference is wall time only. The D-CV2 lockstep invariant is
+    /// *satisfied* by this: playback completes, just instantly.
+    pub fn skip(&mut self) -> &[SoundEvent] {
+        self.sounds.clear();
+        let pending: Vec<Op> = self.timeline.drain_pending().map(|i| i.op).collect();
+        for op in pending {
+            self.apply(op);
+        }
+        &self.sounds
+    }
+
+    /// The sound cues the last [`Self::tick`] or [`Self::skip`] produced.
+    pub fn sounds(&self) -> &[SoundEvent] {
+        &self.sounds
+    }
+
+    /// The panel summary currently on screen, if the timeline has selected one.
+    pub fn panel_focus(&self) -> Option<&PanelSummary> {
+        self.panel_focus.and_then(|id| self.panels.get(id))
+    }
+
+    /// The message script currently displayed (§1.5's panel channel).
+    pub fn messages(&self) -> &[PanelOp] {
+        &self.messages
+    }
+
+    /// The prompt row's current line, if any.
+    pub fn prompt(&self) -> Option<&str> {
+        self.prompt.as_deref()
+    }
+
+    /// The status row's current line, if any.
+    pub fn status(&self) -> Option<&str> {
+        self.status.as_deref()
+    }
+
+    /// The overlay sprites currently up.
+    pub fn overlays(&self) -> &[OverlayDraw] {
+        &self.overlays
+    }
+
+    fn apply(&mut self, op: Op) {
+        match op {
+            Op::Camera(top_left) => self.board.apply(ActionEvent::Camera { top_left }),
+            Op::Board(event) => self.board.apply(event),
+            Op::Pose {
+                id,
+                pose,
+                direction,
+            } => self.board.set_pose(id, pose, direction),
+            Op::Hidden(id) => self.board.set_icon_suppressed(id),
+            Op::Panel(id) => {
+                // `CombatDisplayPlayerSummary` clears the whole panel region,
+                // messages included (`ovr025.cs:294`).
+                self.panel_focus = Some(id);
+                self.messages.clear();
+            }
+            Op::Focus(cursor) => self.focus = cursor,
+            Op::Overlay(draws) => self.overlays = draws,
+            Op::Message(PanelOp::Clear) => self.messages.clear(),
+            Op::Message(other) => self.messages.push(other),
+            Op::Prompt(text) => self.prompt = text,
+            Op::Status(text) => self.status = text,
+            Op::Sound(id) => self.sounds.push(SoundEvent(id)),
+            Op::Wait => {}
+        }
+    }
+
+    /// The whole combat screen at the playback cursor: the map (ground, icons,
+    /// focus box, overlays), the right panel and its messages, the status row
+    /// and the prompt row.
+    ///
+    /// A full repaint every frame, which is what makes the presented screen a
+    /// pure function of the presented state — coab reaches the same pixels by
+    /// saving and restoring video RAM around each overlay.
+    pub fn render_frame(
+        &self,
+        fb: &mut Framebuffer,
+        sets: &SymbolSets,
+        font: &Font,
+    ) -> Result<(), SceneError> {
+        self.render(fb, sets)?;
+        render::draw_overlays(fb, &self.art, &self.overlays);
+        if let Some(summary) = self.panel_focus() {
+            render::draw_panel_summary(fb, font, summary);
+        }
+        render::draw_panel_messages(fb, font, &self.board, &self.messages);
+        match &self.status {
+            Some(text) => render::draw_status_line(fb, font, text),
+            None => render::clear_status_line(fb),
+        }
+        match &self.prompt {
+            Some(text) => render::draw_prompt(fb, font, text),
+            None => render::clear_prompt_line(fb),
+        }
+        Ok(())
     }
 }

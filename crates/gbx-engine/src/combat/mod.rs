@@ -2287,7 +2287,7 @@ pub fn tile_passability(tile: u8) -> TilePassability {
 /// Built from a provided terrain descriptor (a `MAP_W*MAP_H` tile-index buffer,
 /// row-major `y*50 + x`); the real "derive tiles from the area GEO block the party
 /// stood on" wiring is the deferred hook documented at the top of this section.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CombatMap {
     /// `mapToBackGroundTile.field_7` (`Struct_1D1BC`): ground-tile index per cell,
     /// row-major `y*MAP_W + x`, length `MAP_W*MAP_H`.

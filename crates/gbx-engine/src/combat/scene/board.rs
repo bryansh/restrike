@@ -97,12 +97,17 @@ pub struct DownedTile {
 }
 
 /// The presented board: roster + map + camera at the playback cursor.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PresentedBoard {
     combatants: Vec<PresentedCombatant>,
     map: CombatMap,
     camera_top_left: GridPos,
     downed: Vec<DownedTile>,
+    /// `RedrawPlayerBackground(idx)` (`ovr033.cs:556`) with nothing painted
+    /// back over it: the combatant is still on the board in every other sense,
+    /// its cell just shows bare ground. `CombatantKilled` erases its victim
+    /// this way before the death flash plays over the cleared cell.
+    icon_suppressed: Option<usize>,
 }
 
 impl PresentedBoard {
@@ -122,6 +127,7 @@ impl PresentedBoard {
             map,
             camera_top_left,
             downed: Vec::new(),
+            icon_suppressed: None,
         }
     }
 
@@ -147,6 +153,28 @@ impl PresentedBoard {
     /// The saved body tiles, in stamp order (`gbl.downedPlayers`).
     pub fn downed_tiles(&self) -> &[DownedTile] {
         &self.downed
+    }
+
+    /// Sets the pose and facing playback wants drawn for one combatant —
+    /// `draw_74B3F(_, iconState, direction, combatant)`'s two presentation
+    /// effects (`ovr033.cs:376-396`). Presentation-only: reconciliation
+    /// refreshes both from the boundary read rather than asserting them.
+    pub fn set_pose(&mut self, id: usize, pose: IconPose, direction: u8) {
+        if let Some(c) = self.combatants.get_mut(id) {
+            c.pose = pose;
+            c.direction = direction;
+        }
+    }
+
+    /// `RedrawPlayerBackground(idx)` — suppress one combatant's icon (or
+    /// `None` to put every icon back). See [`Self::icon_suppressed`].
+    pub fn set_icon_suppressed(&mut self, id: Option<usize>) {
+        self.icon_suppressed = id;
+    }
+
+    /// Whether this combatant's icon is currently erased.
+    pub fn icon_suppressed(&self, id: usize) -> bool {
+        self.icon_suppressed == Some(id)
     }
 
     /// `combatantMap.screenPos = pos − mapScreenTopLeft`

@@ -703,17 +703,20 @@ fn the_held_slay_announces_itself_before_the_kill() {
 
     let ev = log.events();
     let ev = &ev[log_len..];
+    // `AttackTarget`'s pose block runs first for a held target too, so the run
+    // is framed before the branch that replaces its message.
+    assert!(matches!(ev[0], ActionEvent::Attacking { .. }), "{ev:?}");
     // `PlaySound(sound_attackHeld)` is the branch's first statement
     // (`ovr014.cs:742`) — id 7, the same `sound::HIT` a connecting swing plays.
     assert_eq!(
-        ev[0],
+        ev[1],
         ActionEvent::Sound {
             id: crate::combat::sound::HIT
         },
         "the attackHeld sound opens the beat: {ev:?}"
     );
     assert_eq!(
-        ev[1],
+        ev[2],
         ActionEvent::SlayHelpless {
             attacker_id: 0,
             target_id: 1,
