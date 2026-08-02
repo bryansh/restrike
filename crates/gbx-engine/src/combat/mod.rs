@@ -38,6 +38,8 @@ use gbx_rules::flavor::Flavor;
 mod records;
 pub use records::{combat_state_from_records, RecordCombatant};
 
+pub mod reel;
+
 mod affects;
 use affects::CheckType;
 mod ai;
