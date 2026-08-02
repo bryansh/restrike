@@ -240,6 +240,11 @@ impl ActionSink for CollectorActionSink {
             ActionEvent::Sound { .. } => return,
             ActionEvent::Attacking { .. } => return,
             ActionEvent::Flees { .. } => return,
+            // M6 slice 5's two board-carrying variants (spell damage and the
+            // regeneration tick). Engine-local like every other presentation
+            // event: the `.gbxtrace` `action` profile stays FROZEN.
+            ActionEvent::SpellDamage { .. } => return,
+            ActionEvent::Regenerated { .. } => return,
         };
         self.events.borrow_mut().push(translated);
     }

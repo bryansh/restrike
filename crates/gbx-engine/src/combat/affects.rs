@@ -178,7 +178,17 @@ impl CombatState {
             // any capture; the death strip leaves at most one 0x62 behind).
             0x62 => {
                 let f = &mut self.fighters[ci];
+                let before = f.hp_current;
                 f.hp_current = (f.hp_current + 3).min(f.hp_max);
+                // D-CV2 `Regenerated`: the applied delta after the cap, so a
+                // fully-healed troll emits 0. Without this the presented board
+                // drifts LOW every round a troll ticks — the reel's live
+                // reconcile is what found it.
+                let amount = self.fighters[ci].hp_current - before;
+                self.emit(ActionEvent::Regenerated {
+                    combatant_id: ci,
+                    amount,
+                });
             }
             // `sub_3A071` = `clear_actions(player)` — the shared handler for
             // the RESTRAINED family (coab `affect_table`, ovr013.cs:1816/1820/

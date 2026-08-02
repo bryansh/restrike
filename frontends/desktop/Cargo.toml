@@ -13,5 +13,10 @@ path = "src/main.rs"
 [dependencies]
 gbx-formats = { path = "../../crates/gbx-formats" }
 gbx-engine = { path = "../../crates/gbx-engine" }
+# `--watch <capture>`: the M6a reel parses the `.gbxtrace` and assembles the
+# engine-side `ReelInput` here (combat-visualizer.md D-CV1 item 2 — the
+# dependency direction stays oracle -> engine, and the frontend stays a thin
+# presenter: it owns no framebuffer, atlas or timeline).
+gbx-oracle = { path = "../../crates/gbx-oracle" }
 winit = "0.30"
 softbuffer = "0.4"

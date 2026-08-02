@@ -978,6 +978,47 @@ pub enum ActionEvent {
     /// print once, at the check. The Got-Away removal that may follow is
     /// [`Removed`](Self::Removed)'s `Fled`.
     Flees { combatant_id: usize, forced: bool },
+
+    // --- presentation vocabulary (M6 slice 5) ------------------------------
+    //
+    // Two more engine-local variants, and they exist for the bluntest possible
+    // reason: without them the presented board **drifts**. D-CV2 requires the
+    // scene's board to reconcile with the real roster at every step boundary,
+    // and the M6a reel checks that live over every closed capture — which found
+    // two hp-changing sites the event stream did not carry. Both are draw-neutral
+    // emissions at the original's own sites; both get their own drop arm in the
+    // oracle collector (the `.gbxtrace` profile stays FROZEN).
+    /// A spell dealt damage (`damage_person` → `damage_player`, the
+    /// [`CombatState::apply_damage`] call at the tail of the spell-effect ladder,
+    /// `ovr024:21B3`).
+    ///
+    /// **Why not [`Dmg`](Self::Dmg):** that variant is on the frozen `.gbxtrace`
+    /// wire, where it means a *weapon* damage roll bracketing its dice
+    /// (`sub_3E192`) — emitting it from the spell path would both widen the
+    /// equality surface for presentation's sake and mislabel the beat, since
+    /// §1.5's "Hitting for N point(s) of damage" belongs to
+    /// `DisplayAttackMessage` and a spell's damage is displayed by its own
+    /// effect path. Spell damage is also frequently **draw-free at this site**
+    /// (Magic Missile's dice are rolled during the effect build, the save
+    /// earlier), so it brackets nothing.
+    ///
+    /// Capture-proven necessity: PHILIPPE's Magic Missile in sewer-fight-1
+    /// takes a Fire Knife from 26 to 14 with no board event at all before this.
+    SpellDamage {
+        caster_id: usize,
+        target_id: usize,
+        amount: i32,
+    },
+    /// The round-end regeneration tick healed a combatant (`AffectRegen3Hp`
+    /// `sub_3BEB8`, `ovr013.cs:1240` — Type_19, `BattleRoundChecks`' per-combatant
+    /// round-end sweep, `ovr009.cs:371`). `amount` is the **applied** delta after
+    /// the `hp_max` cap, so a fully-healed troll emits `0`.
+    ///
+    /// **Why not [`Healed`](Self::Healed):** that event's `amount` is the number
+    /// the original's message reports, and regeneration has no message at all —
+    /// it is a silent per-round tick. Giving it a `HealKind` would put a
+    /// message-shaped event on a site with nothing to say.
+    Regenerated { combatant_id: usize, amount: i32 },
 }
 
 /// `DisplayAttackMessage`'s `AttackType` (`ovr014.cs:104-110`) minus `Slay`,

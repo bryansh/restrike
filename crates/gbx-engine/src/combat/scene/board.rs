@@ -287,6 +287,28 @@ impl PresentedBoard {
                 }
             }
 
+            // The spell-damage twin of `Dmg` — same board effect, its own
+            // event because the wire's `Dmg` means a weapon roll (see the
+            // variant's own doc).
+            ActionEvent::SpellDamage {
+                target_id, amount, ..
+            } => {
+                if let Some(c) = self.combatants.get_mut(target_id) {
+                    c.hp_current -= amount;
+                }
+            }
+
+            // `AffectRegen3Hp`'s silent round-end tick. `amount` is already
+            // capped by the emitter, so this is a plain add.
+            ActionEvent::Regenerated {
+                combatant_id,
+                amount,
+            } => {
+                if let Some(c) = self.combatants.get_mut(combatant_id) {
+                    c.hp_current += amount;
+                }
+            }
+
             ActionEvent::Bled { combatant_id, died } => {
                 if died {
                     if let Some(c) = self.combatants.get_mut(combatant_id) {

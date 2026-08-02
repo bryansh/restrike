@@ -485,6 +485,24 @@ impl Composer<'_> {
                 self.prompt_beat(strings::CONTINUE_BATTLE);
             }
 
+            // --- board-only beats (M6 slice 5) ----------------------------
+            //
+            // Both move hit points and neither has a message of its own, so
+            // they advance the shadow board and schedule nothing. Without the
+            // board op the presented board drifts and the reel's boundary
+            // reconcile fails — which is precisely how these two sites were
+            // found.
+            //
+            // `SpellDamage` is also the event `burst_instructions` has been
+            // waiting for since slice 4 (built and tested, wired to nothing).
+            // Wiring it needs the per-spell COMSPR slot/frame table §1.4 names
+            // but nothing in-repo transcribes yet, so the burst stays deferred
+            // rather than guessed — the hp number on the right panel is the
+            // feedback until it lands.
+            ActionEvent::SpellDamage { .. } | ActionEvent::Regenerated { .. } => {
+                self.board_op(event);
+            }
+
             // Diagnostics, never presentation.
             ActionEvent::Morale { .. } | ActionEvent::StubTripped { .. } => {}
         }

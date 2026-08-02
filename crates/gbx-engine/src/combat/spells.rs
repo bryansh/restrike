@@ -582,6 +582,14 @@ impl CombatState {
         // save draw; damage > 0 → damage_person → damage_player == apply_damage.
         // affect_id 0 → no ApplyAttackSpellAffect.
         if damage > 0 {
+            // D-CV2 `SpellDamage`, before the cascade its `Removed` comes out
+            // of — the same head-of-branch placement `SlayHelpless` uses, and
+            // the order the original displays: the effect, then the fall.
+            self.emit(ActionEvent::SpellDamage {
+                caster_id: actor,
+                target_id: target,
+                amount: damage,
+            });
             self.apply_damage(rng, target, damage);
         }
     }

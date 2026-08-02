@@ -8,6 +8,7 @@ mod map;
 mod run_script;
 mod trace_compare;
 mod verify;
+mod watch;
 
 use gbx_formats::detect::{self, Detection};
 use gbx_vm::dialect::COTAB;
@@ -31,6 +32,7 @@ fn main() -> ExitCode {
         Some("trace-compare") => trace_compare::cmd_trace_compare(args.collect()),
         Some("verify") => verify::cmd_verify(args.collect()),
         Some("extract-table") => extract_table::cmd_extract_table(args.collect()),
+        Some("watch") => watch::cmd_watch(args.collect()),
         Some(other) => {
             eprintln!("restrike: unknown command '{other}'");
             print_usage();
@@ -64,6 +66,7 @@ fn print_usage() {
     eprintln!("       restrike trace-compare <A.gbxtrace> [B.gbxtrace] [--chain]");
     eprintln!("       restrike verify [DIR]");
     eprintln!("       restrike extract-table [DIR] --table <id>");
+    eprintln!("       restrike watch <CAPTURE.gbxtrace> [--data DIR] [--turbo N] [--frames N]");
     eprintln!();
     eprintln!("If DIR is omitted, falls back to the GBX_DATA_DIR environment variable.");
     eprintln!();
@@ -71,6 +74,13 @@ fn print_usage() {
         "census scans DIR for ECL*.DAX, extracts every block, and disassembles from each \
          block's header vectors, aggregating opcode/hazard statistics. CSV goes to --out (or \
          stdout by default); the human-readable report always goes to stderr."
+    );
+    eprintln!();
+    eprintln!(
+        "watch plays a closed combat capture through the M6a reel (the same engine the \
+         desktop --watch flag opens), headless: every beat is composed and every frame drawn, \
+         with the capture's draw stream asserted live. It ends by reporting frames/steps/draws; \
+         a divergence panics with the h4_replay diagnostic instead of scrolling past."
     );
     eprintln!();
     eprintln!(
