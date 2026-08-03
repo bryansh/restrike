@@ -53,7 +53,9 @@ pub mod manual;
 pub mod scene;
 mod spells;
 
-pub use manual::{DoneWords, ManualTurn, MenuWords, TurnCmd, TurnOutcome, TurnRefusal};
+pub use manual::{
+    AimCamera, DoneWords, ManualTurn, MenuWords, StepPreview, TurnCmd, TurnOutcome, TurnRefusal,
+};
 
 /// One `roll_dice(size, count)` (`ovr024.cs:586-598`): `count` dice, each
 /// `1 + random(size)`, through the engine's one PRNG seam so an attached

@@ -32,6 +32,7 @@
 
 mod board;
 pub mod layout;
+pub mod menu;
 pub mod missile;
 pub mod render;
 pub mod strings;
@@ -41,6 +42,8 @@ pub mod timeline;
 #[cfg(test)]
 mod goldens;
 #[cfg(test)]
+mod menu_tests;
+#[cfg(test)]
 mod parity;
 #[cfg(test)]
 mod tests;
@@ -48,6 +51,7 @@ mod tests;
 mod timeline_tests;
 
 pub use board::{DownedTile, PresentedBoard, PresentedCombatant};
+pub use menu::{ManualUi, MenuAction, Stage as MenuStage};
 pub use render::{status_string, OverlayDraw, PanelOp, PanelSummary};
 pub use time::BeatClock;
 pub use timeline::{Instruction, Op, Timeline};
@@ -481,6 +485,25 @@ impl CombatScene {
     /// The status row's current line, if any.
     pub fn status(&self) -> Option<&str> {
         self.status.as_deref()
+    }
+
+    /// Put a line on the prompt row directly — M6c's menus, which the host
+    /// draws between steps rather than scheduling through the timeline (no
+    /// playback runs while a player is deciding).
+    pub fn set_prompt(&mut self, text: Option<String>) {
+        self.prompt = text;
+    }
+
+    /// The same for the status row ("Range = N" while aiming).
+    pub fn set_status(&mut self, text: Option<String>) {
+        self.status = text;
+    }
+
+    /// The panel the right column shows — the acting combatant at a turn head,
+    /// the focused one while aiming (`CombatDisplayPlayerSummary(target)`,
+    /// `ovr014.cs:1796`).
+    pub fn set_panel_focus(&mut self, id: Option<usize>) {
+        self.panel_focus = id;
     }
 
     /// The overlay sprites currently up.

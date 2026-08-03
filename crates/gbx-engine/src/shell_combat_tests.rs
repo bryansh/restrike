@@ -133,6 +133,25 @@ fn engine_with(data: GameData, party: Vec<crate::party::Character>) -> Engine {
     e
 }
 
+/// ★ **M6c**: the keys a test with no player at the keyboard still owes.
+///
+/// A won fight with two members standing ends on `yes_no("Continue Battle:")`
+/// (`ovr009.cs:404-410`) — a real question, and since D-CV5 a real suspension.
+/// These tests are about the shell flow, so they answer it the way an operator
+/// who is done fighting does: `N`.
+fn auto_keys(e: &Engine) -> Vec<crate::input::InputEvent> {
+    match e.shell().combat_host().map(|h| h.stage()) {
+        Some(Stage::ContinuePrompt) => vec![crate::input::InputEvent::Char(b'N')],
+        _ => Vec::new(),
+    }
+}
+
+/// [`Engine::tick`] with [`auto_keys`] fed in.
+fn tick<'a>(e: &'a mut Engine) -> crate::engine::Frame<'a> {
+    let keys = auto_keys(e);
+    e.tick(&keys)
+}
+
 /// What one driven tick observed.
 #[derive(Default)]
 struct Observed {
@@ -168,7 +187,7 @@ fn park_and_resume(e: &mut Engine, marker: &str, expect: fn(&Shell) -> bool) -> 
     let mut ticks_parked = 0usize;
     let mut saw_park = false;
     for _ in 0..MAX_TICKS {
-        e.tick(&[]);
+        tick(e);
         drain(e, &mut o);
         if e.shell().combat_host().is_some() {
             saw_park = true;
@@ -209,7 +228,7 @@ fn a_fight_parks_and_resumes_inside_the_boot_flow() {
         if matches!(e.shell(), Shell::WorldMenu { .. }) {
             return;
         }
-        e.tick(&[]);
+        tick(&mut e);
     }
     panic!("Boot never completed after the fight");
 }
@@ -232,7 +251,7 @@ fn a_fight_parks_and_resumes_inside_the_step_flow() {
 
     // Boot to the world menu, then step forward.
     for _ in 0..50 {
-        e.tick(&[]);
+        tick(&mut e);
         if matches!(e.shell(), Shell::WorldMenu { .. }) {
             break;
         }
@@ -245,7 +264,7 @@ fn a_fight_parks_and_resumes_inside_the_step_flow() {
 
     let mut o = o;
     for _ in 0..MAX_TICKS {
-        e.tick(&[]);
+        tick(&mut e);
         drain(&mut e, &mut o);
         if matches!(e.shell(), Shell::WorldMenu { .. }) {
             break;
@@ -268,7 +287,7 @@ fn a_fight_parks_and_resumes_inside_the_look_flow() {
     });
     let mut e = engine_with(data, two_pcs());
     for _ in 0..50 {
-        e.tick(&[]);
+        tick(&mut e);
         if matches!(e.shell(), Shell::WorldMenu { .. }) {
             break;
         }
@@ -281,7 +300,7 @@ fn a_fight_parks_and_resumes_inside_the_look_flow() {
     let o = park_and_resume(&mut e, "AFTER-LOOK", |s| matches!(s, Shell::Look(_)));
     assert!(combat_line(&o).is_some());
     for _ in 0..MAX_TICKS {
-        e.tick(&[]);
+        tick(&mut e);
         if matches!(e.shell(), Shell::WorldMenu { .. }) {
             break;
         }
@@ -330,7 +349,7 @@ fn a_fight_parks_and_resumes_inside_a_chain_round() {
     let o = park_and_resume(&mut e, "AFTER-CHAIN", |s| matches!(s, Shell::Boot(_)));
     assert!(combat_line(&o).is_some());
     for _ in 0..MAX_TICKS {
-        e.tick(&[]);
+        tick(&mut e);
         if matches!(e.shell(), Shell::WorldMenu { .. }) {
             break;
         }
@@ -361,12 +380,12 @@ fn a_wiped_partys_final_beats_all_play_before_the_game_over_unwind() {
     let mut game_over_at: Option<usize> = None;
     let mut stages_after_outcome: Vec<Stage> = Vec::new();
 
-    for tick in 0..MAX_TICKS {
-        e.tick(&[]);
+    for tick_no in 0..MAX_TICKS {
+        tick(&mut e);
         if let Some(host) = e.shell().combat_host() {
             if host.outcome().is_some() {
                 if outcome_known_at.is_none() {
-                    outcome_known_at = Some(tick);
+                    outcome_known_at = Some(tick_no);
                     assert_eq!(
                         host.outcome(),
                         Some(crate::combat::CombatOutcome::MonstersWin)
@@ -375,16 +394,16 @@ fn a_wiped_partys_final_beats_all_play_before_the_game_over_unwind() {
                 stages_after_outcome.push(host.stage().clone());
                 assert!(
                     !e.state().party_killed,
-                    "tick {tick}: party_killed must stay down while the fight is \
+                    "tick {tick_no}: party_killed must stay down while the fight is \
                      still presenting — setting it here annihilates the final beats"
                 );
             }
         }
         if e.state().party_killed && flag_set_at.is_none() {
-            flag_set_at = Some(tick);
+            flag_set_at = Some(tick_no);
         }
         if matches!(e.shell(), Shell::GameOver) {
-            game_over_at = Some(tick);
+            game_over_at = Some(tick_no);
             break;
         }
     }
@@ -465,7 +484,7 @@ fn run_fight_to_the_end(snapshot_after: Option<usize>) -> FightRun {
     let mut round_tripped = false;
     let mut o = Observed::default();
     for _ in 0..MAX_TICKS {
-        e.tick(&[]);
+        tick(&mut e);
         drain(&mut e, &mut o);
         if e.shell().combat_host().is_some() {
             fighting_ticks += 1;
@@ -499,7 +518,7 @@ fn run_fight_to_the_end(snapshot_after: Option<usize>) -> FightRun {
 fn a_restored_fight_rebuilds_its_scene_and_renders_again() {
     let mut e = engine_with_program(load_then_combat_program(3, b"AFTERWARD"), two_pcs());
     for _ in 0..MAX_TICKS {
-        e.tick(&[]);
+        tick(&mut e);
         if e.shell()
             .combat_host()
             .is_some_and(|h| matches!(h.stage(), Stage::Fighting))
@@ -510,7 +529,7 @@ fn a_restored_fight_rebuilds_its_scene_and_renders_again() {
     let json = serde_json::to_string(e.shell()).unwrap();
     e.shell = serde_json::from_str(&json).unwrap();
     assert!(e.shell().combat_host().unwrap().scene().is_none());
-    e.tick(&[]);
+    tick(&mut e);
     assert!(
         e.shell().combat_host().is_some_and(|h| h.scene().is_some()),
         "the first tick after a restore rebuilds the presenter"
@@ -538,7 +557,7 @@ fn the_shell_driven_fight_draws_exactly_what_the_headless_one_draws() {
     let mut fork: Option<(CombatState, u32, usize)> = None;
     let mut o = Observed::default();
     for _ in 0..MAX_TICKS {
-        e.tick(&[]);
+        tick(&mut e);
         drain(&mut e, &mut o);
         if fork.is_none() {
             if let Some(host) = e.shell().combat_host() {
@@ -568,6 +587,13 @@ fn the_shell_driven_fight_draws_exactly_what_the_headless_one_draws() {
     rng.set_state(forked_rng);
     rng.attach_sink(headless.sink());
     let mut state = forked_state;
+    // ★ M6c: the fork carries the host's interactive flag, and a headless
+    // driver cannot answer D-CV5's suspensions. Turning it off is not a
+    // difference between the twins — it swaps the *source* of the
+    // Continue-Battle answer from the keyboard ('N', which `auto_keys` presses)
+    // to the empty schedule (also 'N'). Every draw either side of it is the
+    // same, which is exactly what this test then proves.
+    state.set_interactive(false);
     let mut steps = 0;
     while state.step(&mut rng) != CombatStep::Ended {
         steps += 1;
@@ -627,7 +653,7 @@ fn the_floor_dice_are_the_only_draws_before_the_fights_first_step() {
     let draws = Draws::default();
     e.attach_rng_sink(draws.sink());
     for _ in 0..MAX_TICKS {
-        e.tick(&[]);
+        tick(&mut e);
         if e.shell()
             .combat_host()
             .is_some_and(|h| matches!(h.stage(), Stage::Fighting))
@@ -638,7 +664,7 @@ fn the_floor_dice_are_the_only_draws_before_the_fights_first_step() {
     // The first `Fighting` tick has taken the round-1 initiative step only; a
     // few more ticks reach the first selection pass.
     for _ in 0..600 {
-        e.tick(&[]);
+        tick(&mut e);
         if draws.len() > 16 {
             break;
         }
@@ -682,7 +708,7 @@ fn the_fight_reaches_the_screen_and_gives_it_back() {
 
     let mut o = Observed::default();
     for _ in 0..MAX_TICKS {
-        let hash = e.tick(&[]).hash_hex();
+        let hash = tick(&mut e).hash_hex();
         drain(&mut e, &mut o);
         match e.shell().combat_host().map(|h| h.stage().clone()) {
             None if before_fight.is_none() => before_fight = Some(hash),
@@ -705,38 +731,108 @@ fn the_fight_reaches_the_screen_and_gives_it_back() {
     assert_ne!(during, after, "and the exploration screen came back");
 }
 
+/// A party that fights **manually** — `quick_fight` cleared, the way a save
+/// whose player never pressed Quick carries it.
+fn manual_pcs() -> Vec<crate::party::Character> {
+    two_pcs()
+        .into_iter()
+        .map(|mut c| {
+            c.status.quick_fight = 0;
+            c
+        })
+        .collect()
+}
+
 #[test]
-fn space_during_a_fight_is_reported_not_silently_eaten() {
-    // §8.2: SPACE (quick-fight revoke) needs D-CV5's suspensions, so until
-    // slice 7 it is queued and dropped — with a transcript note, and a count on
-    // the fight's own closing line.
-    let mut e = engine_with_program(load_then_combat_program(3, b"AFTERWARD"), two_pcs());
+fn a_manual_fight_is_played_from_the_menus_and_won() {
+    // ★ **M6c's done-condition, in CI form** (§4): every party turn opens the
+    // combat menu, a scripted player aims and commits from it, and the fight is
+    // won by hand — through the same `attack_target` the AI swings with.
+    let mut e = engine_with_program(load_then_combat_program(1, b"AFTERWARD"), manual_pcs());
     let mut o = Observed::default();
-    let mut pressed = false;
+    let mut menus_opened = 0usize;
+    let mut last_stage: Option<Stage> = None;
     for _ in 0..MAX_TICKS {
-        let input: &[crate::input::InputEvent] = if e.shell().combat_host().is_some() && !pressed {
-            pressed = true;
-            &[crate::input::InputEvent::Char(b' ')]
-        } else {
-            &[]
+        let stage = e.shell().combat_host().map(|h| h.stage().clone());
+        if matches!(stage, Some(Stage::PlayerTurn)) && last_stage != stage {
+            menus_opened += 1;
+        }
+        last_stage = stage.clone();
+        let keys: Vec<crate::input::InputEvent> = match stage {
+            Some(Stage::PlayerTurn) => crate::demo::scripted_player_key(&e).into_iter().collect(),
+            Some(Stage::ContinuePrompt) => vec![crate::input::InputEvent::Char(b'N')],
+            _ => Vec::new(),
         };
-        e.tick(input);
+        e.tick(&keys);
         drain(&mut e, &mut o);
         if combat_line(&o).is_some() {
             break;
         }
     }
-    assert!(pressed);
+    assert!(menus_opened > 0, "the party's turns opened the combat menu");
+    let line = combat_line(&o).expect("the fight ended and reported itself");
     assert!(
-        o.transcript
-            .iter()
-            .any(|l| l.contains("queued and dropped")),
-        "the dropped key names itself: {:?}",
-        o.transcript
+        line.contains("party wins"),
+        "a hand-played fight was won: {line:?}"
     );
     assert!(
-        combat_line(&o).unwrap().contains("1 key(s) dropped"),
-        "and the fight's closing line counts it: {:?}",
+        !o.transcript.iter().any(|l| l.contains("refused")),
+        "no command the menus offered was refused by the core: {:?}",
+        o.transcript
+    );
+}
+
+#[test]
+fn space_during_a_fight_hands_the_next_turn_to_the_player() {
+    // ★ M6c: SPACE is a real key at last (`process_input_in_monsters_turn`,
+    // `ovr010.cs:729-743`). Pressed while the AI fights, it revokes auto-fight
+    // for every player-controlled combatant, and the next party turn opens the
+    // combat menu instead of running itself.
+    let mut e = engine_with_program(load_then_combat_program(3, b"AFTERWARD"), two_pcs());
+    let mut o = Observed::default();
+    let mut pressed = false;
+    let mut saw_menu = false;
+    for _ in 0..MAX_TICKS {
+        let input: Vec<crate::input::InputEvent> = match e.shell().combat_host().map(|h| h.stage())
+        {
+            Some(Stage::Fighting) if !pressed => {
+                pressed = true;
+                vec![crate::input::InputEvent::Char(b' ')]
+            }
+            // The menu is open: its words are on the prompt row. `Quick`
+            // hands this turn — and every later one — back to the AI
+            // (`SetPlayerQuickFight` + `PlayerQuickFight`, `ovr009.cs:175`),
+            // which is how a player who pressed SPACE by accident recovers.
+            Some(Stage::PlayerTurn) => {
+                if !saw_menu {
+                    let host = e.shell().combat_host().expect("parked");
+                    let prompt = host
+                        .scene()
+                        .and_then(|s| s.prompt())
+                        .unwrap_or_default()
+                        .to_string();
+                    assert!(
+                        prompt.contains("View Aim") && prompt.ends_with("Quick Done"),
+                        "the combat menu is on the prompt row: {prompt:?}"
+                    );
+                    saw_menu = true;
+                }
+                vec![crate::input::InputEvent::Char(b'Q')]
+            }
+            Some(Stage::ContinuePrompt) => vec![crate::input::InputEvent::Char(b'N')],
+            _ => Vec::new(),
+        };
+        e.tick(&input);
+        drain(&mut e, &mut o);
+        if combat_line(&o).is_some() {
+            break;
+        }
+    }
+    assert!(pressed, "SPACE was pressed during an AI turn");
+    assert!(saw_menu, "the next party turn opened the combat menu");
+    assert!(
+        combat_line(&o).is_some_and(|l| !l.contains("dropped")),
+        "and nothing was dropped: {:?}",
         combat_line(&o)
     );
 }
@@ -779,7 +875,7 @@ fn the_live_party_fights_with_its_own_record_not_a_placeholder_die() {
     }
     let mut e = engine_with_program(load_then_combat_program(3, b"AFTERWARD"), party);
     for _ in 0..MAX_TICKS {
-        e.tick(&[]);
+        tick(&mut e);
         if let Some(host) = e.shell().combat_host() {
             if matches!(host.stage(), Stage::Fighting) {
                 let roster = host.state().roster();
@@ -808,7 +904,7 @@ fn the_monsters_carry_the_icon_slot_and_cpic_block_loadmonster_gave_them() {
     // off `gbl.monster_icon_id`, CPIC blocks off LOAD MONSTER's third operand.
     let mut e = engine_with_program(load_then_combat_program(3, b"AFTERWARD"), two_pcs());
     for _ in 0..MAX_TICKS {
-        e.tick(&[]);
+        tick(&mut e);
         if let Some(host) = e.shell().combat_host() {
             if matches!(host.stage(), Stage::Fighting) {
                 let roster = host.state().roster();
@@ -836,7 +932,7 @@ fn a_fight_with_no_living_party_reports_itself_and_still_replies() {
     let mut e = engine_with_program(load_then_combat_program(3, b"AFTERWARD"), dead);
     let mut o = Observed::default();
     for _ in 0..MAX_TICKS {
-        e.tick(&[]);
+        tick(&mut e);
         drain(&mut e, &mut o);
         if o.prints.iter().any(|p| p.contains("AFTERWARD")) {
             break;
@@ -867,7 +963,7 @@ fn placement_uses_the_areas_real_walls() {
         e.party = crate::party::Party { members: two_pcs() };
         e.state.pos = pos;
         for _ in 0..MAX_TICKS {
-            e.tick(&[]);
+            tick(&mut e);
             if let Some(host) = e.shell().combat_host() {
                 if matches!(host.stage(), Stage::Fighting) {
                     return host.state().roster()[2].pos;

@@ -47,8 +47,12 @@
 
 use crate::combat::floor::{self, FloorError};
 use crate::combat::kits;
+use crate::combat::manual::{TurnCmd, TurnOutcome};
 use crate::combat::scene::{
-    strings, time::BeatClock, CombatScene, CombatantIdentity, EntrySnapshot, SceneArt,
+    menu::{ManualUi, MenuAction},
+    strings,
+    time::BeatClock,
+    CombatScene, CombatantIdentity, EntrySnapshot, SceneArt,
 };
 use crate::combat::{
     place_combatants, ActionEvent, ActionSink, CombatOutcome, CombatState, CombatStep, Combatant,
@@ -83,6 +87,17 @@ pub enum Stage {
     Announce { ticks_left: u32 },
     /// The D-CV2 lockstep loop.
     Fighting,
+    /// ★ **M6c**: a manual turn is open ([`CombatStep::AwaitPlayerTurn`]) and
+    /// the menus have the keyboard. No `step()` runs until a command ends the
+    /// turn — here the suspension *is* the lockstep.
+    PlayerTurn,
+    /// ★ **M6c**: the mid-combat View sheet (`viewPlayer`, `ovr020.cs:236`),
+    /// palette swapped back to normal around it. Returns to
+    /// [`Stage::PlayerTurn`].
+    Sheet { member: usize },
+    /// ★ **M6c**: the round-end `yes_no("Continue Battle:")`
+    /// ([`CombatStep::AwaitContinueBattle`]).
+    ContinuePrompt,
     /// The last frame, held one `GameDelay` beat before the screen restores.
     FinalBeats { ticks_left: u32 },
     /// The one-tick screen restore + the deferred writes.
@@ -148,9 +163,12 @@ pub struct CombatHost {
     /// Set once `step()` returns `Ended`; the final batch may still be playing.
     ended: bool,
     outcome: Option<CombatOutcome>,
-    /// Keys pressed during AI turns that this slice cannot honour yet — SPACE
-    /// (quick-fight revoke) needs D-CV5's suspensions. Recorded so a dropped
-    /// key is *reported*, never silently eaten (§8.2).
+    /// ★ **M6c**: the open manual turn's menus, if one is suspended.
+    manual: Option<ManualUi>,
+    /// Keys pressed during AI turns that no path honours — none, as of M6c:
+    /// SPACE and '2' are both real now. Kept because the *reporting* is the
+    /// §8.2 rule, and the next unmodeled key should land here rather than
+    /// vanish.
     dropped_keys: Vec<u8>,
     /// Presentation, rebuilt on load (D-CV7).
     #[serde(skip)]
@@ -176,6 +194,7 @@ impl Clone for CombatHost {
             rounds: self.rounds,
             ended: self.ended,
             outcome: self.outcome,
+            manual: self.manual.clone(),
             dropped_keys: self.dropped_keys.clone(),
             scene: None,
             batch: Rc::new(RefCell::new(Vec::new())),
@@ -403,6 +422,7 @@ impl CombatHost {
             rounds: 0,
             ended: false,
             outcome: None,
+            manual: None,
             dropped_keys: Vec::new(),
             scene: None,
             batch: Rc::new(RefCell::new(Vec::new())),
@@ -430,6 +450,16 @@ impl CombatHost {
             }
             Stage::Fighting => {
                 self.tick_fighting(ctx);
+                HostTick::Working
+            }
+            // Both suspensions and the sheet are input-driven: `drain_input`
+            // above did this tick's work, and the frame is already composed.
+            Stage::PlayerTurn | Stage::ContinuePrompt => {
+                self.render(ctx);
+                HostTick::Working
+            }
+            Stage::Sheet { member } => {
+                self.render_sheet(ctx, member);
                 HostTick::Working
             }
             Stage::FinalBeats { ticks_left } => {
@@ -484,6 +514,10 @@ impl CombatHost {
             }
         };
         state.attach_action_sink(Box::new(BatchSink(Rc::clone(&self.batch))));
+        // ★ D-CV5: there is a human at the keyboard. This is the one call that
+        // arms both suspensions — every headless path leaves it off, which is
+        // what makes the whole manual surface invisible to the guard.
+        state.set_interactive(true);
 
         // D-CV2: the camera initializes lazily inside `combat_setup` on the
         // first `step()`, so the entry snapshot is read after it.
@@ -509,6 +543,15 @@ impl CombatHost {
         self.art = art;
         self.scene = Some(scene);
         self.stage = Stage::Fighting;
+        // The first `step()` is `RoundStarted` (initiative), never a
+        // suspension — but say so rather than assume it.
+        debug_assert!(
+            !matches!(
+                first,
+                CombatStep::AwaitPlayerTurn { .. } | CombatStep::AwaitContinueBattle
+            ),
+            "the entry step cannot suspend: it is the round head"
+        );
         self.render(ctx);
     }
 
@@ -548,53 +591,316 @@ impl CombatHost {
             .as_mut()
             .expect("just rebuilt")
             .begin_step(&events);
+        // ★ M6c: a suspension parks the host on the player. Its batch (the
+        // `Pick` and the turn head's camera) plays out first — the stage change
+        // is what stops `step()` being called again, and playback drains under
+        // `Stage::PlayerTurn` exactly as it does here.
+        match step {
+            CombatStep::AwaitPlayerTurn { combatant_id } => self.open_manual_turn(combatant_id),
+            CombatStep::AwaitContinueBattle => self.stage = Stage::ContinuePrompt,
+            _ => {}
+        }
         self.render(ctx);
     }
 
-    /// Live input, applied at **step heads only** — the D-CV2 lockstep rule,
-    /// mirroring the original's own `sub_36269` head polls.
+    /// ★ **M6c**: park on a manual turn — build the menus, put the focus box on
+    /// the actor and its summary in the right panel (`DoPlayerCombatTurn`'s own
+    /// `RedrawCombatIfFocusOn(true, 2, player)` + `CombatDisplayPlayerSummary`,
+    /// `ovr009.cs:122-124`).
+    fn open_manual_turn(&mut self, actor: usize) {
+        let mut ui = ManualUi::open(&mut self.state, actor);
+        if let Some(scene) = self.scene.as_mut() {
+            ui.set_game_speed(scene.clock().game_speed());
+            scene.set_panel_focus(Some(actor));
+        }
+        self.manual = Some(ui);
+        self.stage = Stage::PlayerTurn;
+        self.refresh_manual_surfaces();
+    }
+
+    /// Push the open UI's three surfaces into the scene: the prompt row, the
+    /// status row and the grey focus box.
+    fn refresh_manual_surfaces(&mut self) {
+        let Some(ui) = self.manual.as_ref() else {
+            return;
+        };
+        let size = ui
+            .aim_target()
+            .and_then(|t| self.state.roster().get(t))
+            .map(|c| c.size)
+            .unwrap_or_else(|| self.state.roster()[ui.actor()].size);
+        let (prompt, status) = (ui.prompt(), ui.status());
+        let aim_cell = ui.aim_focus_cell();
+        let actor = ui.actor();
+        let panel = ui.aim_target().or(Some(actor));
+        if let Some(scene) = self.scene.as_mut() {
+            // The actor's box rides the **presented** board, so it follows the
+            // icon through a walk instead of jumping to where the fight has
+            // already put it (D-CV2's whole point). The aim cursor is
+            // presentation's own and has no board twin.
+            let pos = aim_cell.or_else(|| scene.board().combatant(actor).map(|c| c.pos));
+            scene.set_prompt(Some(prompt));
+            scene.set_status(status);
+            scene.set_focus(pos.map(|pos| crate::combat::scene::FocusCursor { pos, size }));
+            scene.set_panel_focus(panel);
+        }
+    }
+
+    /// ★ **M6c**: run one accepted [`TurnCmd`] and fold the result back into
+    /// the UI, the scene and the stage.
     ///
-    /// `'2'` (the auto-magic toggle, `ovr010.cs:718-730`) works from M6b: it is
-    /// a plain flag flip the next turn's spell gate reads. SPACE (quick-fight
-    /// revoke) needs D-CV5's suspensions and is **queued and dropped with a
-    /// transcript note** until slice 7 — never silently eaten (§8.2).
+    /// The events a command emits are played through the same timeline a
+    /// `step()` batch is: a swing animates, a walk step walks. The lockstep
+    /// invariant holds trivially — the next key is not read until this drains,
+    /// because `drain_input` only feeds the UI at a quiet moment.
+    fn issue(&mut self, ctx: &mut FlowCtx, cmd: TurnCmd) {
+        let outcome = self.state.issue(ctx.rng, cmd.clone());
+        let events = self.take_batch();
+        if let Some(scene) = self.scene.as_mut() {
+            if !events.is_empty() {
+                scene.begin_step(&events);
+            }
+        }
+        match outcome {
+            Ok(TurnOutcome::Speed(n)) => {
+                if let Some(scene) = self.scene.as_mut() {
+                    scene.set_game_speed(n);
+                }
+                if let Some(ui) = self.manual.as_mut() {
+                    ui.set_game_speed(n);
+                }
+            }
+            Ok(outcome) => {
+                if let Some(ui) = self.manual.as_mut() {
+                    ui.note(outcome);
+                }
+                if outcome.turn_ended() {
+                    self.close_manual_turn();
+                    return;
+                }
+            }
+            Err(refusal) => {
+                // §9's rule: a refusal is loud. Two of them are the original's
+                // own player-facing lines; the rest name a driver bug, and the
+                // transcript is where this host says so.
+                if let Some(ui) = self.manual.as_mut() {
+                    ui.note_refusal(&refusal);
+                }
+                ctx.vm_memory
+                    .transcript
+                    .push(crate::vmhost::TranscriptEntry::Request(format!(
+                        "combat: {cmd:?} refused: {refusal:?}"
+                    )));
+            }
+        }
+        if let Some(ui) = self.manual.as_mut() {
+            ui.refresh(&mut self.state);
+        }
+        self.refresh_manual_surfaces();
+    }
+
+    /// The turn is over: drop the menus, clear their surfaces, and go back to
+    /// the lockstep loop.
+    fn close_manual_turn(&mut self) {
+        self.manual = None;
+        self.stage = Stage::Fighting;
+        if let Some(scene) = self.scene.as_mut() {
+            scene.set_prompt(None);
+            scene.set_status(None);
+        }
+    }
+
+    /// Live input.
+    ///
+    /// Two régimes, exactly as the original has: while the **AI** is fighting,
+    /// the only keys are `sub_36269`'s head polls ('2' and SPACE), and they land
+    /// at **step heads only** (the D-CV2 lockstep rule). While a **player's**
+    /// turn is open, the menus have the keyboard and every key goes through
+    /// [`ManualUi`].
     fn drain_input(&mut self, ctx: &mut FlowCtx) {
+        // Both suspensions let the *last* batch finish playing before they read
+        // a key — the original is inside its own animation there, and the D-CV2
+        // lockstep forbids composing a batch over a running one.
+        if matches!(self.stage, Stage::PlayerTurn | Stage::ContinuePrompt)
+            && self.tick_playback(ctx)
+        {
+            return;
+        }
+        match self.stage {
+            Stage::PlayerTurn => self.drain_menu_input(ctx),
+            Stage::ContinuePrompt => self.drain_continue_input(ctx),
+            Stage::Sheet { .. } => self.drain_sheet_input(ctx),
+            _ => self.drain_ai_turn_input(ctx),
+        }
+    }
+
+    /// Advances a running playback by this tick; `true` while one is running.
+    fn tick_playback(&mut self, ctx: &mut FlowCtx) -> bool {
+        let Some(scene) = self.scene.as_mut() else {
+            return false;
+        };
+        if !scene.is_playing() {
+            return false;
+        }
+        let cues = scene.tick(ctx.dt_ticks.max(1));
+        ctx.sounds.extend_from_slice(cues);
+        true
+    }
+
+    /// `process_input_in_monsters_turn` (`ovr010.cs:703-754`), as keys: '2'
+    /// flips auto-magic, SPACE revokes auto-fight — and the engine consumes the
+    /// SPACE at the original's own poll site, which is what hands the turn back.
+    fn drain_ai_turn_input(&mut self, ctx: &mut FlowCtx) {
         let at_step_head = matches!(self.stage, Stage::Fighting)
             && self.scene.as_ref().is_some_and(|s| !s.is_playing());
         while let Some(event) = ctx.input.read_key() {
             let crate::input::InputEvent::Char(key) = event else {
                 continue;
             };
+            if !at_step_head {
+                continue;
+            }
             match key {
                 b'2' => {
-                    if at_step_head {
-                        self.state.auto_pcs_cast_magic = !self.state.auto_pcs_cast_magic;
-                        let label = if self.state.auto_pcs_cast_magic {
-                            strings::MAGIC_ON
-                        } else {
-                            strings::MAGIC_OFF
-                        };
-                        ctx.vm_memory
-                            .transcript
-                            .push(crate::vmhost::TranscriptEntry::Print {
-                                text: label.to_string(),
-                                clear_first: false,
-                            });
-                    }
-                }
-                b' ' => {
-                    self.dropped_keys.push(key);
+                    self.state.auto_pcs_cast_magic = !self.state.auto_pcs_cast_magic;
+                    let label = if self.state.auto_pcs_cast_magic {
+                        strings::MAGIC_ON
+                    } else {
+                        strings::MAGIC_OFF
+                    };
                     ctx.vm_memory
                         .transcript
-                        .push(crate::vmhost::TranscriptEntry::Request(
-                            "combat: SPACE (quick-fight revoke) queued and dropped — \
-                             manual turns land with the D-CV5 suspensions (slice 7)"
-                                .to_string(),
-                        ));
+                        .push(crate::vmhost::TranscriptEntry::Print {
+                            text: label.to_string(),
+                            clear_first: false,
+                        });
                 }
+                // ★ M6c: a real key at last. The flag is queued here and
+                // consumed inside the next AI turn's own poll, so the revoke
+                // takes effect exactly where the original's does.
+                b' ' => self.state.queue_quick_fight_revoke(),
                 _ => {}
             }
         }
+    }
+
+    /// The manual turn's keyboard (§9): one key per tick's worth of input,
+    /// through the menus, with each accepted command executed immediately.
+    fn drain_menu_input(&mut self, ctx: &mut FlowCtx) {
+        while let Some(event) = ctx.input.read_key() {
+            let Some(ui) = self.manual.as_mut() else {
+                return;
+            };
+            match ui.key(event) {
+                MenuAction::None => {}
+                MenuAction::OpenSheet => {
+                    let actor = ui.actor();
+                    // The party member behind the roster index — the fight's
+                    // party run is the party's living prefix, in order.
+                    let member = self.party_member_of(ctx, actor);
+                    self.stage = Stage::Sheet { member };
+                    return;
+                }
+                MenuAction::Issue(cmd) => {
+                    self.issue(ctx, cmd);
+                    // A direction key at the main menu opens the loop *and*
+                    // steps (`ovr009.cs:243`): the step rides right behind its
+                    // `BeginMove`.
+                    let pending = self.manual.as_mut().and_then(|ui| ui.take_pending_step());
+                    if let Some(step) = pending {
+                        self.issue(ctx, step);
+                    }
+                    if !matches!(self.stage, Stage::PlayerTurn) {
+                        return;
+                    }
+                    if self.scene.as_ref().is_some_and(|s| s.is_playing()) {
+                        return;
+                    }
+                }
+            }
+            self.refresh_manual_surfaces();
+        }
+    }
+
+    /// `yes_no("Continue Battle:")` (`ovr009.cs:407`) — Y or N, nothing else.
+    fn drain_continue_input(&mut self, ctx: &mut FlowCtx) {
+        if let Some(scene) = self.scene.as_mut() {
+            scene.set_prompt(Some(format!(
+                "{} {}",
+                strings::CONTINUE_BATTLE,
+                strings::YES_NO
+            )));
+        }
+        while let Some(event) = ctx.input.read_key() {
+            let crate::input::InputEvent::Char(key) = event else {
+                continue;
+            };
+            let yes = match key.to_ascii_uppercase() {
+                b'Y' => true,
+                b'N' => false,
+                _ => continue,
+            };
+            let step = self.state.answer_continue_battle(yes);
+            self.note_round(step);
+            if let CombatStep::RoundEnded { battle_over, .. } = step {
+                if battle_over {
+                    self.ended = true;
+                    self.outcome = Some(self.state.outcome());
+                }
+            }
+            let events = self.take_batch();
+            if let Some(scene) = self.scene.as_mut() {
+                scene.set_prompt(None);
+                scene.begin_step(&events);
+            }
+            self.stage = Stage::Fighting;
+            return;
+        }
+    }
+
+    /// `viewPlayer`'s exit set (`unk_54B03 = {0, 'E'}`, `ovr020.cs:249`).
+    fn drain_sheet_input(&mut self, ctx: &mut FlowCtx) {
+        while let Some(event) = ctx.input.read_key() {
+            let exit = match event {
+                crate::input::InputEvent::Escape => true,
+                crate::input::InputEvent::Char(key) => key.eq_ignore_ascii_case(&b'E'),
+                _ => false,
+            };
+            if exit {
+                self.stage = Stage::PlayerTurn;
+                // `Color_0_8_inverse()` + `LoadPic()` (`ovr020.cs:332-336`):
+                // the combat palette and the whole combat screen come back.
+                crate::combat::scene::render::palette_combat(ctx.fb);
+                self.issue(ctx, TurnCmd::ViewSheet);
+                return;
+            }
+        }
+    }
+
+    /// The `party.members` index behind a roster index — the fight's party run
+    /// is the living members in order ([`kits::party_kits`]).
+    fn party_member_of(&self, ctx: &FlowCtx, actor: usize) -> usize {
+        ctx.roster
+            .members
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.hit_point_current > 0)
+            .nth(actor)
+            .map(|(i, _)| i)
+            .unwrap_or(0)
+    }
+
+    /// The mid-combat character sheet (`viewPlayer`, `ovr020.cs:236-339`), with
+    /// the palette swapped back to normal for it (`:240`).
+    fn render_sheet(&self, ctx: &mut FlowCtx, member: usize) {
+        crate::combat::scene::render::palette_normal(ctx.fb);
+        ctx.fb.clear(0);
+        let Some(character) = ctx.roster.members.get(member) else {
+            return;
+        };
+        let view = crate::charsheet::sheet_view(character);
+        crate::charsheet::render_sheet(ctx.fb, ctx.font, ctx.symbols, &view);
+        crate::combat::scene::render::draw_prompt(ctx.fb, ctx.font, "Exit");
     }
 
     fn note_round(&mut self, step: CombatStep) {
@@ -707,6 +1013,12 @@ impl CombatHost {
 
     pub fn scene(&self) -> Option<&CombatScene> {
         self.scene.as_ref()
+    }
+
+    /// The open manual turn's UI, if one is suspended — what a scripted player
+    /// (a demo, a test) reads to decide its next key.
+    pub fn manual(&self) -> Option<&ManualUi> {
+        self.manual.as_ref()
     }
 
     pub fn outcome(&self) -> Option<CombatOutcome> {

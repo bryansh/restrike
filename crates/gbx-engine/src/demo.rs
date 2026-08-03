@@ -1714,6 +1714,127 @@ fn watch_a_real_art_combat_reel() {
     assert!(frames > 60, "the reel played at least a second of beats");
 }
 
+use crate::input::{ExtKey, InputEvent};
+
+/// ★ **A scripted player** (doc §9.6's manual-fight demo).
+///
+/// It reads only what a player sees — whose turn it is, which menu is open,
+/// where the pieces are — and presses one key per tick: walk at the nearest
+/// foe, and walk *into* it to swing (`sub_33F03`).
+pub(crate) fn scripted_player_key(e: &crate::engine::Engine) -> Option<InputEvent> {
+    use crate::combat::scene::MenuStage;
+    let host = e.shell().combat_host()?;
+    // A player presses keys at the menu, not through an animation — and the
+    // menus deliberately read nothing while one is playing, so an early press
+    // would just queue up and arrive two-at-a-time.
+    if host.scene().is_none_or(|s| s.is_playing()) {
+        return None;
+    }
+    let ui = host.manual()?;
+    let state = host.state();
+    let actor = ui.actor();
+    let me = &state.roster()[actor];
+    let Some(foe) = state
+        .roster()
+        .iter()
+        .filter(|c| c.in_combat && c.team != me.team)
+        .min_by_key(|c| (c.pos.x - me.pos.x).abs().max((c.pos.y - me.pos.y).abs()))
+    else {
+        // The last foe fell on this very turn: spend what is left of it and
+        // let `BattleRoundChecks` ask its question.
+        return Some(match ui.stage() {
+            MenuStage::Moving => InputEvent::Enter,
+            MenuStage::Done => InputEvent::Char(b'Q'),
+            _ => InputEvent::Char(b'D'),
+        });
+    };
+    let bearing = crate::combat::target_direction(me.pos, foe.pos);
+
+    // The first direction that gets somewhere: into the foe if it is next
+    // door (that is the swing), else onto passable, unoccupied ground, trying
+    // the bearing first and fanning out — the same idea as the AI's own
+    // `CanMove` retry, done by hand.
+    // The first direction that gets somewhere, asked of the core itself
+    // (§9.3's own forks): into the foe if it is next door — that is the swing —
+    // else a step the moves left can pay for. The bearing first, then fanning
+    // out, which is the same idea as the AI's `CanMove` retry, done by hand.
+    let mut step = None;
+    for offset in [0i32, 1, -1, 2, -2, 3, -3, 4] {
+        let dir = ((bearing as i32 + offset).rem_euclid(8)) as u8;
+        match state.move_step_preview(actor, dir) {
+            crate::combat::StepPreview::Attack { target } => {
+                // Only a weapon that can swing in melee may walk into someone;
+                // an archer aims instead (`sub_33F03`'s own gate).
+                if target == foe.id && state.weapon_can_swing_in_melee(actor) {
+                    step = Some(dir);
+                    break;
+                }
+            }
+            crate::combat::StepPreview::Step => {
+                step = Some(dir);
+                break;
+            }
+            crate::combat::StepPreview::Blocked | crate::combat::StepPreview::OffMap => {}
+        }
+    }
+
+    // An archer (or anyone whose foe is out of walking reach this turn) shoots
+    // from the Aim menu instead.
+    //
+    // The candidate comes out of the **aim list** rather than the roster: the
+    // list is what `Next` walks (`copy_sorted_players`, wall-respecting), so a
+    // foe that is commit-legal but not in it could never be cycled onto.
+    let shootable = (!state.weapon_can_swing_in_melee(actor) || step.is_none())
+        .then(|| {
+            state
+                .aim_list(actor)
+                .into_iter()
+                .find(|&id| state.roster()[id].team != me.team && state.can_commit_aim(actor, id))
+        })
+        .flatten();
+    if let Some(target) = shootable {
+        return Some(InputEvent::Char(match ui.stage() {
+            MenuStage::Main => b'A',
+            MenuStage::Aim if ui.aim_target() == Some(target) => b'T',
+            MenuStage::Aim => b'N',
+            MenuStage::Moving => return Some(InputEvent::Enter),
+            MenuStage::Done => b'Q',
+            _ => b'E',
+        }));
+    }
+
+    let can_step = me.move_left > 1 && step.is_some();
+    Some(match (ui.stage(), can_step) {
+        // A keypad key opens the movement loop *with* its step
+        // (`ovr009.cs:239-252`); a plain letter there is a menu word.
+        (MenuStage::Main, true) | (MenuStage::Moving, true) => {
+            InputEvent::Ext(keypad_for(step.expect("checked"))?)
+        }
+        // Nowhere to go: leave the loop, then spend the turn.
+        (MenuStage::Moving, false) => InputEvent::Enter,
+        (MenuStage::Main, false) => InputEvent::Char(b'D'),
+        (MenuStage::Done, _) => InputEvent::Char(b'Q'),
+        _ => InputEvent::Char(b'E'),
+    })
+}
+
+/// The keypad key that walks in `dir` — the inverse of `keypad_ctrl_codes`
+/// composed with the movement table (§1.7).
+pub(crate) fn keypad_for(dir: u8) -> Option<crate::input::ExtKey> {
+    use ExtKey::*;
+    Some(match dir {
+        0 => Kp8,
+        1 => Kp9,
+        2 => Kp6,
+        3 => Kp3,
+        4 => Kp2,
+        5 => Kp1,
+        6 => Kp4,
+        7 => Kp7,
+        _ => return None,
+    })
+}
+
 /// ★ **M6b's done-condition, headlessly ticked** (`docs/design/combat-visualizer.md`
 /// §4 M6b / §8): boot the real bundled save, **walk to the Tilverton bar**, and
 /// watch the brawl happen on screen — entry beats, QuickFight, the VM resuming
@@ -1808,11 +1929,52 @@ fn m6b_a_party_wipe_shows_its_ending_before_game_over() {
     );
 }
 
-/// The shared boot-and-walk rig for the two M6b demos.
+/// ★ **M6c's done-condition** (`docs/design/combat-visualizer.md` §4 M6c): the
+/// same walk to the same Tilverton bar, and then the brawl **played by hand** —
+/// every party turn opens the real combat menu, a scripted player walks its
+/// combatant at the nearest patron and swings by walking into it, and the fight
+/// is won from the menus.
+///
+/// What the frames show: the combat screen with `Move View Aim Use Cast Turn
+/// Quick Done` on the prompt row, the movement loop's "Move/Attack, Move Left =
+/// N", mid-fight moments, and the exploration view restored afterwards.
+///
+/// Run: `GBX_DATA_DIR=~/goldbox-data/cotab cargo test -p gbx-engine --release \
+///   -- --nocapture --ignored m6c_a_hand_played_bar_brawl`
+#[test]
+#[ignore]
+fn m6c_a_hand_played_bar_brawl() {
+    let Some(mut run) = BarBrawl::open("m6c-manual-brawl", false) else {
+        return;
+    };
+    run.manual = true;
+    // Every party member fights by hand, whatever the save's own auto-fight
+    // byte says — that is the fight this demo exists to play.
+    for m in &mut run.engine.party.members {
+        m.status.quick_fight = 0;
+    }
+    let outcome = run.play();
+    assert!(outcome.rounds > 0, "the brawl ran rounds");
+    assert!(
+        outcome.combat_line.contains("party wins"),
+        "the hand-played party beat the patrons: {}",
+        outcome.combat_line
+    );
+    assert!(
+        outcome.resumed_to_the_walk_loop,
+        "the VM resumed and the shell went back to the walk loop"
+    );
+}
+
+/// The shared boot-and-walk rig for the M6b/M6c bar demos.
 struct BarBrawl {
     engine: crate::engine::Engine,
     out_dir: std::path::PathBuf,
     label: &'static str,
+    /// ★ M6c: who fights. `false` presses `Quick` at the first menu (the
+    /// QuickFight brawl M6b watches); `true` plays every party turn from the
+    /// menus with [`scripted_player_key`].
+    manual: bool,
 }
 
 #[derive(Default)]
@@ -1932,6 +2094,7 @@ impl BarBrawl {
             engine,
             out_dir,
             label,
+            manual: false,
         };
         run.settle();
         eprintln!(
@@ -2050,8 +2213,54 @@ impl BarBrawl {
         let mut fight_ticks = 0usize;
         let mut shots = 0usize;
         let mut prints: Vec<String> = Vec::new();
+        let mut menu_shots = 0usize;
         for tick in 0..200_000usize {
-            self.engine.tick(&[]);
+            // ★ M6c: the keys a fight needs from whoever is watching it.
+            //
+            // The Continue-Battle prompt is a real question now
+            // (`ovr009.cs:404`) and every party turn opens the combat menu
+            // unless its `quick_fight` byte says otherwise — so even the
+            // QuickFight demo answers, it just answers with `Quick`.
+            let keys: Vec<InputEvent> = match self.engine.shell().combat_host().map(|h| h.stage()) {
+                Some(Stage::ContinuePrompt) => vec![InputEvent::Char(b'N')],
+                Some(Stage::PlayerTurn) if self.manual => {
+                    scripted_player_key(&self.engine).into_iter().collect()
+                }
+                Some(Stage::PlayerTurn) => vec![InputEvent::Char(b'Q')],
+                _ => Vec::new(),
+            };
+            if self.manual
+                && menu_shots < 3
+                && matches!(
+                    self.engine.shell().combat_host().map(|h| h.stage()),
+                    Some(Stage::PlayerTurn)
+                )
+                && self
+                    .engine
+                    .shell()
+                    .combat_host()
+                    .and_then(|h| h.manual())
+                    .is_some_and(|u| {
+                        matches!(
+                            u.stage(),
+                            crate::combat::scene::MenuStage::Main
+                                | crate::combat::scene::MenuStage::Moving
+                        )
+                    })
+            {
+                menu_shots += 1;
+                let prompt = self
+                    .engine
+                    .shell()
+                    .combat_host()
+                    .and_then(|h| h.scene())
+                    .and_then(|s| s.prompt())
+                    .unwrap_or_default()
+                    .to_string();
+                eprintln!("      menu on screen: {prompt:?}");
+                self.dump(&format!("0{}-the-menu", menu_shots + 1));
+            }
+            self.engine.tick(&keys);
             for entry in self.engine.take_transcript() {
                 match entry {
                     crate::vmhost::TranscriptEntry::Print { text, .. } => {

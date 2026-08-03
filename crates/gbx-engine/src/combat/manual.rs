@@ -100,6 +100,8 @@ pub enum TurnCmd {
     /// Aim's `Target` commit (`sub_411D8` with `showRange`, `ovr014.cs:1806`):
     /// swing at the focused combatant with the readied weapon.
     AttackTarget { target: usize },
+    /// One of Aim's own camera moves ([`AimCamera`]).
+    Aim(AimCamera),
 
     // --- §9.2, the Done submenu --------------------------------------------
     /// `G` → `guarding(player)`; ends the turn.
@@ -117,6 +119,49 @@ pub enum TurnCmd {
     /// The "Flee:" prompt answered `Y` (`ovr009.cs:508-514`) → `flee_battle`'s
     /// §28 ladder. Ends the turn whether or not the escape succeeds.
     Flee,
+}
+
+/// What [`CombatState::move_step_preview`] found in a direction — §9.3's own
+/// three forks (`ovr009.cs:500-534`), plus the plain step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepPreview {
+    /// The cell is occupied: stepping into it is a swing (`sub_33F03`).
+    Attack { target: usize },
+    /// The cell is off the map: stepping asks "Flee:".
+    OffMap,
+    /// The step costs more than the moves left — "can't go there".
+    Blocked,
+    /// A plain step.
+    Step,
+}
+
+/// Aim's camera moves — the scrolls the aim UI performs while the player is
+/// still deciding (§9.4).
+///
+/// They are **core** commands, not presentation, for one reason: the combat
+/// window (`gbl.mapToBackGroundTile.mapScreenTopLeft`) is engine state that a
+/// later swing reads (`AttackTarget`'s on-screen facing branch, §36.1). A scene
+/// that scrolled its own copy would leave the fight's camera where it wasn't,
+/// and the staged manual-turn capture would diverge on a facing store nobody
+/// could see. Every variant lands on [`CombatState::redraw_combat_area`] — the
+/// same primitive the AI's scroll sites use — and emits the usual
+/// [`ActionEvent::Camera`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AimCamera {
+    /// `aim_sub_menu`'s `RedrawCombatIfFocusOn(true, 3, target)`
+    /// (`ovr014.cs:1793`): focus-gated, radius 3, on the focused combatant.
+    Focus { target: usize },
+    /// `step_combat_list`'s aim line (`draw_missile_attack(0, 1, targetPos,
+    /// attackerPos)`, `ovr014.cs:2110`) — the same camera port a real missile
+    /// flight uses, run between the previously-focused cell and the new one.
+    Line { from: GridPos, to: GridPos },
+    /// The free cursor's per-key scroll (`redrawCombatArea(dir, 3, pos)`,
+    /// `ovr014.cs:1875`) — the probe is the cell the cursor is *about* to move
+    /// to, which is why the direction rides along.
+    Cursor { at: GridPos, dir: u8 },
+    /// `Center` (`redrawCombatArea(8, 0, pos)`, `ovr014.cs:2213`) — radius 0,
+    /// i.e. an unconditional recentre on the focused cell.
+    Center { at: GridPos },
 }
 
 /// What an accepted [`TurnCmd`] did.
@@ -200,7 +245,7 @@ pub enum TurnRefusal {
 /// prints for the acting combatant, in the original's order.
 ///
 /// `View`, `Aim`, `Quick` and `Done` are unconditional and have no field.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MenuWords {
     /// `player.actions.move > 0`.
     pub move_: bool,
@@ -239,7 +284,7 @@ impl MenuWords {
 /// §9.2's word list (`delay_menu`, `ovr009.cs:619-635`).
 ///
 /// `Delay`, `Quit`, `Speed` and `Exit` are unconditional.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DoneWords {
     /// `!is_weapon_ranged(player) || is_weapon_ranged_melee(player)` — a
     /// pure-ranged weapon cannot guard (the §34 `TryGuarding` rule, now
@@ -318,6 +363,22 @@ pub fn movement_key_direction(key: u8) -> Option<u8> {
         b'O' => 5,
         b'K' => 6,
         b'G' => 7,
+        _ => return None,
+    })
+}
+
+/// [`movement_key_direction`] the other way round — the key that walks in
+/// `dir`. Scripted players (the demos and the CI manual fight) need it.
+pub fn direction_key(dir: u8) -> Option<u8> {
+    Some(match dir {
+        0 => b'H',
+        1 => b'I',
+        2 => b'M',
+        3 => b'Q',
+        4 => b'P',
+        5 => b'O',
+        6 => b'K',
+        7 => b'G',
         _ => return None,
     })
 }
@@ -431,6 +492,30 @@ impl CombatState {
                 Ok(TurnOutcome::Continue)
             }
             TurnCmd::AttackTarget { target } => self.aim_commit(rng, actor, target),
+            TurnCmd::Aim(camera) => {
+                match camera {
+                    AimCamera::Focus { target } => {
+                        if target >= self.fighters.len() {
+                            return Err(TurnRefusal::NoSuchTarget { target });
+                        }
+                        // `RedrawCombatIfFocusOn(true, …)` is the focus-gated
+                        // form (`ovr033.cs:660`), so an unfocused camera stays.
+                        if self.camera_focus() {
+                            let p = self.fighters[target].pos;
+                            self.redraw_combat_area(8, 3, p);
+                        }
+                    }
+                    AimCamera::Line { from, to } => self.draw_missile_camera_between(from, to),
+                    AimCamera::Cursor { at, dir } => {
+                        if dir > 8 {
+                            return Err(TurnRefusal::BadDirection(dir));
+                        }
+                        self.redraw_combat_area(dir, 3, at);
+                    }
+                    AimCamera::Center { at } => self.redraw_combat_area(8, 0, at),
+                }
+                Ok(TurnOutcome::Continue)
+            }
             TurnCmd::Guard => {
                 if !self.done_words().expect("a turn is open").guard {
                     return Err(TurnRefusal::WordUnavailable { word: "Guard" });
@@ -548,31 +633,15 @@ impl CombatState {
         // prompt and a swing all turn the icon first.
         self.draw_74b3f(actor, dir);
 
-        let (ground_tile, target_index) = self.ground_info_dir(actor, dir);
-        if target_index > 0 {
+        match self.move_step_preview(actor, dir) {
             // `sub_33F03` (`ovr009.cs:500`) — walk into an occupied cell.
-            return self.walk_into(rng, actor, (target_index - 1) as usize);
-        }
-        if ground_tile == 0 {
+            StepPreview::Attack { target } => return self.walk_into(rng, actor, target),
             // Off the map (`ovr009.cs:503-514`): the driver owes a "Flee:".
-            return Ok(TurnOutcome::FleePrompt);
+            StepPreview::OffMap => return Ok(TurnOutcome::FleePrompt),
+            StepPreview::Blocked | StepPreview::Step => {}
         }
 
-        // The affordability pre-check (`ovr009.cs:518-531`).
-        //
-        // ★ Cited asymmetry, flagged for the audit: this site multiplies by 3
-        // when `(dir / 2) < 1` — i.e. for directions 0 and 1 — where
-        // `sub_3E748`'s own deduction (`ovr014.cs:266`, and our
-        // [`CombatState::sub_3e748`]) uses the diagonal test `dir & 1`. coab
-        // writes the two idioms differently in the two functions, which is why
-        // this is transcribed rather than unified: the pre-check can pass a
-        // diagonal that then costs more, and `sub_3E748` clamps the remainder
-        // to zero when it does. Only a manual-turn capture can settle whether
-        // the binary really reads `cmp dir,2`.
-        let base = super::ground_tile_move_cost(ground_tile) as i32;
-        let cost = if dir < 2 { base * 3 } else { base * 2 };
-        let cost = if base == 0xFF { 0xFFFF } else { cost };
-        if cost > self.fighters[actor].move_left {
+        if let StepPreview::Blocked = self.move_step_preview(actor, dir) {
             return Ok(TurnOutcome::Blocked); // "can't go there"
         }
 
@@ -596,6 +665,45 @@ impl CombatState {
             return Ok(self.end_turn());
         }
         Ok(TurnOutcome::Continue)
+    }
+
+    /// ★ What one movement-loop step *would* do (§9.3's three forks), without
+    /// doing it — the read a driver needs to choose a direction, and the same
+    /// three tests [`TurnCmd::MoveStep`] then makes.
+    pub fn move_step_preview(&self, actor: usize, dir: u8) -> StepPreview {
+        let (ground_tile, target_index) = self.ground_info_dir(actor, dir);
+        if target_index > 0 {
+            return StepPreview::Attack {
+                target: (target_index - 1) as usize,
+            };
+        }
+        if ground_tile == 0 {
+            return StepPreview::OffMap;
+        }
+        // The affordability pre-check (`ovr009.cs:518-531`).
+        //
+        // ★ Cited asymmetry, flagged for the audit: this site multiplies by 3
+        // when `(dir / 2) < 1` — i.e. for directions 0 and 1 — where
+        // `sub_3E748`'s own deduction (`ovr014.cs:266`, and our
+        // [`CombatState::sub_3e748`]) uses the diagonal test `dir & 1`. coab
+        // writes the two idioms differently in the two functions, which is why
+        // this is transcribed rather than unified: the pre-check can pass a
+        // diagonal that then costs more, and `sub_3E748` clamps the remainder
+        // to zero when it does. Only a manual-turn capture can settle whether
+        // the binary really reads `cmp dir,2`.
+        let base = super::ground_tile_move_cost(ground_tile) as i32;
+        let cost = if base == 0xFF {
+            0xFFFF
+        } else if dir < 2 {
+            base * 3
+        } else {
+            base * 2
+        };
+        if cost > self.fighters[actor].move_left {
+            StepPreview::Blocked
+        } else {
+            StepPreview::Step
+        }
     }
 
     /// `sub_33F03` (`ovr009.cs:591-614`): the cell you walked into is occupied.
@@ -711,6 +819,13 @@ impl CombatState {
     /// (review finding #4: the binary sanitizes bytes).
     pub fn aim_max_range(&self, actor: usize) -> i32 {
         self.weapon_range(actor)
+    }
+
+    /// Can this combatant swing at the cell it walks into
+    /// (`sub_33F03`'s gate, `ovr009.cs:594`)? The same predicate §9.2's Guard
+    /// word reads: a pure-ranged weapon can do neither.
+    pub fn weapon_can_swing_in_melee(&self, actor: usize) -> bool {
+        !self.is_weapon_ranged(actor) || self.is_weapon_ranged_melee(actor)
     }
 
     /// Whether Aim would offer `Target` for this pairing — `aim_sub_menu`'s

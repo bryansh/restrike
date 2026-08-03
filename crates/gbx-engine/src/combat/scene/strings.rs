@@ -116,6 +116,61 @@ pub fn range_status(range: i32) -> String {
     format!("Range = {range}  ")
 }
 
+// --- ★ the M6c manual surface (doc §9) ------------------------------------
+
+/// The movement loop's prompt (`sub_33B26`, `ovr009.cs:436`) — `N` is
+/// `actions.move / 2`, the WHOLE moves left, because the budget is kept in
+/// halves (§45). The trailing space is the original's.
+pub fn move_left_prompt(whole_moves: i32) -> String {
+    format!("Move/Attack, Move Left = {whole_moves} ")
+}
+
+/// The movement loop's unaffordable-step message (`ovr009.cs:533`).
+pub const CANT_GO_THERE: &str = "can't go there";
+/// `sub_33F03`'s refusal when a pure-ranged weapon is readied
+/// (`ovr009.cs:596`).
+pub const NOT_WITH_THAT_WEAPON: &str = "Not with that weapon";
+/// The manual targeting loop's duplicate-pick message (`ovr014.cs:1344`) — the
+/// player's arm only; QuickFight silently spends the pick instead.
+pub const ALREADY_BEEN_TARGETED: &str = "Already been targeted";
+
+/// Aim's prompt (`aim_sub_menu`'s `displayInput(…, "Aim:")`, `ovr014.cs:1803`).
+pub const AIM_PROMPT: &str = "Aim:";
+/// Aim's words either side of the conditional `Target` (`ovr014.cs:1793`).
+pub const AIM_WORDS_HEAD: &str = "Next Prev Manual ";
+pub const AIM_WORDS_TAIL: &str = "Center Exit";
+/// The conditional word itself, with the original's trailing space.
+pub const AIM_TARGET_WORD: &str = "Target ";
+/// The free cursor's prompt (`Target`, `ovr014.cs:1985`).
+pub const CURSOR_PROMPT: &str = "(Use Cursor keys) ";
+/// The free cursor's unconditional words (`ovr014.cs:1976-1983`).
+pub const CURSOR_WORDS: &str = "Center Exit";
+
+/// `set_gamespeed`'s prompt (`ovr009.cs:678`) — the space before the colon is
+/// the original's.
+pub fn game_speed_prompt(speed: u8) -> String {
+    format!("GameSpeed ({speed}) :")
+}
+
+/// `set_gamespeed`'s word list (`ovr009.cs:679-690`): Slower only below 9,
+/// Faster only above 0, and the leading space is the original's. (Higher
+/// `game_speed_var` = longer delays, so **Slower** is the one that increments.)
+pub fn game_speed_words(speed: u8) -> String {
+    let mut out = String::from(" ");
+    if speed < 9 {
+        out.push_str("Slower ");
+    }
+    if speed > 0 {
+        out.push_str("Faster ");
+    }
+    out.push_str("Exit");
+    out
+}
+
+/// `yes_no`'s words (`ovr027.cs:684`); the prompt beside them is the caller's
+/// ([`FLEE_PROMPT`], [`CONTINUE_BATTLE`]).
+pub const YES_NO: &str = "Yes No";
+
 /// `ovr023.SpellNames` (`ovr023.cs:10-105`), the table `DisplayCaseSpellText`
 /// prints from — 101 rows, indexed by spell id.
 ///

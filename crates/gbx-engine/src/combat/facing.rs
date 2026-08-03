@@ -105,6 +105,18 @@ impl CombatState {
     pub(super) fn draw_missile_camera(&mut self, attacker: usize, target: usize) {
         let a = self.fighters[attacker].pos;
         let t = self.fighters[target].pos;
+        self.draw_missile_camera_between(a, t);
+    }
+
+    /// [`draw_missile_camera`](Self::draw_missile_camera) between two **cells**
+    /// rather than two combatants — the shape `draw_missile_attack` actually
+    /// takes (`Point target, Point attacker`).
+    ///
+    /// M6c needs it because Aim's cycling draws the same flight between the
+    /// previously-focused cell and the newly-focused one
+    /// (`step_combat_list`, `ovr014.cs:2110`), and either end may be a cell the
+    /// free cursor picked rather than a combatant.
+    pub(super) fn draw_missile_camera_between(&mut self, a: GridPos, t: GridPos) {
         let var_af = missile_path_pixel_steps(a, t);
         let var_b0 = var_af as i32 - 2;
         if var_b0 < 2 || (var_af as i32) < 2 {

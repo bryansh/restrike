@@ -129,6 +129,11 @@ pub(crate) fn party_member(name: &str, hp: u8, raw_ac: i8, thac0: i8) -> crate::
     rec[0x19e] = 1; // a1 dice_count
     rec[0x1a0] = 8; // a1 dice_size
     rec[0x1a2] = 2; // a1 damage_bonus
+                    // ★ M6c: `quick_fight@0x198` — this fixture party fights on **auto**, so
+                    // the shell-flow tests keep testing the flow rather than the menus. A test
+                    // that wants a manual turn zeroes `status.quick_fight` on the decoded
+                    // `Character`, which is the same switch a real save carries.
+    rec[0x198] = 1;
     let decoded = decode_char_record(&rec).unwrap();
     crate::party::character_from_record(&decoded, vec![], vec![])
 }
@@ -194,9 +199,18 @@ fn combat_from_a_running_script_resolves_and_resumes() {
 
     let mut combat_line: Option<String> = None;
     let mut saw_resume_print = false;
-    // Drive to completion (the block EXITs into the world menu).
+    // Drive to completion (the block EXITs into the world menu). ★ M6c: a won
+    // fight with two members standing ends on `yes_no("Continue Battle:")`
+    // (`ovr009.cs:404`), which is a real suspension now — this driver answers
+    // it `N`, the way an operator who is done fighting does.
     for _ in 0..3000 {
-        e.tick(&[]);
+        let keys: Vec<crate::input::InputEvent> = match e.shell().combat_host().map(|h| h.stage()) {
+            Some(crate::combat_host::Stage::ContinuePrompt) => {
+                vec![crate::input::InputEvent::Char(b'N')]
+            }
+            _ => Vec::new(),
+        };
+        e.tick(&keys);
         for entry in e.take_transcript() {
             match entry {
                 TranscriptEntry::Request(label) if label.starts_with("combat:") => {
