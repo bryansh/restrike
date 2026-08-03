@@ -54,6 +54,10 @@ mod h2_conformance;
 mod hash_goldens;
 #[cfg(test)]
 mod save_roundtrip_tests;
+
+/// The M6 slice-6 state-chart tests (`combat-visualizer.md` §8.5).
+#[cfg(test)]
+mod shell_combat_tests;
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]

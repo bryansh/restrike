@@ -1302,6 +1302,33 @@ impl Shell {
         }
     }
 
+    /// The fight currently on screen, if any — the parked [`CombatHost`] in
+    /// whichever flow's vector run owns it (`combat-visualizer.md` §8.1).
+    ///
+    /// A read-only seam for the inspector's live pane and for the state-chart
+    /// tests; the host is otherwise invisible from outside, which is the point
+    /// of parking at interaction level.
+    pub fn combat_host(&self) -> Option<&CombatHost> {
+        fn in_run(run: &Option<VectorRun>) -> Option<&CombatHost> {
+            match run.as_ref().map(|r| &r.phase) {
+                Some(VmPhase::Combat(h)) => Some(h),
+                _ => None,
+            }
+        }
+        fn in_chain(chain: &Option<ChainRunner>) -> Option<&CombatHost> {
+            match chain.as_ref().map(|c| &c.run.phase) {
+                Some(VmPhase::Combat(h)) => Some(h),
+                _ => None,
+            }
+        }
+        match self {
+            Shell::Boot(b) => in_run(&b.run).or_else(|| in_chain(&b.chain)),
+            Shell::Look(l) => in_run(&l.run).or_else(|| in_chain(&l.chain)),
+            Shell::Step(s) => in_run(&s.run).or_else(|| in_chain(&s.chain)),
+            Shell::WorldMenu { .. } | Shell::GameOver | Shell::Screen(_) => None,
+        }
+    }
+
     /// The status line every command refreshes (§1.6): `"X,Y DIR HH:MM"`
     /// (+ `" search"`).
     pub fn status_line(state: &EngineState) -> String {

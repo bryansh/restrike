@@ -41,7 +41,7 @@ use std::rc::Rc;
 
 // --- fixture assets (mirrors h2_conformance's tiny synthetic set) ----------
 
-fn synthetic_set4() -> ImageBlock {
+pub(crate) fn synthetic_set4() -> ImageBlock {
     ImageBlock {
         height: 8,
         width_cols: 1,
@@ -56,7 +56,7 @@ fn synthetic_set4() -> ImageBlock {
     }
 }
 
-fn synthetic_font() -> Font {
+pub(crate) fn synthetic_font() -> Font {
     let mut data = Vec::with_capacity(font::GLYPH_COUNT * font::GLYPH_BYTES);
     for j in 0..font::GLYPH_COUNT {
         data.extend_from_slice(&[j as u8; font::GLYPH_BYTES]);
@@ -64,7 +64,7 @@ fn synthetic_font() -> Font {
     font::decode(&data)
 }
 
-fn open_geo() -> GeoBlock {
+pub(crate) fn open_geo() -> GeoBlock {
     GeoBlock::parse(&vec![0u8; GEO_BLOCK_SIZE]).unwrap()
 }
 
@@ -74,7 +74,14 @@ fn open_geo() -> GeoBlock {
 /// reads poked to the given values (the same offsets `decode_char_record`
 /// uses, `save_orig.rs`). A "monster" and a "party member" share this layout —
 /// a monster *is* a `Player` record.
-fn char_record(name: &[u8], hp: u8, raw_ac: i8, thac0: i8, movement: u8, npc: bool) -> Vec<u8> {
+pub(crate) fn char_record(
+    name: &[u8],
+    hp: u8,
+    raw_ac: i8,
+    thac0: i8,
+    movement: u8,
+    npc: bool,
+) -> Vec<u8> {
     let mut rec = vec![0u8; CHAR_RECORD_SIZE];
     rec[0] = name.len() as u8;
     rec[1..1 + name.len()].copy_from_slice(name);
@@ -113,7 +120,7 @@ fn char_record(name: &[u8], hp: u8, raw_ac: i8, thac0: i8, movement: u8, npc: bo
 /// A synthetic party member (`crate::party::Character`) with combat stats set,
 /// via the record path so every derived field is populated exactly as an
 /// imported save's would be.
-fn party_member(name: &str, hp: u8, raw_ac: i8, thac0: i8) -> crate::party::Character {
+pub(crate) fn party_member(name: &str, hp: u8, raw_ac: i8, thac0: i8) -> crate::party::Character {
     let mut rec = char_record(name.as_bytes(), hp, raw_ac, thac0, 12, false);
     // A readied longsword's serialized attack-1 profile (1d8+2). Before M6
     // slice 6 the shell handed every party member a hardcoded 1d8
@@ -129,7 +136,7 @@ fn party_member(name: &str, hp: u8, raw_ac: i8, thac0: i8) -> crate::party::Char
 /// A `GameData` with a synthetic `ECL2.DAX` (the given entry program at
 /// [`INITIAL_ECL_BLOCK`]) and a `MON2CHA.DAX` whose block 0 is one weak
 /// goblin record — the fixture the wiring drives.
-fn combat_game_data(program: EclBuilder) -> GameData {
+pub(crate) fn combat_game_data(program: EclBuilder) -> GameData {
     let ecl_raw = vec![(INITIAL_ECL_BLOCK, ecl_dax_block(&program.build_bytes()))];
     let ecl_dax = build_dax_file(&ecl_raw);
     // A weak monster: raw AC 10 (easy to hit), THAC0 20 (near-useless vs a
@@ -144,7 +151,10 @@ fn combat_game_data(program: EclBuilder) -> GameData {
 
 /// Builds an `Engine` running `program` as its resident block, with `party`
 /// as the live roster.
-fn engine_with_program(program: EclBuilder, party: Vec<crate::party::Character>) -> Engine {
+pub(crate) fn engine_with_program(
+    program: EclBuilder,
+    party: Vec<crate::party::Character>,
+) -> Engine {
     let mut sets = crate::symbols::SymbolSets::new();
     sets.load(4, synthetic_set4());
     let data = combat_game_data(program);
@@ -163,7 +173,7 @@ fn engine_with_program(program: EclBuilder, party: Vec<crate::party::Character>)
 // --- D5: the milestone -----------------------------------------------------
 
 /// A `LOAD MONSTER 0, copies, 1; COMBAT; PRINT "<resume_text>"; EXIT` program.
-fn load_then_combat_program(copies: u8, resume_text: &[u8]) -> EclBuilder {
+pub(crate) fn load_then_combat_program(copies: u8, resume_text: &[u8]) -> EclBuilder {
     crate::test_support::simple_block(|b| {
         b.op(0x0B).imm_byte(0).imm_byte(copies).imm_byte(1); // LOAD MONSTER
         b.op(0x24); // COMBAT

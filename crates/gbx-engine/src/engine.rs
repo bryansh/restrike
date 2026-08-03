@@ -519,6 +519,14 @@ impl Engine {
         &self.state
     }
 
+    /// The live PRNG state (`DS:0x47F0`) — a synchronization point for the
+    /// oracle rig (D-OR1) and for the shell-path draw-parity test, which forks
+    /// a headless fight from exactly this value.
+    #[cfg(test)]
+    pub(crate) fn rng_state(&self) -> u32 {
+        self.rng.state()
+    }
+
     /// The UI shell state machine's current node (`Boot`/`WorldMenu`/`Look`/
     /// `Step`/`GameOver`) — read by `tools/inspect`'s live engine pane
     /// (D-UI8) to show what flow stage the machine is in. `Shell` is a plain
