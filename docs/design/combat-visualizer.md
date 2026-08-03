@@ -681,3 +681,121 @@ sessions resume-don't-respawn on infra drops (the M5 pattern).
 - No sound synthesis — M8; M6 emits `SoundEvent`s only.
 - The egui inspector combat pane is welcome as a byproduct, never the
   deliverable.
+
+## 8. The Shell combat flow — the slice-6 spec-refresh (2026-08-02, Fable)
+
+The state chart D-CV1 item 1 owes slice 6. Baseline being replaced: the
+synchronous inline fight — `PresentTick` sees `Request::Combat` with
+`pending_combat.monsters_loaded`, calls `run_pending_combat` on the spot
+(`shell.rs:466-500`), which assembles the placeholder inputs
+(`party_combat_stats` = `DEFAULT_PARTY_WEAPON_DIE`, `provisional_combat_map`),
+runs the fight headless, pushes the transcript line, sets `party_killed`
+immediately on a wipe (`shell.rs:259-273`), and resumes the VM on the same
+tick. Two properties of that baseline are bugs under a rendered fight and
+drive the whole chart: the transcript/`party_killed` writes happen at
+outcome-known time, and nothing survives between request and reply because
+nothing needs to.
+
+### 8.1 The parking shape
+
+`VectorRun.phase` gains a third interaction-level variant beside
+`Gate(Widget)` — `Combat(CombatHost)` — NOT a top-level `Shell` variant.
+The `VectorRun` (and the flow that owns it: Boot, Step, Look, or a chain
+round) stays exactly where it was, suspended mid-`Present`, its
+flow/stage cursor intact; the fight is an interaction the vector is
+waiting on, morally identical to a menu. `CombatHost` owns the
+`CombatState`, the `CombatScene`, the outcome-so-far, and a `stage`
+cursor (§8.2). Serde per D-CV7: `CombatHost` derives, the sink and
+transient timeline state are `#[serde(skip)]` + rebuilt-on-load
+(default-inert by design), `item_data` per the D-CV7 choice made at
+implementation. A parked fight snapshots by construction (D-UI2); the
+player-facing Save word stays faithfully absent from the combat menus.
+
+### 8.2 The stage chart
+
+```
+Pump/Present ──Request::Combat(+monsters)──▶ Entry ──▶ Fighting ──▶ ExitStage ──▶ (reply) Pump
+                                              │            │              │
+                                              ▼            ▼              ▼
+                                        BattleSetup    D-CV2 lockstep   outcome beats,
+                                        order (§1.6)   loop            restore, THEN writes
+```
+
+- **Entry** (one-time, may span ticks): palette 0↔8 swap on; "A battle
+  begins..." prompt beat; floor + placement (D-CV6 inputs); combat art
+  loads (ground tiles per area, party CHEAD/CBODY, monster CPIC per the
+  recorded LOADMONSTER operands, COMSPR already boot-loaded); camera
+  centred on the leader; first full draw. Order per `BattleSetup`
+  (`ovr011.cs:1169-1220`). The encounter-sprite/"You encounter…" text is
+  exploration territory and has ALREADY happened (§1.6).
+- **Fighting**: the D-CV2 lockstep loop verbatim — `step()` once, buffer
+  the batch, play it to completion over ticks (D-CV3 clock), reconcile,
+  repeat. Live input lands at step heads only: '2' (auto-magic toggle)
+  works from M6b; SPACE quick-fight-revoke routes to the D-CV5 suspension
+  machinery and is slice 7 (until then it is queued-and-dropped with a
+  transcript note, not silently eaten). `Ended` moves to ExitStage with
+  the outcome.
+- **ExitStage** (one-time, may span ticks): the outcome's final beats
+  (last messages, death flashes already played in Fighting; "flees" and
+  kindred beats arrive as ordinary playback), then screen restore —
+  palette un-swap +
+  exploration redraw, the `free_combat_stuff`/`LoadPic` analog
+  (`ovr009.cs:9`, `ovr003.cs:971`) — and ONLY at completion: the
+  transcript line, `party_killed` on a wipe, `pending_reply =
+  Reply::Combat`, `phase = Pump`. The tick-top GameOver unwind
+  (`shell.rs:1146-1150`) then fires on the NEXT tick, after the player has
+  seen the fight end. This ordering is a MUST (review finding): setting
+  `party_killed` at outcome-known time annihilates the final beats.
+
+### 8.3 Rules
+
+1. The flow cursor survives: no state owned by Boot/Step/Look/chain is
+   torn down or rebuilt around a fight. Proof: park inside each flow kind
+   in tests; resume must land in the identical pre-fight cursor.
+2. The reply enum is unchanged: `Reply::Combat` with today's outcome
+   semantics — scripts cannot tell the rendered fight from the headless
+   one.
+3. Headless paths untouched: `run_encounter`/`run_combat*`, the harnesses,
+   and the guard never construct a `CombatHost` (D-CV1's standing rule).
+   `run_pending_combat` itself is retired in the shell path but its
+   assembly logic moves, not dies (§8.4 uses it as the seed).
+4. The D-CV8 draw-parity invariant extends naturally: a scripted
+   fight through the parked shell path must produce the identical
+   `RngDraw` stream to the same fight headless. This is the state chart's
+   own parity test and slice 6 ships it.
+
+### 8.4 D-CV6 lands here (the fidelity half of M6b)
+
+1. `provisional_combat_map` → faithful `SetupDungeonFloor`
+   (`ovr011.cs:500-522` + the §1.2 shear/wall-run/door tables +
+   `sub_370D3`'s 50%/90% furniture dice). DRAW-BEARING: the dice change
+   the stream, so it lands with table-exact unit tests and the honesty
+   rule (§D-CV6) that the first live-fight capture pins it; until that
+   capture exists it is cited-not-capture-proven and says so in comments.
+2. `party_combat_stats` → real party kits: derive combat records from M3
+   party state through the same decode path capture rosters use
+   (equipment, readied weapons, the §49 readied-ammo gate — arrows must
+   be READIED to count). `DEFAULT_PARTY_WEAPON_DIE` retires.
+3. Monster records/CPIC/placement already flow from LOADMONSTER — only
+   the two placeholders above change.
+
+### 8.5 Slice-6 test surface
+
+- State-chart unit tests: park/resume in every flow kind (rule 1); the
+  GameOver deferral (a wiped fight's final beats all present before the
+  unwind — the `shell.rs:1468` test gains the rendered twin); a
+  snapshot/restore of a parked fight round-trips (D-CV7 by construction).
+- The §8.3.4 shell-path draw-parity test (CI, synthetic fight).
+- Floor-gen: table-exact tests for the shear projection, wall/door runs,
+  and the furniture-dice draw ORDER (the §D-CV8 pin-shape, ready for the
+  future live capture).
+- Kits: a party built from M3 state must decode to the same combat record
+  fields the capture path produces for equivalent equipment (fixture
+  comparison), readied-ammo gate included.
+- Gates unchanged: guard 15/15 exact every commit, draw-parity green,
+  clippy/fmt, 1,188+ tests.
+
+**Done (M6b) =** boot → walk to the Tilverton bar → the brawl happens on
+screen via QuickFight (Entry beats included), the VM resumes correctly,
+and a party wipe shows its full ending before GameOver. The §4 M6b row's
+done-condition stands unchanged; this section only specifies the how.
