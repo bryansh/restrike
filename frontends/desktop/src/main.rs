@@ -54,6 +54,7 @@ fn main() {
     let mut square_pixels = false;
     let mut watch: Option<PathBuf> = None;
     let mut turbo: u32 = 1;
+    let mut slot: Option<char> = Some('A');
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -70,6 +71,20 @@ fn main() {
                 let v = args.next().expect("--turbo requires a value");
                 turbo = v.parse().expect("--turbo must be a positive integer");
             }
+            "--slot" => {
+                let v = args
+                    .next()
+                    .expect("--slot requires a save letter (A-J) or 'none'");
+                slot = match v.as_str() {
+                    "none" => None,
+                    s => Some(
+                        s.chars()
+                            .next()
+                            .expect("--slot letter")
+                            .to_ascii_uppercase(),
+                    ),
+                };
+            }
             other => dir_arg = Some(PathBuf::from(other)),
         }
     }
@@ -79,9 +94,7 @@ fn main() {
     let data = load_dir(&dir).expect("restrike-desktop: failed to read the data directory");
     let engine = match watch {
         Some(capture) => open_reel(data, &capture, turbo),
-        None => {
-            Engine::new(data, seed).expect("restrike-desktop: Engine::new failed to boot this data")
-        }
+        None => boot_with_party(data, &dir, slot, seed),
     };
 
     let event_loop = EventLoop::new().expect("failed to create the winit event loop");
@@ -131,6 +144,40 @@ fn open_reel(data: gbx_formats::game_data::GameData, capture: &PathBuf, turbo: u
         }
     );
     Engine::new_reel(data, input).unwrap_or_else(|e| panic!("restrike-desktop: {e}"))
+}
+
+/// Normal play boots WITH a party: import the save slot (default `A`, the
+/// GOG-bundled one — the "continue where the box left you" experience, and
+/// the same state every demo/capture flow uses). The original never lets a
+/// partyless session adventure; an engine booted bare can walk but any
+/// COMBAT refuses with "no living party" — exactly the trap this default
+/// closes. `--slot none` keeps the bare boot for engine archaeology.
+fn boot_with_party(
+    data: gbx_formats::game_data::GameData,
+    dir: &std::path::Path,
+    slot: Option<char>,
+    seed: u32,
+) -> Engine {
+    let Some(letter) = slot else {
+        eprintln!("restrike-desktop: --slot none — bare boot, NO PARTY (fights will refuse)");
+        return Engine::new(data, seed).expect("restrike-desktop: bare boot failed");
+    };
+    let saves = load_dir(&dir.join("SAVE"))
+        .unwrap_or_else(|e| panic!("restrike-desktop: {}/SAVE unreadable: {e}", dir.display()));
+    let master_name = format!("SAVGAM{letter}.DAT");
+    let master = saves.raw_file(&master_name).unwrap_or_else(|| {
+        panic!(
+            "restrike-desktop: save slot {letter} not found ({master_name}); \
+             pass --slot <letter> or --slot none"
+        )
+    });
+    let set = gbx_formats::save_orig::load_from_lookup(master, letter, |n| saves.raw_file(n))
+        .unwrap_or_else(|e| panic!("restrike-desktop: slot {letter} did not parse: {e:?}"));
+    let party_size = set.chars.len();
+    let engine = gbx_engine::import::import_original(&set, data, seed)
+        .unwrap_or_else(|e| panic!("restrike-desktop: slot {letter} did not import: {e:?}"));
+    eprintln!("restrike-desktop: imported save slot {letter} — party of {party_size}");
+    engine
 }
 
 struct App {

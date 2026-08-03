@@ -509,6 +509,15 @@ impl CombatHost {
             Err(e) => {
                 // Nothing to fight: report it and end the stage immediately, so
                 // the VM still gets its `Reply::Combat` and the script goes on.
+                // The refusal is drawn on the prompt line too — a transcript
+                // no frontend shows is not a report (the partyless-boot hunt,
+                // 2026-08-03: ten loaded patrons met an empty roster and the
+                // only witness was RESTRIKE_DEBUG_LOG).
+                crate::combat::scene::render::draw_prompt(
+                    ctx.fb,
+                    ctx.font,
+                    &format!("combat: {e}"),
+                );
                 ctx.vm_memory
                     .transcript
                     .push(crate::vmhost::TranscriptEntry::Request(format!(
