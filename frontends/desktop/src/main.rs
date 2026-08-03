@@ -146,10 +146,17 @@ struct App {
     pending_input: Vec<InputEvent>,
     accumulator: Duration,
     last_instant: Instant,
+    /// `RESTRIKE_DEBUG_LOG=<path>`: per-tick state/input/transcript log for
+    /// interactive-bug forensics. `None` in normal play.
+    debug_log: Option<std::fs::File>,
+    debug_tick: u64,
+    debug_last_probe: String,
 }
 
 impl App {
     fn new(engine: Engine, square_pixels: bool) -> Self {
+        let debug_log = std::env::var_os("RESTRIKE_DEBUG_LOG")
+            .map(|p| std::fs::File::create(&p).expect("RESTRIKE_DEBUG_LOG path must be writable"));
         App {
             engine,
             square_pixels,
@@ -160,6 +167,9 @@ impl App {
             pending_input: Vec::new(),
             accumulator: Duration::ZERO,
             last_instant: Instant::now(),
+            debug_log,
+            debug_tick: 0,
+            debug_last_probe: String::new(),
         }
     }
 
@@ -173,13 +183,28 @@ impl App {
 
         let mut ticked = false;
         while self.accumulator >= TICK {
-            let frame = self.engine.tick(&self.pending_input);
-            self.pending_input.clear();
-            if frame.serial != self.last_serial {
-                self.last_serial = frame.serial;
-                for (dst, &idx) in self.rgba.iter_mut().zip(frame.pixels.iter()) {
-                    let [r, g, b] = frame.palette[idx as usize];
-                    *dst = [r, g, b, 0xFF];
+            let sent = std::mem::take(&mut self.pending_input);
+            {
+                let frame = self.engine.tick(&sent);
+                if frame.serial != self.last_serial {
+                    self.last_serial = frame.serial;
+                    for (dst, &idx) in self.rgba.iter_mut().zip(frame.pixels.iter()) {
+                        let [r, g, b] = frame.palette[idx as usize];
+                        *dst = [r, g, b, 0xFF];
+                    }
+                }
+            }
+            self.debug_tick += 1;
+            if let Some(log) = &mut self.debug_log {
+                let probe = self.engine.probe();
+                let transcript = self.engine.take_transcript();
+                if !sent.is_empty() || probe != self.debug_last_probe || !transcript.is_empty() {
+                    use std::io::Write;
+                    let _ = writeln!(log, "tick {} | sent {sent:?} | {probe}", self.debug_tick);
+                    for entry in transcript {
+                        let _ = writeln!(log, "    {entry:?}");
+                    }
+                    self.debug_last_probe = probe;
                 }
             }
             ticked = true;
@@ -257,11 +282,19 @@ impl ApplicationHandler for App {
                     window.request_redraw();
                 }
             }
-            WindowEvent::KeyboardInput { event, .. }
-                if event.state == ElementState::Pressed && !event.repeat =>
-            {
-                if let Some(mapped) = keymap::map_key(&event) {
-                    self.pending_input.push(mapped);
+            WindowEvent::KeyboardInput { event, .. } => {
+                if let Some(log) = &mut self.debug_log {
+                    use std::io::Write;
+                    let _ = writeln!(
+                        log,
+                        "key: {:?} state={:?} repeat={}",
+                        event.logical_key, event.state, event.repeat
+                    );
+                }
+                if event.state == ElementState::Pressed && !event.repeat {
+                    if let Some(mapped) = keymap::map_key(&event) {
+                        self.pending_input.push(mapped);
+                    }
                 }
             }
             _ => {}

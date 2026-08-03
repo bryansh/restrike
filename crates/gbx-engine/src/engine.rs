@@ -540,6 +540,12 @@ impl Engine {
     /// (D-UI8) to show what flow stage the machine is in. `Shell` is a plain
     /// serde-able enum with no engine-internal borrows, so this is a
     /// read-only seam, not a control surface.
+    /// The shell's one-line debug summary ([`Shell::probe`]) — for frontend
+    /// debug logs (`RESTRIKE_DEBUG_LOG`).
+    pub fn probe(&self) -> String {
+        self.shell.probe()
+    }
+
     pub fn shell(&self) -> &Shell {
         &self.shell
     }

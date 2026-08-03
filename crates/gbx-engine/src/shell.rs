@@ -78,6 +78,36 @@ pub enum VmPhase {
     Combat(Box<CombatHost>),
 }
 
+impl VmPhase {
+    /// One-word state summary for frontend debug logs (`RESTRIKE_DEBUG_LOG`).
+    fn probe(&self) -> String {
+        match self {
+            VmPhase::Pump => "pump".to_string(),
+            VmPhase::Present => "present".to_string(),
+            VmPhase::Gate(w) => format!(
+                "gate({})",
+                match w {
+                    Widget::Hotbar(_) => "hotbar",
+                    Widget::ListMenu(_) => "list",
+                    Widget::TextEntry(_) => "text-entry",
+                    Widget::PressAnyKey(_) => "press-any-key",
+                    Widget::Delay(_) => "delay",
+                }
+            ),
+            VmPhase::Combat(h) => format!("combat({:?})", h.stage()),
+        }
+    }
+}
+
+/// The vector/chain half of a flow's probe line.
+fn run_probe(run: &Option<VectorRun>, chain: &Option<ChainRunner>) -> String {
+    match (run, chain) {
+        (Some(r), _) => r.phase.probe(),
+        (None, Some(c)) => format!("chain:{}", c.run.phase.probe()),
+        (None, None) => "idle".to_string(),
+    }
+}
+
 impl Clone for VmPhase {
     fn clone(&self) -> Self {
         match self {
@@ -1131,6 +1161,23 @@ pub enum Shell {
     /// save/load, training, shops) — additive, no VM vector runs here; each
     /// is a parked-widget screen (`crate::screens`).
     Screen(crate::screens::Screen),
+}
+
+impl Shell {
+    /// A one-line state summary for frontend debug logs
+    /// (`RESTRIKE_DEBUG_LOG`): the shell variant plus, where a VM vector or
+    /// chain is live, its phase — `step/gate(hotbar)`,
+    /// `step/combat(Fighting)`, `world-menu`, …
+    pub fn probe(&self) -> String {
+        match self {
+            Shell::Boot(f) => format!("boot/{}", run_probe(&f.run, &f.chain)),
+            Shell::WorldMenu { .. } => "world-menu".to_string(),
+            Shell::Look(f) => format!("look/{}", run_probe(&f.run, &f.chain)),
+            Shell::Step(f) => format!("step/{}", run_probe(&f.run, &f.chain)),
+            Shell::GameOver => "game-over".to_string(),
+            Shell::Screen(_) => "screen".to_string(),
+        }
+    }
 }
 
 impl Shell {
