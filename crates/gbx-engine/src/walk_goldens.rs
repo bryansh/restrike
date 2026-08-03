@@ -171,22 +171,22 @@ fn golden_walk_trace() {
         // pieces draw) — every checkpoint below was regenerated for that.
         (
             2,
-            "aa9c09ffea402f1a039d765c222634a10d63faf407f202c4d08a935319550f4e",
+            "5be46aacc70d0e2df6f94067aaae33f4fe0ad92abf0362913c9f6cf4532b0f5d",
         ),
         // Mid-turn-around: facing West after the first 180° turn.
         (
             4,
-            "bd0970158912d4bd461ea865d6f95c481c51eba16dbdbd7227f326282b0771a7",
+            "354f2b869223c611e021df892a482f885b8818b7cecd826e350cdc4f3d5b31ff",
         ),
         // Stepped into the open square (pos (6,5)), facing East again.
         (
             12,
-            "6735c96d9e14dda0d38180bae06c0134c2330e3738757939b4b39bc8a1cb95a6",
+            "495d26484563950954f4b8c9a0951f142de3dc1c432eea5ef96d001921dc0d6a",
         ),
         // Bashed through the locked door (pos (7,5)).
         (
             22,
-            "ec8a53bd4da223a1c888c8b8ff73f74d5ac8f94bad02eba23c34b29c934307ce",
+            "c1f8873e14e32b0484e9a59e37f2d5128d219cdde592eaf380b15f61a2253d2f",
         ),
     ];
     let mut next_checkpoint = 0usize;

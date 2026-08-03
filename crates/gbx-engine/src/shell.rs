@@ -99,6 +99,36 @@ impl VmPhase {
     }
 }
 
+/// `display_highlighed_text` (`sub_6C1E9`, `ovr027.cs:89-120`) for a parked
+/// [`Hotbar`]: row 0x18, three-way coloring, padded clear to col 0x27.
+/// `defaultMenuColors` (`Gbl.cs:189`): highlight 15, foreground 10.
+fn draw_hotbar_prompt(
+    fb: &mut crate::framebuffer::Framebuffer,
+    font: &gbx_formats::font::Font,
+    hotbar: &Hotbar,
+) {
+    const ROW: usize = 0x18;
+    const HIGHLIGHT: u8 = 15;
+    const FOREGROUND: u8 = 10;
+    let bytes = hotbar.text.as_bytes();
+    let span = hotbar.selected.and_then(|i| hotbar.words().get(i)).copied();
+    for col in 0..=0x27usize {
+        let Some(&ch) = bytes.get(col) else {
+            crate::text::draw_char(fb, font, b' ', ROW, col, 0, 0);
+            continue;
+        };
+        let in_selection = span.is_some_and(|(s, e)| col >= s && col < e);
+        let (bg, fg) = if in_selection {
+            (HIGHLIGHT, 0) // inverse video over the selected word
+        } else if ch.is_ascii_uppercase() || ch.is_ascii_digit() {
+            (0, HIGHLIGHT)
+        } else {
+            (0, FOREGROUND)
+        };
+        crate::text::draw_char(fb, font, ch, ROW, col, bg, fg);
+    }
+}
+
 /// The vector/chain half of a flow's probe line.
 fn run_probe(run: &Option<VectorRun>, chain: &Option<ChainRunner>) -> String {
     match (run, chain) {
@@ -1202,16 +1232,31 @@ impl Shell {
         }
     }
 
-    /// Draws the parked widget's prompt-row line ([`Widget::display_line`]) —
-    /// called every tick after the flows have run, skipped while a fight owns
-    /// the screen. Idempotent (the row is cleared and redrawn), and the
-    /// resolution paths call `ClearPromptArea`'s analogue so nothing lingers.
+    /// Draws the parked widget's prompt-row line — called every tick after the
+    /// flows have run, skipped while a fight owns the screen. Idempotent (the
+    /// row is cleared and redrawn), and the resolution paths call
+    /// `ClearPromptArea`'s analogue so nothing lingers.
+    ///
+    /// A `Hotbar` draws with `display_highlighed_text`'s own three-way
+    /// coloring (`sub_6C1E9`, `ovr027.cs:89-120`): the SELECTED word in
+    /// inverse video (black on the highlight color), every hotkey-capable
+    /// `[0-9A-Z]` character in the highlight color, separators/lowercase in
+    /// the foreground color — `defaultMenuColors` = highlight 15 / foreground
+    /// 10 (`Gbl.cs:189`). Other widgets draw their plain line.
     pub fn draw_parked_widget(&self, ctx: &mut FlowCtx) {
         if self.combat_host().is_some() {
             return;
         }
-        if let Some(line) = self.parked_widget().and_then(|w| w.display_line()) {
-            crate::combat::scene::render::draw_prompt(ctx.fb, ctx.font, &line);
+        let Some(widget) = self.parked_widget() else {
+            return;
+        };
+        match widget {
+            Widget::Hotbar(h) => draw_hotbar_prompt(ctx.fb, ctx.font, h),
+            other => {
+                if let Some(line) = other.display_line() {
+                    crate::combat::scene::render::draw_prompt(ctx.fb, ctx.font, &line);
+                }
+            }
         }
     }
 
