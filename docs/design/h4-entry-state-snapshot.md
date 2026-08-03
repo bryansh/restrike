@@ -476,6 +476,17 @@ party's Paladins/Cleric/Fighter-multiclasses are not → they advance and fight.
 **consequence** of charging + retargeting, not the cause. `field_159` @0x159 is a
 far-pointer, null here — likely a readied ranged option; a mage with one would advance.)
 
+> **CORRECTION (M6 slice 6, 2026-08-02).** `field_159` is **the readied ARMOR slot**,
+> not a ranged option. The record's `activeItems` pointer array starts at @0x151 with one
+> 4-byte slot per `ItemData.item_slot`, and coab names slot 2 — @0x151 + 4·2 = **@0x159** —
+> `armor` (`Classes/Player.cs:216-280`). The same arithmetic puts `arrows` at slot 11 =
+> @0x17D and `quarrels` at slot 12 = @0x181, which is exactly where §49's readied-ammo gate
+> already reads them, so the layout is corroborated at two other offsets. The mage hold
+> therefore reads: **an unarmoured, non-fleeing pure Magic-User holds position** — which is
+> why PHILIPPE (a mage, no armour) guards all fight. Draw-neutral for every capture (the
+> replay path still reads the raw bytes at @0x159); the correction is what lets a **live**
+> party derive the flag from its readied equipment, which `combat::kits` now does.
+
 **Empirical validation (all four, layered, over `combat4`).** Applying #1 + the class-5
 guard moved the first *operand* divergence draw **33 → 129**; adding #2 → **153**; and the
 round-1 board is now **near-exact** — PHILIPPE (5) and LEDERA (3) identical, most monsters
