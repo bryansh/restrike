@@ -92,6 +92,11 @@ fn main() {
         gbx_engine::import::import_original(&set, data, 1).expect("slot A imports")
     };
 
+    let dump_at: Vec<u64> = std::env::var("RESTRIKE_REPLAY_DUMP")
+        .ok()
+        .map(|s| s.split(',').filter_map(|n| n.trim().parse().ok()).collect())
+        .unwrap_or_default();
+
     let mut cursor = 0usize;
     let mut last_probe = String::new();
     for tick in 1..=last_tick {
@@ -101,7 +106,16 @@ fn main() {
         } else {
             &[]
         };
-        engine.tick(batch);
+        let frame = engine.tick(batch);
+        if dump_at.contains(&tick) {
+            let path = std::env::temp_dir().join(format!("restrike-replay-{tick:05}.ppm"));
+            let mut out = format!("P6\n{} {}\n255\n", 320, 200).into_bytes();
+            for &idx in frame.pixels {
+                out.extend_from_slice(&frame.palette[idx as usize]);
+            }
+            std::fs::write(&path, &out).expect("dump writable");
+            eprintln!("frame {tick} -> {}", path.display());
+        }
         let probe = engine.probe();
         let transcript = engine.take_transcript();
         if !batch.is_empty() || probe != last_probe || !transcript.is_empty() {

@@ -613,7 +613,10 @@ impl VectorRun {
         }
 
         // Any resolution: build the real Reply matching the pending
-        // Request, then resume pumping.
+        // Request, then resume pumping. `displayInput` ends with
+        // `ClearPromptArea` (`ovr027.cs:344-354`) — clear the menu line so
+        // nothing lingers under whatever the script prints next.
+        crate::combat::scene::render::draw_prompt(ctx.fb, ctx.font, "");
         let Some(PendingOutcome::Request(request)) = self.pending.take() else {
             unreachable!("Gate phase without a pending Request")
         };
@@ -1101,8 +1104,13 @@ impl StepFlow {
                         );
                     }
                     self.door_widget = None;
+                    // `ClearPromptArea` on resolution (`ovr027.cs:344-354`).
+                    crate::combat::scene::render::draw_prompt(ctx.fb, ctx.font, "");
                 }
-                _ => self.door_widget = None, // any other widget outcome: treat as exit
+                _ => {
+                    self.door_widget = None; // any other widget outcome: treat as exit
+                    crate::combat::scene::render::draw_prompt(ctx.fb, ctx.font, "");
+                }
             }
         } else if ctx.state.field_592 < 0xFF {
             let square = ctx
@@ -1164,6 +1172,49 @@ pub enum Shell {
 }
 
 impl Shell {
+    /// The Widget currently holding the keyboard, wherever it is parked — the
+    /// same walk [`Shell::gate_open`] does, plus `WorldMenu`'s own menu and
+    /// the door menu. `None` while a fight owns the screen (combat draws its
+    /// own prompts).
+    fn parked_widget(&self) -> Option<&Widget> {
+        fn from_phase(phase: Option<&VmPhase>) -> Option<&Widget> {
+            match phase {
+                Some(VmPhase::Gate(w)) => Some(w),
+                _ => None,
+            }
+        }
+        fn from_run<'a>(
+            run: &'a Option<VectorRun>,
+            chain: &'a Option<ChainRunner>,
+        ) -> Option<&'a Widget> {
+            from_phase(run.as_ref().map(|r| &r.phase))
+                .or_else(|| from_phase(chain.as_ref().map(|c| &c.run.phase)))
+        }
+        match self {
+            Shell::Boot(f) => from_run(&f.run, &f.chain),
+            Shell::WorldMenu { menu } => Some(menu),
+            Shell::Look(f) => from_run(&f.run, &f.chain),
+            Shell::Step(f) => f
+                .door_widget
+                .as_ref()
+                .or_else(|| from_run(&f.run, &f.chain)),
+            Shell::GameOver | Shell::Screen(_) => None,
+        }
+    }
+
+    /// Draws the parked widget's prompt-row line ([`Widget::display_line`]) —
+    /// called every tick after the flows have run, skipped while a fight owns
+    /// the screen. Idempotent (the row is cleared and redrawn), and the
+    /// resolution paths call `ClearPromptArea`'s analogue so nothing lingers.
+    pub fn draw_parked_widget(&self, ctx: &mut FlowCtx) {
+        if self.combat_host().is_some() {
+            return;
+        }
+        if let Some(line) = self.parked_widget().and_then(|w| w.display_line()) {
+            crate::combat::scene::render::draw_prompt(ctx.fb, ctx.font, &line);
+        }
+    }
+
     /// A one-line state summary for frontend debug logs
     /// (`RESTRIKE_DEBUG_LOG`): the shell variant plus, where a VM vector or
     /// chain is live, its phase — `step/gate(hotbar)`,
@@ -1254,6 +1305,8 @@ impl Shell {
                 let WidgetOutcome::Hotbar(key) = outcome else {
                     return; // Pending, or a party-scroll outcome — handled below
                 };
+                // `ClearPromptArea` on resolution (`ovr027.cs:344-354`).
+                crate::combat::scene::render::draw_prompt(ctx.fb, ctx.font, "");
                 ctx.state.last_selected_player = ctx.state.selected_player; // `:2319`/`:2353`
                 if !ctx.state.chained {
                     ctx.state.last_ecl_block_id = ctx.state.ecl_block_id; // `:2321-2324`

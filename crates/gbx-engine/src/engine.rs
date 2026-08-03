@@ -622,6 +622,10 @@ impl Engine {
                 combat_icons: &self.combat_icons,
             };
             self.shell.tick(&mut ctx);
+            // The parked widget's prompt-row line (`Widget::display_line`) —
+            // menus were engine-state-only until 2026-08-03: every script
+            // menu (and the world menu) ran INVISIBLE, playable only blind.
+            self.shell.draw_parked_widget(&mut ctx);
         }
 
         // The position/time status line (§1.9): row 15, cols 17-38,

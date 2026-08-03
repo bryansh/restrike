@@ -578,6 +578,22 @@ pub enum Widget {
 }
 
 impl Widget {
+    /// The line a parked widget shows on the prompt row (`displayInput`'s own
+    /// menu text, `ovr027.cs:126-341`) — `None` for the widgets that draw
+    /// nothing there (`PressAnyKey`'s marker lives in the text region;
+    /// `Delay` is invisible). The 2026-08-03 finding: NO shell path ever drew
+    /// this, so every script menu (and the world menu itself) ran invisible —
+    /// playable only by muscle memory.
+    pub fn display_line(&self) -> Option<String> {
+        match self {
+            Widget::Hotbar(h) => Some(h.text.clone()),
+            Widget::TextEntry(t) => {
+                Some(format!("{}{}", t.prompt, String::from_utf8_lossy(&t.buf)))
+            }
+            Widget::ListMenu(_) | Widget::PressAnyKey(_) | Widget::Delay(_) => None,
+        }
+    }
+
     /// Advances the parked widget by one tick.
     pub fn tick(&mut self, queue: &mut InputQueue, dt_ticks: u32) -> WidgetOutcome {
         match self {

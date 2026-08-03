@@ -172,7 +172,7 @@ fn golden_print_frame() {
         // Step 5: regenerated — the viewport now composes real sky/band/
         // ground fills on every `enter_world_menu` (this fixture never
         // loads a wallset, so no wall pieces draw, just the backdrop).
-        "71409d45b1bdfa1fd13242b15455789096e2e17b064342895bd070bcbe0791f2",
+        "b3d0829bd9fb1f1efcd25a5d8c5ff9a4ffdb61e66998ccc6331c06c9affd70c0",
     );
 }
 
