@@ -435,9 +435,15 @@ impl CombatHost {
             Stage::Restore => {
                 // `free_combat_stuff` (`ovr009.cs:9`) + `CMD_Combat`'s `LoadPic`
                 // rebuild (`ovr003.cs:971`): the palette goes back and the
-                // exploration screen is recomposed. Only after this does the
-                // caller perform the deferred writes (§8.2's MUST).
+                // exploration screen is recomposed whole — combat replaced it
+                // (§1.1), so putting the 3D viewport back is not enough; the
+                // frame, the panel and the text areas are all combat pixels
+                // until they are painted over. These are `Engine::build`'s own
+                // three steps for a fresh screen.
                 crate::combat::scene::render::palette_normal(ctx.fb);
+                ctx.fb.clear(0);
+                crate::frames::draw8x8_03(ctx.fb, ctx.symbols)
+                    .expect("symbol set 4 is resident whenever a fight can start");
                 crate::corridor::redraw_view(ctx);
                 HostTick::Finished {
                     outcome: self.outcome.unwrap_or(CombatOutcome::Stalemate),

@@ -522,6 +522,14 @@ impl Engine {
     /// The live PRNG state (`DS:0x47F0`) — a synchronization point for the
     /// oracle rig (D-OR1) and for the shell-path draw-parity test, which forks
     /// a headless fight from exactly this value.
+    /// The engine-owned framebuffer — a demo/test seam for dumping a frame
+    /// outside the tick loop (`Frame` borrows it, so a caller that already
+    /// dropped its `Frame` needs this).
+    #[cfg(test)]
+    pub(crate) fn framebuffer_for_demo(&self) -> &Framebuffer {
+        &self.fb
+    }
+
     #[cfg(test)]
     pub(crate) fn rng_state(&self) -> u32 {
         self.rng.state()
@@ -615,8 +623,15 @@ impl Engine {
         // (a documented simplification — the original's per-field redraw
         // discipline is step-5 rendering scope; unconditional redraw is
         // idempotent and keeps hash-goldens simple).
-        let status = Shell::status_line(&self.state);
-        draw_string(&mut self.fb, &self.font, &status, 15, 17, 0, 10);
+        //
+        // Except over a fight: combat **fully replaces** the exploration
+        // screen (`combat-visualizer.md` §1.1), and row 15 col 17 lands inside
+        // the combat right panel. The reel host skips it the same way
+        // (`tick_reel` never reaches here).
+        if self.shell.combat_host().is_none() {
+            let status = Shell::status_line(&self.state);
+            draw_string(&mut self.fb, &self.font, &status, 15, 17, 0, 10);
+        }
 
         let hash = self.fb.hash();
         if self.last_hash != Some(hash) {

@@ -1,10 +1,14 @@
-//! Local-only demo artifacts (gated on `GBX_DATA_DIR`). Two demos live
-//! here: step 2's static-screen compose, and M2 step 4's task deliverable —
-//! walking real Tilverton streets (`GEO2.DAX` block 1) headlessly through
+//! Local-only demo artifacts (gated on `GBX_DATA_DIR`). The originals are
+//! step 2's static-screen compose and M2 step 4's task deliverable — walking
+//! real Tilverton streets (`GEO2.DAX` block 1) headlessly through
 //! `Engine::tick`, running the *real* `ECL2.DAX` block 1 scripts (the VM is
 //! no longer a stub as of step 4), turning, stepping, and bashing through a
 //! real locked door, dumping frames as `.ppm` outside the repo and printing
 //! the ScriptMemory unknown-access log + service-call log.
+//!
+//! M6 slice 6 adds the two that close M6b: [`m6b_boot_to_the_bar_brawl`] and
+//! [`m6b_a_party_wipe_shows_its_ending_before_game_over`] — boot the bundled
+//! save, walk to the Tilverton bar, and watch the fight happen on screen.
 
 #![cfg(test)]
 
@@ -1708,4 +1712,443 @@ fn watch_a_real_art_combat_reel() {
         sounds.len()
     );
     assert!(frames > 60, "the reel played at least a second of beats");
+}
+
+/// ★ **M6b's done-condition, headlessly ticked** (`docs/design/combat-visualizer.md`
+/// §4 M6b / §8): boot the real bundled save, **walk to the Tilverton bar**, and
+/// watch the brawl happen on screen — entry beats, QuickFight, the VM resuming
+/// afterwards — dumping `.ppm` frames outside the repo (D10) for the eyeball
+/// pass.
+///
+/// **The route is the game's own.** GOG's bundled slot-A save spawns the real
+/// party (MATHEW/MARK/TRAVIS/LEDERA/SHARA/PHILIPPE) at Tilverton City `(7,13)`
+/// facing north. Three steps north and one west lands on `(6,10)` — the square
+/// whose step script runs `LOAD MONSTER`×10 then `COMBAT`, i.e. the bar. Nothing
+/// is staged: the walk loop's own `StepFlow` fires `ECL2.DAX` block 1's vector
+/// 0, and the script does the rest.
+///
+/// What the frames show, in order: the exploration view, "A battle begins..."
+/// on the prompt line, the combat screen with the real party icons and the ten
+/// patrons on the projected bar floor, several mid-fight moments, and the
+/// exploration view restored.
+///
+/// Run: `GBX_DATA_DIR=~/goldbox-data/cotab cargo test -p gbx-engine --release \
+///   -- --nocapture --ignored m6b_boot_to_the_bar_brawl`
+///
+/// (`--ignored` because it plays a whole fight at the faithful tick rate; it is
+/// a demo for a human, not a CI gate — the CI half is
+/// `shell_combat_tests`.)
+#[test]
+#[ignore]
+fn m6b_boot_to_the_bar_brawl() {
+    let Some(run) = BarBrawl::open("m6b-bar-brawl", false) else {
+        return;
+    };
+    let outcome = run.play();
+    assert!(
+        outcome.saw_announce,
+        "BattleSetup's \"A battle begins...\" beat played before the fight"
+    );
+    assert!(outcome.rounds > 0, "the brawl ran rounds");
+    assert!(
+        outcome.combat_line.contains("party wins"),
+        "the real party beat the patrons: {}",
+        outcome.combat_line
+    );
+    assert!(
+        outcome.resumed_to_the_walk_loop,
+        "the VM resumed and the shell went back to the walk loop"
+    );
+    assert!(!outcome.party_killed, "nobody died, so no game-over signal");
+}
+
+/// ★ The other half of M6b's done-condition: **a party wipe shows its full
+/// ending before GameOver** (§8.2's MUST).
+///
+/// The same walk to the same bar, with the party's hit points poked to 1 first
+/// (a demo-only poke — the records are otherwise untouched) so the ten patrons
+/// win. The frames show the fight ending, the final beats, and the restored
+/// exploration screen — and only then does the shell unwind to `GameOver`.
+///
+/// Run: `GBX_DATA_DIR=~/goldbox-data/cotab cargo test -p gbx-engine --release \
+///   -- --nocapture --ignored m6b_a_party_wipe_shows_its_ending_before_game_over`
+#[test]
+#[ignore]
+fn m6b_a_party_wipe_shows_its_ending_before_game_over() {
+    let Some(run) = BarBrawl::open("m6b-bar-wipe", true) else {
+        return;
+    };
+    let outcome = run.play();
+    assert!(
+        outcome.combat_line.contains("party wiped"),
+        "the doomed party lost: {}",
+        outcome.combat_line
+    );
+    assert!(outcome.party_killed, "a wipe raises the game-over signal");
+    let known = outcome
+        .outcome_known_tick
+        .expect("the outcome became known during the fight");
+    let flagged = outcome.flag_tick.expect("party_killed went up");
+    let over = outcome
+        .game_over_tick
+        .expect("the shell unwound to GameOver");
+    eprintln!(
+        "  ordering: outcome known @{known}, party_killed @{flagged}, GameOver @{over} \
+         ({} ticks of ending on screen)",
+        flagged - known
+    );
+    assert!(
+        flagged > known,
+        "party_killed must wait for the ending to finish playing"
+    );
+    assert!(over > flagged, "and GameOver arrives a tick later still");
+    assert!(
+        flagged - known > 10,
+        "the ending was on screen for real time, not one tick"
+    );
+}
+
+/// The shared boot-and-walk rig for the two M6b demos.
+struct BarBrawl {
+    engine: crate::engine::Engine,
+    out_dir: std::path::PathBuf,
+    label: &'static str,
+}
+
+#[derive(Default)]
+struct BrawlOutcome {
+    saw_announce: bool,
+    combat_line: String,
+    rounds: usize,
+    resumed_to_the_walk_loop: bool,
+    party_killed: bool,
+    outcome_known_tick: Option<usize>,
+    flag_tick: Option<usize>,
+    game_over_tick: Option<usize>,
+}
+
+/// Which way `from` must face to step onto the adjacent cell `to`.
+fn step_facing(from: (u8, u8), to: (u8, u8)) -> crate::movement::Facing {
+    use crate::movement::Facing;
+    match (to.0 as i32 - from.0 as i32, to.1 as i32 - from.1 as i32) {
+        (0, -1) => Facing::North,
+        (1, 0) => Facing::East,
+        (0, 1) => Facing::South,
+        (-1, 0) => Facing::West,
+        d => panic!("{from:?} -> {to:?} is not one step ({d:?})"),
+    }
+}
+
+/// A shortest route over the area's **open** edges (`wall_door_flags` +
+/// `DoorState::Open`) — the same passability the walk loop applies, minus the
+/// locked-door menu, which a demo has no business opening.
+fn plan_route(
+    geo: &gbx_formats::geo::GeoBlock,
+    from: (u8, u8),
+    to: (u8, u8),
+) -> Option<Vec<(u8, u8)>> {
+    use crate::movement::{wall_door_flags, DoorState, Facing};
+    use std::collections::{HashMap, VecDeque};
+    let mut came: HashMap<(u8, u8), (u8, u8)> = HashMap::new();
+    let mut queue = VecDeque::from([from]);
+    came.insert(from, from);
+    while let Some(cell) = queue.pop_front() {
+        if cell == to {
+            let mut path = vec![to];
+            let mut cur = to;
+            while cur != from {
+                cur = came[&cur];
+                path.push(cur);
+            }
+            path.reverse();
+            path.remove(0); // the cell we are standing on
+            return Some(path);
+        }
+        for facing in [Facing::North, Facing::East, Facing::South, Facing::West] {
+            let square = geo.square(cell.0 as usize, cell.1 as usize);
+            if DoorState::from_flag(wall_door_flags(square, facing)) != DoorState::Open {
+                continue;
+            }
+            let (dx, dy) = facing.delta();
+            let (nx, ny) = (cell.0 as i32 + dx, cell.1 as i32 + dy);
+            if !(0..16).contains(&nx) || !(0..16).contains(&ny) {
+                continue;
+            }
+            let next = (nx as u8, ny as u8);
+            if came.contains_key(&next) {
+                continue;
+            }
+            came.insert(next, cell);
+            queue.push_back(next);
+        }
+    }
+    None
+}
+
+impl BarBrawl {
+    /// The bar: the Tilverton City square whose step script loads ten BAR
+    /// PATRONs and calls `COMBAT`. Found by walking every square of `GEO2.DAX`
+    /// block 1 against the real `ECL2.DAX` scripts.
+    const BAR: (u8, u8) = (6, 10);
+
+    fn open(label: &'static str, doom_the_party: bool) -> Option<Self> {
+        use crate::input::{ExtKey, InputEvent};
+        let root = match std::env::var_os("GBX_DATA_DIR") {
+            Some(r) => r,
+            None => {
+                eprintln!("SKIPPED: the M6b demo needs GBX_DATA_DIR ({label})");
+                return None;
+            }
+        };
+        let root = std::path::Path::new(&root);
+        let data = load_dir(root).expect("GBX_DATA_DIR must be readable");
+        let saves = load_dir(&root.join("SAVE")).expect("GBX_DATA_DIR/SAVE must be readable");
+        let master = saves
+            .raw_file("SAVGAMA.DAT")
+            .expect("the bundled SAVGAMA.DAT must exist");
+        let set = gbx_formats::save_orig::load_from_lookup(master, 'A', |n| saves.raw_file(n))
+            .expect("the bundled slot-A save must parse");
+        let mut engine = crate::import::import_original(&set, data, 0x0C0F_FEE0)
+            .expect("the bundled save imports");
+
+        if doom_the_party {
+            // Demo-only pokes on the live party model (the records on disk are
+            // untouched): one hit point each, an armour class every patron
+            // hits, and a to-hit number that never lands. Ten BAR PATRONs then
+            // reliably finish the fight, which is the only way to watch the
+            // wipe ending on screen.
+            for m in &mut engine.party.members {
+                m.hit_point_current = 1;
+                m.combat.ac = 0; // raw AC 0 == display AC 60
+                m.combat.thac0_current = 0; // hitBonus 0: never hits
+            }
+        }
+
+        let out_dir = std::env::var_os("RESTRIKE_M6B_DEMO_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+
+        let mut run = BarBrawl {
+            engine,
+            out_dir,
+            label,
+        };
+        run.settle();
+        eprintln!(
+            "== {label} ==\n[1] imported slot A: {} at {:?} facing {:?}",
+            run.engine
+                .party()
+                .members
+                .iter()
+                .map(|m| m.name.as_str())
+                .collect::<Vec<_>>()
+                .join("/"),
+            run.engine.state().pos,
+            run.engine.state().facing
+        );
+        run.dump("00-spawn");
+
+        // The walk: a route through Tilverton's streets to the bar, driven
+        // one world-menu keypress at a time (turn, turn, forward, ...) exactly
+        // as a player drives it. The route is planned from the GEO's own
+        // wall/door topology, so it is the streets that decide it, not a
+        // hardcoded key list.
+        let route = plan_route(run.engine.geo(), run.engine.state().pos, Self::BAR);
+        let route = route.expect("the bar is reachable from the spawn on open streets");
+        eprintln!("[2] route to the bar: {} step(s)", route.len());
+        for (i, cell) in route.iter().enumerate() {
+            let facing = step_facing(run.engine.state().pos, *cell);
+            // Turn on the spot until we face the next cell, then step.
+            for _ in 0..3 {
+                if run.engine.state().facing == facing {
+                    break;
+                }
+                run.press(InputEvent::Ext(ExtKey::Left));
+            }
+            assert_eq!(run.engine.state().facing, facing, "turned to face {cell:?}");
+            run.press(InputEvent::Ext(ExtKey::Up));
+            eprintln!(
+                "    [2.{i}] at {:?} facing {:?}{}",
+                run.engine.state().pos,
+                run.engine.state().facing,
+                if run.engine.shell().combat_host().is_some() {
+                    "  <- the bar: a fight parked"
+                } else {
+                    ""
+                }
+            );
+            if run.engine.shell().combat_host().is_some() {
+                break;
+            }
+        }
+        assert_eq!(
+            run.engine.state().pos,
+            Self::BAR,
+            "the walk reached the bar square"
+        );
+        assert!(
+            run.engine.shell().combat_host().is_some(),
+            "stepping onto the bar parked a fight"
+        );
+        Some(run)
+    }
+
+    /// One world-menu keypress, then ticks until the walk loop settles again —
+    /// or a fight parks, whichever comes first.
+    fn press(&mut self, key: crate::input::InputEvent) {
+        self.engine.tick(&[key]);
+        self.settle();
+    }
+
+    /// Ticks to a quiet state, feeding Enter through any event text the streets
+    /// print (the M2/M3 demo pattern).
+    fn settle(&mut self) {
+        use crate::input::InputEvent;
+        use crate::shell::Shell;
+        let mut last = u64::MAX;
+        let mut quiet = 0u32;
+        for _ in 0..1500 {
+            if self.engine.shell().combat_host().is_some() {
+                return;
+            }
+            if matches!(self.engine.shell(), Shell::WorldMenu { .. }) {
+                return;
+            }
+            let feed: &[InputEvent] = if quiet >= 2 {
+                quiet = 0;
+                &[InputEvent::Enter]
+            } else {
+                &[]
+            };
+            let serial = self.engine.tick(feed).serial;
+            if serial == last {
+                quiet += 1;
+            } else {
+                quiet = 0;
+                last = serial;
+            }
+        }
+    }
+
+    fn dump(&self, name: &str) {
+        let path = self
+            .out_dir
+            .join(format!("restrike-{}-{name}.ppm", self.label));
+        write_ppm(self.engine.framebuffer_for_demo(), &path);
+        eprintln!("      frame -> {}", path.display());
+    }
+
+    /// Plays the parked fight to its end, dumping frames along the way.
+    fn play(mut self) -> BrawlOutcome {
+        use crate::combat_host::Stage;
+        use crate::shell::Shell;
+        let mut o = BrawlOutcome::default();
+
+        self.dump("01-a-battle-begins");
+        let mut announced_roster = false;
+
+        let mut fight_ticks = 0usize;
+        let mut shots = 0usize;
+        let mut prints: Vec<String> = Vec::new();
+        for tick in 0..200_000usize {
+            self.engine.tick(&[]);
+            for entry in self.engine.take_transcript() {
+                match entry {
+                    crate::vmhost::TranscriptEntry::Print { text, .. } => {
+                        if text.contains("A battle begins") {
+                            o.saw_announce = true;
+                        }
+                        prints.push(text);
+                    }
+                    crate::vmhost::TranscriptEntry::Request(l) => {
+                        if l.starts_with("combat:") && l.contains("round(s)") {
+                            o.combat_line = l;
+                        } else if l.starts_with("combat:") {
+                            eprintln!("      note: {l}");
+                        }
+                    }
+                }
+            }
+            match self.engine.shell().combat_host().map(|h| {
+                (
+                    h.stage().clone(),
+                    h.outcome().is_some(),
+                    h.rounds() as usize,
+                )
+            }) {
+                Some((stage, outcome_known, rounds)) => {
+                    fight_ticks += 1;
+                    if !announced_roster && matches!(stage, Stage::Fighting) {
+                        announced_roster = true;
+                        let host = self.engine.shell().combat_host().expect("fighting");
+                        let roster = host.state().roster();
+                        eprintln!(
+                            "[3] the fight: {} combatants ({} party, {} monsters)",
+                            roster.len(),
+                            roster
+                                .iter()
+                                .filter(|c| c.team == crate::combat::Team::Party)
+                                .count(),
+                            roster
+                                .iter()
+                                .filter(|c| c.team == crate::combat::Team::Monster)
+                                .count(),
+                        );
+                    }
+                    o.rounds = o.rounds.max(rounds);
+                    if outcome_known && o.outcome_known_tick.is_none() {
+                        o.outcome_known_tick = Some(tick);
+                        self.dump("06-outcome-known");
+                    }
+                    // A handful of evenly spaced mid-fight frames.
+                    if matches!(stage, Stage::Fighting)
+                        && fight_ticks.is_multiple_of(900)
+                        && shots < 4
+                    {
+                        shots += 1;
+                        self.dump(&format!("0{}-round-{rounds}", shots + 1));
+                    }
+                    if matches!(stage, Stage::Restore) {
+                        self.dump("07-final-beats");
+                    }
+                }
+                None if !o.combat_line.is_empty() => {}
+                None => {}
+            }
+            if self.engine.state().party_killed && o.flag_tick.is_none() {
+                o.flag_tick = Some(tick);
+                o.party_killed = true;
+                self.dump("08-screen-restored");
+            }
+            if matches!(self.engine.shell(), Shell::GameOver) {
+                o.game_over_tick = Some(tick);
+                self.dump("09-game-over");
+                break;
+            }
+            if !o.combat_line.is_empty()
+                && self.engine.shell().combat_host().is_none()
+                && o.game_over_tick.is_none()
+                && !o.party_killed
+            {
+                o.resumed_to_the_walk_loop = matches!(
+                    self.engine.shell(),
+                    Shell::WorldMenu { .. } | Shell::Step(_)
+                );
+                if o.resumed_to_the_walk_loop {
+                    self.dump("08-back-in-the-walk-loop");
+                    break;
+                }
+            }
+        }
+
+        eprintln!(
+            "[4] {} — {} tick(s) of fight, party at {:?}",
+            o.combat_line,
+            fight_ticks,
+            self.engine.state().pos
+        );
+        let tail: Vec<&String> = prints.iter().rev().take(6).collect();
+        eprintln!("[5] last combat text: {tail:?}");
+        o
+    }
 }
