@@ -220,6 +220,10 @@ impl CombatHost {
         let monsters: Vec<LoadedMonster> = std::mem::take(&mut ctx.state.pending_combat.monsters);
         let living = kits::living_count(&ctx.roster.members);
         if living == 0 || monsters.is_empty() {
+            // Consume the roster anyway (`CMD_Combat` does): leaving
+            // `monstersLoaded` up would send the script's *next* COMBAT down
+            // the real-combat branch with nothing to fight.
+            ctx.state.pending_combat.clear();
             return Err(CombatHostError::NothingToFight);
         }
 
@@ -407,6 +411,12 @@ impl CombatHost {
 
     /// One tick of the §8.2 chart.
     pub fn tick(&mut self, ctx: &mut FlowCtx) -> HostTick {
+        // D-CV7's rebuild-on-load, before anything reads the presenter: every
+        // stage past `Announce` owns a scene, and a fight restored from a
+        // snapshot has none.
+        if !matches!(self.stage, Stage::Announce { .. }) {
+            self.rebuild_scene_if_missing(ctx);
+        }
         self.drain_input(ctx);
         match self.stage {
             Stage::Announce { ticks_left } => {
@@ -505,8 +515,7 @@ impl CombatHost {
     /// D-CV2's lockstep loop, verbatim: present step N to completion **before**
     /// calling `step()` for N+1. There is no pipelining and no rollback.
     fn tick_fighting(&mut self, ctx: &mut FlowCtx) {
-        self.rebuild_scene_if_missing(ctx);
-        let scene = self.scene.as_mut().expect("just rebuilt");
+        let scene = self.scene.as_mut().expect("`tick` rebuilds it first");
         if scene.is_playing() {
             let cues = scene.tick(ctx.dt_ticks.max(1));
             ctx.sounds.extend_from_slice(cues);
