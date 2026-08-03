@@ -799,3 +799,105 @@ Pump/Present ──Request::Combat(+monsters)──▶ Entry ──▶ Fighting 
 screen via QuickFight (Entry beats included), the VM resumes correctly,
 and a party wipe shows its full ending before GameOver. The §4 M6b row's
 done-condition stands unchanged; this section only specifies the how.
+
+## 9. TurnCmd and the manual-turn legality tables — the slice-7 spec-refresh (2026-08-03, Fable)
+
+The legality table D-CV5 owes slice 7. D-CV5's contract stands unchanged
+(two suspensions, dark-landing, semantic commands through the proven
+primitives); this section pins WHAT is legal WHEN, straight from the
+original's menu builders, so the implementer transcribes rather than
+invents. Rule of split (D-CV5): **presentation decides which words show;
+the core decides whether a command executes** — both sides transcribe the
+same cited conditions, and the core refuses illegal commands loudly (a
+driver bug, not a silent no-op).
+
+### 9.1 The main menu (`combat_menu`, `ovr009.cs:313-360`)
+
+| Word | Shows iff | TurnCmd | Notes |
+|---|---|---|---|
+| Move | `actions.move > 0` | `MoveStep(dir)` sequence via §9.3 | |
+| View | always | `ViewSheet` | opens the M3 character sheet; palette toggles around it (`ovr020.cs:240,334`); returns to this menu |
+| Aim | always | `Aim*` (§9.4) | |
+| Use | `items.Count > 0` | `UseItem(...)` | routes to the item-use path; unmodeled item classes hit their cited tripwires LOUDLY (circle-back territory) |
+| Cast | `spellList.HasSpells() && actions.can_cast && area_ptr.can_cast_spells == false` | `CastSpell(...)` | the area flag is a per-area cast BAN when set — transcribe the polarity exactly as cited; §45's can_cast disruption applies (an arrow hit this round kills the word) |
+| Turn | `SkillLevel(Cleric) > 0 && !actions.hasTurnedUndead` | `TurnUndead` | the engine path is a cited stub — the command routes to it and trips loudly until a capture drives it; the WORD still shows per the faithful condition |
+| Quick | always | `EngageQuickFight` | hands the side to `PlayerQuickFight`; SPACE revokes during AI turns (D-CV5) |
+| Done | always | opens §9.2 | |
+
+### 9.2 The Done submenu (`delay_menu`, `ovr009.cs:616-669`)
+
+| Word | Shows iff | TurnCmd | Effect (cited) |
+|---|---|---|---|
+| Guard | `!is_weapon_ranged \|\| is_weapon_ranged_melee` | `Guard` | `guarding(player)`; ends turn. (Pure-ranged weapons cannot guard — the §34 TryGuarding rule again, now player-facing.) |
+| Delay | always | `DelayTurn` | `actions.delay = 1`; ends turn |
+| Quit | always | `EndTurn` | `clear_actions`; ends turn |
+| Bandage | `bandage(false)` scan is true (a dying teammate exists) | `Bandage` | `bandage(true)` then `clear_actions`; ends turn |
+| Speed | always | `SetSpeed(n)` | `set_gamespeed` — "GameSpeed (N): Slower Faster" (§1.7); does NOT end the turn |
+| Exit | always | — | back to §9.1; does not end the turn |
+
+### 9.3 The movement loop (`sub_33B26`, `ovr009.cs:416-588`)
+
+- Entry from Move; prompt "Move/Attack, Move Left = N" where **N =
+  `actions.move / 2`** (moves are half-units, §45).
+- Loop continues while `actions.move > 1` — a single remaining half-move
+  cannot step (transcribe the `> 1` gate exactly).
+- Keys G/H/I/K/M/O/P/Q → dirs 7/0/1/6/2/5/4/3 (§1.7). Each step spends
+  cost through the SAME `sub_3E748` movement primitive the AI uses — the
+  terrain-cost draws and opportunity-attack rules are the proven ones.
+- **Walking into an enemy-occupied cell attacks it** (the melee swing via
+  `attack_target`, then the loop continues if moves remain).
+- **Stepping off-map prompts "Flee:"** — the §28 flee ladder decides; a
+  refusal returns to the loop.
+- RETURN (13) ends movement keeping the position; **ESC ('\0') aborts:
+  moves restored to the entry backup, the icon redrawn at the ORIGINAL
+  position, and `sub_7515A`'s visibility re-test decides whether the turn
+  continues** — transcribe this restore exactly (it is the one place the
+  presented board must rewind mid-turn; the scene replays it from the
+  abort event rather than reading state).
+- Direction changes during the walk update facing per the §36 substrate —
+  already proven; the manual path adds no new facing writes.
+
+### 9.4 Aim (`ovr014.cs:1752-2060`)
+
+Modes cycle Next / Prev / Manual / Target / Center / Exit (§1.7):
+- **Next/Prev** cycle live enemy targets in the original's scan order
+  (transcribe the ORDER — it is an index walk, not a distance sort);
+  the grey focus box + right-panel summary + "Range = N" track the
+  focused target (all slice-3/4 surfaces).
+- **Manual** = free cursor, cell-by-cell with the movement keys; the
+  focus box follows the cursor.
+- **Target** commits: melee adjacency or the ranged/spell legality of
+  the pending action decides (range, ammo readied — the §49 gate — LOS
+  via the real check); an illegal commit beeps-and-stays (transcribe).
+- **Center** recenters the camera on the actor (radius-3 scroll).
+- Committing routes to `attack_target`/the cast path — the proven
+  primitives; aim itself draws nothing.
+
+### 9.5 Suspension-side additions
+
+- `AwaitPlayerTurn { combatant_id }` fires per D-CV5 (party PC,
+  quick-fight off). The turn head runs BEFORE the suspension (initiative
+  re-arms, §45 can_cast state, counter resets — the §36 turn-head rules)
+  so legality reads are current when the menu draws.
+- `AwaitContinueBattle` per D-CV5, interactive-driver flag only.
+- SPACE (revoke quick-fight) and '2' (auto-magic) are real keys routed at
+  step heads (D-CV2 lockstep; the §38 machinery unchanged in replay).
+- Dark-landing order within the slice is BINDING: (1) suspensions +
+  TurnCmd core land with every PC quick_fight ON — guard 15/15 and the
+  draw-parity suite must be EXACT before (2) any menu/aim UI drives them.
+
+### 9.6 Test surface and the closing capture
+
+- Core: legality unit tests per table row (each condition true/false);
+  the movement loop's `> 1` gate, ESC-restore, walk-into-enemy, and
+  off-map-flee paths; illegal-command refusal is loud.
+- Parity: with all quick-fight flags on, step sequence and draw stream
+  bit-identical to pre-slice (guard + parity suite, the D-CV5 invariant).
+- UI: fixture goldens for both menus' conditional words, the aim focus
+  box, and "Move/Attack, Move Left = N".
+- **The manual-turn capture campaign closes M6c** (§4): Bryan stages one
+  fight playing at least one PC turn manually (moves + an attack + a
+  Done-word; the §25 runbook + one launch), and the capture must CLOSE
+  in the guard like every QuickFight capture — manual turns are plain
+  draws (the sewer-fight-4 take-1 precedent). The capture rides the
+  existing sidecar; no new format work.
