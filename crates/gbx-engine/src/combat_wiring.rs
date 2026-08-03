@@ -79,13 +79,30 @@ fn char_record(name: &[u8], hp: u8, raw_ac: i8, thac0: i8, movement: u8, npc: bo
     rec[0] = name.len() as u8;
     rec[1..1 + name.len()].copy_from_slice(name);
     rec[0x73] = thac0 as u8; // thac0_base
+    rec[0x199] = thac0 as u8; // hitBonus (the CURRENT to-hit number combat reads)
+    rec[0xe5] = 2; // hit_dice (nonzero: the 0-HD sweep gate is a tripwire)
+                   // `field_DE` @0xDE — `BattleSetup` reads its low 3 bits as the combatant's
+                   // footprint (`ovr011.cs:1118`). Every real record carries one; a 0 here
+                   // would mean a fighter that occupies no map cell at all, so nobody can
+                   // ever stand next to it. Load-bearing since the party's record started
+                   // driving its own combatant (M6 slice 6).
+    rec[0xde] = 0x01; // size 1
     rec[0x78] = hp; // hit_point_max
     rec[0x1a4] = hp; // hit_point_current
     rec[0x19a] = raw_ac as u8; // ac
     rec[0x1a5] = movement; // movement
     rec[0xf7] = if npc { 0x80 } else { 0x00 }; // control_morale
-                                               // attack profile 1 (a weak 1d2 fist for monsters; party uses the shell's
-                                               // default weapon die regardless).
+                                               // The BASE profile (@0x11C): `attacksCount` 2 half-attacks = one swing
+                                               // per round, and a 1d2 bare-hands die. Since M6 slice 6 the party's
+                                               // combat record comes through the same decode the captures ride
+                                               // (`combat::kits`), so these cells are load-bearing here exactly as
+                                               // they are on a real imported save — an `attacksCount` of 0 would
+                                               // mean a party that never swings.
+    rec[0x11c] = 2; // attacksCount (half-attacks)
+    rec[0x11e] = 1; // attack1_DiceCountBase
+    rec[0x120] = 2; // attack1_DiceSizeBase
+                    // attack profile 1, current (a weak 1d2 fist for monsters; `party_member`
+                    // overrides it with a weapon profile).
     rec[0x19c] = 1; // a1 attacks
     rec[0x19e] = 1; // a1 dice_count
     rec[0x1a0] = 2; // a1 dice_size
@@ -97,7 +114,14 @@ fn char_record(name: &[u8], hp: u8, raw_ac: i8, thac0: i8, movement: u8, npc: bo
 /// via the record path so every derived field is populated exactly as an
 /// imported save's would be.
 fn party_member(name: &str, hp: u8, raw_ac: i8, thac0: i8) -> crate::party::Character {
-    let rec = char_record(name.as_bytes(), hp, raw_ac, thac0, 12, false);
+    let mut rec = char_record(name.as_bytes(), hp, raw_ac, thac0, 12, false);
+    // A readied longsword's serialized attack-1 profile (1d8+2). Before M6
+    // slice 6 the shell handed every party member a hardcoded 1d8
+    // (`DEFAULT_PARTY_WEAPON_DIE`); now the record decides, which is the whole
+    // point of D-CV6 item 2 — so the fixture says what it means.
+    rec[0x19e] = 1; // a1 dice_count
+    rec[0x1a0] = 8; // a1 dice_size
+    rec[0x1a2] = 2; // a1 damage_bonus
     let decoded = decode_char_record(&rec).unwrap();
     crate::party::character_from_record(&decoded, vec![], vec![])
 }
@@ -126,6 +150,13 @@ fn engine_with_program(program: EclBuilder, party: Vec<crate::party::Character>)
     let data = combat_game_data(program);
     let mut e = Engine::new_fixture(synthetic_font(), sets, open_geo(), data, 1);
     e.party = crate::party::Party { members: party };
+    // Stand in the middle of the map. Since M6 slice 6 the battlefield floor is
+    // the faithful `SetupDungeonFloor` projection of the area's real wall
+    // topology (`combat::floor`), and a square outside the 16x16 grid reads as
+    // a WALL (`sub_37306`'s off-grid arm) — so a fight staged at the spawn
+    // corner (0,0) facing north is genuinely walled off from its own monsters,
+    // which is correct behaviour and a useless fixture.
+    e.state.pos = (8, 8);
     e
 }
 
@@ -210,8 +241,15 @@ impl RngSink for DrawTap {
 fn opcode_to_combat_path_adds_no_draw_before_initiative() {
     // 2 party + 3 monsters = 5 in-combat combatants → the §2 fingerprint is
     // 5 leading d6 (initiative) then a d100 selection pass. If any setup step
-    // (load_monster decode, terrain, encounter distance, placement) drew, it
-    // would appear ahead of the first d6 and break this.
+    // (load_monster decode, encounter distance, placement) drew, it would
+    // appear ahead of the first d6 and break this.
+    //
+    // **Terrain is the one setup step that CAN draw** since M6 slice 6: the
+    // faithful `SetupDungeonFloor` rolls `sub_370D3`'s furniture d10s. This
+    // fixture's GEO is entirely open, and the furniture gate needs a walled
+    // room (`byte_1AD3E`) AND the x2 `0x40` bit — so it spends no dice here,
+    // and the fingerprint still leads. `combat::floor`'s own tests cover the
+    // walled case, and the shell-path draw-parity test covers both.
     let party = vec![
         party_member("Ravd", 40, 54, 50),
         party_member("Ilma", 38, 52, 48),

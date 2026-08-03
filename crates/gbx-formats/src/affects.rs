@@ -27,6 +27,7 @@
 /// §39.1). List order is load-bearing at the combatant level, but a single
 /// record is order-free.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AffectRecord {
     /// The `Affects` enum id (`type`@0x00, coab `Affect.type`). 0x00-0x93.
     pub kind: u8,

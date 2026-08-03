@@ -56,6 +56,7 @@ pub mod flags {
 /// Every field is a direct byte read at the offset coab documents; the two
 /// damage bonuses are signed (`sbyte`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ItemData {
     /// `[0]` `item_slot` — inventory slot class (`ItemSlot`).
     pub item_slot: u8,
@@ -143,6 +144,7 @@ impl ItemData {
 /// The resident item table — `0x81` [`ItemData`] entries indexed by item type
 /// (`ItemDataTable`, coab `Classes/ItemData.cs:38`).
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ItemDataTable {
     entries: Vec<ItemData>,
 }

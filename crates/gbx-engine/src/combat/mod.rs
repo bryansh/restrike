@@ -47,6 +47,8 @@ mod attack;
 pub use ai::field_15_mode_gate;
 mod facing;
 pub use facing::scrolled_top_left;
+pub mod floor;
+pub mod kits;
 pub mod scene;
 mod spells;
 
@@ -83,7 +85,7 @@ pub const DEFAULT_NO_ACTION_LIMIT: u16 = 15;
 /// Which side a combatant fights on. The discriminants mirror coab's
 /// `CombatTeam` (`Classes/Enums.cs:91` — `Ours = 0`, `Enemy = 1`) because the
 /// surprise test is bit `(team + 1)` of the per-round mask (`ovr014.cs:38`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Team {
     /// `CombatTeam.Ours` — the player party.
     Party = 0,
@@ -129,7 +131,7 @@ pub enum Team {
 /// other original values (`tempgone`/`running`/`stoned`/`gone`) are set only by
 /// spell/affect paths (M5), so they are not modeled — an entry record carrying
 /// one decodes to [`HealthStatus::Okey`] (documented on [`decode_health_status`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum HealthStatus {
     /// `okey` (0) — conscious and fighting. Entry records are all okey.
     Okey,
@@ -178,7 +180,7 @@ pub fn decode_health_status(byte: u8) -> HealthStatus {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Combatant {
     /// Stable per-encounter roster index (the D-OR3 `combatant_id`).
     pub id: usize,
@@ -494,7 +496,7 @@ struct CurrentAttackItem {
 /// pointers the capture does not chase), so a fight with readied ranged weapons
 /// supplies them here, committed per capture in the harness like the guard's
 /// pins. `None` reproduces today's melee behaviour exactly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Loadout {
     /// `AI_items_selection`'s ranged candidate `var_4` (`sub_36673`
     /// @`ovr010:1673`, doc §48): the kit's best launcher/thrown weapon as
@@ -1114,6 +1116,45 @@ pub trait ActionSink {
     fn on_action(&mut self, event: ActionEvent);
 }
 
+/// [`CombatState`]'s observer slot — a newtype purely so the state can derive
+/// `Clone`/`Serialize` (D-CV7: the shell parks a live fight inside the
+/// serde-derived `Shell`, and `Engine::save` clones it).
+///
+/// **A clone or a round trip carries no observer.** That is not lossy: a sink
+/// is something a *host* attaches to watch a fight, never fight state, and it
+/// is `Option` + default-inert by design (`None` in normal play). The one rule
+/// it implies is that whoever restores a snapshot re-attaches its own sink
+/// before the next `step()` — which the shell's combat host does.
+#[derive(Default)]
+pub struct SinkSlot(Option<Box<dyn ActionSink>>);
+
+impl Clone for SinkSlot {
+    fn clone(&self) -> Self {
+        SinkSlot(None)
+    }
+}
+
+impl std::fmt::Debug for SinkSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(_) => f.write_str("SinkSlot(attached)"),
+            None => f.write_str("SinkSlot(none)"),
+        }
+    }
+}
+
+impl serde::Serialize for SinkSlot {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_unit()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SinkSlot {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        <()>::deserialize(d).map(|()| SinkSlot(None))
+    }
+}
+
 /// What one [`CombatState::step`] produced. The round advances tick-by-tick (D8:
 /// no blocking loop; control returns each step), so a caller drives combat with a
 /// `loop { match state.step(rng) { … } }`.
@@ -1135,7 +1176,7 @@ pub enum CombatStep {
 }
 
 /// Where the tick machine is between [`CombatState::step`] calls.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum Phase {
     /// Next step counts teams and rolls initiative.
     RoundStart,
@@ -1157,7 +1198,7 @@ enum Phase {
 ///   so it isn't re-picked. This exposes the initiative/selection subsystem in
 ///   isolation — the cleanest possible parity target (study §2/§14) — and is what
 ///   [`CombatState::initiative_only`] configures.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum TurnDriver {
     /// Zero-draw turn (initiative/selection harness).
     Stub,
@@ -1170,6 +1211,19 @@ enum TurnDriver {
 /// load-bearing), the round counter, the stalemate cap, and the per-round
 /// surprise mask. Runs `count → initiative → turns → BattleRoundChecks` as a
 /// tick-based skeleton.
+/// **D-CV7 (`docs/design/combat-visualizer.md`): serde-derived so a live fight
+/// can be parked.** The shell's `VmPhase::Combat` suspends a `VectorRun` around
+/// a running `CombatState` (§8.1), and `Shell` promises every parked state is
+/// serializable *by construction* (D-UI2) — so this type must compile under
+/// serde whether or not the player can ever reach a save from combat (they
+/// cannot: the combat menu builds no Save word, `ovr009.cs:313-360,616-631`,
+/// and that faithful absence stays).
+///
+/// One field is skipped: [`CombatState::sink`], the D-OR3 action-trace
+/// observer. It is `Option` + default-inert by design (`None` in normal play),
+/// so a restored state simply has no observer attached — exactly its state
+/// before a harness attaches one.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CombatState {
     /// `gbl.TeamList` (`Classes/Gbl.cs:496`) — party then monsters, iteration
     /// order preserved. (The former `CombatWorld.fighters`; draw order depends on
@@ -1298,8 +1352,9 @@ pub struct CombatState {
     /// setup camera (`ovr011.cs:1209`) run once, at the first [`step`], after
     /// the harness has set [`map_direction`](CombatState::map_direction).
     combat_setup_done: bool,
-    /// The optional action-trace observer (D-OR3). `None` in normal play.
-    sink: Option<Box<dyn ActionSink>>,
+    /// The optional action-trace observer (D-OR3). `None` in normal play, and
+    /// dropped by a clone or a serde round trip — see [`SinkSlot`].
+    sink: SinkSlot,
 }
 
 impl CombatState {
@@ -1339,7 +1394,7 @@ impl CombatState {
             map_screen_top_left: GridPos::new(0, 0),
             focus: false,
             combat_setup_done: false,
-            sink: None,
+            sink: SinkSlot::default(),
         };
         s.rebuild_occupancy();
         // The entry-state team counts (the MainCombatLoop pre-loop
@@ -1389,7 +1444,7 @@ impl CombatState {
             map_screen_top_left: GridPos::new(0, 0),
             focus: false,
             combat_setup_done: false,
-            sink: None,
+            sink: SinkSlot::default(),
         }
     }
 
@@ -1446,12 +1501,12 @@ impl CombatState {
     /// Attaches an action-trace observer (D-OR3). Replaces any existing sink and
     /// returns it. Observing never changes the draw stream or the outcome.
     pub fn attach_action_sink(&mut self, sink: Box<dyn ActionSink>) -> Option<Box<dyn ActionSink>> {
-        self.sink.replace(sink)
+        self.sink.0.replace(sink)
     }
 
     /// Detaches and returns the current observer, if any.
     pub fn take_action_sink(&mut self) -> Option<Box<dyn ActionSink>> {
-        self.sink.take()
+        self.sink.0.take()
     }
 
     /// The current round counter (`byte_1D8B7`).
@@ -1781,8 +1836,9 @@ impl CombatState {
     /// The fight's decision from the live team counts — `PartyWins` if the
     /// monsters are gone (checked first, as `MainCombatLoop` does), `MonstersWin`
     /// if the party is gone, else `Stalemate`. Read by [`run_combat`](Self::run_combat)
-    /// once the tick loop ends.
-    fn outcome(&self) -> CombatOutcome {
+    /// once the tick loop ends, and by the shell's combat host at the fight's
+    /// end (a boundary read — the fight is over).
+    pub fn outcome(&self) -> CombatOutcome {
         let (party, monsters) = self.live_counts();
         if monsters == 0 {
             CombatOutcome::PartyWins
@@ -1794,7 +1850,7 @@ impl CombatState {
     }
 
     fn emit(&mut self, event: ActionEvent) {
-        if let Some(sink) = self.sink.as_mut() {
+        if let Some(sink) = self.sink.0.as_mut() {
             sink.on_action(event);
         }
     }
@@ -2181,7 +2237,7 @@ pub const SCREEN_HALF: i32 = SCREEN_MAX / 2;
 
 /// A cell in the 50×25 combat map (coab's `Point`, `Gbl.cs:106`). `y` increases
 /// **downward** (screen space), which the facing/octant math below depends on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct GridPos {
     pub x: i32,
     pub y: i32,
@@ -2330,7 +2386,7 @@ pub fn tile_passability(tile: u8) -> TilePassability {
 /// Built from a provided terrain descriptor (a `MAP_W*MAP_H` tile-index buffer,
 /// row-major `y*50 + x`); the real "derive tiles from the area GEO block the party
 /// stood on" wiring is the deferred hook documented at the top of this section.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CombatMap {
     /// `mapToBackGroundTile.field_7` (`Struct_1D1BC`): ground-tile index per cell,
     /// row-major `y*MAP_W + x`, length `MAP_W*MAP_H`.
@@ -3887,7 +3943,7 @@ pub fn this_round_action_count(half_actions: i32, round: u16) -> i32 {
 }
 
 /// The result of a full [`CombatState::run_combat`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CombatOutcome {
     /// The monster team was wiped out.
     PartyWins,

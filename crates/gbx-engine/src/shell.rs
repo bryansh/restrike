@@ -21,6 +21,7 @@
 //! module's own citations are to `engine/ovr003.cs` `sub_29758` (the walk
 //! loop, `:2230-2396`) and `sub_29677` (the chain runner, `:2180-2227`).
 
+use crate::combat_host::{CombatHost, HostTick};
 use crate::framebuffer::Framebuffer;
 use crate::input::InputQueue;
 use crate::movement::{
@@ -59,11 +60,45 @@ const VECTOR_ENTRY_POINT: usize = 4;
 /// module's top doc comment). `Pump`/`Present` only ever occur inside a
 /// [`VectorRun`]; `Gate` is the shared park point for both VM-sourced and
 /// purely engine-owned widgets.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+/// The `Combat` arm is `combat-visualizer.md` §8.1's parking shape: a live
+/// fight is an **interaction the vector is waiting on**, at the same level as
+/// a parked `Widget` — not a top-level [`Shell`] variant. The `VectorRun`, and
+/// the flow that owns it (Boot, Step, Look, or a chain round), stay exactly
+/// where they were with their stage cursors intact, so every flow kind resumes
+/// into the identical pre-fight cursor (§8.3 rule 1).
+///
+/// `PartialEq` is derived on the enum but a [`CombatHost`] is not comparable
+/// (a whole `CombatState`), so the arm compares by discriminant only — enough
+/// for the `matches!` uses in this module.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum VmPhase {
     Pump,
     Present,
     Gate(Widget),
+    Combat(Box<CombatHost>),
+}
+
+impl Clone for VmPhase {
+    fn clone(&self) -> Self {
+        match self {
+            VmPhase::Pump => VmPhase::Pump,
+            VmPhase::Present => VmPhase::Present,
+            VmPhase::Gate(w) => VmPhase::Gate(w.clone()),
+            VmPhase::Combat(h) => VmPhase::Combat(h.clone()),
+        }
+    }
+}
+
+impl PartialEq for VmPhase {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (VmPhase::Pump, VmPhase::Pump) => true,
+            (VmPhase::Present, VmPhase::Present) => true,
+            (VmPhase::Gate(a), VmPhase::Gate(b)) => a == b,
+            (VmPhase::Combat(_), VmPhase::Combat(_)) => true,
+            _ => false,
+        }
+    }
 }
 
 /// Whatever a vector run yielded once its activation stack stops (a
@@ -146,6 +181,12 @@ pub struct FlowCtx<'a> {
     /// `BootAssets::sky`) — read-only after boot, `crate::corridor`'s
     /// backdrop source (step 5, task deliverable 2).
     pub sky: &'a [gbx_formats::image::ImageBlock; 3],
+    /// Boot's 26-slot combat icon store (`BootAssets::combat_icons`) with the
+    /// thirteen `COMSPR` missile/effect/focus-box icons already in it
+    /// (`seg001.cs:312-317`). The combat host copies it at fight entry and
+    /// fills the party/monster slots over the top, which is `BattleSetup`'s own
+    /// division of labour (M6 slice 6).
+    pub combat_icons: &'a crate::combat_art::CombatIcons,
 }
 
 /// `Request` -> `Widget` (design doc's table, M2 slice). Engine-owned
@@ -208,7 +249,7 @@ fn describe_request(request: &Request) -> String {
 /// The party's world facing → coab's `mapDirection` (0/2/4/6 = N/E/S/W), the
 /// axis `place_combatants` offsets the monster team along and `sub_304B4`
 /// casts its LoS ray down.
-fn facing_to_map_dir(facing: crate::movement::Facing) -> u8 {
+pub(crate) fn facing_to_map_dir(facing: crate::movement::Facing) -> u8 {
     use crate::movement::Facing;
     match facing {
         Facing::North => 0,
@@ -218,59 +259,17 @@ fn facing_to_map_dir(facing: crate::movement::Facing) -> u8 {
     }
 }
 
-/// The equipped-weapon damage die the party fights with until the `.swg`
-/// `ItemData` weapon records are decoded (FD-29's weapon clause, M5-adjacent):
-/// a documented 1d8 (a longsword). Flagged provisional — real per-member
-/// weapon dice replace this when items land.
-const DEFAULT_PARTY_WEAPON_DIE: (u8, u8, u8) = (1, 8, 0);
-
-/// Map the live party roster into the combat runner's team-0 inputs (M4 combat
-/// #6). Only living members (`hit_point_current > 0`) enter the fight. Each
-/// member's raw AC, THAC0 (as the to-hit bonus, matching the monster path),
-/// current HP, and movement come straight off the record; the weapon die is
-/// [`DEFAULT_PARTY_WEAPON_DIE`] pending item decode.
-fn party_combat_stats(members: &[crate::party::Character]) -> Vec<crate::combat::PartyCombatStats> {
-    members
-        .iter()
-        .filter(|c| c.hit_point_current > 0)
-        .map(|c| crate::combat::PartyCombatStats {
-            hp: c.hit_point_current as i32,
-            raw_ac: c.combat.ac as u8,
-            hit_bonus: c.combat.thac0_base as i32,
-            movement: c.combat.movement as i32,
-            dice: DEFAULT_PARTY_WEAPON_DIE,
-            npc: c.control_morale >= 0x80,
-        })
-        .collect()
-}
-
-/// Run the `COMBAT` opcode's real-combat branch (`CMD_Combat` else-branch,
-/// `ovr003.cs:1004` → `MainCombatLoop`) from the shell/tick path (M4 combat
-/// #6). Called only when monsters were loaded; assembles the roster (party
-/// team 0 + the script-loaded monsters team 1), derives the terrain +
-/// encounter distance from the current area (all draw-free — no draw is added
-/// before the fight's first initiative d6), runs the unified [`CombatState`]
-/// to a victor, then **consumes** the pending roster. A party wipe sets
-/// `party_killed` (the game-over signal). XP/treasure
-/// (`AfterCombatExpAndTreasure`) is deferred.
-///
-/// Runs entirely off `FlowCtx` — the `VmHost` borrow was already released when
-/// `step()` yielded `Request::Combat`, so this never blocks the VM host (D8).
-fn run_pending_combat(ctx: &mut FlowCtx) -> crate::combat::EncounterOutcome {
-    let party = party_combat_stats(&ctx.roster.members);
-    let monsters = std::mem::take(&mut ctx.state.pending_combat.monsters);
-    let map_dir = facing_to_map_dir(ctx.state.facing);
-    let in_dungeon = matches!(ctx.state.game_state, GameState::DungeonMap);
-    let (px, py) = (ctx.state.pos.0 as i32, ctx.state.pos.1 as i32);
-    let dist = crate::combat::encounter_distance(ctx.geo, map_dir, px, py, in_dungeon);
-    let map = crate::combat::provisional_combat_map(ctx.geo);
-    let result = crate::combat::run_encounter(&party, &monsters, map, map_dir, dist, ctx.rng);
-    ctx.state.pending_combat.clear();
-    if result.outcome == crate::combat::CombatOutcome::MonstersWin {
-        ctx.state.party_killed = true;
-    }
-    result
-}
+// `DEFAULT_PARTY_WEAPON_DIE`, `party_combat_stats` and `run_pending_combat`
+// were the shell's synchronous inline fight (M4 combat #6): a documented 1d8
+// for every party member, `provisional_combat_map` for terrain, the whole
+// fight run headlessly inside one `tick`, and `party_killed` set the instant
+// the outcome was known.
+//
+// All three retired with `combat-visualizer.md` §8.4 (M6 slice 6). The
+// assembly logic moved rather than died — `combat_host::CombatHost::assemble`
+// is its successor, with the two placeholders replaced by
+// `combat::floor`'s faithful `SetupDungeonFloor` and `combat::kits`' real
+// party kits, and the sequencing obligations of §8.2 in place.
 
 /// The inverse of [`widget_for_request`]'s `HorizontalMenu` case: maps a
 /// resolved Hotbar key back to a `Reply::Selection` index. Implementation
@@ -335,6 +334,12 @@ impl VectorRun {
                     PresentTick::Done(exit) => return RunTick::Done(exit),
                     PresentTick::OpenedGate => {} // loop: let the Gate arm run this same tick
                 },
+                VmPhase::Combat(_) => {
+                    if !self.tick_combat(ctx) {
+                        return RunTick::Working; // the fight is still on screen
+                    }
+                    // ExitStage completed — resumed to Pump this same tick.
+                }
                 VmPhase::Gate(_) => {
                     if !self.tick_gate(ctx) {
                         return RunTick::Working; // still gated, or paginating
@@ -471,27 +476,14 @@ impl VectorRun {
             PendingOutcome::Exit(exit) => PresentTick::Done(exit),
             PendingOutcome::Request(request) => {
                 // COMBAT (0x24) real-combat branch (`CMD_Combat` else, monsters
-                // loaded): run the fight here in the shell/tick path — the
-                // `VmHost` borrow was released when `step()` yielded the
-                // request, so this never blocks it (D8) — then resume the
-                // script with its outcome. No player input is needed (the fight
-                // is all-AI this slice), so it bypasses the widget/gate
-                // entirely and pumps straight on this same tick.
+                // loaded): **park** the vector on a live fight
+                // (`combat-visualizer.md` §8.1) instead of running it headlessly
+                // inside this tick. The `VmHost` borrow was released when
+                // `step()` yielded the request, so the host can own the tick
+                // loop from here (D8). The run resumes with `Reply::Combat` only
+                // once the fight's ExitStage completes — §8.2's whole point.
                 if matches!(request, Request::Combat) && ctx.state.pending_combat.monsters_loaded {
-                    let result = run_pending_combat(ctx);
-                    let label = match result.outcome {
-                        crate::combat::CombatOutcome::PartyWins => "party wins",
-                        crate::combat::CombatOutcome::MonstersWin => "party wiped",
-                        crate::combat::CombatOutcome::Stalemate => "stalemate",
-                    };
-                    ctx.vm_memory
-                        .transcript
-                        .push(crate::vmhost::TranscriptEntry::Request(format!(
-                            "combat: {label} ({} round(s))",
-                            result.rounds
-                        )));
-                    self.pending_reply = Some(Reply::Combat);
-                    self.phase = VmPhase::Pump;
+                    self.phase = VmPhase::Combat(Box::new(CombatHost::open(ctx)));
                     return PresentTick::OpenedGate;
                 }
                 ctx.vm_memory
@@ -505,6 +497,55 @@ impl VectorRun {
                 PresentTick::OpenedGate
             }
         }
+    }
+
+    /// ★ Ticks the parked fight (`combat-visualizer.md` §8.2). Returns `true`
+    /// once ExitStage completed and the run resumed pumping — `false` while the
+    /// fight is still on screen.
+    ///
+    /// **The deferred writes happen here, and only here.** `Shell::tick`
+    /// unconditionally replaces the shell with `GameOver` at top-of-tick when
+    /// `party_killed` is set, so a wipe that set the flag at outcome-known time
+    /// would annihilate the fight's final beats mid-playback. Setting it at
+    /// ExitStage completion means the unwind fires on the NEXT tick, after the
+    /// player has seen the fight end — §8.2's MUST, and the property
+    /// `a_wiped_partys_final_beats_all_play_before_the_game_over_unwind` pins.
+    fn tick_combat(&mut self, ctx: &mut FlowCtx) -> bool {
+        let VmPhase::Combat(host) = &mut self.phase else {
+            unreachable!("tick_combat called outside Combat phase")
+        };
+        let HostTick::Finished {
+            outcome,
+            rounds,
+            dropped_keys,
+        } = host.tick(ctx)
+        else {
+            return false;
+        };
+
+        let label = match outcome {
+            crate::combat::CombatOutcome::PartyWins => "party wins",
+            crate::combat::CombatOutcome::MonstersWin => "party wiped",
+            crate::combat::CombatOutcome::Stalemate => "stalemate",
+        };
+        let dropped = if dropped_keys > 0 {
+            format!(", {dropped_keys} key(s) dropped")
+        } else {
+            String::new()
+        };
+        ctx.vm_memory
+            .transcript
+            .push(crate::vmhost::TranscriptEntry::Request(format!(
+                "combat: {label} ({rounds} round(s){dropped})"
+            )));
+        if outcome == crate::combat::CombatOutcome::MonstersWin {
+            ctx.state.party_killed = true;
+        }
+        // `Reply::Combat` with today's outcome semantics (§8.3 rule 2): a script
+        // cannot tell the rendered fight from the headless one.
+        self.pending_reply = Some(Reply::Combat);
+        self.phase = VmPhase::Pump;
+        true
     }
 
     /// Ticks the parked Gate widget. Returns `true` once it resumed pumping
@@ -1123,11 +1164,16 @@ impl Shell {
     /// anywhere in the current state (a `Gate`, `WorldMenu`'s own menu, or a
     /// `StepFlow`'s door menu) — no vector may be pumped while this holds.
     pub fn gate_open(&self) -> bool {
+        fn parked(phase: Option<&VmPhase>) -> bool {
+            // A parked fight (`combat-visualizer.md` §8.1) is an interaction
+            // exactly as a Widget is: no vector may pump while one is running.
+            matches!(phase, Some(VmPhase::Gate(_)) | Some(VmPhase::Combat(_)))
+        }
         fn run_gated(run: &Option<VectorRun>) -> bool {
-            matches!(run.as_ref().map(|r| &r.phase), Some(VmPhase::Gate(_)))
+            parked(run.as_ref().map(|r| &r.phase))
         }
         fn chain_gated(chain: &Option<ChainRunner>) -> bool {
-            matches!(chain.as_ref().map(|c| &c.run.phase), Some(VmPhase::Gate(_)))
+            parked(chain.as_ref().map(|c| &c.run.phase))
         }
         match self {
             Shell::Boot(b) => run_gated(&b.run) || chain_gated(&b.chain),
@@ -1318,6 +1364,7 @@ mod tests {
         sounds: Vec<SoundEvent>,
         symbols: crate::symbols::SymbolSets,
         sky: [gbx_formats::image::ImageBlock; 3],
+        combat_icons: crate::combat_art::CombatIcons,
     }
 
     impl Harness {
@@ -1348,6 +1395,7 @@ mod tests {
                 sounds: Vec::new(),
                 symbols: crate::symbols::SymbolSets::new(),
                 sky: [empty_sky_block(), empty_sky_block(), empty_sky_block()],
+                combat_icons: crate::combat_art::CombatIcons::new(),
             }
         }
 
@@ -1378,6 +1426,7 @@ mod tests {
                 sounds: &mut self.sounds,
                 symbols: &mut self.symbols,
                 sky: &self.sky,
+                combat_icons: &self.combat_icons,
             }
         }
     }

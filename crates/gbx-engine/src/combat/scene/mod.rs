@@ -130,7 +130,7 @@ impl SceneArt {
 /// harnesses decode it from the capture record) and the **icon slot**
 /// (`player.icon_id`; captures carry no monster CPIC ids, so M6a pins them in
 /// a per-capture sidecar).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CombatantIdentity {
     pub name: String,
     pub icon_slot: usize,

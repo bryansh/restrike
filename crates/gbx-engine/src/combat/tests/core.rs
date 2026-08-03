@@ -801,6 +801,8 @@ fn weak_goblin() -> LoadedMonster {
         monster_type: 3,
         control_morale: 0x80,
         movement: 6,
+        icon_slot: 8,
+        icon_block: 4,
         attacks: [
             MonsterAttack {
                 attacks: 1,

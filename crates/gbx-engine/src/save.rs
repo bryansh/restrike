@@ -381,6 +381,7 @@ pub(crate) fn rebuild_engine(
         pacer: state.pacer,
         symbol_sets,
         sky: assets.sky,
+        combat_icons: assets.combat_icons,
         verify_report,
         boot_seed: header.seed,
         tick_count: header.tick_index,

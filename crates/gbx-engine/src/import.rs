@@ -233,6 +233,7 @@ pub fn import_original(
         pacer: TextPacer::new(4),
         symbol_sets,
         sky: boot_assets.sky,
+        combat_icons: boot_assets.combat_icons,
         verify_report,
         // u64 provenance, u32 live seed zero-extended (D-OR1) — see engine.rs.
         boot_seed: seed as u64,

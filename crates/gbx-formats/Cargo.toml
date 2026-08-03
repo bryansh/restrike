@@ -8,6 +8,17 @@ description = "Gold Box data format parsers: DAX containers, ECL blocks, GEO map
 
 [dependencies]
 sha2 = "0.10"
+serde = { version = "1", features = ["derive"], optional = true }
+
+[features]
+# D-CV7 (`docs/design/combat-visualizer.md`): the engine parks a live fight
+# inside its serde-derived `Shell`, and a parked `CombatState` carries two
+# format-layer types verbatim — `affects::AffectRecord` (every combatant's
+# live affect chain) and `items::ItemDataTable` (the resident weapon table).
+# An optional feature keeps the crate's zero-dependency default intact while
+# giving the engine ONE mechanism for both, rather than an engine-side mirror
+# that could silently drift from the decode it mirrors.
+serde = ["dep:serde"]
 
 [dev-dependencies]
 tempfile = "3"

@@ -1310,6 +1310,7 @@ dependencies = [
 name = "gbx-formats"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "sha2",
  "tempfile",
 ]

@@ -55,12 +55,18 @@ pub struct RecordCombatant<'a> {
 /// [`Combatant`] model has no save-bonus cell because saving throws only fire for
 /// spell/affect effects (stubbed to M5). A plain-melee replay rolls no saves, so
 /// `field_186` feeds no draw here — it becomes load-bearing only once effects land.
-fn combatant_from_record(
+///
+/// `armor_readied` is the one input a [`CharRecord`] cannot carry: the
+/// `activeItems` pointer array at `@0x151` is runtime heap linkage that
+/// `decode_char_record` deliberately drops (§1.7 item 3 / D-SAVE6). See
+/// [`Combatant::field_159_null`] — a capture reads the raw bytes, a live party
+/// derives it from its readied equipment ([`crate::combat::kits`]).
+pub(crate) fn combatant_from_record(
     id: usize,
     team: Team,
     pos: GridPos,
     rec: &CharRecord,
-    raw: &[u8],
+    armor_readied: bool,
     flavor: &dyn Flavor,
 ) -> Combatant {
     let npc = rec.control_morale >= 0x80;
@@ -92,14 +98,23 @@ fn combatant_from_record(
     c.hit_dice = rec.hit_dice;
     c.reaction_adj = reaction_adj;
     c.attacks_count = rec.attack_profile_base[0]; // attacksCount @0x11c
-                                                  // §15 bug #4 (the mage hold): class @0x75 and field_159 @0x159 (a 4-byte
-                                                  // runtime far-pointer; null == all-zero). The QuickFight approach guards a
-                                                  // non-fleeing class-5 (pure Magic-User) with a null field_159.
+                                                  // §15 bug #4 (the mage hold): class @0x75 and field_159 @0x159. The
+                                                  // QuickFight approach guards a non-fleeing class-5 (pure Magic-User)
+                                                  // with a null field_159.
+                                                  //
+                                                  // **What field_159 is** (read this session, M6 slice 6): the record's
+                                                  // `activeItems` pointer array starts at @0x151 with one 4-byte slot
+                                                  // per `ItemData.item_slot`, and coab names slot 2 — @0x151 + 4*2 =
+                                                  // @0x159 — `armor` (`Classes/Player.cs:225`). The same arithmetic
+                                                  // puts `arrows` at @0x17D (slot 11) and `quarrels` at @0x181 (slot
+                                                  // 12), which is exactly where §49's readied-ammo gate reads them, so
+                                                  // the layout is corroborated. `field_159` is therefore **the readied
+                                                  // ARMOR slot**, not the "readied ranged option" the §15 note guessed
+                                                  // — and the mage hold reads as "an unarmoured pure Magic-User holds
+                                                  // position". Draw-neutral for every capture (the raw bytes still
+                                                  // decide there); it is what lets a LIVE party derive the flag.
     c.class = rec.class;
-    c.field_159_null = match raw.get(0x159..0x15D) {
-        Some(p) => p.iter().all(|&b| b == 0),
-        None => true, // full 0x1A6 records always carry it; missing → treat as null
-    };
+    c.field_159_null = !armor_readied;
     // `sub_3560B`'s memorized candidate list (doc §41.1). The collection loop
     // (`ovr010:062A-065D`) reads `record[0x1E + i]` for i = 1..=0x53 (bytes
     // 0x1F..0x71): slot 0 @0x1E is NEVER read, and the list packs from the BACK
@@ -167,14 +182,14 @@ fn combatant_from_record(
     // (giant 2 / troll 10 → the dwarf vs-giants −4) and `field_14B@0x14B`
     // bit 2 (the orc-class flag the dwarf vs-orc +1 reads; sewer TROLL 0x0E).
     c.monster_type = rec.monster_type;
-    c.field_14b = raw.get(0x14B).copied().unwrap_or(0);
-    // §45 the ready/unready hit-bonus recompute: `thac0@0x73` (the
-    // `reclac_player_values` base, `ovr025.cs:427`) and `strengthHitBonus`
-    // (`ovr025.cs:627` — coab reads `stats2.Str.full`/`Str00.cur`, our
-    // `.original`/`.current` bytes), zeroed by the `field_125@0x125` gate
-    // inside the coab bonus functions (FIRE KNIFE carries 0 there). The dex
-    // missile term reuses `reaction_adj` (`DexReactionAdj`, the same coab
-    // function the initiative delay reads).
+    c.field_14b = rec.field_14b; // @0x14B
+                                 // §45 the ready/unready hit-bonus recompute: `thac0@0x73` (the
+                                 // `reclac_player_values` base, `ovr025.cs:427`) and `strengthHitBonus`
+                                 // (`ovr025.cs:627` — coab reads `stats2.Str.full`/`Str00.cur`, our
+                                 // `.original`/`.current` bytes), zeroed by the `field_125@0x125` gate
+                                 // inside the coab bonus functions (FIRE KNIFE carries 0 there). The dex
+                                 // missile term reuses `reaction_adj` (`DexReactionAdj`, the same coab
+                                 // function the initiative delay reads).
     c.thac0 = rec.thac0_base as i32;
     c.str_hit_bonus = if rec.field_125 != 0 {
         flavor.strength_hit_bonus(rec.stats.str.original, rec.stats.str_exceptional.current)
@@ -192,19 +207,17 @@ fn combatant_from_record(
     } else {
         0
     };
-    c.race = raw.get(0x74).copied().unwrap_or(0);
-    // §50 the prot-evil alignment gate: `alignment@0x11B` (struct-verified),
-    // read on the ACTING combatant by `sub_3A224`/`sub_3A259` — the otyughs
-    // carry 0x08 (CE, the evil column {2,5,8}); TRAVIS 0x04 (TN).
-    c.alignment = raw.get(0x11B).copied().unwrap_or(0);
-    // §48 the cleric spell slice: `saveVerse[5]@0xDF` + the additive save
-    // bonus `field_186@0x186` (sbyte) — `do_saving_throw`'s inputs; and the
-    // Cleric/Paladin skill levels for `spellMaxTargetCount`'s Cleric arm
-    // (SHARA cleric 5, MATHEW/MARK paladin 5 — paladins < 9 cast nothing).
-    for (i, s) in c.saves.iter_mut().enumerate() {
-        *s = raw.get(0xDF + i).copied().unwrap_or(0);
-    }
-    c.field_186 = raw.get(0x186).map(|&b| b as i8 as i32).unwrap_or(0);
+    c.race = rec.race; // @0x74
+                       // §50 the prot-evil alignment gate: `alignment@0x11B` (struct-verified),
+                       // read on the ACTING combatant by `sub_3A224`/`sub_3A259` — the otyughs
+                       // carry 0x08 (CE, the evil column {2,5,8}); TRAVIS 0x04 (TN).
+    c.alignment = rec.alignment; // @0x11B
+                                 // §48 the cleric spell slice: `saveVerse[5]@0xDF` + the additive save
+                                 // bonus `field_186@0x186` (sbyte) — `do_saving_throw`'s inputs; and the
+                                 // Cleric/Paladin skill levels for `spellMaxTargetCount`'s Cleric arm
+                                 // (SHARA cleric 5, MATHEW/MARK paladin 5 — paladins < 9 cast nothing).
+    c.saves = rec.save_verse; // @0xDF
+    c.field_186 = rec.field_186 as i32; // @0x186
     c.skill_level_cleric = skill_level(rec, SKILL_CLERIC);
     c.skill_level_paladin = skill_level(rec, SKILL_PALADIN);
     c
@@ -274,7 +287,13 @@ pub fn combat_state_from_records(
     let mut fighters = Vec::with_capacity(entries.len());
     for (id, e) in entries.iter().enumerate() {
         let rec = decode_char_record(e.record)?;
-        let mut c = combatant_from_record(id, e.team, e.pos, &rec, e.record, flavor);
+        // The `activeItems.armor` pointer @0x159, straight off the capture's
+        // record image — unchanged behaviour, now named for what it is.
+        let armor_readied = match e.record.get(0x159..0x15D) {
+            Some(p) => p.iter().any(|&b| b != 0),
+            None => false, // full 0x1A6 records always carry it; missing → null
+        };
+        let mut c = combatant_from_record(id, e.team, e.pos, &rec, armor_readied, flavor);
         c.non_team_member = id >= party_size;
         // §47.7: the captured live affect chain rides straight onto the
         // combatant — order preserved (find-FIRST is order-observable, §39.2).

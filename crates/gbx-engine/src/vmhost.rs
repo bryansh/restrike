@@ -785,10 +785,11 @@ impl gbx_vm::EngineServices for EngineVmHost<'_> {
     /// `CMD_LoadMonster` (`ovr003.cs:238`) → `load_mob` (`ovr017.cs:824`):
     /// decode block `monster_id` of `MON{game_area}CHA.DAX` as a full 0x1A6
     /// `Player` record (`new Player(data, 0)`) and accumulate it into the
-    /// pending-combat roster `num_copies` times (M4 combat #6). The SPC/ITM
-    /// companion files (`load_mob`'s innate affects + carried items) and the
-    /// CPIC `icon_block_id` are visual/effect state deferred past this slice —
-    /// recorded, not decoded. A missing/undecodable `.dax` is coab's hard
+    /// pending-combat roster `num_copies` times (M4 combat #6). The `CPIC`
+    /// `icon_block_id` rides along onto every copy (M6 slice 6 — the shell's
+    /// combat host loads the monster's combat icon from it); the SPC/ITM
+    /// companion files (`load_mob`'s innate affects + carried items) are
+    /// effect state deferred past this slice. A missing/undecodable `.dax` is coab's hard
     /// `print_and_exit` (`ovr017.cs:836`); we surface it as `MissingData` →
     /// the interpreter's `VmError::MissingAsset` non-aborting analogue
     /// (`machine.rs:92`).
@@ -814,7 +815,9 @@ impl gbx_vm::EngineServices for EngineVmHost<'_> {
         let record = gbx_formats::monster::MonsterRecord::from_cha_block(monster_id, &block)
             .map_err(|_| MissingData)?;
         let monster = crate::monster::LoadedMonster::from_record(&record);
-        self.state.pending_combat.load(monster, num_copies);
+        self.state
+            .pending_combat
+            .load(monster, num_copies, icon_block_id);
         Ok(MonsterHandle(monster_id as u16))
     }
 

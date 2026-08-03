@@ -60,6 +60,16 @@ pub struct LoadedMonster {
     pub movement: u8,
     /// The two attack profiles (attack1, attack2).
     pub attacks: [MonsterAttack; 2],
+    /// `gbl.monster_icon_id` as `CMD_LoadMonster` stamped it onto this copy
+    /// (`ovr003.cs:259-293`): the `gbl.combat_icons[26]` slot every copy of
+    /// this monster type draws from. `8` and up — slots `0..8` are the party's.
+    /// Assigned by [`PendingCombat::load`], not by the record.
+    pub icon_slot: u8,
+    /// `LOAD MONSTER`'s third operand — the `CPIC{area}.DAX` block this
+    /// monster's combat icon loads from (`ovr003.cs:238`, the operand the VM
+    /// host has always recorded). Consumed at combat entry by
+    /// [`crate::combat_art::load_monster_icon`].
+    pub icon_block: u8,
 }
 
 impl LoadedMonster {
@@ -77,6 +87,10 @@ impl LoadedMonster {
             control_morale: record.control_morale(),
             movement: record.movement(),
             attacks: [a1.into(), a2.into()],
+            // Both are LOADMONSTER's, not the record's — `PendingCombat::load`
+            // stamps the slot and the caller supplies the CPIC block.
+            icon_slot: 0,
+            icon_block: 0,
         }
     }
 
@@ -146,16 +160,25 @@ impl PendingCombat {
     /// once full, the call is a no-op (coab's `if (numLoadedMonsters < 63)`
     /// wraps the entire body, `:243`), so a `monstersLoaded`/icon bump only
     /// happens when at least one copy was added.
-    pub fn load(&mut self, monster: LoadedMonster, num_copies: u8) {
+    /// `icon_block` is `LOAD MONSTER`'s third operand (the `CPIC{area}.DAX`
+    /// block); the slot it lands in is the current `gbl.monster_icon_id`,
+    /// stamped onto every copy before the counter increments — which is what
+    /// makes all copies of one monster type share one icon.
+    pub fn load(&mut self, monster: LoadedMonster, num_copies: u8, icon_block: u8) {
         if self.monsters.len() >= Self::CAP {
             return;
         }
         let copies = (num_copies.max(1)) as usize;
+        let stamped = LoadedMonster {
+            icon_slot: self.monster_icon_id,
+            icon_block,
+            ..monster
+        };
         for _ in 0..copies {
             if self.monsters.len() >= Self::CAP {
                 break;
             }
-            self.monsters.push(monster.clone());
+            self.monsters.push(stamped.clone());
         }
         self.monster_icon_id = self.monster_icon_id.wrapping_add(1);
         self.monsters_loaded = true;
@@ -265,12 +288,12 @@ mod tests {
     #[test]
     fn load_expands_num_copies_and_sets_flags() {
         let mut pc = PendingCombat::default();
-        pc.load(goblin(), 3);
+        pc.load(goblin(), 3, 4);
         assert_eq!(pc.monsters.len(), 3, "3 copies added (master + 2 clones)");
         assert!(pc.monsters_loaded);
         assert_eq!(pc.monster_icon_id, 9, "one icon bump per LOAD MONSTER call");
         // A second LOAD MONSTER call bumps the icon once more, not per copy.
-        pc.load(goblin(), 2);
+        pc.load(goblin(), 2, 4);
         assert_eq!(pc.monsters.len(), 5);
         assert_eq!(pc.monster_icon_id, 10);
     }
@@ -278,19 +301,19 @@ mod tests {
     #[test]
     fn zero_copies_becomes_one() {
         let mut pc = PendingCombat::default();
-        pc.load(goblin(), 0); // coab: if (num_copies <= 0) num_copies = 1
+        pc.load(goblin(), 0, 4); // coab: if (num_copies <= 0) num_copies = 1
         assert_eq!(pc.monsters.len(), 1);
     }
 
     #[test]
     fn load_is_capped_at_63() {
         let mut pc = PendingCombat::default();
-        pc.load(goblin(), 200); // far past the cap
+        pc.load(goblin(), 200, 4); // far past the cap
         assert_eq!(pc.monsters.len(), PendingCombat::CAP);
         // A full roster makes the next call a no-op (coab's `< 63` guard wraps
         // the whole body, so no icon bump either).
         let icon_before = pc.monster_icon_id;
-        pc.load(goblin(), 1);
+        pc.load(goblin(), 1, 4);
         assert_eq!(pc.monsters.len(), PendingCombat::CAP);
         assert_eq!(pc.monster_icon_id, icon_before);
     }
@@ -298,7 +321,7 @@ mod tests {
     #[test]
     fn clear_resets_to_defaults() {
         let mut pc = PendingCombat::default();
-        pc.load(goblin(), 4);
+        pc.load(goblin(), 4, 4);
         pc.clear();
         assert!(pc.monsters.is_empty());
         assert!(!pc.monsters_loaded);

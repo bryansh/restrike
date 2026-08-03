@@ -111,6 +111,12 @@ pub struct Engine {
     /// The three boot-loaded `SKY` blocks (moon/sun/horizon) — read-only
     /// after boot.
     sky: [ImageBlock; 3],
+    /// Boot's 26-slot combat icon store, thirteen `COMSPR` missile/effect/
+    /// focus-box icons already in it (`seg001.cs:312-317`). Kept resident so
+    /// the shell's combat host (M6 slice 6) has them at fight entry; a fixture
+    /// engine that skips `boot()` carries an empty store, and an unloaded slot
+    /// simply draws nothing (`ovr034.cs:92`).
+    combat_icons: crate::combat_art::CombatIcons,
     /// D-RP4's verify-on-load report, computed once at boot against `data`
     /// and retained for the `verify_report` getter (boot diagnostics, the
     /// `restrike verify` CLI subcommand, and the inspector). Advisory only
@@ -174,6 +180,7 @@ pub(crate) struct AssembledEngine {
     pub pacer: TextPacer,
     pub symbol_sets: SymbolSets,
     pub sky: [ImageBlock; 3],
+    pub combat_icons: crate::combat_art::CombatIcons,
     pub verify_report: VerifyReport,
     /// Provenance continuity (D-SAVE4): a restored engine's *next* `.rsav`
     /// still reports where this session's PRNG stream/tick coordinate came
@@ -194,6 +201,7 @@ impl Engine {
             assets.font,
             assets.symbol_sets,
             assets.sky,
+            assets.combat_icons,
             geo,
             data,
             seed,
@@ -226,11 +234,10 @@ impl Engine {
         use gbx_rules::adnd1::flavor_impl::Adnd1;
 
         let mut engine = Engine::new(data, input.rng_state)?;
-        // `Engine::new` drops boot's COMSPR store (normal play never draws a
-        // combat icon); the reel needs it back for missiles, effects and the
-        // grey focus box, so re-run just that load.
-        let boot_icons = crate::combat_art::load_comspr_icons(&engine.data)
-            .map_err(|e| ReelHostError::Reel(crate::combat::reel::ReelError::Art(e)))?;
+        // Boot's COMSPR store (missiles, effects, the grey focus box) is now
+        // resident — the shell's combat host needs it too, so the reel reads
+        // the same copy instead of re-running the load.
+        let boot_icons = engine.combat_icons.clone();
         let reel = {
             let flavor = Adnd1::new(&engine.rules);
             crate::combat::reel::Reel::new(&engine.data, boot_icons, &input, &flavor)?
@@ -266,13 +273,22 @@ impl Engine {
         data: GameData,
         seed: u32,
     ) -> Self {
-        Self::build(font, symbol_sets, dummy_sky(), geo, data, seed)
+        Self::build(
+            font,
+            symbol_sets,
+            dummy_sky(),
+            crate::combat_art::CombatIcons::new(),
+            geo,
+            data,
+            seed,
+        )
     }
 
     fn build(
         font: Font,
         symbol_sets: SymbolSets,
         sky: [ImageBlock; 3],
+        combat_icons: crate::combat_art::CombatIcons,
         geo: GeoBlock,
         data: GameData,
         seed: u32,
@@ -322,6 +338,7 @@ impl Engine {
             tick_count: 0,
             symbol_sets,
             sky,
+            combat_icons,
             verify_report,
             rules,
             slots: crate::saveload::SlotDirectory::new(),
@@ -362,6 +379,7 @@ impl Engine {
             tick_count: a.tick_count,
             symbol_sets: a.symbol_sets,
             sky: a.sky,
+            combat_icons: a.combat_icons,
             verify_report: a.verify_report,
             // Reloaded from the embedded packs (not carried in the save/import).
             rules: RuleSet::load(),
@@ -579,6 +597,7 @@ impl Engine {
                 sounds: &mut self.sounds,
                 symbols: &mut self.symbol_sets,
                 sky: &self.sky,
+                combat_icons: &self.combat_icons,
             };
             self.shell.tick(&mut ctx);
         }

@@ -7,7 +7,10 @@ repository.workspace = true
 description = "Game state, world simulation, combat, magic, UI shell, framebuffer, tick API, and save/load."
 
 [dependencies]
-gbx-formats = { path = "../gbx-formats" }
+# The `serde` feature is D-CV7's choice: a parked fight (`VmPhase::Combat`)
+# lives inside the serde-derived `Shell`, and `CombatState` carries
+# `AffectRecord`/`ItemDataTable` verbatim.
+gbx-formats = { path = "../gbx-formats", features = ["serde"] }
 gbx-prng = { path = "../gbx-prng" }
 gbx-vm = { path = "../gbx-vm" }
 gbx-rules = { path = "../gbx-rules" }
