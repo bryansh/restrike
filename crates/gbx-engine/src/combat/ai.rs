@@ -295,7 +295,7 @@ impl CombatState {
     /// Size-1 footprints reduce to the old single-cell probe on every tile
     /// whose cost is ≥ 1 (all tiles any capture map carries — a 0-cost tile
     /// would faithfully report as the 0x17 default, as the binary does).
-    fn ground_info_dir(&self, actor: usize, direction: u8) -> (i32, u16) {
+    pub(super) fn ground_info_dir(&self, actor: usize, direction: u8) -> (i32, u16) {
         let f = &self.fighters[actor];
         let current = (actor + 1) as u16;
         let mut player_index: u16 = 0;
@@ -760,6 +760,39 @@ impl CombatState {
         !delayed
     }
 
+    /// `process_input_in_monsters_turn(player)` (`sub_36269`,
+    /// `ovr010.cs:703-754`) — the in-turn keyboard poll, and **the only way a
+    /// human interrupts the AI** (D-CV5).
+    ///
+    /// Returns coab's `player_turn`: true when the poll took this turn away
+    /// from the AI. The '2' half of the poll keeps its own occurrence schedule
+    /// at the turn head (doc §38, [`CombatState::auto_cast_toggles`]) — this is
+    /// the SPACE half, and it is inert in every replay because nothing queues
+    /// the press there.
+    ///
+    /// SPACE revokes auto-fight for every player-controlled combatant
+    /// (`control_morale < NPC_Base && health_status != animated`, `:731-737`);
+    /// if that includes the combatant whose turn is starting, its `delay` is
+    /// parked at **20** and the turn is handed back — the combatant is picked
+    /// again almost immediately (20 outranks any initiative roll) and
+    /// `DoPlayerCombatTurn`'s clamp puts the delay back to 19 before the menu
+    /// opens.
+    fn process_input_in_monsters_turn(&mut self, actor: usize) -> bool {
+        if !std::mem::take(&mut self.pending_space) {
+            return false;
+        }
+        for f in &mut self.fighters {
+            if !f.npc && f.health_status != HealthStatus::Animated {
+                f.quick_fight = false;
+            }
+        }
+        if !self.fighters[actor].quick_fight {
+            self.fighters[actor].delay = 20;
+            return true;
+        }
+        false
+    }
+
     /// `PlayerQuickFight(actor)` (`ovr010.cs:8`) — the whole melee AI turn, in draw
     /// order (study §4.1): the `field_15` mode-gate, `FleeCheck_001` (draw-free),
     /// the two normal-area behavior-guard d7s (`sub_354AA:192` + `sub_3560B:248`),
@@ -768,17 +801,21 @@ impl CombatState {
     /// faithful. Every draw flows through `rng`, so an attached `RngSink` sees the
     /// exact stream (D9).
     pub fn melee_ai_turn(&mut self, rng: &mut EngineRng, actor: usize) {
-        // process_input_in_monsters_turn — headless, draw-free, returns false.
+        // `var_2 = process_input_in_monsters_turn(player)` (`ovr010.cs:10`) —
+        // draw-free, and `false` unless an interactive host queued a key.
+        let mut var_2 = self.process_input_in_monsters_turn(actor);
         if !self.fighters[actor].in_combat {
             self.clear_actions(actor);
             return;
         }
 
-        // 1. field_15 mode-gate (ovr010.cs:20-36).
+        // 1. field_15 mode-gate (ovr010.cs:20-36). Note it runs BEFORE `var_2`
+        // is consulted: a SPACE press does not save the turn its dice.
         self.fighters[actor].field_15 = field_15_mode_gate(rng, self.fighters[actor].field_15);
 
-        // 2. FleeCheck_001 (ovr010.cs:40) — draw-free.
-        let surrendered = self.flee_check(actor);
+        // 2. FleeCheck_001 (ovr010.cs:38-40) — draw-free, and SKIPPED when the
+        // poll already ended the turn (`if (var_2 == false)`).
+        let surrendered = if var_2 { false } else { self.flee_check(actor) };
         // D-CV2 `Flees { forced: false }` — "flees in panic" (`ovr010.cs:43-47`),
         // the caller's own display, gated on the check having broken morale for
         // a combatant that was NOT already fleeing (the `forced: true` branch
@@ -790,7 +827,9 @@ impl CombatState {
                 forced: false,
             });
         }
-        if surrendered {
+        // `if (var_2 == true) return;` (`ovr010.cs:49`) — the surrender return
+        // and the revoked-quick-fight return are the same line.
+        if var_2 || surrendered {
             return;
         }
 
@@ -835,18 +874,20 @@ impl CombatState {
         // the swing below is a punch; the room clearing re-readies the bow.
         // Draw-free; inert without a loadout.
         self.ai_items_selection(actor);
-        // 8. process_input again — draw-free.
+        // 8. `var_2 = process_input_in_monsters_turn(player)` again
+        // (`ovr010.cs:80`) — draw-free, and the loop below is `while (var_2 ==
+        // false)`, so a SPACE here skips the whole move-attack loop (and its
+        // `TryGuarding` fallback) exactly as the original does.
+        var_2 = self.process_input_in_monsters_turn(actor);
 
         // 9. the target/move-attack loop (ovr010.cs:82-95).
-        loop {
+        while !var_2 {
             let found = self.find_target(rng, actor, false, 1, 0xff);
             if found && self.fighters[actor].delay > 0 && self.fighters[actor].in_combat {
-                if self.sub_35db1(rng, actor) {
-                    break;
-                }
+                var_2 = self.sub_35db1(rng, actor);
             } else {
+                var_2 = true;
                 self.try_guarding(actor);
-                break;
             }
         }
 

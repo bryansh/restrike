@@ -188,6 +188,7 @@ fn a_round_draws_kc_d6_then_a_plus_one_times_k_d100() {
                 break;
             }
             CombatStep::Ended => panic!("ended mid-round"),
+            step => panic!("{step:?}: this harness is not interactive (D-CV5)"),
         }
     }
     assert_eq!(turns, k, "every in-combat member with delay>0 acts once");
@@ -213,6 +214,7 @@ fn pick_events_track_selection_order_and_zero_the_picked_delay() {
             CombatStep::Turn { combatant_id } => picks.push(combatant_id),
             CombatStep::RoundEnded { .. } => break,
             CombatStep::Ended => panic!("ended mid-round"),
+            step => panic!("{step:?}: this harness is not interactive (D-CV5)"),
         }
     }
 

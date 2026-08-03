@@ -9,6 +9,7 @@ mod ai;
 mod attack;
 mod core;
 mod facing;
+mod manual;
 mod presentation;
 mod records;
 mod spells;

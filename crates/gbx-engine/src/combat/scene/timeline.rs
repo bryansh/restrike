@@ -323,6 +323,13 @@ impl Composer<'_> {
                 // mutates in silence); the presented board still has to follow it.
                 self.board_op(event);
             }
+            ActionEvent::MoveAborted { .. } => {
+                // ★ M6c (doc §9.3): ESC out of the movement loop. The original
+                // erases the icon and redraws it on the entry cell
+                // (`RedrawPlayerBackground` + `redrawCombatArea(8, 0, …)`,
+                // `ovr009.cs:445-455`) — untimed, silent, no walk.
+                self.board_op(event);
+            }
             ActionEvent::Sound { id } => {
                 if id == sound::MISS {
                     // `var_11 == false` (`ovr014.cs:859`): the whole attack

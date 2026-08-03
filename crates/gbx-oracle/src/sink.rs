@@ -245,6 +245,13 @@ impl ActionSink for CollectorActionSink {
             // event: the `.gbxtrace` `action` profile stays FROZEN.
             ActionEvent::SpellDamage { .. } => return,
             ActionEvent::Regenerated { .. } => return,
+            // M6 slice 7's abort event (doc §9.3): a manual movement loop was
+            // ESCed and the presented board must rewind. A capture *can* carry
+            // this moment — a staged manual turn where the operator pressed ESC
+            // — but it carries it as the absence of movement, which the frozen
+            // profile already expresses: the aborted steps' `Move` events are
+            // real and recorded, and the restore itself draws nothing.
+            ActionEvent::MoveAborted { .. } => return,
         };
         self.events.borrow_mut().push(translated);
     }

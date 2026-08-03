@@ -220,6 +220,12 @@ pub(crate) fn combatant_from_record(
     c.field_186 = rec.field_186 as i32; // @0x186
     c.skill_level_cleric = skill_level(rec, SKILL_CLERIC);
     c.skill_level_paladin = skill_level(rec, SKILL_PALADIN);
+    // §9/M6c: `quick_fight@0x198` — the flag `DoPlayerCombatTurn` forks on
+    // (`ovr009.cs:134`). Every capture replay decodes it too and is unaffected:
+    // the D-CV5 suspension needs an interactive driver as well, and a harness
+    // never is one. Live party records are where it means something (a real
+    // save carries the auto-fight state the player last chose).
+    c.quick_fight = rec.quick_fight != 0;
     c
 }
 

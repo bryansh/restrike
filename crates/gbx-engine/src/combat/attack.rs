@@ -3,7 +3,7 @@ use super::*;
 impl CombatState {
     /// The range layer's view of the roster (`size = 0` for the dead, so they drop
     /// out of target lists — matching coab's `combatantMap.size > 0` gate).
-    fn range_combatants(&self) -> Vec<RangeCombatant> {
+    pub(super) fn range_combatants(&self) -> Vec<RangeCombatant> {
         self.fighters
             .iter()
             .map(|f| RangeCombatant {

@@ -317,6 +317,22 @@ impl PresentedBoard {
                 }
             }
 
+            // ★ M6c's ESC restore (`sub_7515A`, doc §9.3): the combatant is
+            // *put* back on its entry cell, not walked back — no per-cell
+            // beats, no facing derived from a delta (the loop's `dirBackup`
+            // restore is separate and presentation refreshes it at the
+            // boundary). This is the one board rewind, and it is why the event
+            // exists.
+            ActionEvent::MoveAborted {
+                combatant_id,
+                to_x,
+                to_y,
+            } => {
+                if let Some(c) = self.combatants.get_mut(combatant_id) {
+                    c.pos = GridPos::new(to_x, to_y);
+                }
+            }
+
             ActionEvent::Removed {
                 combatant_id,
                 reason,

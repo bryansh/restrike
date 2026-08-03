@@ -389,7 +389,7 @@ pub fn party_kits(
         .enumerate()
         .map(|(id, ((member_index, c), &pos))| {
             let record = record_from_character(c);
-            let combatant = combatant_from_record(
+            let mut combatant = combatant_from_record(
                 id,
                 Team::Party,
                 pos,
@@ -397,6 +397,10 @@ pub fn party_kits(
                 armor_readied(c, items),
                 flavor,
             );
+            // §9.1's Use word: `player.items.Count > 0` (`ovr009.cs:322`). The
+            // record image cannot carry the inventory (items are a heap list),
+            // so the live party is the only place this predicate exists.
+            combatant.has_items = !c.items.is_empty();
             PartyKit {
                 combatant,
                 loadout: items.and_then(|t| loadout_for(c, t, flavor)),

@@ -1,5 +1,20 @@
 use super::*;
 
+/// Which arm of `ovr014.target` a cast takes — the `quick_fight` argument
+/// `sub_5D2E1` threads from `spell_menu3` down to `sub_4001C`
+/// (`ovr023.cs:674-733`, `ovr014.cs:1095-1103`).
+///
+/// `QuickFight.True` picks its targets with `find_target`'s dice; `False` opens
+/// the aim menu, which draws nothing. Same cast, different targeting — the one
+/// place a player's spell and the AI's diverge.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Targeting<'a> {
+    /// `QuickFight.True` — the AI's auto-pick (draw-bearing).
+    Auto,
+    /// `QuickFight.False` — the aim menu's picks, in pick order (draw-free).
+    Manual(&'a [usize]),
+}
+
 // ===========================================================================
 // The spell subsystem (M5 caster peel doc §41; the cleric slice doc §48)
 // ===========================================================================
@@ -307,6 +322,29 @@ impl CombatState {
     /// (`pub(super)` so the D-CV2 emission-order tests can drive the queue and
     /// immediate arms directly, without steering the selection loop by seed.)
     pub(super) fn spell_menu3(&mut self, rng: &mut EngineRng, actor: usize, spell_id: u8) -> bool {
+        self.spell_menu3_with(rng, actor, spell_id, Targeting::Auto)
+    }
+
+    /// ★ **M6c**: `spell_menu3` with `quick_fight == False` (`ovr009.cs:219`) —
+    /// the player's Cast word. Same function, same delay arithmetic, same queue;
+    /// only the targeting differs, and `targets` is what the aim menu picked.
+    pub(super) fn spell_menu3_manual(
+        &mut self,
+        rng: &mut EngineRng,
+        actor: usize,
+        spell_id: u8,
+        targets: &[usize],
+    ) -> bool {
+        self.spell_menu3_with(rng, actor, spell_id, Targeting::Manual(targets))
+    }
+
+    fn spell_menu3_with(
+        &mut self,
+        rng: &mut EngineRng,
+        actor: usize,
+        spell_id: u8,
+        targeting: Targeting<'_>,
+    ) -> bool {
         let entry = spell_entry(spell_id).expect("caller guarantees a transcribed id");
         // Camp-only spell reached in combat (@1385) — coab zeroes spell_id, so
         // casting_spell stays false. Unreachable for the transcribed rows.
@@ -322,7 +360,7 @@ impl CombatState {
         let delay = entry.casting_delay / 3;
         if delay == 0 {
             // Immediate cast (@1406-1411): sub_5D2E1 then clear_actions.
-            self.sub_5d2e1(rng, actor, spell_id);
+            self.sub_5d2e1_with(rng, actor, spell_id, targeting);
             self.clear_actions(actor);
             true
         } else {
@@ -373,6 +411,33 @@ impl CombatState {
     /// Aborted", ClearSpell); the turn still ends. Magic Missile always finds a
     /// target in the pinned captures (its selection gate needed a near enemy).
     pub(super) fn sub_5d2e1(&mut self, rng: &mut EngineRng, actor: usize, spell_id: u8) {
+        self.sub_5d2e1_with(rng, actor, spell_id, Targeting::Auto)
+    }
+
+    /// [`sub_5d2e1`](Self::sub_5d2e1) with the `quick_fight` argument the
+    /// original threads all the way down to `sub_4001C` (`ovr023.cs:733` →
+    /// `ovr014.target` → `ovr014.cs:1098`). Everything outside the targeting
+    /// call is shared, which is the point: a player's Magic Missile and the
+    /// AI's are the same cast.
+    /// ★ **M6c**: the queued cast resolving on a manual turn
+    /// (`combat_menu`'s head, `ovr009.cs:161` — `QuickFight.False`).
+    pub(super) fn sub_5d2e1_manual(
+        &mut self,
+        rng: &mut EngineRng,
+        actor: usize,
+        spell_id: u8,
+        targets: &[usize],
+    ) {
+        self.sub_5d2e1_with(rng, actor, spell_id, Targeting::Manual(targets))
+    }
+
+    fn sub_5d2e1_with(
+        &mut self,
+        rng: &mut EngineRng,
+        actor: usize,
+        spell_id: u8,
+        targeting: Targeting<'_>,
+    ) {
         // Miscast gate (@0714): HasAffect(affect_4a) → d2, 1 = miscast. The read
         // is draw-free on an empty list, and no capture carries the affect, so
         // the miscast never fires; the d2 is drawn only when the affect is
@@ -384,7 +449,7 @@ impl CombatState {
         // SpellCastFunction = target(quick_fight, spell_id) (@0733) — fills
         // gbl.spellTargets (the multi-target loop draws its find_target picks
         // here, doc §48).
-        let targets = self.spell_target(rng, actor, spell_id);
+        let targets = self.spell_target_with(rng, actor, spell_id, targeting);
         // D-CV2 `Cast` + one `SpellTarget` per pick, emitted once the targeting
         // pass has run (its `find_target` d10s are already drawn) and before the
         // missile camera below — message, then the targets it highlights, then
@@ -449,7 +514,13 @@ impl CombatState {
     /// cited + tripped (`spell-target-shape`): `0` self, `5` budgeted-multi
     /// (a 2d4 draw), `8..=E` area, `0xF` held/area. Returns `gbl.spellTargets`
     /// (empty = no cast).
-    fn spell_target(&mut self, rng: &mut EngineRng, actor: usize, spell_id: u8) -> Vec<usize> {
+    fn spell_target_with(
+        &mut self,
+        rng: &mut EngineRng,
+        actor: usize,
+        spell_id: u8,
+        targeting: Targeting<'_>,
+    ) -> Vec<usize> {
         let entry = spell_entry(spell_id).expect("caller guarantees a transcribed id");
         let nibble = entry.field_6 & 0x0F;
         let tail_branch = !(nibble == 0 || nibble == 5 || (8..=0x0F).contains(&nibble));
@@ -460,6 +531,16 @@ impl CombatState {
                 stub: "spell-target-shape",
             });
             return Vec::new();
+        }
+        // ★ M6c: the manual arm. Each of the loop's `sub_4001C` calls opened
+        // the **aim menu** (`ovr014.cs:1098-1103`) instead of drawing a
+        // `find_target` pick, so the picks are already made and this whole loop
+        // is draw-free. Its rules — at most `(field_6 & 3) + 1` distinct
+        // targets, an aborted aim ending the loop, an empty list meaning no
+        // cast — are enforced where the picks are collected
+        // ([`CombatState::issue`]'s `CastSpell` arm).
+        if let Targeting::Manual(picked) = targeting {
+            return picked.to_vec();
         }
         // The max_targets loop (@1327-1358): MM 1 pick, hold person 3.
         let mut max_targets = (entry.field_6 & 3) as i32 + 1;

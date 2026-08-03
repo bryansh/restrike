@@ -411,6 +411,7 @@ fn run(cap: &Capture, map: CombatMap) -> RunResult {
                 }
             }
             CombatStep::Ended => break,
+            step => panic!("{step:?}: the turndiff harness is not interactive (D-CV5)"),
         }
     }
 

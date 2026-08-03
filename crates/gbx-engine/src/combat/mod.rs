@@ -49,8 +49,11 @@ mod facing;
 pub use facing::scrolled_top_left;
 pub mod floor;
 pub mod kits;
+pub mod manual;
 pub mod scene;
 mod spells;
+
+pub use manual::{DoneWords, ManualTurn, MenuWords, TurnCmd, TurnOutcome, TurnRefusal};
 
 /// One `roll_dice(size, count)` (`ovr024.cs:586-598`): `count` dice, each
 /// `1 + random(size)`, through the engine's one PRNG seam so an attached
@@ -467,6 +470,28 @@ pub struct Combatant {
     /// §39.2/§39.6). Real-play population (save `.FX` import, `MON<area>SPC` innate
     /// affects) is wired by their own slices.
     pub affects: Vec<AffectRecord>,
+
+    // --- the manual-turn surface (M6c, doc §9) -----------------------------
+    /// `Player.quick_fight@0x198` (`QuickFight`, coab `Player.cs:593`) — the
+    /// per-combatant auto-fight flag `DoPlayerCombatTurn` forks on
+    /// (`ovr009.cs:134`): `True` runs `PlayerQuickFight`, `False` opens the
+    /// player's combat menu. An **interactive** [`CombatState`] suspends on the
+    /// `False` arm ([`CombatStep::AwaitPlayerTurn`], D-CV5); a schedule-driven
+    /// harness never suspends, whatever this says. Decoded from the record
+    /// ([`crate::combat::records`]); `true` for hand-built combatants, whose
+    /// turns are the AI's by construction.
+    pub quick_fight: bool,
+    /// `player.items.Count > 0` — the Use word's condition (`combat_menu`,
+    /// `ovr009.cs:322`). The combat roster carries no inventory (items live on
+    /// the M3 `Character`), so the fight's assembler supplies the one predicate
+    /// the menu reads. `false` for hand-built combatants.
+    pub has_items: bool,
+    /// `actions.hasTurnedUndead@0x11` (`Classes/Action.cs:24`) — set by
+    /// `turns_undead` (`ovr014.cs:616`), read by the Turn word's condition
+    /// (`ovr009.cs:339`) and by the AI's own turn-undead gate (`ovr010.cs:103`).
+    /// Neither `Action.Clear` nor `CalculateInitiative` resets it: one turning
+    /// per combatant per fight.
+    pub has_turned_undead: bool,
 }
 
 /// Which item a ranged swing draws from — the `out item` of
@@ -615,6 +640,11 @@ impl Combatant {
             thief_skill_level: 0,
             base_dice: (0, 0, 0),
             affects: Vec::new(),
+            // A hand-built combatant fights the AI's turn: `quick_fight` on,
+            // no inventory, no turning spent (doc §9's three menu inputs).
+            quick_fight: true,
+            has_items: false,
+            has_turned_undead: false,
         }
     }
 
@@ -720,6 +750,11 @@ impl Combatant {
             thief_skill_level: 0,
             base_dice: (0, 0, 0),
             affects: Vec::new(),
+            // A hand-built combatant fights the AI's turn: `quick_fight` on,
+            // no inventory, no turning spent (doc §9's three menu inputs).
+            quick_fight: true,
+            has_items: false,
+            has_turned_undead: false,
         }
     }
 }
@@ -1021,6 +1056,22 @@ pub enum ActionEvent {
     /// it is a silent per-round tick. Giving it a `HealKind` would put a
     /// message-shaped event on a site with nothing to say.
     Regenerated { combatant_id: usize, amount: i32 },
+    /// ★ **The abort event** (M6c, doc §9.3): a manual movement loop was ESCed,
+    /// and `sub_7515A(false, entryPos, player)` (`ovr033.cs:614-625`) wrote the
+    /// combatant's map cell back to where the loop started.
+    ///
+    /// It is the one place the presented board must **rewind** mid-turn, and a
+    /// rewind cannot be inferred from the [`Move`](Self::Move) stream: the
+    /// original does not walk the icon home, it erases and redraws it there
+    /// (`RedrawPlayerBackground` + `redrawCombatArea(8, 0, …)`,
+    /// `ovr009.cs:445-455`) — no step sound, no per-cell beats, no move cost.
+    /// Replaying a `Move` per retraced cell would invent an animation the
+    /// original never plays, so the abort travels as itself.
+    MoveAborted {
+        combatant_id: usize,
+        to_x: i32,
+        to_y: i32,
+    },
 }
 
 /// `DisplayAttackMessage`'s `AttackType` (`ovr014.cs:104-110`) minus `Slay`,
@@ -1171,6 +1222,28 @@ pub enum CombatStep {
     /// terminating empty selection pass consumed its K d100 draws first (study
     /// §14 landmine 1). `battle_over` is the loop-exit decision.
     RoundEnded { round: u16, battle_over: bool },
+    /// ★ **D-CV5 suspension 1** — the picked combatant's turn is the *player's*
+    /// (`DoPlayerCombatTurn`'s `quick_fight == False` arm, `ovr009.cs:134`), so
+    /// the core stops instead of running it. The **turn head has already run**
+    /// (the `AttacksReceived`/`directionChanges`/`guarding` resets, the
+    /// restrained/Type_15/Confusion dispatches, the camera) — exactly what the
+    /// original does before `combat_menu` draws — so every legality read the
+    /// menu makes is current (doc §9.5).
+    ///
+    /// The driver then issues [`TurnCmd`](manual::TurnCmd)s through
+    /// [`CombatState::issue`] until one ends the turn; `step()` meanwhile keeps
+    /// returning this same suspension. Fires only when
+    /// [`CombatState::set_interactive`] is on, so replays never see it.
+    AwaitPlayerTurn { combatant_id: usize },
+    /// ★ **D-CV5 suspension 2** — the round-end "Continue Battle:" prompt
+    /// (`ovr009.cs:404-410`) needs its answer. The driver calls
+    /// [`CombatState::answer_continue_battle`], which returns the
+    /// [`CombatStep::RoundEnded`] the prompt was blocking.
+    ///
+    /// **Interactive-driver only** (D-CV5's review finding): harnesses and the
+    /// reel keep answering from `continue_battle_yes` and never suspend, so an
+    /// unconditional suspension can never hang [`CombatState::run_combat`].
+    AwaitContinueBattle,
     /// Combat is over; further `step` calls stay `Ended`.
     Ended,
 }
@@ -1182,6 +1255,14 @@ enum Phase {
     RoundStart,
     /// Next step runs one `FindNextCombatant` selection pass.
     Selecting,
+    /// ★ D-CV5: a manual turn is open for roster index `idx` — its head has
+    /// run and the driver owes [`TurnCmd`](manual::TurnCmd)s. `step()` returns
+    /// [`CombatStep::AwaitPlayerTurn`] until one of them ends the turn, which
+    /// puts the machine back in [`Phase::Selecting`].
+    PlayerTurn { idx: usize },
+    /// ★ D-CV5: the round-end "Continue Battle:" prompt is open;
+    /// [`CombatState::answer_continue_battle`] finishes `BattleRoundChecks`.
+    ContinuePrompt,
     /// Terminal.
     Ended,
 }
@@ -1355,6 +1436,30 @@ pub struct CombatState {
     /// The optional action-trace observer (D-OR3). `None` in normal play, and
     /// dropped by a clone or a serde round trip — see [`SinkSlot`].
     sink: SinkSlot,
+
+    // --- ★ D-CV5: the interactive driver (M6c, doc §9.5) -------------------
+    /// Is a **human** driving this fight? Set by the shell's combat host, never
+    /// by a harness. It is the single gate on both suspensions
+    /// ([`CombatStep::AwaitPlayerTurn`], [`CombatStep::AwaitContinueBattle`]),
+    /// which is what makes the whole manual surface land **dark**: with this
+    /// `false` the step sequence and the draw stream are what they were before
+    /// M6c existed, whatever the roster's `quick_fight` bytes say.
+    interactive: bool,
+    /// The open manual turn, if one is suspended — the movement loop's entry
+    /// backups live inside it (`sub_33B26`'s `movesBackup`/`dirBackup`/`pos`,
+    /// `ovr009.cs:418-420`). `None` whenever [`Phase`] is not
+    /// [`Phase::PlayerTurn`].
+    manual: Option<manual::ManualTurn>,
+    /// A buffered SPACE press, waiting for the original's own keyboard poll.
+    ///
+    /// `process_input_in_monsters_turn` (`sub_36269`, `ovr010.cs:703-754`) reads
+    /// the keyboard at two points inside `PlayerQuickFight`; an interactive host
+    /// cannot block there, so it queues the press at a step head (the D-CV2
+    /// lockstep rule) and the poll consumes it exactly where the original would
+    /// have seen it. Always `false` in a replay — the '2' toggle keeps its own
+    /// occurrence schedule ([`auto_cast_toggles`](Self::auto_cast_toggles)),
+    /// which is unchanged.
+    pending_space: bool,
 }
 
 impl CombatState {
@@ -1395,6 +1500,11 @@ impl CombatState {
             focus: false,
             combat_setup_done: false,
             sink: SinkSlot::default(),
+            // D-CV5 lands dark: no interactive driver, no open manual turn, no
+            // queued key. A harness never touches these three.
+            interactive: false,
+            manual: None,
+            pending_space: false,
         };
         s.rebuild_occupancy();
         // The entry-state team counts (the MainCombatLoop pre-loop
@@ -1445,6 +1555,11 @@ impl CombatState {
             focus: false,
             combat_setup_done: false,
             sink: SinkSlot::default(),
+            // D-CV5 lands dark: no interactive driver, no open manual turn, no
+            // queued key. A harness never touches these three.
+            interactive: false,
+            manual: None,
+            pending_space: false,
         }
     }
 
@@ -1544,12 +1659,52 @@ impl CombatState {
         &self.fighters
     }
 
+    /// ★ **D-CV5**: is a human driving this fight? Turns the two suspensions on
+    /// ([`CombatStep::AwaitPlayerTurn`], [`CombatStep::AwaitContinueBattle`]).
+    ///
+    /// Only the shell's combat host calls this. Every replay harness — the
+    /// frontier guard, `h4_replay`, the reel, `run_combat` — leaves it off, and
+    /// with it off this whole module is inert: the step sequence and the draw
+    /// stream are exactly what they were before manual turns existed.
+    pub fn set_interactive(&mut self, on: bool) {
+        self.interactive = on;
+    }
+
+    /// Whether an interactive driver is attached ([`set_interactive`](Self::set_interactive)).
+    pub fn is_interactive(&self) -> bool {
+        self.interactive
+    }
+
+    /// Queue a SPACE press for the original's own in-turn keyboard poll
+    /// (`process_input_in_monsters_turn`, `ovr010.cs:703-754`): auto-fight is
+    /// revoked for every player-controlled combatant at the next poll, and an
+    /// AI turn that consumes it hands itself back to the player.
+    ///
+    /// A host calls this at a **step head** (the D-CV2 lockstep rule) — never
+    /// mid-playback, where the flag would be read by a turn already resolved.
+    pub fn queue_quick_fight_revoke(&mut self) {
+        self.pending_space = true;
+    }
+
+    /// A combatant's queued delayed cast (`actions.spell_id`, doc §48) — the
+    /// one thing a host must ask before opening a manual turn's menu, because
+    /// `combat_menu`'s head resolves it instead of drawing the menu
+    /// (`ovr009.cs:155-163`).
+    pub fn pending_spell(&self, actor: usize) -> Option<u8> {
+        self.fighters[actor].pending_spell
+    }
+
     /// Advances combat by one tick and returns what happened (D8: control
     /// returns each step). The `Turn` phase resolves the acting combatant's whole
     /// turn *inside* this call (via the [`TurnDriver`]), so a headless caller can
     /// drive an entire fight with `while state.step(rng) != CombatStep::Ended {}`
     /// — that is exactly what [`run_combat`](Self::run_combat) is. See
     /// [`CombatStep`].
+    ///
+    /// An interactive fight has two more answers: a suspended manual turn or a
+    /// suspended Continue-Battle prompt re-reports itself here for as long as it
+    /// is open, so a host that ticks while waiting can never fall through into
+    /// the next round (D-CV5).
     pub fn step(&mut self, rng: &mut EngineRng) -> CombatStep {
         if !self.combat_setup_done {
             self.combat_setup();
@@ -1559,6 +1714,10 @@ impl CombatState {
             Phase::Ended => CombatStep::Ended,
             Phase::RoundStart => self.begin_round(rng),
             Phase::Selecting => self.select_or_end(rng),
+            Phase::PlayerTurn { idx } => CombatStep::AwaitPlayerTurn {
+                combatant_id: self.fighters[idx].id,
+            },
+            Phase::ContinuePrompt => CombatStep::AwaitContinueBattle,
         }
     }
 
@@ -1674,8 +1833,15 @@ impl CombatState {
                     delay,
                     roll,
                 });
-                self.take_turn(rng, idx);
-                CombatStep::Turn { combatant_id: id }
+                // ★ D-CV5: a manual turn suspends here instead of resolving —
+                // `DoPlayerCombatTurn` has run its head and reached the
+                // `quick_fight` fork (`ovr009.cs:131-141`), which is where the
+                // original hands the turn to the keyboard.
+                if self.take_turn(rng, idx) {
+                    CombatStep::AwaitPlayerTurn { combatant_id: id }
+                } else {
+                    CombatStep::Turn { combatant_id: id }
+                }
             }
             None => self.battle_round_checks(),
         }
@@ -1684,7 +1850,12 @@ impl CombatState {
     /// Resolve the picked combatant's turn per the active [`TurnDriver`] — the
     /// dispatch `MainCombatLoop`'s `while (FindNextCombatant) { … }` body performs
     /// (`ovr009.cs:59-95`).
-    fn take_turn(&mut self, rng: &mut EngineRng, idx: usize) {
+    ///
+    /// Returns **true when the turn suspended** for a human (D-CV5): the head has
+    /// run, [`Phase::PlayerTurn`] is armed, and the caller owes the driver a
+    /// [`CombatStep::AwaitPlayerTurn`]. Always false without an interactive
+    /// driver.
+    fn take_turn(&mut self, rng: &mut EngineRng, idx: usize) -> bool {
         // The in-turn keyboard poll (`sub_36269` @`ovr010:1269`, called at the
         // AI turn's head `sub_3504B+D`): a buffered '2' press flips
         // `AutoPCsCastMagic` ("Magic On"/"Magic Off" @`ovr010:129C-12A9`). The
@@ -1727,6 +1898,16 @@ impl CombatState {
                 // throws); re-pointed per swing in `attack_target` (doc §50).
                 self.selected_attacker = idx;
                 if self.fighters[idx].in_combat && self.fighters[idx].delay > 0 {
+                    // `if (delay == 20) delay = 19` (`ovr009.cs:113-116`), the
+                    // head of the turn body. 20 is the flag value SPACE parks on
+                    // a combatant whose auto-fight it just revoked
+                    // (`sub_36269` @`ovr010:742`); the clamp puts it back inside
+                    // the normal delay band before the turn runs. Dead code
+                    // without a keyboard — initiative never produces 20 — but it
+                    // is the first thing the original does here.
+                    if self.fighters[idx].delay == 20 {
+                        self.fighters[idx].delay = 19;
+                    }
                     // Site 2 — the turn-head camera (`sub_33281` @`ovr009:02FA-0318`):
                     // the camera follows the acting combatant — `focus = (team ==
                     // Ours) || PlayerOnScreen(actor)` — and a focus-on turn scrolls
@@ -1746,12 +1927,37 @@ impl CombatState {
                     if self.fighters[idx].pending_spell.is_none() {
                         self.check_affects_effect(idx, CheckType::Confusion);
                     }
+                    // ★ The `quick_fight` fork (`ovr009.cs:132-140`): the AI turn
+                    // or the player's menu. Everything above ran either way —
+                    // which is why doc §9.5 puts the suspension *here* and not at
+                    // the top of the turn: the menu's legality reads (moves left,
+                    // can_cast, the guard flags) are the post-head values.
+                    if self.manual_turn_due(idx) {
+                        self.manual = Some(manual::ManualTurn::new(idx));
+                        self.phase = Phase::PlayerTurn { idx };
+                        return true;
+                    }
                     self.melee_ai_turn(rng, idx);
                 } else {
                     self.clear_actions(idx);
                 }
             }
         }
+        false
+    }
+
+    /// The `quick_fight == False` arm of `DoPlayerCombatTurn`'s fork
+    /// (`ovr009.cs:134`), narrowed by D-CV5's interactive gate.
+    ///
+    /// The extra `team`/`npc` terms are not in that line — the original forks on
+    /// the flag alone — but they are the same predicate every *other* site pairs
+    /// with it (`sub_36269`'s revoke sweep keeps `control_morale < NPC_Base`,
+    /// `ovr010.cs:733`), and they make a monster record that happens to carry a
+    /// zero `quick_fight` byte fight itself rather than open a menu for it. A
+    /// party PC is the only combatant a human ever drives.
+    fn manual_turn_due(&self, idx: usize) -> bool {
+        let f = &self.fighters[idx];
+        self.interactive && f.team == Team::Party && !f.npc && !f.quick_fight
     }
 
     /// `BattleRoundChecks` (`ovr009.cs:363`, `battle01`) reduced to its
@@ -1806,15 +2012,57 @@ impl CombatState {
         let (party, monsters) = self.live_counts();
         self.friends_count = party;
         self.foe_count = monsters;
-        let mut battle_over =
-            party == 0 || monsters == 0 || self.combat_round >= self.no_action_limit;
+        let battle_over = party == 0 || monsters == 0 || self.combat_round >= self.no_action_limit;
         // The "Continue Battle:" prompt (`ovr009.cs:404-410`, doc §48): with
         // 2+ party members up and no foes, a 'Y' answer overrides battleOver.
-        // The occurrence-indexed schedule stands in for the keyboard.
+        // The occurrence-indexed schedule stands in for the keyboard — unless
+        // there is a real keyboard, in which case D-CV5's second suspension
+        // hands the question to it and `answer_continue_battle` resumes here.
         if party > 1 && monsters == 0 {
+            if self.interactive {
+                self.phase = Phase::ContinuePrompt;
+                return CombatStep::AwaitContinueBattle;
+            }
             let occurrence = self.continue_prompts_seen;
             self.continue_prompts_seen += 1;
             let answered_yes = self.continue_battle_yes.contains(&occurrence);
+            return self.finish_round(battle_over, Some(answered_yes));
+        }
+        self.finish_round(battle_over, None)
+    }
+
+    /// ★ **D-CV5 suspension 2's resume**: answers the round-end "Continue
+    /// Battle:" prompt and returns the [`CombatStep::RoundEnded`] it was
+    /// blocking (`ovr009.cs:404-410`).
+    ///
+    /// Panics if no prompt is open — like every `issue`
+    /// [refusal](manual::TurnRefusal), a driver that answers a question nobody
+    /// asked is a bug in the driver, not a no-op.
+    pub fn answer_continue_battle(&mut self, yes: bool) -> CombatStep {
+        assert!(
+            matches!(self.phase, Phase::ContinuePrompt),
+            "no Continue-Battle prompt is open (D-CV5)"
+        );
+        // The occurrence clock keeps ticking on the live path too: it is the
+        // same prompt, and a capture staged from a live fight indexes its
+        // answers by exactly this count.
+        self.continue_prompts_seen += 1;
+        // Re-derive the verdict the prompt interrupted. Its inputs are the
+        // round-stale counts this same call just refreshed and the round
+        // counter, none of which a suspension can change.
+        let battle_over = self.friends_count == 0
+            || self.foe_count == 0
+            || self.combat_round >= self.no_action_limit;
+        self.finish_round(battle_over, Some(yes))
+    }
+
+    /// `battle01`'s tail (`ovr009.cs:404-412`): fold the Continue-Battle answer
+    /// into the verdict, park the phase, and report the round.
+    ///
+    /// `answered` is `None` when the prompt did not fire at all.
+    fn finish_round(&mut self, battle_over: bool, answered: Option<bool>) -> CombatStep {
+        let mut battle_over = battle_over;
+        if let Some(answered_yes) = answered {
             if answered_yes {
                 battle_over = false;
             }
@@ -3613,6 +3861,30 @@ pub fn build_near_targets(
     ignore_walls: bool,
 ) -> Vec<NearTarget> {
     let attacker = combatants[attacker_idx];
+    // `near_enermy`'s post-sort filter-compact (`ovr025:2648-26B2`): keep the
+    // opposite team, preserving sorted order (coab≠binary #20, header note).
+    build_sorted_combatants(map, combatants, attacker_idx, max_range, ignore_walls)
+        .into_iter()
+        .filter(|nt| combatants[nt.idx].team != attacker.team)
+        .collect()
+}
+
+/// `Rebuild_SortedCombatantList(size, max_range, pos, filter)` itself
+/// (`sub_738D8` @`ovr032:08D8`, coab `ovr032.cs:228`) — the **unfiltered**
+/// sorted list [`build_near_targets`] then compacts.
+///
+/// Two callers want it raw: `near_enermy`, which filters *after* the sort
+/// (coab≠binary #20 — the whole reason this split exists), and Aim's
+/// `copy_sorted_players` (`ovr014.cs:2073`), whose predicate is `p => true`, so
+/// the player cycles allies and the attacker itself along with the enemies.
+pub fn build_sorted_combatants(
+    map: &CombatMap,
+    combatants: &[RangeCombatant],
+    attacker_idx: usize,
+    max_range: i32,
+    ignore_walls: bool,
+) -> Vec<NearTarget> {
+    let attacker = combatants[attacker_idx];
     let attacker_map = size_footprint(attacker.size, attacker.pos);
 
     let mut out: Vec<(NearTarget, u8)> = Vec::new();
@@ -3695,12 +3967,7 @@ pub fn build_near_targets(
         }
     }
 
-    // `near_enermy`'s post-sort filter-compact (`ovr025:2648-26B2`): keep the
-    // opposite team, preserving sorted order (coab≠binary #20, header note).
-    out.into_iter()
-        .filter(|(nt, _)| combatants[nt.idx].team != attacker.team)
-        .map(|(nt, _)| nt)
-        .collect()
+    out.into_iter().map(|(nt, _)| nt).collect()
 }
 
 /// **`CombatWorld` is the former name of the now-unified [`CombatState`].** Kept
@@ -3928,6 +4195,16 @@ impl CombatState {
                     }
                 }
                 CombatStep::Ended => break,
+                // D-CV5's review finding, enforced: a headless driver cannot
+                // answer a suspension, so an interactive state reaching here
+                // would spin forever. Loud beats hung (D11).
+                step @ (CombatStep::AwaitPlayerTurn { .. } | CombatStep::AwaitContinueBattle) => {
+                    panic!(
+                        "{step:?}: `run_combat` is a headless driver — a fight with \
+                         `set_interactive(true)` must be pumped by a host that can \
+                         answer D-CV5's suspensions"
+                    )
+                }
                 _ => {}
             }
         }
