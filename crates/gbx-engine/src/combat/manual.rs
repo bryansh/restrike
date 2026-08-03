@@ -431,6 +431,29 @@ impl CombatState {
             return Err(TurnRefusal::NoManualTurn);
         };
         let actor = manual.actor;
+        let outcome = self.dispatch(rng, actor, cmd);
+        // `combat_menu`'s loop tail (`ovr009.cs:294-297`): every iteration that
+        // did NOT end the turn re-centres on the acting combatant
+        // (`RedrawCombatIfFocusOn(true, 2, player)`) and redraws its summary.
+        // The camera is fight state, so the scroll belongs here rather than in
+        // the scene — and it is skipped while the movement loop is open,
+        // because that loop lives *inside* one menu iteration and has its own
+        // scroll sites (`sub_33B26`).
+        let turn_open = self.manual.is_some();
+        let moving = self.manual.as_ref().is_some_and(|m| m.movement.is_some());
+        if turn_open && !moving && self.focus {
+            let p = self.fighters[actor].pos;
+            self.redraw_combat_area(8, 2, p);
+        }
+        outcome
+    }
+
+    fn dispatch(
+        &mut self,
+        rng: &mut EngineRng,
+        actor: usize,
+        cmd: TurnCmd,
+    ) -> Result<TurnOutcome, TurnRefusal> {
         match cmd {
             TurnCmd::BeginMove => self.begin_move(actor),
             TurnCmd::MoveStep(dir) => self.move_step(rng, actor, dir),

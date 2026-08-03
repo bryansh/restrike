@@ -435,7 +435,14 @@ impl CombatHost {
         // stage past `Announce` owns a scene, and a fight restored from a
         // snapshot has none.
         if !matches!(self.stage, Stage::Announce { .. }) {
+            let had_scene = self.scene.is_some();
             self.rebuild_scene_if_missing(ctx);
+            // A fight restored *on a player's turn* rebuilds its menus' three
+            // surfaces too — the words, the status row and the focus box are
+            // presentation, so the snapshot did not carry them.
+            if !had_scene && self.manual.is_some() {
+                self.refresh_manual_surfaces();
+            }
         }
         self.drain_input(ctx);
         match self.stage {

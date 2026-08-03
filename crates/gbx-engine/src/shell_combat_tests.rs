@@ -515,6 +515,82 @@ fn run_fight_to_the_end(snapshot_after: Option<usize>) -> FightRun {
 }
 
 #[test]
+fn a_fight_parked_on_a_players_turn_round_trips_with_its_menus() {
+    // ★ **M6c's half of D-CV7**: the state a *suspended manual turn* adds —
+    // the open `ManualTurn` in the core, the `ManualUi` in the host — is inside
+    // the same serde-derived `Shell`, so a fight waiting on a keypress
+    // snapshots by construction. (Nothing player-facing can reach a save from
+    // here: the combat menu builds no Save word, `ovr009.cs:313-360`. The
+    // obligation is the type system's, and the inspector's debug pane.)
+    let mut e = engine_with_program(load_then_combat_program(1, b"AFTERWARD"), manual_pcs());
+    for _ in 0..MAX_TICKS {
+        e.tick(&[]);
+        if e.shell()
+            .combat_host()
+            .is_some_and(|h| matches!(h.stage(), Stage::PlayerTurn))
+        {
+            break;
+        }
+    }
+    let host = e.shell().combat_host().expect("a manual turn opened");
+    let actor = host.manual().expect("with menus").actor();
+    let prompt = host
+        .scene()
+        .and_then(|s| s.prompt())
+        .expect("the menu is on the prompt row")
+        .to_string();
+
+    let json = serde_json::to_string(e.shell()).expect("a suspended turn serializes");
+    e.shell = serde_json::from_str(&json).expect("and deserializes");
+
+    let back = e.shell().combat_host().expect("the fight survived");
+    assert!(
+        matches!(back.stage(), Stage::PlayerTurn),
+        "still the player's"
+    );
+    assert_eq!(
+        back.manual().map(|u| u.actor()),
+        Some(actor),
+        "and still the same player's"
+    );
+    assert_eq!(
+        back.state().manual_turn().map(|m| m.actor()),
+        Some(actor),
+        "the core's own suspension came back too"
+    );
+    assert!(back.state().is_interactive());
+
+    // The next tick rebuilds the scene and puts the menu back on the row.
+    e.tick(&[]);
+    assert_eq!(
+        e.shell()
+            .combat_host()
+            .and_then(|h| h.scene())
+            .and_then(|s| s.prompt()),
+        Some(prompt.as_str()),
+        "the same words, redrawn from the restored state"
+    );
+    // And it still plays: hand the turn to the AI and let the fight finish.
+    let mut o = Observed::default();
+    for _ in 0..MAX_TICKS {
+        let keys: Vec<crate::input::InputEvent> = match e.shell().combat_host().map(|h| h.stage()) {
+            Some(Stage::PlayerTurn) => vec![crate::input::InputEvent::Char(b'Q')],
+            Some(Stage::ContinuePrompt) => vec![crate::input::InputEvent::Char(b'N')],
+            _ => Vec::new(),
+        };
+        e.tick(&keys);
+        drain(&mut e, &mut o);
+        if combat_line(&o).is_some() {
+            break;
+        }
+    }
+    assert!(
+        combat_line(&o).is_some(),
+        "the restored fight played on to its end"
+    );
+}
+
+#[test]
 fn a_restored_fight_rebuilds_its_scene_and_renders_again() {
     let mut e = engine_with_program(load_then_combat_program(3, b"AFTERWARD"), two_pcs());
     for _ in 0..MAX_TICKS {
