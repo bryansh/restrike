@@ -369,6 +369,18 @@ Walk around Tilverton, looking right.
 > MM casting, affects; the exotic-spell tail is the circle-back ledger,
 > `h4-entry-state-snapshot.md` §50.5), and this plan's M6–M8 shift right
 > accordingly. Sections below keep their original numbering as history.
+>
+> **Queued as the first post-M6 slice (Bryan, 2026-08-03): scene pictures** —
+> `PICTURE`/`BIGPIC`/`ANIMATION` rendering in the walk loop. The op handlers
+> have recorded-not-drawn since M2 (an honest scope note that outlived three
+> milestones — found when the amnesia intro and the tavern showed empty
+> viewports in live play); `image.rs`/`anim.rs` already decode every BIGPIC
+> block in the real set, so the slice is wiring + placement/palette
+> transcription from `CMD_Picture`'s coab site. Rides with it: the
+> **interactive-rendering triage list** from Bryan's first live playthroughs —
+> the status line overdrawing full-screen `Screen` states (camp), the camp
+> screen's missing party roster, the VERTICAL MENU renderer (unverified — the
+> bar's drink submenu), and whatever else his list surfaces.
 
 ### M5 — Fireball (3–5 weekends)
 - Vancian memorization/slots/scribing; casting in and out of combat.
