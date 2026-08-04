@@ -324,7 +324,7 @@ fn golden_hash_of_a_synthetic_rsav_is_stable() {
     // the header's `data_fingerprint` (a hash of the exact file set,
     // `save::data_fingerprint`) moved with it. A fixture-set change, not a
     // format change — SAVE_FORMAT_VERSION deliberately stays at 2.
-    const GOLDEN: &str = "0df753d400352ee4d16b171270d632a6f4a94899588d19c9eb291443921c915c";
+    const GOLDEN: &str = "ae6d936b2cac155aae7b4ab1fbb33de96cf785f7ae46d99043d183bc956ad1d1";
     assert_eq!(hash_hex, GOLDEN, "synthetic .rsav golden hash changed");
 }
 

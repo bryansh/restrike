@@ -36,23 +36,35 @@ use crate::input::{ExtKey, InputEvent, InputQueue};
 /// owning [`Hotbar`]'s text.
 pub type WordRange = (usize, usize);
 
-/// `BuildInputKeys` (`ovr027.cs:59-86`): maximal runs of `[0-9A-Z]` are the
-/// hotkey-selectable words; everything else (spaces, lowercase, punctuation)
-/// is separator.
+/// `BuildInputKeys` (`ovr027.cs:59-86`), transcribed EXACTLY: each
+/// `[0-9A-Z]` character *delimits* a word — a word runs from its capital
+/// through the following lowercase tail, ending two characters before the
+/// NEXT capital (`end = idx - 2`, dropping the separating space); the last
+/// word runs to the end of the string. This is why the original inverts the
+/// WHOLE selected word ("Quick" -> QUICK on screen, the 8x8 font renders
+/// lowercase as capitals) — and why ALL-CAPS menu strings (script HORIZONTAL
+/// MENUs) degenerate to per-letter words with empty highlight spans, exactly
+/// as they do in the original. (The previous "maximal runs of [0-9A-Z]"
+/// reading was a mis-transcription, found in the M6 D13 side-by-side: the
+/// DOSBox combat menu inverts all of QUICK, not just the Q.)
 pub fn build_words(text: &str) -> Vec<WordRange> {
     let bytes = text.as_bytes();
-    let mut words = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i].is_ascii_uppercase() || bytes[i].is_ascii_digit() {
-            let start = i;
-            while i < bytes.len() && (bytes[i].is_ascii_uppercase() || bytes[i].is_ascii_digit()) {
-                i += 1;
+    let mut words: Vec<WordRange> = Vec::new();
+    let mut start: Option<usize> = None;
+    for (idx, &b) in bytes.iter().enumerate() {
+        if b.is_ascii_uppercase() || b.is_ascii_digit() {
+            if let Some(s) = start {
+                // Close the previous word at `idx - 2` inclusive (coab), i.e.
+                // exclusive end `idx - 1`, clamped so adjacent capitals yield
+                // the original's own empty-span degenerate words.
+                let end_ex = (idx.saturating_sub(1)).max(s);
+                words.push((s, end_ex));
             }
-            words.push((start, i));
-        } else {
-            i += 1;
+            start = Some(idx);
         }
+    }
+    if let Some(s) = start {
+        words.push((s, bytes.len()));
     }
     words
 }
@@ -617,20 +629,35 @@ mod tests {
     }
 
     #[test]
-    fn build_words_finds_maximal_uppercase_digit_runs() {
-        let words = build_words("Area Cast View Encamp Search Look");
-        // "Area" -> 'A' run of length 1 (only leading 'A' is uppercase).
+    fn build_words_spans_capital_to_next_capital() {
+        // `BuildInputKeys` (`ovr027.cs:59-86`): a word runs from its capital
+        // through the lowercase tail, ending before the next capital's
+        // separating space — the WHOLE word inverts when selected (the D13
+        // side-by-side correction: DOSBox inverts all of QUICK, not the Q).
         let text = "Area Cast View Encamp Search Look";
+        let words = build_words(text);
         let slices: Vec<&str> = words.iter().map(|&(s, e)| &text[s..e]).collect();
-        assert_eq!(slices, vec!["A", "C", "V", "E", "S", "L"]);
+        assert_eq!(
+            slices,
+            vec!["Area", "Cast", "View", "Encamp", "Search", "Look"]
+        );
     }
 
     #[test]
-    fn build_words_handles_full_uppercase_words_and_digits() {
-        let words = build_words("1 BASH PICK KNOCK EXIT");
-        let text = "1 BASH PICK KNOCK EXIT";
-        let slices: Vec<&str> = words.iter().map(|&(s, e)| &text[s..e]).collect();
-        assert_eq!(slices, vec!["1", "BASH", "PICK", "KNOCK", "EXIT"]);
+    fn build_words_degenerates_on_all_caps_like_the_original() {
+        // Adjacent capitals each start a new word whose exclusive end clamps
+        // to its start (coab's `end = idx - 2` gone negative): per-letter
+        // words with EMPTY highlight spans — the original's own behavior on
+        // all-caps script menus ("PUNCH BARKEEP..."). Hotkey matching still
+        // works (each word's first char is the capital); only the last word
+        // carries a visible span (coab's `end = menuText.Length`).
+        let text = "1 BASH";
+        let words = build_words(text);
+        // '1','B','A','S' close empty; the final 'H' spans to end-of-string.
+        assert_eq!(words.len(), 5);
+        assert!(words[..4].iter().all(|&(s, e)| e <= s + 1));
+        assert_eq!(words[4], (5, 6));
+        assert_eq!(&text[words[1].0..words[1].0 + 1], "B");
     }
 
     #[test]

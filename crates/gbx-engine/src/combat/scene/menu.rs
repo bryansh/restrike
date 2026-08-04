@@ -107,6 +107,10 @@ pub struct ManualUi {
     /// The original's own transient line ("can't go there", "Not with that
     /// weapon", "Already been targeted"), shown until the next keypress.
     message: Option<String>,
+    /// `gbl.menuSelectedWord` — the selected menu word. GLOBAL in the
+    /// original (the last-resolved word stays selected into the next menu,
+    /// across turns): the host seeds it at open and persists it after keys.
+    selected: usize,
 }
 
 impl ManualUi {
@@ -141,6 +145,7 @@ impl ManualUi {
             cursor_occupant: None,
             pending_step: None,
             message: None,
+            selected: 0,
         };
         ui.refresh(state);
         ui
@@ -319,6 +324,37 @@ impl ManualUi {
         // Any keypress clears the transient message the last one printed —
         // `draw8x8_clear_area(0x18, …)` at the top of every loop iteration.
         self.message = None;
+        // `displayInput`'s selection machinery (`ovr027.cs:215-268`): the
+        // ','/'.' cycle, and Enter resolving the highlighted word — only in
+        // the stages that show MENU WORDS. The loops with their own Enter
+        // semantics (Moving ends the walk, Cursor commits) are untouched.
+        if matches!(
+            self.stage,
+            Stage::Main | Stage::Aim | Stage::Done | Stage::Speed
+        ) {
+            match ev {
+                InputEvent::Char(b',') => {
+                    self.cycle_selection(-1);
+                    return MenuAction::None;
+                }
+                InputEvent::Char(b'.') => {
+                    self.cycle_selection(1);
+                    return MenuAction::None;
+                }
+                InputEvent::Enter => {
+                    return match self.selected_hotkey() {
+                        Some(key) => self.key(InputEvent::Char(key)),
+                        None => MenuAction::None,
+                    };
+                }
+                InputEvent::Char(c) if c.is_ascii_alphanumeric() => {
+                    // `select_word_starting_with` before the stage handler
+                    // resolves it — the selection lands on what you picked.
+                    self.select_word_starting_with(c.to_ascii_uppercase());
+                }
+                _ => {}
+            }
+        }
         match self.stage {
             Stage::Main => self.key_main(ev),
             Stage::Moving => self.key_moving(ev),
@@ -330,6 +366,64 @@ impl ManualUi {
             // The host drives the aim menu itself here and issues
             // `ResolvePendingCast`; no keys of our own.
             Stage::PendingCast => MenuAction::None,
+        }
+    }
+
+    /// The selected word's span within the CURRENT prompt, for the inverse-
+    /// video render — `None` for non-menu stages and transient messages.
+    pub fn selected_span(&self) -> Option<(usize, usize)> {
+        if !matches!(
+            self.stage,
+            Stage::Main | Stage::Aim | Stage::Done | Stage::Speed
+        ) || self.message.is_some()
+        {
+            return None;
+        }
+        let text = self.prompt();
+        let words = crate::widgets::build_words(&text);
+        if words.is_empty() {
+            return None;
+        }
+        Some(words[self.selected.min(words.len() - 1)])
+    }
+
+    /// `gbl.menuSelectedWord` in/out — the host persists it across turns.
+    pub fn selected_index(&self) -> usize {
+        self.selected
+    }
+
+    pub fn set_selected(&mut self, index: usize) {
+        self.selected = index;
+    }
+
+    fn cycle_selection(&mut self, dir: i32) {
+        let words = crate::widgets::build_words(&self.prompt());
+        let n = words.len() as i32;
+        if n == 0 {
+            return;
+        }
+        let cur = (self.selected.min(words.len() - 1)) as i32;
+        self.selected = ((cur + dir).rem_euclid(n)) as usize;
+    }
+
+    /// pub(crate) for the sibling test module.
+    pub(crate) fn selected_hotkey(&self) -> Option<u8> {
+        let text = self.prompt();
+        let words = crate::widgets::build_words(&text);
+        if words.is_empty() {
+            return None;
+        }
+        let (start, _) = words[self.selected.min(words.len() - 1)];
+        text.as_bytes().get(start).copied()
+    }
+
+    fn select_word_starting_with(&mut self, upper: u8) {
+        let text = self.prompt();
+        if let Some(i) = crate::widgets::build_words(&text)
+            .iter()
+            .position(|&(s, _)| text.as_bytes().get(s).copied() == Some(upper))
+        {
+            self.selected = i;
         }
     }
 

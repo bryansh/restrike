@@ -239,6 +239,9 @@ pub struct CombatScene {
     messages: Vec<PanelOp>,
     /// The prompt row's current line (§1.5's other channel).
     prompt: Option<String>,
+    /// The selected-word span for a MENU prompt (`draw_menu_line`); `None`
+    /// renders the prompt flat (transient messages, non-menu prompts).
+    prompt_selection: Option<(usize, usize)>,
     /// The status row's current line ("Spell:<name>", "Range = N").
     status: Option<String>,
     /// Overlay sprites currently up — missile, burst, death flash.
@@ -261,6 +264,7 @@ impl CombatScene {
             panel_focus: None,
             messages: Vec::new(),
             prompt: None,
+            prompt_selection: None,
             status: None,
             overlays: Vec::new(),
             sounds: Vec::new(),
@@ -490,7 +494,14 @@ impl CombatScene {
     /// Put a line on the prompt row directly — M6c's menus, which the host
     /// draws between steps rather than scheduling through the timeline (no
     /// playback runs while a player is deciding).
+    /// The menu-selection span rendered with the prompt (inverse video);
+    /// call AFTER `set_prompt` — plain `set_prompt` clears it.
+    pub fn set_prompt_selection(&mut self, span: Option<(usize, usize)>) {
+        self.prompt_selection = span;
+    }
+
     pub fn set_prompt(&mut self, text: Option<String>) {
+        self.prompt_selection = None;
         self.prompt = text;
     }
 
@@ -531,7 +542,10 @@ impl CombatScene {
             Op::Overlay(draws) => self.overlays = draws,
             Op::Message(PanelOp::Clear) => self.messages.clear(),
             Op::Message(other) => self.messages.push(other),
-            Op::Prompt(text) => self.prompt = text,
+            Op::Prompt(text) => {
+                self.prompt = text;
+                self.prompt_selection = None; // timeline messages render flat
+            }
             Op::Status(text) => self.status = text,
             Op::Sound(id) => self.sounds.push(SoundEvent(id)),
             Op::Wait => {}
@@ -562,7 +576,10 @@ impl CombatScene {
             None => render::clear_status_line(fb),
         }
         match &self.prompt {
-            Some(text) => render::draw_prompt(fb, font, text),
+            Some(text) => match self.prompt_selection {
+                Some(span) => render::draw_menu_line(fb, font, text, Some(span)),
+                None => render::draw_prompt(fb, font, text),
+            },
             None => render::clear_prompt_line(fb),
         }
         Ok(())

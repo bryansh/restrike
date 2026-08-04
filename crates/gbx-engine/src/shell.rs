@@ -99,34 +99,15 @@ impl VmPhase {
     }
 }
 
-/// `display_highlighed_text` (`sub_6C1E9`, `ovr027.cs:89-120`) for a parked
-/// [`Hotbar`]: row 0x18, three-way coloring, padded clear to col 0x27.
-/// `defaultMenuColors` (`Gbl.cs:189`): highlight 15, foreground 10.
+/// The shell's parked-`Hotbar` line — delegates to the shared
+/// `sub_6C1E9` transcription (`scene::render::draw_menu_line`).
 fn draw_hotbar_prompt(
     fb: &mut crate::framebuffer::Framebuffer,
     font: &gbx_formats::font::Font,
     hotbar: &Hotbar,
 ) {
-    const ROW: usize = 0x18;
-    const HIGHLIGHT: u8 = 15;
-    const FOREGROUND: u8 = 10;
-    let bytes = hotbar.text.as_bytes();
     let span = hotbar.selected.and_then(|i| hotbar.words().get(i)).copied();
-    for col in 0..=0x27usize {
-        let Some(&ch) = bytes.get(col) else {
-            crate::text::draw_char(fb, font, b' ', ROW, col, 0, 0);
-            continue;
-        };
-        let in_selection = span.is_some_and(|(s, e)| col >= s && col < e);
-        let (bg, fg) = if in_selection {
-            (HIGHLIGHT, 0) // inverse video over the selected word
-        } else if ch.is_ascii_uppercase() || ch.is_ascii_digit() {
-            (0, HIGHLIGHT)
-        } else {
-            (0, FOREGROUND)
-        };
-        crate::text::draw_char(fb, font, ch, ROW, col, bg, fg);
-    }
+    crate::combat::scene::render::draw_menu_line(fb, font, &hotbar.text, span);
 }
 
 /// The vector/chain half of a flow's probe line.

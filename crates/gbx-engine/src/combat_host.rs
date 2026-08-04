@@ -165,6 +165,12 @@ pub struct CombatHost {
     outcome: Option<CombatOutcome>,
     /// ★ **M6c**: the open manual turn's menus, if one is suspended.
     manual: Option<ManualUi>,
+    /// `gbl.menuSelectedWord` — global in the original: the last-resolved
+    /// menu word stays selected into the next menu, across turns (the D13
+    /// side-by-side showed QUICK still selected a turn after Quick was
+    /// picked). Seeded into each `ManualUi` at open, persisted after keys.
+    #[serde(default)]
+    menu_selected: usize,
     /// Keys pressed during AI turns that no path honours — none, as of M6c:
     /// SPACE and '2' are both real now. Kept because the *reporting* is the
     /// §8.2 rule, and the next unmodeled key should land here rather than
@@ -195,6 +201,7 @@ impl Clone for CombatHost {
             ended: self.ended,
             outcome: self.outcome,
             manual: self.manual.clone(),
+            menu_selected: self.menu_selected,
             dropped_keys: self.dropped_keys.clone(),
             scene: None,
             batch: Rc::new(RefCell::new(Vec::new())),
@@ -423,6 +430,7 @@ impl CombatHost {
             ended: false,
             outcome: None,
             manual: None,
+            menu_selected: 0,
             dropped_keys: Vec::new(),
             scene: None,
             batch: Rc::new(RefCell::new(Vec::new())),
@@ -625,6 +633,7 @@ impl CombatHost {
     /// `ovr009.cs:122-124`).
     fn open_manual_turn(&mut self, actor: usize) {
         let mut ui = ManualUi::open(&mut self.state, actor);
+        ui.set_selected(self.menu_selected);
         if let Some(scene) = self.scene.as_mut() {
             ui.set_game_speed(scene.clock().game_speed());
             scene.set_panel_focus(Some(actor));
@@ -649,6 +658,7 @@ impl CombatHost {
         let aim_cell = ui.aim_focus_cell();
         let actor = ui.actor();
         let panel = ui.aim_target().or(Some(actor));
+        let ui_span = ui.selected_span();
         if let Some(scene) = self.scene.as_mut() {
             // The actor's box rides the **presented** board, so it follows the
             // icon through a walk instead of jumping to where the fight has
@@ -656,6 +666,7 @@ impl CombatHost {
             // presentation's own and has no board twin.
             let pos = aim_cell.or_else(|| scene.board().combatant(actor).map(|c| c.pos));
             scene.set_prompt(Some(prompt));
+            scene.set_prompt_selection(ui_span);
             scene.set_status(status);
             scene.set_focus(pos.map(|pos| crate::combat::scene::FocusCursor { pos, size }));
             scene.set_panel_focus(panel);
@@ -840,6 +851,9 @@ impl CombatHost {
                         return;
                     }
                 }
+            }
+            if let Some(ui) = self.manual.as_ref() {
+                self.menu_selected = ui.selected_index();
             }
             self.refresh_manual_surfaces();
         }

@@ -712,6 +712,38 @@ pub fn draw_prompt(fb: &mut Framebuffer, font: &Font, text: &str) {
     draw_string(fb, font, text, PROMPT_ROW, 0, 0, LABEL_COLOR);
 }
 
+/// `display_highlighed_text` (`sub_6C1E9`, `ovr027.cs:89-120`): the prompt
+/// row as a MENU line. The selected word's span draws in inverse video
+/// (black on highlight 15), every hotkey-capable `[0-9A-Z]` character in
+/// highlight 15, separators/lowercase in foreground 10 — `defaultMenuColors`
+/// (`Gbl.cs:189`), call site `ovr027.cs:253`. Padded clear to the row end.
+/// Shared by the shell's parked Hotbar and the combat manual menus.
+pub fn draw_menu_line(
+    fb: &mut Framebuffer,
+    font: &Font,
+    text: &str,
+    selected: Option<(usize, usize)>,
+) {
+    const HIGHLIGHT: u8 = 15;
+    const FOREGROUND: u8 = 10;
+    let bytes = text.as_bytes();
+    for col in 0..40usize {
+        let Some(&ch) = bytes.get(col) else {
+            crate::text::draw_char(fb, font, b' ', PROMPT_ROW, col, 0, 0);
+            continue;
+        };
+        let in_selection = selected.is_some_and(|(s, e)| col >= s && col < e);
+        let (bg, fg) = if in_selection {
+            (HIGHLIGHT, 0) // inverse video over the selected word
+        } else if ch.is_ascii_uppercase() || ch.is_ascii_digit() {
+            (0, HIGHLIGHT)
+        } else {
+            (0, FOREGROUND)
+        };
+        crate::text::draw_char(fb, font, ch, PROMPT_ROW, col, bg, fg);
+    }
+}
+
 /// The status row (`ovr023.cs:3122`'s "Spell:<name>", `ovr014.cs:1760`'s
 /// "Range = N") — row 0x17 from column 0, cleared first.
 pub fn draw_status_line(fb: &mut Framebuffer, font: &Font, text: &str) {

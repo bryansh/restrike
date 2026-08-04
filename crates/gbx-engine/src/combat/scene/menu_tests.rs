@@ -7,7 +7,7 @@
 //! `draw_prompt` they cover), and what M6c adds is *which string goes there*.
 
 use super::menu::{ManualUi, MenuAction, Stage};
-use crate::combat::manual::{AimCamera, TurnCmd};
+use crate::combat::manual::{AimCamera, TurnCmd, TurnOutcome};
 use crate::combat::{CombatMap, CombatState, Combatant, GridPos, Team};
 use crate::input::{ExtKey, InputEvent};
 use crate::rng::EngineRng;
@@ -409,4 +409,68 @@ fn a_pending_cast_opens_with_no_menu_at_all() {
     let ui = ManualUi::open(&mut state, actor);
     assert_eq!(ui.stage(), Stage::PendingCast);
     assert_eq!(ui.prompt(), "");
+}
+
+// --- `displayInput`'s selection machinery (`gbl.menuSelectedWord`) ---------
+
+#[test]
+fn comma_and_period_cycle_the_selection_and_enter_resolves_it() {
+    let (_state, _rng, mut ui) = open_fight();
+    // The main menu always carries Move? -> at minimum "View Aim Quick Done".
+    let span0 = ui.selected_span().expect("a menu shows a selection");
+    assert_eq!(ui.key(InputEvent::Char(b'.')), MenuAction::None);
+    let span1 = ui.selected_span().expect("still a menu");
+    assert_ne!(span0, span1, "'.' moved the selection");
+    assert_eq!(ui.key(InputEvent::Char(b',')), MenuAction::None);
+    assert_eq!(
+        ui.selected_span().expect("back where it started"),
+        span0,
+        "',' cycles the other way"
+    );
+    // Enter resolves the SELECTED word: select 'Q'uick, then Enter.
+    ui.key(InputEvent::Char(b'q'));
+    let mut ui2 = ui.clone();
+    // Whatever Quick resolved to, Enter on a fresh Quick-selected menu
+    // resolves identically (Enter == the highlighted word's hotkey).
+    assert_eq!(ui.selected_hotkey(), Some(b'Q'));
+    assert_eq!(
+        ui2.key(InputEvent::Enter),
+        MenuAction::Issue(TurnCmd::EngageQuickFight),
+    );
+}
+
+#[test]
+fn the_selection_index_carries_into_submenus_like_the_original() {
+    let (_state, _rng, mut ui) = open_fight();
+    // Pressing 'D' lands the selection on "Done" (index 4 of
+    // "Move View Aim Quick Done") and opens the submenu — and
+    // `gbl.menuSelectedWord` is GLOBAL: the original does not reset it for
+    // the new menu, so index 4 of "Guard Delay Quit Speed Exit" (no dying
+    // teammate in this duel, so no Bandage) is "Exit".
+    ui.key(InputEvent::Char(b'd'));
+    assert_eq!(ui.selected_hotkey(), Some(b'E'));
+}
+
+#[test]
+fn transient_messages_render_without_a_selection_span() {
+    let (_state, _rng, mut ui) = open_fight();
+    assert!(ui.selected_span().is_some());
+    ui.note(TurnOutcome::Blocked); // "CAN'T GO THERE"
+    assert!(
+        ui.selected_span().is_none(),
+        "a transient message is a prompt, not a menu"
+    );
+}
+
+#[test]
+fn the_selection_seeds_from_the_hosts_memory() {
+    let (_state, _rng, mut ui) = open_fight();
+    ui.set_selected(3);
+    assert_eq!(ui.selected_index(), 3);
+    let words = gbx_len_of_menu(&ui);
+    assert!(words > 3, "the main menu has at least four words");
+}
+
+fn gbx_len_of_menu(ui: &ManualUi) -> usize {
+    crate::widgets::build_words(&ui.prompt()).len()
 }
