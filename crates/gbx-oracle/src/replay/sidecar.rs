@@ -577,9 +577,12 @@ const SIDECARS: &[Row] = &[
         in_dungeon: true,
         monster_icons: &[(8, 4, "BAR PATRON")],
         manual_turns: &[
+            // Re-staged 2026-08-04 (the D13 overwrite incident): MATHEW's
+            // round-1 walk-into punch — six steps east from (26,12), the
+            // seventh into the patron at (33,12) (d20+d2 @32-33, hp 16->9).
             (
                 0,
-                2,
+                0,
                 &[
                     TurnCmd::BeginMove,
                     TurnCmd::MoveStep(2),
@@ -587,45 +590,122 @@ const SIDECARS: &[Row] = &[
                     TurnCmd::MoveStep(2),
                     TurnCmd::MoveStep(2),
                     TurnCmd::MoveStep(2),
-                    TurnCmd::MoveStep(3),
-                    TurnCmd::MoveStep(7),
-                    TurnCmd::MoveStep(0),
-                    TurnCmd::EndMove,
-                    TurnCmd::Guard,
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(2),
                 ],
             ),
+            // SHARA's walk-around punch: (25,13) -> (29,14), striking the
+            // patron at (28,14) from the east (d20+d2 @108-109, hp 16->13).
+            // The path is draw-free; endpoint + attack direction are what
+            // the snapshots pin (MARK holds (27,13), so she went south-about).
             (
                 1,
-                5,
+                4,
                 &[
                     TurnCmd::BeginMove,
-                    TurnCmd::MoveStep(2),
-                    TurnCmd::MoveStep(2),
-                    TurnCmd::MoveStep(2),
-                    TurnCmd::MoveStep(2),
-                    TurnCmd::MoveStep(2),
-                    TurnCmd::MoveStep(2),
-                    TurnCmd::MoveStep(2),
-                    TurnCmd::MoveStep(2),
-                    TurnCmd::MoveStep(2),
-                ],
-            ),
-            (
-                2,
-                3,
-                &[
-                    TurnCmd::BeginMove,
-                    TurnCmd::MoveStep(2),
-                    TurnCmd::MoveStep(3),
                     TurnCmd::MoveStep(1),
                     TurnCmd::MoveStep(2),
                     TurnCmd::MoveStep(2),
                     TurnCmd::MoveStep(3),
+                    TurnCmd::MoveStep(4),
+                    TurnCmd::MoveStep(6),
+                ],
+            ),
+            // PHILIPPE's long march: (23,11) -> (31,11) east along row 11,
+            // then a swing at the patron on (32,11) — the lone d20 @150, a
+            // MISS (no damage die follows).
+            (
+                2,
+                5,
+                &[
+                    TurnCmd::BeginMove,
+                    TurnCmd::MoveStep(1),
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(3),
                     TurnCmd::MoveStep(2),
                     TurnCmd::MoveStep(2),
                     TurnCmd::MoveStep(2),
-                    TurnCmd::EndMove,
-                    TurnCmd::Guard,
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(2),
+                ],
+            ),
+            // MARK: (27,13) three steps east, the fourth into the patron at
+            // (31,13) — the fighter's 3/2 swings @246-248: d20 miss, d20 hit,
+            // d2 (hp 16->12).
+            (
+                3,
+                1,
+                &[
+                    TurnCmd::BeginMove,
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(2),
+                ],
+            ),
+            // TRAVIS: (25,11) -> (27,14) southeast-about, the step into
+            // (28,14) finishing the wounded patron — d20+d2 @293-294,
+            // hp 13->0 (the thief's angle doing thief things).
+            (
+                4,
+                2,
+                &[
+                    TurnCmd::BeginMove,
+                    TurnCmd::MoveStep(3),
+                    TurnCmd::MoveStep(3),
+                    TurnCmd::MoveStep(4),
+                    TurnCmd::MoveStep(2),
+                ],
+            ),
+            // LEDERA: seven east along row 12, then a southward swing at the
+            // patron MARK wounded on (31,13) — the lone d20 @335, a miss.
+            // All SIX PCs played manual turns ("two crisp turns" — the
+            // testimony undercounts again; the draws never do).
+            (
+                5,
+                3,
+                &[
+                    TurnCmd::BeginMove,
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(4),
+                ],
+            ),
+            // Round 2 — SHARA steps east and swings at the patron that
+            // closed to (31,14): lone d20 @437, a miss.
+            (
+                6,
+                4,
+                &[
+                    TurnCmd::BeginMove,
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(2),
+                ],
+            ),
+            // Round 2 — MARK, adjacent already, punches his wounded patron
+            // again: d20+d2 @454-455, hp 12->7.
+            (7, 1, &[TurnCmd::BeginMove, TurnCmd::MoveStep(2)]),
+            // Round 2 — TRAVIS flanks through the patron's reach (the d20+d6
+            // reaction @496-497 hits him for 5) and punches from the far
+            // side: d20+d2 @498-499, hp 16->4 — the thief's angle again.
+            (
+                8,
+                2,
+                &[
+                    TurnCmd::BeginMove,
+                    TurnCmd::MoveStep(3),
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(3),
+                    TurnCmd::MoveStep(1),
+                    TurnCmd::MoveStep(0),
+                    TurnCmd::MoveStep(6),
                 ],
             ),
         ],
