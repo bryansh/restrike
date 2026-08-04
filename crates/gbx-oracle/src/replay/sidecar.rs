@@ -798,10 +798,16 @@ mod tests {
             );
         }
         let s = sidecar_for("manual-bar.gbxtrace").unwrap();
-        assert_eq!(s.knobs.manual_turns.len(), 3);
-        assert_eq!(s.knobs.manual_turns[0].actor, 2, "TRAVIS");
-        assert_eq!(s.knobs.manual_turns[1].actor, 5, "PHILIPPE");
-        assert_eq!(s.knobs.manual_turns[2].actor, 3, "LEDERA");
+        // The RE-STAGED capture (2026-08-04, the D13 overwrite incident):
+        // nine hand-played turns — all six PCs in round 1, then SHARA, MARK
+        // and TRAVIS again in round 2.
+        assert_eq!(s.knobs.manual_turns.len(), 9);
+        let actors: Vec<usize> = s.knobs.manual_turns.iter().map(|t| t.actor).collect();
+        assert_eq!(
+            actors,
+            vec![0, 4, 5, 1, 2, 3, 4, 1, 2],
+            "MATHEW, SHARA, PHILIPPE, MARK, TRAVIS, LEDERA; then SHARA, MARK, TRAVIS"
+        );
         // The schedule is an input knob like any other: canonical writer,
         // liberal reader, byte-stable round trip.
         let json = s.to_canonical_json();
