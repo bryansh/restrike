@@ -901,3 +901,34 @@ Modes cycle Next / Prev / Manual / Target / Center / Exit (§1.7):
   in the guard like every QuickFight capture — manual turns are plain
   draws (the sewer-fight-4 take-1 precedent). The capture rides the
   existing sidecar; no new format work.
+
+### 9.7 ★ LANDED — manual-bar CLOSED 3,230/3,230; the guard goes 16/16 (2026-08-03, Fable)
+
+`manual-bar.gbxtrace` (the canonical bar brawl, seed 2643148259, 58C=99 /
+6E4=0 / md=2 in-trace, 12 rounds, staged in DOSBox 2026-08-03) closed
+operand-exact on the schedule machinery §9.6 predicted:
+
+- **The shape**: `reel::ScriptedTurn { occurrence, actor, cmds }` rows in
+  the sidecar's knob half (a keypress input, exactly like the '2' presses);
+  `run_scripted` answers `AwaitPlayerTurn` from the schedule through
+  `CombatState::issue` and defaults every unscripted suspension to
+  `EngageQuickFight`. An empty schedule never sets the interactive flag —
+  the 15 all-QuickFight pins rode the untouched path at every commit.
+- **The reconstruction** (testimony seeded the search; the draws won):
+  THREE manual turns, not the remembered two — TRAVIS [2] walked
+  (25,11)→(30,10) *through* patron [9]'s reach (the #62 d20 + #63 d6
+  departure attack under a manual walk) then Guarded; PHILIPPE [5] walked
+  eight cells and swung walking INTO [9] (#80 d20 + #81 d2 — §47.5's bare
+  manual-attack signature, no AI head); and LEDERA [3] — the forgotten
+  turn — walked draw-free to (33,13) and Guarded, proven by her #317
+  into-reach reaction d20 when [8] stepped adjacent. The remembered
+  "Aim→commit + Delay" never happened; the draws say walk-into + Guard.
+- **What it proves end-to-end**: the D-CV5 suspension at the quick_fight
+  fork, the §9.3 movement loop (including a departure attack mid-walk and
+  the walk-into swing), Guard, and default-Quick — all through the same
+  primitives the QuickFight captures pinned. Manual turns are plain draws,
+  capture-confirmed.
+- Gates: guard **16/16** CLOSED 0 trips, reel smoke **16/16** (62,365
+  draws live — manual-bar plays with pixels), 1,304 workspace tests,
+  draw-parity green, clippy 0. Main `1073820`. §4 exit-gate item 3 is MET;
+  items 1/2/4 already held — Bryan's D13 ratification (item 5) remains.
