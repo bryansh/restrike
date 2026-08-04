@@ -737,10 +737,17 @@ impl CombatHost {
         // Both suspensions let the *last* batch finish playing before they read
         // a key — the original is inside its own animation there, and the D-CV2
         // lockstep forbids composing a batch over a running one.
-        if matches!(self.stage, Stage::PlayerTurn | Stage::ContinuePrompt)
-            && self.tick_playback(ctx)
-        {
-            return;
+        if matches!(self.stage, Stage::PlayerTurn | Stage::ContinuePrompt) {
+            if self.tick_playback(ctx) {
+                return;
+            }
+            // Playback just drained (or none is running): bring the manual
+            // surfaces up to date BEFORE reading keys. `drain_menu_input`'s
+            // accept path deliberately returns early while a step's batch is
+            // playing, so this is the one place the focus box catches up to
+            // where the walk actually put the icon (Bryan's playtest find,
+            // 2026-08-03: the box trailed the actor by a cell per step).
+            self.refresh_manual_surfaces();
         }
         match self.stage {
             Stage::PlayerTurn => self.drain_menu_input(ctx),
