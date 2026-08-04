@@ -22,10 +22,11 @@
 //! owns the fight, the scene and the capture's draw stream, and is what
 //! `engine.rs` ticks — see [`crate::combat::scene`] for the presenter itself.
 
+use super::manual::{TurnCmd, TurnOutcome};
 use super::scene::{CombatScene, CombatantIdentity, EntrySnapshot, SceneArt};
 use super::{
-    combat_state_from_records, ActionEvent, ActionSink, CombatMap, CombatState, CombatStep,
-    GridPos, Loadout, RecordCombatant,
+    combat_state_from_records, ActionEvent, ActionSink, CombatMap, CombatOutcome, CombatState,
+    CombatStep, GridPos, Loadout, RecordCombatant,
 };
 use crate::combat_art::{
     self, CombatArtLoadError, CombatIcons, COMBAT_ICON_SLOTS, PARTY_ICON_SLOTS,
@@ -167,6 +168,36 @@ pub struct ExpectedDraw {
     pub operand: Option<u16>,
 }
 
+/// ★ One scripted manual turn (doc §9.6's closing capture) — the replay-side
+/// stand-in for a player at the combat menu.
+///
+/// A staged manual-turn capture records the *draws* a manual turn made, but the
+/// commands behind them are keypresses no hook records — the same class of
+/// input as the '2' presses and the "Continue Battle:" answers, so they ride
+/// the same per-capture sidecar. Each row answers exactly one
+/// [`CombatStep::AwaitPlayerTurn`] suspension:
+///
+/// - `occurrence` — which suspension, 0-based in fight order. Suspensions the
+///   schedule does NOT name are answered [`TurnCmd::EngageQuickFight`] — the
+///   staged captures' own testimony ("Quick to the end"), and draw-identical
+///   to the AI turn the flag would have run.
+/// - `actor` — the roster index whose turn it must be. A mismatch is a
+///   reconstruction error and panics rather than issuing one PC's walk as
+///   another's.
+/// - `cmds` — the [`TurnCmd`]s, in press order, executed through
+///   [`CombatState::issue`] like every interactive driver (D-CV5). The last
+///   command must end the turn (or the turn must end itself — a walk-into
+///   attack that spends the last swing does).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ScriptedTurn {
+    /// Which [`CombatStep::AwaitPlayerTurn`] suspension this answers (0-based).
+    pub occurrence: u32,
+    /// The roster index whose turn it must be (asserted, loudly).
+    pub actor: usize,
+    /// The player's commands, in press order.
+    pub cmds: Vec<TurnCmd>,
+}
+
 /// Everything [`Engine::new_reel`] needs to replay one captured fight with
 /// pixels.
 ///
@@ -200,6 +231,11 @@ pub struct ReelInput {
     /// with pixels"). Empty disables the check — for a reel over a fight that
     /// has no capture behind it.
     pub expected_draws: Vec<ExpectedDraw>,
+    /// The manual-turn schedule (doc §9.6): one [`ScriptedTurn`] per manual
+    /// turn the staged capture's player actually played. Empty for every
+    /// all-QuickFight capture — the state is then never interactive and the
+    /// replay path is bit-identical to the pre-schedule one.
+    pub manual_script: Vec<ScriptedTurn>,
 }
 
 impl ReelInput {
@@ -218,6 +254,7 @@ impl ReelInput {
             game_speed: 4,
             tick_multiplier: 1,
             expected_draws: Vec::new(),
+            manual_script: Vec::new(),
         }
     }
 
@@ -264,7 +301,186 @@ pub fn build_state(input: &ReelInput, flavor: &dyn Flavor) -> Result<CombatState
     for &(id, loadout) in &input.loadouts {
         state.set_loadout(id, loadout);
     }
+    // §9.6: a manual-turn schedule needs the state to SUSPEND where the
+    // original opened its combat menu — D-CV5's interactive gate, driven by a
+    // script instead of a keyboard. An empty schedule leaves the flag exactly
+    // where the dark landing put it (off), so every all-QuickFight capture
+    // replays bit-identically to the pre-schedule path.
+    if !input.manual_script.is_empty() {
+        state.set_interactive(true);
+    }
     Ok(state)
+}
+
+// === the manual-turn script driver (doc §9.6) =============================
+
+/// Answers D-CV5's two suspensions from per-capture schedules — the replay
+/// harnesses' and the reel's shared stand-in for the player who staged the
+/// capture.
+///
+/// Every deviation from the schedule is a panic by design: a scripted turn is
+/// a *reconstruction claim* about what the player pressed, and a claim the
+/// fight refuses (wrong actor, a refused command, a turn left open, a row that
+/// never fires) must fail as loudly as a draw divergence — it is the same kind
+/// of error.
+pub struct ScriptDriver {
+    script: Vec<ScriptedTurn>,
+    /// The next unconsumed script row.
+    next: usize,
+    /// How many [`CombatStep::AwaitPlayerTurn`] suspensions have fired.
+    occurrence: u32,
+}
+
+impl ScriptDriver {
+    pub fn new(script: Vec<ScriptedTurn>) -> Self {
+        ScriptDriver {
+            script,
+            next: 0,
+            occurrence: 0,
+        }
+    }
+
+    /// Resolve one suspended manual turn: the scripted row for this
+    /// occurrence, or the default — `Quick` (see [`ScriptedTurn`]).
+    pub fn drive_player_turn(
+        &mut self,
+        state: &mut CombatState,
+        rng: &mut EngineRng,
+        combatant_id: usize,
+    ) {
+        let occ = self.occurrence;
+        self.occurrence += 1;
+        if let Some(row) = self.script.get(self.next) {
+            assert!(
+                row.occurrence >= occ,
+                "manual script row {} pins occurrence {}, but suspension {} has already fired \
+                 (rows must be in fight order)",
+                self.next,
+                row.occurrence,
+                occ
+            );
+        }
+        let Some(row) = self.script.get(self.next).filter(|r| r.occurrence == occ) else {
+            // Between scripted turns the player pressed Quick — draw-identical
+            // to the AI turn `quick_fight` would have run, and the flag stays
+            // up, so this PC never suspends again.
+            let out = state
+                .issue(rng, TurnCmd::EngageQuickFight)
+                .unwrap_or_else(|e| {
+                    panic!("suspension {occ} (combatant {combatant_id}): Quick refused: {e:?}")
+                });
+            assert!(
+                out.turn_ended(),
+                "suspension {occ}: EngageQuickFight did not end the turn"
+            );
+            return;
+        };
+        assert_eq!(
+            row.actor, combatant_id,
+            "manual script occurrence {occ} pins actor {}, but the fight parked combatant {} — \
+             the reconstruction is wrong, not the fight",
+            row.actor, combatant_id
+        );
+        let cmds = row.cmds.clone();
+        self.next += 1;
+        let n = cmds.len();
+        for (i, cmd) in cmds.into_iter().enumerate() {
+            let out = state.issue(rng, cmd.clone()).unwrap_or_else(|e| {
+                panic!("manual script occurrence {occ}, cmd {i} ({cmd:?}): refused: {e:?}")
+            });
+            match out {
+                TurnOutcome::TurnEnded => assert_eq!(
+                    i + 1,
+                    n,
+                    "manual script occurrence {occ}: the turn ended at cmd {i} ({cmd:?}) \
+                     with {} command(s) left",
+                    n - i - 1
+                ),
+                TurnOutcome::Blocked => panic!(
+                    "manual script occurrence {occ}, cmd {i} ({cmd:?}): step blocked \
+                     (\"can't go there\") — the schedule walks an unaffordable cell"
+                ),
+                TurnOutcome::FleePrompt => panic!(
+                    "manual script occurrence {occ}, cmd {i} ({cmd:?}): stepped off-map — \
+                     a scheduled flee must answer with TurnCmd::Flee explicitly"
+                ),
+                TurnOutcome::Continue | TurnOutcome::Speed(_) => {}
+            }
+        }
+        assert!(
+            state.manual_turn().is_none(),
+            "manual script occurrence {occ}: the schedule left the turn open — it must end \
+             with Guard/Delay/Quit/Bandage/Flee/EngageQuickFight or an ending attack"
+        );
+    }
+
+    /// Answer a [`CombatStep::AwaitContinueBattle`] from the state's own
+    /// occurrence schedule — the same `continue_battle_yes` indexing the
+    /// non-interactive path applies (`battle_round_checks`), so a capture's
+    /// pinned answers mean the same thing whichever path asks.
+    pub fn answer_continue_battle(state: &mut CombatState) -> CombatStep {
+        let occurrence = state.continue_prompts_seen;
+        let yes = state.continue_battle_yes.contains(&occurrence);
+        state.answer_continue_battle(yes)
+    }
+
+    /// The fight is over: every scripted row must have fired.
+    pub fn assert_consumed(&self, label: &str) {
+        assert_eq!(
+            self.next,
+            self.script.len(),
+            "{label}: {} scripted manual turn(s) never fired (next pinned occurrence {}, \
+             but only {} suspensions happened)",
+            self.script.len() - self.next,
+            self.script
+                .get(self.next)
+                .map(|r| r.occurrence)
+                .unwrap_or(0),
+            self.occurrence
+        );
+    }
+}
+
+/// [`CombatState::run_combat_observed`] with D-CV5's suspensions answered from
+/// schedules — the headless pump for a capture that carries a manual-turn
+/// script (doc §9.6).
+///
+/// With an empty `script` the state was never made interactive, no suspension
+/// can fire, and this is `run_combat_observed` line for line — which is why
+/// the harnesses call this unconditionally.
+pub fn run_scripted<F: FnMut(&CombatState, u16)>(
+    state: &mut CombatState,
+    rng: &mut EngineRng,
+    max_rounds: u16,
+    script: &[ScriptedTurn],
+    mut on_round: F,
+) -> CombatOutcome {
+    state.no_action_limit = max_rounds;
+    let mut driver = ScriptDriver::new(script.to_vec());
+    loop {
+        let step = match state.step(rng) {
+            CombatStep::AwaitPlayerTurn { combatant_id } => {
+                driver.drive_player_turn(state, rng, combatant_id);
+                continue;
+            }
+            CombatStep::AwaitContinueBattle => ScriptDriver::answer_continue_battle(state),
+            other => other,
+        };
+        match step {
+            CombatStep::RoundEnded { round, battle_over } => {
+                // `round` is post-increment (1-based); the observer wants the
+                // 0-based index, exactly as `run_combat_observed` reports it.
+                on_round(state, round - 1);
+                if battle_over {
+                    break;
+                }
+            }
+            CombatStep::Ended => break,
+            _ => {}
+        }
+    }
+    driver.assert_consumed("run_scripted");
+    state.outcome()
 }
 
 /// Compare one of our draws against the capture's, on the harnesses' surface.
@@ -419,6 +635,9 @@ pub struct Reel {
     finished: bool,
     steps: u64,
     sounds: Vec<SoundEvent>,
+    /// §9.6: answers `AwaitPlayerTurn` from the capture's manual-turn schedule
+    /// (a no-op driver for the all-QuickFight captures, which never suspend).
+    script: ScriptDriver,
 }
 
 impl Reel {
@@ -486,6 +705,7 @@ impl Reel {
             finished: false,
             steps: 0,
             sounds: Vec::new(),
+            script: ScriptDriver::new(input.manual_script.clone()),
         };
 
         let first = reel.state.step(&mut reel.rng);
@@ -546,10 +766,25 @@ impl Reel {
         }
         let step = self.state.step(&mut self.rng);
         self.steps += 1;
-        self.verify_new_draws();
-        if step == CombatStep::Ended {
-            self.ended = true;
+        // §9.6: D-CV5's suspensions, answered from the capture's schedules.
+        // The manual turn resolves *inside* this step — its head events and
+        // its command events land in one batch, so a scripted turn presents
+        // with the same step granularity as an AI turn (D-CV2 lockstep).
+        match step {
+            CombatStep::AwaitPlayerTurn { combatant_id } => {
+                self.script
+                    .drive_player_turn(&mut self.state, &mut self.rng, combatant_id);
+            }
+            CombatStep::AwaitContinueBattle => {
+                ScriptDriver::answer_continue_battle(&mut self.state);
+            }
+            CombatStep::Ended => {
+                self.script.assert_consumed(&self.label);
+                self.ended = true;
+            }
+            _ => {}
         }
+        self.verify_new_draws();
         let events = self.take_batch();
         self.scene.begin_step(&events);
     }

@@ -6,10 +6,11 @@
 //!
 //! 1. **Knobs.** `map_direction` / `area2.field_58C` / `area2.field_6E4` ARE
 //!    emitted by modern staging hooks (and the capture's value always wins), but
-//!    the '2' auto-magic presses (doc §38) and the "Continue Battle:" answers
-//!    (doc §48) are keypresses with no hook at all — they have been hand-pinned
-//!    in the frontier guard's `PINS` manifest since M5, and this is where they
-//!    now live.
+//!    the '2' auto-magic presses (doc §38), the "Continue Battle:" answers
+//!    (doc §48) and the manual-turn schedules (doc §9.6 — the `TurnCmd`s a
+//!    staging player issued at each combat-menu suspension) are keypresses with
+//!    no hook at all — they have been hand-pinned in the frontier guard's
+//!    `PINS` manifest since M5, and this is where they now live.
 //! 2. **Icon assignments.** `combat_entry` carries no monster CPIC ids:
 //!    LOADMONSTER's third operand is read on the live path only
 //!    (`format.rs:430-437`). Party icons need no pin — `head_icon` /
@@ -52,7 +53,8 @@
 //! rather than migrated (the D-SAVE2 reject-not-migrate rule — a silently
 //! misread input knob is exactly the class of bug the guard exists to prevent).
 
-use gbx_engine::combat::reel::MONSTER_FIRST_ICON_SLOT;
+use gbx_engine::combat::reel::{ScriptedTurn, MONSTER_FIRST_ICON_SLOT};
+use gbx_engine::combat::TurnCmd;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -72,6 +74,9 @@ pub enum SidecarError {
     PartyIconPinned { slot: u8 },
     /// Two pins claim the same icon slot.
     DuplicateIconSlot { slot: u8 },
+    /// A manual-turn row that cannot be right: out of fight order, or with no
+    /// commands to issue.
+    ManualTurnInvalid { index: usize, why: &'static str },
 }
 
 impl fmt::Display for SidecarError {
@@ -90,6 +95,9 @@ impl fmt::Display for SidecarError {
             ),
             SidecarError::DuplicateIconSlot { slot } => {
                 write!(f, "two icon pins claim slot {slot}")
+            }
+            SidecarError::ManualTurnInvalid { index, why } => {
+                write!(f, "manual-turn row {index} is invalid: {why}")
             }
         }
     }
@@ -120,6 +128,15 @@ pub struct SidecarKnobs {
     /// captures predating the trio emission.
     #[serde(default)]
     pub area_field_6e4: i32,
+    /// ★ The manual-turn schedule (doc §9.6): the `TurnCmd`s the staging
+    /// player issued at each `AwaitPlayerTurn` suspension the schedule names —
+    /// keypresses no hook records, like every other knob in this half.
+    /// Suspensions not named here replay as `Quick` (see
+    /// `gbx_engine::combat::reel::ScriptedTurn`). Empty for every
+    /// all-QuickFight capture, which then replays through the exact
+    /// non-interactive path it always did.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub manual_turns: Vec<ScriptedTurn>,
 }
 
 fn default_map_direction() -> u8 {
@@ -134,6 +151,7 @@ impl Default for SidecarKnobs {
             auto_cast_toggles: Vec::new(),
             continue_battle: Vec::new(),
             area_field_6e4: 0,
+            manual_turns: Vec::new(),
         }
     }
 }
@@ -261,6 +279,22 @@ impl CaptureSidecar {
             }
             seen.push(pin.slot);
         }
+        // §9.6: a manual-turn schedule the driver could never satisfy is a
+        // typo, not a fight — the same posture as the icon checks above.
+        for (index, turn) in self.knobs.manual_turns.iter().enumerate() {
+            if turn.cmds.is_empty() {
+                return Err(SidecarError::ManualTurnInvalid {
+                    index,
+                    why: "no commands to issue",
+                });
+            }
+            if index > 0 && turn.occurrence <= self.knobs.manual_turns[index - 1].occurrence {
+                return Err(SidecarError::ManualTurnInvalid {
+                    index,
+                    why: "occurrences must be strictly increasing (fight order)",
+                });
+            }
+        }
         Ok(())
     }
 }
@@ -277,9 +311,12 @@ struct Row {
     in_dungeon: bool,
     /// `(icon slot, CPIC block, monster name)`.
     monster_icons: &'static [(u8, u8, &'static str)],
+    /// `(suspension occurrence, actor roster index, commands)` — doc §9.6.
+    manual_turns: &'static [(u32, usize, &'static [TurnCmd])],
 }
 
-/// **The committed sidecar table** — the 15 closed captures (doc §44–§50).
+/// **The committed sidecar table** — the 15 all-QuickFight closed captures
+/// (doc §44–§50) plus the M6c manual-turn capture (doc §9.6).
 ///
 /// The knob columns are the same values the frontier guard's `PINS` manifest
 /// carried before this table existed; `PINS` now reads them from here, so the
@@ -300,6 +337,7 @@ const SIDECARS: &[Row] = &[
         cpic_area: 2,
         in_dungeon: true,
         monster_icons: &[(8, 4, "BAR PATRON")],
+        manual_turns: &[],
     },
     Row {
         capture: "combat3+terrain4.gbxtrace",
@@ -311,6 +349,7 @@ const SIDECARS: &[Row] = &[
         cpic_area: 2,
         in_dungeon: true,
         monster_icons: &[(8, 4, "BAR PATRON")],
+        manual_turns: &[],
     },
     Row {
         capture: "combat2+terrain4.gbxtrace",
@@ -322,6 +361,7 @@ const SIDECARS: &[Row] = &[
         cpic_area: 2,
         in_dungeon: true,
         monster_icons: &[(8, 4, "BAR PATRON")],
+        manual_turns: &[],
     },
     Row {
         capture: "combat+terrain4.gbxtrace",
@@ -333,6 +373,7 @@ const SIDECARS: &[Row] = &[
         cpic_area: 2,
         in_dungeon: true,
         monster_icons: &[(8, 4, "BAR PATRON")],
+        manual_turns: &[],
     },
     Row {
         capture: "bar-rout-58c50.gbxtrace",
@@ -344,6 +385,7 @@ const SIDECARS: &[Row] = &[
         cpic_area: 2,
         in_dungeon: true,
         monster_icons: &[(8, 4, "BAR PATRON")],
+        manual_turns: &[],
     },
     Row {
         capture: "armed-bar.gbxtrace",
@@ -355,6 +397,7 @@ const SIDECARS: &[Row] = &[
         cpic_area: 2,
         in_dungeon: true,
         monster_icons: &[(8, 4, "BAR PATRON")],
+        manual_turns: &[],
     },
     Row {
         // The §38 toggle pin, DERIVED: entry-false + a '2' press at global
@@ -368,6 +411,7 @@ const SIDECARS: &[Row] = &[
         cpic_area: 2,
         in_dungeon: true,
         monster_icons: &[(8, 4, "BAR PATRON")],
+        manual_turns: &[],
     },
     Row {
         capture: "bar-fists-2.gbxtrace",
@@ -379,6 +423,7 @@ const SIDECARS: &[Row] = &[
         cpic_area: 2,
         in_dungeon: true,
         monster_icons: &[(8, 4, "BAR PATRON")],
+        manual_turns: &[],
     },
     // --- campaign 1, the sewers (doc §45/§47) -------------------------------
     Row {
@@ -393,6 +438,7 @@ const SIDECARS: &[Row] = &[
         cpic_area: 2,
         in_dungeon: true,
         monster_icons: &[(8, 1, "FIRE KNIFE")],
+        manual_turns: &[],
     },
     Row {
         // The 23-combatant guild war: 2 FIRE KNIVES + 11 enemy THIEFs + 4
@@ -408,6 +454,7 @@ const SIDECARS: &[Row] = &[
         cpic_area: 2,
         in_dungeon: true,
         monster_icons: &[(8, 1, "FIRE KNIFE"), (9, 2, "THIEF")],
+        manual_turns: &[],
     },
     Row {
         // 4 TROLLS (size 2, the 48-row CPIC) + 7 CROCODILES (size 3, the
@@ -421,6 +468,7 @@ const SIDECARS: &[Row] = &[
         cpic_area: 2,
         in_dungeon: true,
         monster_icons: &[(8, 7, "TROLL"), (9, 8, "CROCODILE")],
+        manual_turns: &[],
     },
     Row {
         // 4 OTYUGHS + 1 NEO-OTYUGH (size 2).
@@ -433,6 +481,7 @@ const SIDECARS: &[Row] = &[
         cpic_area: 2,
         in_dungeon: true,
         monster_icons: &[(8, 9, "OTYUGH"), (9, 10, "NEO-OTYUGH")],
+        manual_turns: &[],
     },
     // --- campaign 2, the slot-H party (doc §48/§49) -------------------------
     Row {
@@ -446,6 +495,7 @@ const SIDECARS: &[Row] = &[
         cpic_area: 2,
         in_dungeon: true,
         monster_icons: &[(8, 1, "FIRE KNIFE")],
+        manual_turns: &[],
     },
     Row {
         capture: "cleric-guildwar.gbxtrace",
@@ -457,6 +507,7 @@ const SIDECARS: &[Row] = &[
         cpic_area: 2,
         in_dungeon: true,
         monster_icons: &[(8, 1, "FIRE KNIFE"), (9, 2, "THIEF")],
+        manual_turns: &[],
     },
     // --- campaign 3, the camp-buffed otyugh fight (doc §50) -----------------
     Row {
@@ -469,6 +520,115 @@ const SIDECARS: &[Row] = &[
         cpic_area: 2,
         in_dungeon: true,
         monster_icons: &[(8, 9, "OTYUGH")],
+        manual_turns: &[],
+    },
+    // --- the M6c manual-turn capture (doc §9.6) -----------------------------
+    Row {
+        // ★ The staged MANUAL-TURN capture (2026-08-03, DOSBox, the real
+        // binary): the canonical Tilverton bar brawl — 6 PCs vs 10 BAR
+        // PATRONs, seed 2643148259, 58C=99 / 6E4=0 / md=2 all emitted
+        // in-trace, no '2' presses — with the first two party turns played by
+        // hand. All six PC records enter with `quick_fight` OFF (the GOG
+        // save's default), so every PC turn of rounds 0–1 opened the combat
+        // menu; the schedule below pins the two turns that were *played*, and
+        // every unpinned suspension replays as Quick (draw-identical to the
+        // AI turn — the staging player's own "Quick to the end").
+        //
+        // The two rows, RECONSTRUCTED FROM THE DRAWS (operator testimony
+        // seeded the search; where they disagreed the draws won):
+        //
+        // - occurrence 0 = TRAVIS [2] (suspended after the post-entry-draw
+        //   #46-61 selection pass): Move; five E steps (25,11)→(30,11) and a
+        //   SE step to (31,12) — all draw-free, arriving diagonally adjacent
+        //   to patron [9] at (32,11) — then a NW step AWAY, which is the
+        //   capture's #62 d20 + #63 d6: [9]'s departure opportunity attack
+        //   (TRAVIS 34→33 hp; [9].target flicks 2→255 in the turn_snapshots,
+        //   the §31 restore signature); then N to (30,10), RETURN, Done →
+        //   Guard. TRAVIS never swung — the testimony's "walk-into attack"
+        //   belongs to the next turn.
+        // - occurrence 1 = PHILIPPE [5] (suspended after #64-79): Move; eight
+        //   E steps (23,11)→(31,11), draw-free; then a ninth E step INTO [9]
+        //   — the walk-into attack (`sub_33F03`): #80 d20 + #81 d2, [9]
+        //   16→13 hp, §47.5's exact "bare d20 + d2, no AI head" manual
+        //   signature. The swing spends his one attack and the turn ends
+        //   itself (no Done word follows; round 0's tail shows no delayed
+        //   re-pick, so the testimony's "Delay" never executed).
+        // - occurrence 2 = LEDERA [3] (suspended after #139-154) — a third
+        //   manual turn the testimony forgot: a ZERO-draw walk
+        //   (24,12)→(33,13), parking adjacent to patrons [7]/[6]/[15], no
+        //   swing, then a draw-free Done word. The path below is one of the
+        //   draw-equivalent routes (any path that spends ≤24 halves, avoids
+        //   occupied cells and never LEAVES an enemy's reach draws nothing —
+        //   the two turn_snapshots pin only the endpoint); the tail
+        //   (31,13)→(32,13)→(33,13) stays inside [15]/[7]'s reach the whole
+        //   way, which is what makes it departure-free. GUARD is the pinned
+        //   Done word, and the capture proves it two turns later: when [8]
+        //   walks (35,14)→(34,14) into her reach, she swings the into-reach
+        //   guard reaction (#317 d20, her target flicking to 8 in the
+        //   turn_snapshots) before [8]'s own attack lands. (Not Delay: the
+        //   round-0 tail is one empty 16×d100 pass, no re-pick.)
+        capture: "manual-bar.gbxtrace",
+        map_direction: 2,
+        auto_cast: false,
+        auto_cast_toggles: &[],
+        continue_battle: &[],
+        area_field_6e4: 0,
+        cpic_area: 2,
+        in_dungeon: true,
+        monster_icons: &[(8, 4, "BAR PATRON")],
+        manual_turns: &[
+            (
+                0,
+                2,
+                &[
+                    TurnCmd::BeginMove,
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(3),
+                    TurnCmd::MoveStep(7),
+                    TurnCmd::MoveStep(0),
+                    TurnCmd::EndMove,
+                    TurnCmd::Guard,
+                ],
+            ),
+            (
+                1,
+                5,
+                &[
+                    TurnCmd::BeginMove,
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(2),
+                ],
+            ),
+            (
+                2,
+                3,
+                &[
+                    TurnCmd::BeginMove,
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(3),
+                    TurnCmd::MoveStep(1),
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(3),
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::MoveStep(2),
+                    TurnCmd::EndMove,
+                    TurnCmd::Guard,
+                ],
+            ),
+        ],
     },
 ];
 
@@ -483,6 +643,15 @@ impl From<&Row> for CaptureSidecar {
                 auto_cast_toggles: row.auto_cast_toggles.to_vec(),
                 continue_battle: row.continue_battle.to_vec(),
                 area_field_6e4: row.area_field_6e4,
+                manual_turns: row
+                    .manual_turns
+                    .iter()
+                    .map(|&(occurrence, actor, cmds)| ScriptedTurn {
+                        occurrence,
+                        actor,
+                        cmds: cmds.to_vec(),
+                    })
+                    .collect(),
             },
             art: SidecarArt {
                 cpic_area: row.cpic_area,
@@ -525,8 +694,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_table_holds_the_fifteen_closed_captures() {
-        assert_eq!(pinned_captures().count(), 15);
+    fn the_table_holds_the_sixteen_pinned_captures() {
+        // 15 all-QuickFight captures (doc §44–§50) + the M6c manual-turn
+        // capture (doc §9.6).
+        assert_eq!(pinned_captures().count(), 16);
         for capture in pinned_captures() {
             assert!(capture.ends_with(".gbxtrace"), "{capture} is a basename");
             sidecar_for(capture)
@@ -534,6 +705,55 @@ mod tests {
                 .validate()
                 .expect("every committed row validates");
         }
+    }
+
+    #[test]
+    fn the_manual_bar_schedule_round_trips_and_only_manual_bar_has_one() {
+        for capture in pinned_captures() {
+            let s = sidecar_for(capture).unwrap();
+            assert_eq!(
+                !s.knobs.manual_turns.is_empty(),
+                capture == "manual-bar.gbxtrace",
+                "{capture}: exactly one capture carries a manual-turn schedule"
+            );
+        }
+        let s = sidecar_for("manual-bar.gbxtrace").unwrap();
+        assert_eq!(s.knobs.manual_turns.len(), 3);
+        assert_eq!(s.knobs.manual_turns[0].actor, 2, "TRAVIS");
+        assert_eq!(s.knobs.manual_turns[1].actor, 5, "PHILIPPE");
+        assert_eq!(s.knobs.manual_turns[2].actor, 3, "LEDERA");
+        // The schedule is an input knob like any other: canonical writer,
+        // liberal reader, byte-stable round trip.
+        let json = s.to_canonical_json();
+        assert!(json.contains("\"manual_turns\""));
+        assert!(json.contains("\"BeginMove\""));
+        assert!(json.contains("{\"MoveStep\":2}"));
+        let back = CaptureSidecar::parse(&json).expect("our own writer parses");
+        assert_eq!(back, s);
+        assert_eq!(back.to_canonical_json(), json, "encoding is deterministic");
+    }
+
+    #[test]
+    fn a_bad_manual_schedule_is_refused() {
+        let empty_cmds = r#"{"version":1,"capture":"x.gbxtrace","knobs":{"manual_turns":
+            [{"occurrence":0,"actor":2,"cmds":[]}]}}"#;
+        assert_eq!(
+            CaptureSidecar::parse(empty_cmds).unwrap_err(),
+            SidecarError::ManualTurnInvalid {
+                index: 0,
+                why: "no commands to issue"
+            }
+        );
+        let out_of_order = r#"{"version":1,"capture":"x.gbxtrace","knobs":{"manual_turns":[
+            {"occurrence":1,"actor":2,"cmds":["Guard"]},
+            {"occurrence":1,"actor":5,"cmds":["Quit"]}]}}"#;
+        assert_eq!(
+            CaptureSidecar::parse(out_of_order).unwrap_err(),
+            SidecarError::ManualTurnInvalid {
+                index: 1,
+                why: "occurrences must be strictly increasing (fight order)"
+            }
+        );
     }
 
     #[test]

@@ -1123,3 +1123,121 @@ fn with_every_quick_fight_flag_on_an_interactive_fight_is_bit_identical() {
         "the fixture fight must actually fight"
     );
 }
+
+// === ★ the replay-side script driver (§9.6's closing capture) ============
+
+use crate::combat::reel::{run_scripted, ScriptedTurn};
+
+/// The duel with the PC's `quick_fight` still off AND the interactive flag
+/// raised — the exact state `build_state` hands `run_scripted` for a capture
+/// that carries a manual-turn schedule.
+fn scripted_duel() -> CombatState {
+    let mut state = duel();
+    state.set_interactive(true);
+    state
+}
+
+#[test]
+fn run_scripted_with_an_empty_script_is_run_combat_observed() {
+    // The 15 all-QuickFight captures ride this equivalence (their states are
+    // never interactive), and the guard referees it at full scale; this is
+    // the same claim in CI miniature.
+    let run = |scripted: bool| {
+        let draws = DrawLog::default();
+        let mut rng = EngineRng::new(SEED);
+        rng.attach_sink(draws.sink());
+        let mut state = duel(); // NOT interactive — an empty script never is
+        let outcome = if scripted {
+            run_scripted(&mut state, &mut rng, 50, &[], |_, _| {})
+        } else {
+            state.run_combat_observed(&mut rng, 50, |_, _| {})
+        };
+        (outcome, draws.ns())
+    };
+    let (a_outcome, a_draws) = run(false);
+    let (b_outcome, b_draws) = run(true);
+    assert_eq!(a_outcome, b_outcome);
+    assert_eq!(a_draws, b_draws, "line for line");
+    assert!(!a_draws.is_empty());
+}
+
+#[test]
+fn an_unscripted_suspension_replays_as_quick() {
+    // Default-Q is the staged captures' own testimony ("Quick to the end"):
+    // the suspension resolves, the flag stays up, and the PC never suspends
+    // again — the fight completes with no scripted rows at all.
+    let mut rng = EngineRng::new(SEED);
+    let mut state = scripted_duel();
+    run_scripted(&mut state, &mut rng, 50, &[], |_, _| {});
+    assert!(
+        state.fighters[0].quick_fight,
+        "the default answered Quick, which raises the flag"
+    );
+}
+
+#[test]
+fn a_scripted_turn_executes_at_its_occurrence_and_later_ones_default() {
+    // Occurrence 0 is scripted (Guard); the PC's round-1 suspension is not,
+    // so it defaults to Quick and the fight runs to an outcome.
+    let mut rng = EngineRng::new(SEED);
+    let mut state = scripted_duel();
+    let script = [ScriptedTurn {
+        occurrence: 0,
+        actor: 0,
+        cmds: vec![TurnCmd::Guard],
+    }];
+    run_scripted(&mut state, &mut rng, 50, &script, |_, _| {});
+    assert!(state.fighters[0].quick_fight, "round 1 defaulted to Quick");
+}
+
+#[test]
+#[should_panic(expected = "pins actor")]
+fn a_scripted_turn_with_the_wrong_actor_panics() {
+    let mut rng = EngineRng::new(SEED);
+    let mut state = scripted_duel();
+    let script = [ScriptedTurn {
+        occurrence: 0,
+        actor: 1, // the monster — the suspension parks combatant 0
+        cmds: vec![TurnCmd::Guard],
+    }];
+    run_scripted(&mut state, &mut rng, 50, &script, |_, _| {});
+}
+
+#[test]
+#[should_panic(expected = "never fired")]
+fn a_scripted_row_that_never_fires_panics() {
+    let mut rng = EngineRng::new(SEED);
+    let mut state = scripted_duel();
+    let script = [ScriptedTurn {
+        occurrence: 99,
+        actor: 0,
+        cmds: vec![TurnCmd::Guard],
+    }];
+    run_scripted(&mut state, &mut rng, 50, &script, |_, _| {});
+}
+
+#[test]
+#[should_panic(expected = "the turn ended at cmd")]
+fn a_command_after_the_turn_ends_panics() {
+    let mut rng = EngineRng::new(SEED);
+    let mut state = scripted_duel();
+    let script = [ScriptedTurn {
+        occurrence: 0,
+        actor: 0,
+        cmds: vec![TurnCmd::Guard, TurnCmd::Quit], // Guard already ended it
+    }];
+    run_scripted(&mut state, &mut rng, 50, &script, |_, _| {});
+}
+
+#[test]
+#[should_panic(expected = "left the turn open")]
+fn a_script_that_does_not_close_the_turn_panics() {
+    let mut rng = EngineRng::new(SEED);
+    let mut state = scripted_duel();
+    let script = [ScriptedTurn {
+        occurrence: 0,
+        actor: 0,
+        cmds: vec![TurnCmd::BeginMove], // opens the loop, ends nothing
+    }];
+    run_scripted(&mut state, &mut rng, 50, &script, |_, _| {});
+}

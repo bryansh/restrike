@@ -242,6 +242,11 @@ pub fn reel_input(
     input.knobs = knobs_for(entry, sidecar);
     input.loadouts = loadouts_for(capture, entry);
     input.item_data = item_data;
+    // §9.6: the manual-turn schedule — sidecar-only, like every keypress knob.
+    // Empty for the all-QuickFight captures, whose replay path is then
+    // bit-identical to the pre-schedule one (`build_state` never sets the
+    // interactive flag for an empty script).
+    input.manual_script = sidecar.knobs.manual_turns.clone();
     input.art = ReelArt {
         cpic_area: sidecar.art.cpic_area,
         monster_blocks: sidecar.monster_blocks(),

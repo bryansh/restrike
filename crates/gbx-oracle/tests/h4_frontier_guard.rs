@@ -1,8 +1,9 @@
 //! **The frontier-pin regression guard.** A committed manifest of the exact H4
-//! replay outcome for every local capture — FIFTEEN closed captures (the full
+//! replay outcome for every local capture — SIXTEEN closed captures (the full
 //! bar/terrain matrix, doc §44; the four campaign-1 sewer rosters, doc
-//! §45/§47; the two campaign-2 cleric fights, doc §48/§49; and the campaign-3
-//! buffed-party otyugh fight, doc §50) that cannot silently regress.
+//! §45/§47; the two campaign-2 cleric fights, doc §48/§49; the campaign-3
+//! buffed-party otyugh fight, doc §50; and the M6c manual-turn bar brawl,
+//! doc §9.6) that cannot silently regress.
 //!
 //! ## The exact-pin rule (read before editing [`PINS`])
 //!
@@ -397,6 +398,29 @@ const PINS: &[Pin] = &[
                                 // global turn 0 (LEDERA's) — the head poll sees the press, exactly
                                 // the cleric-fk shape.
     },
+    Pin {
+        // ★ The M6c MANUAL-TURN capture (doc §9.6's closing campaign,
+        // 2026-08-03): the canonical bar brawl (6 PCs vs 10 BAR PATRONs, seed
+        // 2643148259, 58C=99 / 6E4=0 / md=2 in-trace, 3,230 post-entry draws,
+        // 12 rounds) with the first THREE party turns played by hand — all six
+        // PC records enter `quick_fight` OFF (the GOG save default), and every
+        // unscripted suspension replays as Quick (draw-identical to the AI
+        // turn). The manual-turn schedule lives in the sidecar row; the
+        // reconstruction evidence is written on it. Intake frontier @62 (ours
+        // drew the AI-head d8 where the capture's manual TRAVIS turn walked
+        // draw-free into a departure attack's d20); the TRAVIS+PHILIPPE rows
+        // carried it to 155, LEDERA's walk to 317, and her GUARD word — proven
+        // by the #317 into-reach reaction d20 when [8] steps adjacent —
+        // closed it outright: 3,230/3,230, PartyWins, 0 trips.
+        //
+        // ★ This is the capture that proves the MANUAL path end to end:
+        // suspensions at the quick_fight fork, `CombatState::issue` commands
+        // (movement loop, walk-into attack, departure attack under a manual
+        // walk, Guard/EngageQuickFight), all through the same primitives the
+        // QuickFight captures pinned (D-CV5 "manual turns are plain draws").
+        capture: "manual-bar.gbxtrace",
+        expect: Expect::Closed,
+    },
 ];
 
 #[derive(Clone, Default)]
@@ -485,7 +509,16 @@ fn replay(path: &Path, capture: &str) -> (Option<usize>, usize) {
     }
     state.attach_action_sink(Box::new(TripTap(trips.clone())));
 
-    state.run_combat_observed(&mut rng, DEFAULT_NO_ACTION_LIMIT, |_, _| {});
+    // §9.6: `run_scripted` answers D-CV5's suspensions from the sidecar's
+    // manual-turn schedule; with an empty schedule the state was never made
+    // interactive and this is `run_combat_observed` line for line.
+    reel::run_scripted(
+        &mut state,
+        &mut rng,
+        DEFAULT_NO_ACTION_LIMIT,
+        &input.manual_script,
+        |_, _| {},
+    );
 
     let trip_count = *trips.borrow();
     let ours = draws.borrow();

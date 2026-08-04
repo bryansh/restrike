@@ -51,7 +51,12 @@ use crate::rng::EngineRng;
 /// Next/Prev/Manual/Center cursor motion) still appear here where they touch
 /// core state at all: `ViewSheet` runs the original's post-sheet
 /// `reclac_attacks`, and the cursor never does.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Serde: a scripted manual turn is a *sidecar* input (§9.6's closing capture —
+/// keypresses no hook records), so the vocabulary serializes. This is NOT the
+/// frozen `.gbxtrace` profile: the sidecar is versioned with a liberal reader,
+/// and growing this enum grows it additively.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TurnCmd {
     // --- §9.1, the main menu ------------------------------------------------
     /// `M` → `sub_33B26`'s entry (`ovr009.cs:184`): take the movement loop's
@@ -146,7 +151,7 @@ pub enum StepPreview {
 /// could see. Every variant lands on [`CombatState::redraw_combat_area`] — the
 /// same primitive the AI's scroll sites use — and emits the usual
 /// [`ActionEvent::Camera`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AimCamera {
     /// `aim_sub_menu`'s `RedrawCombatIfFocusOn(true, 3, target)`
     /// (`ovr014.cs:1793`): focus-gated, radius 3, on the focused combatant.

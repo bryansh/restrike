@@ -189,18 +189,26 @@ fn h4_melee_replays_the_bar_brawl_capture_draw_for_draw() {
 
     // Record the per-round survivor trajectory (draw-free observation) so a
     // length divergence names the round our fight ended vs the capture's.
+    // `run_scripted` (§9.6) answers D-CV5's suspensions from the sidecar's
+    // manual-turn schedule; with an empty schedule it is `run_combat_observed`
+    // line for line.
     let mut rounds: Vec<(u16, usize, usize)> = Vec::new();
-    let outcome = state.run_combat_observed(&mut rng, DEFAULT_NO_ACTION_LIMIT, |s, r| {
-        let (p, m) =
-            s.roster()
-                .iter()
-                .filter(|f| f.in_combat)
-                .fold((0usize, 0usize), |(p, m), f| match f.team {
+    let outcome = reel::run_scripted(
+        &mut state,
+        &mut rng,
+        DEFAULT_NO_ACTION_LIMIT,
+        &input.manual_script,
+        |s, r| {
+            let (p, m) = s.roster().iter().filter(|f| f.in_combat).fold(
+                (0usize, 0usize),
+                |(p, m), f| match f.team {
                     Team::Party => (p + 1, m),
                     Team::Monster => (p, m + 1),
-                });
-        rounds.push((r, p, m));
-    });
+                },
+            );
+            rounds.push((r, p, m));
+        },
+    );
 
     // The two draw streams.
     let ours = draws.borrow();
