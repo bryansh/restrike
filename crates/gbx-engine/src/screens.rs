@@ -192,24 +192,54 @@ impl PartyView {
 
 // --- Camp (ovr016.cs, MakeCamp) ---
 
-/// The camp menu (`MakeCamp`, `ovr016.cs:1080`): the command bar
-/// `Save View Magic Rest Alter Fix Exit` (`ovr016.cs:1103`), re-displayed
-/// after each sub-action (`ovr016.cs`'s own `while` loop). A parked command
-/// bar dispatching to the party screens, the magic submenu, and the rest
-/// action.
+/// `MakeCamp`'s command bar (`ovr016.cs:1103`).
+const CAMP_MENU: &str = "Save View Magic Rest Alter Fix Exit";
+/// `displayInput`'s `displayExtraString` for that bar (`ovr016.cs:1103`) —
+/// drawn at column 0 in `defaultMenuColors.prompt` (13, `Gbl.cs:189`), with
+/// the menu text starting at `displayExtraString.Length`.
+const CAMP_PROMPT: &str = "Camp:";
+/// `ovr016.cs:1093`: `displayString("The party makes camp...", 0, 10, 18, 1)`.
+const CAMP_ENTRY_TEXT: &str = "The party makes camp...";
+/// `LoadPic`'s Camping arm loads `PIC{area}` block `0x1d` — the campfire
+/// (`load_pic_final(ref gbl.byte_1D556, 0, 0x1d, "PIC")`, `ovr025.cs:1429`;
+/// the file name is `file_name + gbl.game_area`, `ovr030.cs:58`).
+const CAMP_PIC_BLOCK: u8 = 0x1D;
+/// `defaultMenuColors.prompt` (`Gbl.cs:189`).
+const PROMPT_COLOR: u8 = 13;
+
+/// The campfire picture's first frame, decoded once and kept for the screen's
+/// lifetime. **Never serialized** — a `.rsav` carries no pixels, and a restored
+/// camp re-decodes on its first tick.
+#[derive(Debug, Clone)]
+pub struct CampPicture {
+    width: usize,
+    height: usize,
+    pixels: Vec<u8>,
+}
+
+/// The camp screen (`MakeCamp`, `ovr016.cs:1081-1160`): `LoadPic`'s Camping
+/// composition (`ovr025.cs:1428-1433`) — the standard bordered layout, the
+/// campfire picture in the viewport, the party roster down the right panel and
+/// the position/time line — with `"The party makes camp..."` in the text area
+/// and the `Camp:` command bar re-displayed after each sub-action
+/// (`ovr016.cs`'s own `while` loop).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Camp {
     menu: Widget,
-    /// A one-line status shown under the menu after an action — engine-owned,
-    /// not game prose.
+    /// A one-line status shown under the camp text after an action —
+    /// engine-owned, not game prose.
     status: Option<String>,
+    /// Decoded campfire pixels, filled on the first paint. Transient.
+    #[serde(skip)]
+    picture: Option<CampPicture>,
 }
 
 impl Camp {
     pub fn new(_ctx: &FlowCtx) -> Self {
         Camp {
-            menu: menu_bar("Save View Magic Rest Alter Fix Exit"),
+            menu: camp_menu_bar(),
             status: None,
+            picture: None,
         }
     }
 
@@ -217,25 +247,119 @@ impl Camp {
     /// re-display after each dispatch).
     pub fn with_status(status: impl Into<String>) -> Self {
         Camp {
-            menu: menu_bar("Save View Magic Rest Alter Fix Exit"),
+            menu: camp_menu_bar(),
             status: Some(status.into()),
+            picture: None,
+        }
+    }
+
+    /// `LoadPic()`'s Camping arm plus `MakeCamp`'s own two writes, repainted
+    /// every tick (immediate mode, D-UI4 — the original composes it once and
+    /// loops `displayInput` over it, which is the same picture).
+    fn render(&mut self, ctx: &mut FlowCtx) {
+        // `seg037.draw8x8_03()` (`ovr025.cs:1428`) — the standard bordered
+        // layout, whose own inset clear wipes the previous screen's body.
+        let _ = crate::frames::draw8x8_03(ctx.fb, ctx.symbols);
+        self.draw_campfire(ctx);
+
+        // `PartySummary(gbl.SelectedPlayer)` (`ovr025.cs:1430`).
+        let rows: Vec<_> = ctx.roster.members.iter().map(sheet_view).collect();
+        let selected =
+            (!rows.is_empty()).then(|| (ctx.state.selected_player as usize) % rows.len());
+        crate::charsheet::render_party_summary(ctx.fb, ctx.font, &rows, selected);
+
+        // `display_map_position_time()` (`ovr025.cs:1432`), with the
+        // `game_state == Camping` suffix (`ovr025.cs:1500-1503`).
+        draw_position_time(ctx, true);
+
+        // `draw8x8_clear_area(TextRegion.NormalBottom)` then the entry line
+        // (`ovr016.cs:1091-1093`).
+        let region = crate::text::NORMAL_BOTTOM;
+        crate::draw::cell_rect_fill(
+            ctx.fb,
+            0,
+            region.y_start,
+            region.y_end,
+            region.x_start,
+            region.x_end,
+        );
+        crate::text::draw_string(ctx.fb, ctx.font, CAMP_ENTRY_TEXT, 18, 1, 0, 10);
+        if let Some(status) = &self.status {
+            crate::text::draw_string(ctx.fb, ctx.font, status, 20, 1, 0, 0x0E);
+        }
+
+        // `displayInput(…, CAMP_MENU, "Camp:")` (`ovr016.cs:1103`): the prompt
+        // string at column 0, then `display_highlighed_text` from column
+        // `displayExtraString.Length` (`ovr027.cs:158-163`).
+        crate::text::draw_string(ctx.fb, ctx.font, CAMP_PROMPT, 0x18, 0, 0, PROMPT_COLOR);
+        let span = match &self.menu {
+            Widget::Hotbar(h) => h.selected_span(),
+            _ => None,
+        };
+        crate::combat::scene::render::draw_menu_line_at(
+            ctx.fb,
+            ctx.font,
+            CAMP_MENU,
+            span,
+            CAMP_PROMPT.len(),
+        );
+    }
+
+    /// The campfire, blitted at the viewport cell the camp menu's own
+    /// `displayInput` draws it on: `DrawMaybeOverlayed(picture, useOverlay =
+    /// true, 3, 3)` (`ovr027.cs:181-184`, with `MakeCamp` passing
+    /// `useOverlay = true` at `ovr016.cs:1103`) → `OverlayBounded(block, 0, 0,
+    /// 2, 2)` → `draw_combat_picture(block, 3, 3, 0)`, which clips to pixels
+    /// x 8..176 / y 8..176 (`seg040.cs:29-31,115-118` = [`Clip::OVERLAY`]).
+    /// `load_pic_final`'s `masked` argument is 0 here, so nothing is
+    /// transparent and no recolor runs.
+    ///
+    /// ★ **Seam for the concurrent scene-pictures slice.** Only frame 0 is
+    /// drawn: `byte_1D556`'s multi-frame loop — the one `displayInput` advances
+    /// per `CurrentDelay()` (`ovr027.cs:180-193`) — belongs with
+    /// `Effect::Picture`'s general plumbing and the `picture_fade` recolor,
+    /// which that slice owns. This is the smallest thing that puts the right
+    /// pixels on the camp screen; the audit reconciles the two at merge.
+    fn draw_campfire(&mut self, ctx: &mut FlowCtx) {
+        if self.picture.is_none() {
+            self.picture = decode_camp_picture(ctx);
+        }
+        let Some(pic) = &self.picture else {
+            return;
+        };
+        crate::draw::blit_image(
+            ctx.fb,
+            &pic.pixels,
+            pic.width,
+            pic.height,
+            3,
+            3,
+            crate::draw::Clip::OVERLAY,
+            None,
+            None,
+        );
+    }
+
+    /// The highlighted word's span into [`CAMP_MENU`] — a test/introspection
+    /// seam over the bar's `gbl.menuSelectedWord`.
+    pub fn selected_span(&self) -> Option<crate::widgets::WordRange> {
+        match &self.menu {
+            Widget::Hotbar(h) => h.selected_span(),
+            _ => None,
         }
     }
 
     pub fn tick(&mut self, ctx: &mut FlowCtx) -> ScreenTransition {
-        draw_menu_backdrop(
-            ctx,
-            "Camp",
-            "Save View Magic Rest Alter Fix Exit",
-            self.status.as_deref(),
-        );
-        // `LoadPic`'s Camping arm ends with `display_map_position_time()`
-        // (`ovr025.cs:1432`) — camp is one of the two screens whose own layout
-        // carries the line, and `game_state == Camping` gives it the
-        // " camping" suffix (`ovr025.cs:1500-1503`).
-        draw_position_time(ctx, true);
+        self.render(ctx);
         match self.menu.tick(ctx.input, ctx.dt_ticks) {
             WidgetOutcome::Pending => ScreenTransition::Stay,
+            // `special_key == true` → `scroll_team_list` + a `PartySummary`
+            // redraw (`ovr016.cs:1105-1109`); the redraw is free here because
+            // the screen repaints every tick.
+            WidgetOutcome::PartyScroll(code) => {
+                scroll_team_list(ctx, code);
+                ScreenTransition::Stay
+            }
             WidgetOutcome::Hotbar(key) => self.dispatch(key, ctx),
             _ => ScreenTransition::Stay,
         }
@@ -248,9 +372,11 @@ impl Camp {
             // Magic → the memorize/scribe submenu (ovr016.cs:1127 → magic_menu).
             b'M' => ScreenTransition::To(Screen::Magic(MagicMenu::new())),
             // Rest → the memorization commit (ovr016.cs:1132 → rest_menu). See
-            // [`party_rest`] for the M4/M5 deferral (FD-25).
+            // [`party_rest`] for the M4/M5 deferral (FD-25). The menu itself is
+            // NOT rebuilt: `MakeCamp`'s loop keeps the one `displayInput` it
+            // opened with, so the highlighted word survives the action.
             b'R' => {
-                *self = Camp::with_status(party_rest(ctx));
+                self.status = Some(party_rest(ctx));
                 ScreenTransition::Stay
             }
             // Save → the save/load menu (ovr016.cs:1114 → ovr017.SaveGame).
@@ -262,11 +388,11 @@ impl Camp {
             // to the same deferred rest/healing machinery as Rest (FD-25).
             // TODO(M3+): Alter ▸ Order/Drop roster ops; TODO(M4/M5): Fix.
             b'A' => {
-                *self = Camp::with_status("Alter: party order/drop — TODO");
+                self.status = Some("Alter: party order/drop — TODO".into());
                 ScreenTransition::Stay
             }
             b'F' => {
-                *self = Camp::with_status("Fix: auto-heal needs rest/healing (M4/M5)");
+                self.status = Some("Fix: auto-heal needs rest/healing (M4/M5)".into());
                 ScreenTransition::Stay
             }
             // Exit ('E') or Escape ('\0') leaves camp for the walk loop
@@ -275,6 +401,52 @@ impl Camp {
             _ => ScreenTransition::Stay,
         }
     }
+}
+
+/// Camp's command bar: extended keys scroll the team list rather than
+/// resolving the bar (`MakeCamp`'s `special_key` arm, `ovr016.cs:1105-1109`).
+fn camp_menu_bar() -> Widget {
+    let mut hotbar = Hotbar::new(CAMP_MENU);
+    hotbar.accept_ext = true;
+    hotbar.ext_scrolls_party = true;
+    Widget::Hotbar(hotbar)
+}
+
+/// `scroll_team_list` (`ovr020.cs:1349-1368`), transcribed exactly: `'O'`
+/// (End / numpad 1) selects the next member, `'G'` (Home / numpad 7) the
+/// previous, both wrapping; **every other extended key is a no-op** — the
+/// arrow keys included, which is FD-18's confirmed behavior for every Gold Box
+/// list. (`crate::screens::PartyView`/`Training` still read `'H'`/`'P'`
+/// instead; that pre-M6 divergence is docketed, not widened here.)
+fn scroll_team_list(ctx: &mut FlowCtx, code: u8) {
+    let count = ctx.roster.members.len();
+    if count == 0 {
+        return;
+    }
+    let index = (ctx.state.selected_player as usize) % count;
+    let next = match code {
+        b'O' => (index + 1) % count,
+        b'G' => (index + count - 1) % count,
+        _ => return,
+    };
+    ctx.state.selected_player = next as u8;
+}
+
+/// Decodes `PIC{area}.DAX` block [`CAMP_PIC_BLOCK`]'s first frame
+/// (`load_pic_final`, `ovr030.cs:35-149`; the `PIC`/`FINAL` XOR-delta scheme is
+/// [`gbx_formats::anim::decode`]'s `xor_delta`). `None` — no campfire, the rest
+/// of the layout unaffected — whenever the archive isn't there, which is every
+/// synthetic-fixture engine (D10).
+fn decode_camp_picture(ctx: &FlowCtx) -> Option<CampPicture> {
+    let file = format!("PIC{}.DAX", ctx.game_area);
+    let bytes = ctx.data.block(&file, CAMP_PIC_BLOCK).ok()?;
+    let picture = gbx_formats::anim::decode(&bytes, false, true).ok()?;
+    let frame = picture.frames.into_iter().next()?;
+    Some(CampPicture {
+        width: frame.width_px(),
+        height: frame.height as usize,
+        pixels: frame.pixels,
+    })
 }
 
 /// The camp Rest action (`rest_menu`/`resting`, `ovr016.cs:274`/`ovr021.cs:516`).

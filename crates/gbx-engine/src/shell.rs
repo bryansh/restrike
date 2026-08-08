@@ -1328,6 +1328,14 @@ impl Shell {
     /// `textXCol`/`textYCol` either. The status line comes back on its own,
     /// from the engine tick (`display_map_position_time()` at `:1157`), the
     /// instant the shell is no longer a `Screen`.
+    ///
+    /// **Deliberately NOT transplanted:** that `LoadPic` arm's fourth step,
+    /// `PartySummary(gbl.SelectedPlayer)` (`ovr025.cs:1438`). Our walk loop has
+    /// never drawn the right-panel roster at *any* of its recompose sites, so
+    /// painting it only on a screen exit would leave a panel nothing else ever
+    /// refreshes — worse than the honest blank. Wiring `PartySummary` into
+    /// [`Shell::enter_world_menu`] (where it belongs) moves the committed walk
+    /// goldens; docketed as its own change.
     fn rebuild_exploration_screen(ctx: &mut FlowCtx) {
         ctx.fb.clear(0);
         // A fixture engine with no symbol set 4 simply gets no border, exactly
@@ -2154,10 +2162,11 @@ mod tests {
             let mut ctx = h.ctx();
             shell.tick(&mut ctx);
         }
+        // "The party makes camp..." at row 18, col 1 (`ovr016.cs:1093`).
         assert_ne!(
-            h.fb.get_pixel(8, 8),
+            h.fb.get_pixel(8, 18 * 8),
             0,
-            "camp must have painted its own title at cell (1,1)"
+            "camp must have painted its own text area"
         );
 
         h.input.push_all(&[char_key(b'e')]); // camp Exit
@@ -2165,9 +2174,74 @@ mod tests {
             matches!(s, Shell::WorldMenu { .. })
         });
         assert_eq!(
-            h.fb.get_pixel(8, 8),
+            h.fb.get_pixel(8, 18 * 8),
             0,
             "the screen's own pixels must not survive its exit"
+        );
+    }
+
+    /// `MakeCamp`'s `special_key` arm (`ovr016.cs:1105-1109`) →
+    /// `scroll_team_list` (`ovr020.cs:1349-1368`): End/numpad-1 next,
+    /// Home/numpad-7 previous, both wrapping.
+    #[test]
+    fn camp_extended_keys_scroll_the_team_list() {
+        use crate::input::{ExtKey, InputEvent};
+        let (mut shell, mut h) = boot_with_party(); // two members
+        h.input.push_all(&[char_key(b'e')]); // Encamp
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::Camp(_)))
+        });
+        assert_eq!(h.state.selected_player, 0);
+
+        h.input.push_all(&[InputEvent::Ext(ExtKey::End)]);
+        for _ in 0..3 {
+            let mut ctx = h.ctx();
+            shell.tick(&mut ctx);
+        }
+        assert_eq!(h.state.selected_player, 1, "End selects the next member");
+
+        h.input.push_all(&[InputEvent::Ext(ExtKey::Home)]);
+        for _ in 0..3 {
+            let mut ctx = h.ctx();
+            shell.tick(&mut ctx);
+        }
+        assert_eq!(h.state.selected_player, 0, "Home selects the previous");
+
+        // Still in camp: a special key never resolves the bar.
+        assert!(matches!(shell, Shell::Screen(Screen::Camp(_))));
+
+        // FD-18: the arrow keys do nothing in a Gold Box list.
+        h.input.push_all(&[InputEvent::Ext(ExtKey::Down)]);
+        for _ in 0..3 {
+            let mut ctx = h.ctx();
+            shell.tick(&mut ctx);
+        }
+        assert_eq!(h.state.selected_player, 0, "Down is not a scroll key");
+    }
+
+    /// `MakeCamp` loops one `displayInput` (`ovr016.cs:1099-1103`), so the
+    /// highlighted word survives a sub-action rather than snapping back to the
+    /// first — the menu is not rebuilt between iterations.
+    #[test]
+    fn camp_keeps_its_highlighted_word_across_an_action() {
+        let (mut shell, mut h) = boot_with_party();
+        h.input.push_all(&[char_key(b'e')]); // Encamp
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::Camp(_)))
+        });
+        h.input.push_all(&[char_key(b'r')]); // Rest — stays in camp
+        for _ in 0..3 {
+            let mut ctx = h.ctx();
+            shell.tick(&mut ctx);
+        }
+        let Shell::Screen(Screen::Camp(camp)) = &shell else {
+            panic!("still in camp");
+        };
+        let (start, _) = camp.selected_span().expect("a word is highlighted");
+        assert_eq!(
+            &"Save View Magic Rest Alter Fix Exit"[start..start + 4],
+            "Rest",
+            "the Rest keypress leaves Rest highlighted"
         );
     }
 

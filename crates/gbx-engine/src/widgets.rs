@@ -153,6 +153,13 @@ impl Hotbar {
         &self.words
     }
 
+    /// The highlighted word's byte span into [`Hotbar::text`] — what
+    /// `display_highlighed_text` inverts (`highlights[gbl.menuSelectedWord]`,
+    /// `ovr027.cs:89-120`).
+    pub fn selected_span(&self) -> Option<WordRange> {
+        self.selected.and_then(|i| self.words.get(i)).copied()
+    }
+
     /// The highlighted word's first character, uppercased — Enter's normal
     /// resolution, and `'\r'` when nothing is highlightable (§1.5).
     pub fn highlighted_char(&self) -> Option<u8> {

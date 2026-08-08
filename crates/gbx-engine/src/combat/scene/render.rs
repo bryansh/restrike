@@ -724,15 +724,33 @@ pub fn draw_menu_line(
     text: &str,
     selected: Option<(usize, usize)>,
 ) {
+    draw_menu_line_at(fb, font, text, selected, 0);
+}
+
+/// [`draw_menu_line`] with `display_highlighed_text`'s own `xOffset`
+/// (`ovr027.cs:86`): `displayInput` draws its `displayExtraString` prompt at
+/// column 0 and then hands the menu text `displayInputXOffset =
+/// displayExtraString.Length` (`ovr027.cs:158-163`), so a prompted menu like
+/// camp's `"Camp:"` + `"Save View …"` starts five columns in. The highlight
+/// span stays an index into `text`, exactly as `highlights` is; the padded
+/// clear runs from `xOffset + text.len()` to column 0x27 and never touches the
+/// prompt's own columns (`ovr027.cs:107-111`).
+pub fn draw_menu_line_at(
+    fb: &mut Framebuffer,
+    font: &Font,
+    text: &str,
+    selected: Option<(usize, usize)>,
+    x_offset: usize,
+) {
     const HIGHLIGHT: u8 = 15;
     const FOREGROUND: u8 = 10;
     let bytes = text.as_bytes();
-    for col in 0..40usize {
-        let Some(&ch) = bytes.get(col) else {
-            crate::text::draw_char(fb, font, b' ', PROMPT_ROW, col, 0, 0);
-            continue;
-        };
-        let in_selection = selected.is_some_and(|(s, e)| col >= s && col < e);
+    for (i, &ch) in bytes.iter().enumerate() {
+        let col = x_offset + i;
+        if col >= 40 {
+            break;
+        }
+        let in_selection = selected.is_some_and(|(s, e)| i >= s && i < e);
         let (bg, fg) = if in_selection {
             (HIGHLIGHT, 0) // inverse video over the selected word
         } else if ch.is_ascii_uppercase() || ch.is_ascii_digit() {
@@ -741,6 +759,9 @@ pub fn draw_menu_line(
             (0, FOREGROUND)
         };
         crate::text::draw_char(fb, font, ch, PROMPT_ROW, col, bg, fg);
+    }
+    for col in (x_offset + bytes.len()).min(40)..40usize {
+        crate::text::draw_char(fb, font, b' ', PROMPT_ROW, col, 0, 0);
     }
 }
 

@@ -431,14 +431,33 @@ pub fn render_sheet(fb: &mut Framebuffer, font: &Font, sets: &SymbolSets, view: 
 /// One row of the compact party summary (`PartySummary`, `ovr025.cs:216-261`):
 /// Name | AC | HP. The full sheet's `SheetView` is overkill for this list, so
 /// callers pass the three columns directly.
-pub fn render_party_summary(fb: &mut Framebuffer, font: &Font, rows: &[SheetView]) {
+///
+/// `selected` is `PartySummary`'s own `player` argument: that one row's name
+/// draws white (`displayString(name, 0, 15, …)`, `ovr025.cs:238-239`), every
+/// other goes through `displayPlayerName` (`ovr025.cs:827-846`). Of that
+/// function's three colors only the live-team-member arm (`0x0B`) is used
+/// here: the other two read the runtime `in_combat`/`combat_team` cells, which
+/// a roster [`Character`] outside a fight does not carry — docketed rather
+/// than guessed.
+pub fn render_party_summary(
+    fb: &mut Framebuffer,
+    font: &Font,
+    rows: &[SheetView],
+    selected: Option<usize>,
+) {
     // Header (row 2): "Name" at col 17, "AC  HP" at col 33 (ovr025.cs:226-227,
     // the non-StartGameMenu x origin). Body from row 4 (ovr025.cs:229).
     draw_string(fb, font, "Name", 2, 17, BG, WHITE);
     draw_string(fb, font, "AC  HP", 2, 33, BG, WHITE);
     for (i, r) in rows.iter().enumerate() {
         let y = 4 + i;
-        draw_string(fb, font, &r.name, y, 17, BG, WHITE);
+        // draw8x8_clear_area(y_pos, 0x26, y_pos, x_pos) per row (ovr025.cs:234)
+        // — a shortened roster must not leave the old row behind.
+        crate::draw::cell_rect_fill(fb, BG, y, y, 17, 0x26);
+        // `displayPlayerName`'s live-team-member color is `0x0B` — the same
+        // cyan the sheet's own labels use.
+        let name_color = if selected == Some(i) { WHITE } else { CYAN };
+        draw_string(fb, font, &r.name, y, 17, BG, name_color);
         // AC left-justified width 3 at col 31 (ovr025.cs:244, "{0,-3}").
         draw_string(fb, font, &format!("{:<3}", r.ac), y, 31, BG, GREEN);
         // HP right-aligned near col 36 (ovr025.cs:246-256).
