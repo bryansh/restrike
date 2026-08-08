@@ -819,6 +819,46 @@ mod tests {
         assert_eq!(back.to_canonical_json(), json, "encoding is deterministic");
     }
 
+    /// ★ Growing [`TurnCmd`] must never break a committed schedule. The
+    /// `"Attack Ally: "` confirmation (`ovr014.cs:1725`) landed as a new
+    /// **appended unit variant**, so serde's externally-tagged encoding of
+    /// every pre-existing command is byte-identical — asserted here against a
+    /// literal snapshot of the manual-bar schedule's own shapes, not against
+    /// whatever the current writer happens to produce.
+    #[test]
+    fn a_sidecar_written_before_confirm_attack_ally_still_parses() {
+        // Exactly the encoding the committed manual-bar rows use.
+        let legacy = r#"{"version":1,"capture":"manual-bar.gbxtrace","knobs":{"manual_turns":[
+            {"occurrence":0,"actor":0,"cmds":["BeginMove",{"MoveStep":2},"EndMove","Guard"]},
+            {"occurrence":1,"actor":4,"cmds":[{"AttackTarget":{"target":7}},"DelayTurn"]}
+        ]}}"#;
+        let s = CaptureSidecar::parse(legacy).expect("an older sidecar still reads");
+        assert_eq!(s.knobs.manual_turns.len(), 2);
+        assert_eq!(
+            s.knobs.manual_turns[0].cmds,
+            vec![
+                TurnCmd::BeginMove,
+                TurnCmd::MoveStep(2),
+                TurnCmd::EndMove,
+                TurnCmd::Guard
+            ]
+        );
+        assert_eq!(
+            s.knobs.manual_turns[1].cmds,
+            vec![TurnCmd::AttackTarget { target: 7 }, TurnCmd::DelayTurn]
+        );
+        // And the new command round-trips like every other one.
+        let mut grown = s.clone();
+        grown.knobs.manual_turns[1]
+            .cmds
+            .insert(0, TurnCmd::ConfirmAttackAlly);
+        let json = grown.to_canonical_json();
+        assert!(json.contains("\"ConfirmAttackAlly\""));
+        let back = CaptureSidecar::parse(&json).expect("our own writer parses");
+        assert_eq!(back, grown);
+        assert_eq!(back.to_canonical_json(), json);
+    }
+
     #[test]
     fn a_bad_manual_schedule_is_refused() {
         let empty_cmds = r#"{"version":1,"capture":"x.gbxtrace","knobs":{"manual_turns":

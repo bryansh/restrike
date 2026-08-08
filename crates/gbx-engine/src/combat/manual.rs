@@ -124,6 +124,24 @@ pub enum TurnCmd {
     /// The "Flee:" prompt answered `Y` (`ovr009.cs:508-514`) → `flee_battle`'s
     /// §28 ladder. Ends the turn whether or not the escape succeeds.
     Flee,
+
+    /// ★ `can_attack_target`'s `yes_no("Attack Ally: ")` answered **`Y`**
+    /// (`sub_40F1F`, `ovr014.cs:1717-1749`).
+    ///
+    /// The original asks that question *inside* the commit, synchronously; a
+    /// command stream cannot block there, so the answer is pre-supplied — the
+    /// same shape `continue_battle_yes` already uses for the round-end prompt.
+    /// It arms a **one-shot** consent on the open turn, consumed by the very
+    /// next command that reaches the ally branch (an [`TurnCmd::AttackTarget`]
+    /// commit or a [`TurnCmd::MoveStep`] walked into an ally — both route
+    /// through `can_attack_target`, `ovr014.cs:1806-1812` and
+    /// `ovr009.cs:597`). Answering `N` is simply *not* issuing this: the
+    /// unconfirmed command comes back as [`TurnRefusal::AllyTarget`] and the
+    /// aim menu stays open, which is what `result = false` does in the
+    /// original.
+    ///
+    /// Appended last so the committed manual-turn sidecars keep parsing.
+    ConfirmAttackAlly,
 }
 
 /// What [`CombatState::move_step_preview`] found in a direction — §9.3's own
@@ -222,8 +240,11 @@ pub enum TurnRefusal {
     BadDirection(u8),
     /// A roster index that is not a live combatant.
     NoSuchTarget { target: usize },
-    /// `can_attack_target`'s ally branch (`ovr014.cs:1721-1746`) — the "Attack
-    /// Ally: " prompt and its team-flip are not modeled.
+    /// `can_attack_target`'s ally branch answered **N** (`ovr014.cs:1725-1728`)
+    /// — i.e. the command targeted a team-mate with no
+    /// [`TurnCmd::ConfirmAttackAlly`] armed. The original re-prompts here
+    /// rather than doing anything, which is what a refusal means for the aim
+    /// menu: the word stays offered, the swing does not happen.
     AllyTarget { target: usize },
     /// The aim commit failed its range/reach/weapon legality (§9.4) — the
     /// original never shows `Target` here, so reaching it is a driver bug.
@@ -325,6 +346,12 @@ impl DoneWords {
 pub struct ManualTurn {
     actor: usize,
     movement: Option<MovementBackup>,
+    /// ★ A pre-supplied `Y` to `can_attack_target`'s `"Attack Ally: "`
+    /// (`ovr014.cs:1725`), armed by [`TurnCmd::ConfirmAttackAlly`] and consumed
+    /// by the next command that reaches that branch. One-shot: the original
+    /// asks once per commit, so consent never carries to a second swing.
+    #[serde(default)]
+    ally_confirmed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -339,6 +366,7 @@ impl ManualTurn {
         ManualTurn {
             actor,
             movement: None,
+            ally_confirmed: false,
         }
     }
 
@@ -436,6 +464,10 @@ impl CombatState {
             return Err(TurnRefusal::NoManualTurn);
         };
         let actor = manual.actor;
+        // `ConfirmAttackAlly` is not a menu iteration at all — it is the answer
+        // to a `yes_no` the original asks *inside* one — so the loop tail below
+        // does not apply to it.
+        let menu_iteration = !matches!(cmd, TurnCmd::ConfirmAttackAlly);
         let outcome = self.dispatch(rng, actor, cmd);
         // `combat_menu`'s loop tail (`ovr009.cs:294-297`): every iteration that
         // did NOT end the turn re-centres on the acting combatant
@@ -446,7 +478,7 @@ impl CombatState {
         // scroll sites (`sub_33B26`).
         let turn_open = self.manual.is_some();
         let moving = self.manual.as_ref().is_some_and(|m| m.movement.is_some());
-        if turn_open && !moving && self.focus {
+        if menu_iteration && turn_open && !moving && self.focus {
             let p = self.fighters[actor].pos;
             self.redraw_combat_area(8, 2, p);
         }
@@ -584,6 +616,15 @@ impl CombatState {
                 // or the §28 ladder blocked the escape.
                 self.flee_battle(rng, actor);
                 Ok(self.end_turn())
+            }
+            TurnCmd::ConfirmAttackAlly => {
+                // Arms the one-shot consent; the command that needs it follows
+                // immediately (`can_attack_target` asks inside the commit).
+                self.manual
+                    .as_mut()
+                    .expect("checked by `issue`")
+                    .ally_confirmed = true;
+                Ok(TurnOutcome::Continue)
             }
         }
     }
@@ -923,16 +964,67 @@ impl CombatState {
         })
     }
 
-    /// `can_attack_target` (`sub_40F1F`, `ovr014.cs:1717-1749`): an
-    /// opposite-team target is always attackable; an ALLY opens the "Attack
-    /// Ally: " prompt, whose `Y` flips every conscious NPC to the enemy team —
-    /// a whole betrayal mechanic with no capture behind it.
+    /// ★ `can_attack_target` (`sub_40F1F`, `ovr014.cs:1717-1749`), in full.
+    ///
+    /// ```text
+    /// if (target.OppositeTeam() == attacker.combat_team ||
+    ///     attacker.quick_fight == QuickFight.True)      -> allowed
+    /// else if (yes_no("Attack Ally: ") != 'Y')          -> refused
+    /// else                                              -> allowed, AND:
+    ///        area2_ptr.field_666 = 1;
+    ///        foreach player in TeamList
+    ///            if (health_status == okey && control_morale >= NPC_Base)
+    ///                { combat_team = Enemy; actions.target = null; }
+    ///        CountCombatTeamMembers();
+    /// ```
+    ///
+    /// The `yes_no` is pre-supplied by [`TurnCmd::ConfirmAttackAlly`] (a
+    /// command stream cannot block on a modal), so the `N` answer is "no
+    /// consent armed" and surfaces as [`TurnRefusal::AllyTarget`] — the aim
+    /// menu re-prompts, exactly as `result = false` leaves it in the original.
+    ///
+    /// The flip's gate is `control_morale >= Control.NPC_Base` (`= 0x80`,
+    /// `Player.cs:322`) — precisely [`Combatant::npc`](super::Combatant::npc).
+    /// So party-controlled members never flip and a conscious NPC ally always
+    /// does. Every combatant already on the enemy team is re-set to Enemy
+    /// (a no-op) and has its held target dropped, which is transcribed rather
+    /// than optimized away: the target drop is observable.
+    ///
+    /// **No capture exercises this** — the mechanic lands cited and
+    /// unit-tested, and a future staged capture can pin its draws (there are
+    /// none here: every step is a plain field write).
     fn can_attack_target(&mut self, actor: usize, target: usize) -> Result<(), TurnRefusal> {
-        if self.fighters[target].team != self.fighters[actor].team {
+        if self.fighters[target].team != self.fighters[actor].team
+            || self.fighters[actor].quick_fight
+        {
             return Ok(());
         }
-        self.trip(actor, "attack-ally");
-        Err(TurnRefusal::AllyTarget { target })
+        let confirmed = self
+            .manual
+            .as_mut()
+            .map(|m| std::mem::replace(&mut m.ally_confirmed, false))
+            .unwrap_or(false);
+        if !confirmed {
+            return Err(TurnRefusal::AllyTarget { target });
+        }
+        self.betray_the_party();
+        Ok(())
+    }
+
+    /// `can_attack_target`'s `Y` branch (`ovr014.cs:1731-1745`).
+    fn betray_the_party(&mut self) {
+        self.area_field_666 = 1;
+        for f in &mut self.fighters {
+            if f.health_status == super::HealthStatus::Okey && f.npc {
+                f.team = super::Team::Monster;
+                f.target = None;
+            }
+        }
+        // `CountCombatTeamMembers()` (`ovr025.cs:1268-1287`) — the round-stale
+        // globals are refreshed right here, off-schedule, because the teams
+        // just changed under them.
+        let (party, monsters) = self.live_counts();
+        self.set_team_counts(party, monsters);
     }
 
     // === §9.1's Cast =======================================================

@@ -748,30 +748,131 @@ fn a_bow_commits_at_range_and_a_cornered_bow_does_not() {
     assert!(!state.can_commit_aim(0, 1));
 }
 
-#[test]
-fn aiming_at_an_ally_trips_the_unmodeled_prompt() {
-    let log = ActionLog::default();
-    let mut rng = EngineRng::new(SEED);
+/// A duel plus an adjacent ally of combatant 0, ready for the `"Attack Ally: "`
+/// path. `npc` says whether that ally is party-controlled or an NPC —
+/// `control_morale >= Control.NPC_Base` is the flip's own gate.
+fn duel_with_ally(npc: bool) -> crate::combat::CombatState {
     let mut state = duel();
     let mut ally = state.fighters[0].clone();
     ally.id = 2;
     ally.pos = GridPos::new(4, 5);
     ally.quick_fight = true; // only combatant 0 suspends
+    ally.npc = npc;
+    ally.control_morale = if npc { 0x80 } else { 0x10 };
     state.fighters.push(ally);
     state.rebuild_occupancy();
-    state.attach_action_sink(log.sink());
+    state
+}
+
+/// `can_attack_target`'s `N` answer (`ovr014.cs:1725-1728`): the commit is
+/// refused and the aim menu stays open. Unconfirmed means "answered N" — a
+/// driver that never asks never swings at a friend by accident.
+#[test]
+fn aiming_at_an_ally_without_confirmation_is_refused() {
+    let mut rng = EngineRng::new(SEED);
+    let mut state = duel_with_ally(false);
     assert_eq!(open_manual_turn(&mut state, &mut rng), 0);
     assert_eq!(
         state.issue(&mut rng, TurnCmd::AttackTarget { target: 2 }),
         Err(TurnRefusal::AllyTarget { target: 2 })
     );
-    assert!(log.events().iter().any(|e| matches!(
+    assert!(
+        state.manual_turn().is_some(),
+        "a refused ally commit leaves the turn open"
+    );
+}
+
+/// The `Y` branch (`ovr014.cs:1730-1745`): the swing happens, `field_666` goes
+/// up, and every conscious combatant with `control_morale >= NPC_Base` flips to
+/// the enemy team with its held target dropped. A **party-controlled** member
+/// must not flip.
+#[test]
+fn a_confirmed_ally_attack_swings_and_does_not_flip_party_members() {
+    let log = ActionLog::default();
+    let mut rng = EngineRng::new(SEED);
+    let mut state = duel_with_ally(false);
+    state.attach_action_sink(log.sink());
+    assert_eq!(open_manual_turn(&mut state, &mut rng), 0);
+    state
+        .issue(&mut rng, TurnCmd::ConfirmAttackAlly)
+        .expect("arming the confirmation is always legal mid-turn");
+    state
+        .issue(&mut rng, TurnCmd::AttackTarget { target: 2 })
+        .expect("a confirmed ally commit swings");
+    assert_eq!(state.area_field_666(), 1, "field_666 = 1");
+    assert!(
+        log.events().iter().any(|e| matches!(
+            e,
+            ActionEvent::Attacking {
+                attacker_id: 0,
+                target_id: 2,
+                ..
+            }
+        )),
+        "the swing really went through attack_target"
+    );
+    assert_eq!(
+        state.roster()[2].team,
+        crate::combat::Team::Party,
+        "a party-controlled ally (control_morale < 0x80) must NOT flip"
+    );
+    assert!(!log.events().iter().any(|e| matches!(
         e,
         ActionEvent::StubTripped {
             stub: "attack-ally",
             ..
         }
     )));
+}
+
+/// The other half of the gate: a **synthetic NPC ally** (`control_morale >=
+/// NPC_Base`) does flip, loses its held target, and the refreshed
+/// `CountCombatTeamMembers` counts it on the other side.
+#[test]
+fn a_confirmed_ally_attack_flips_conscious_npcs_to_the_enemy_team() {
+    let mut rng = EngineRng::new(SEED);
+    let mut state = duel_with_ally(true);
+    assert_eq!(open_manual_turn(&mut state, &mut rng), 0);
+    // The NPC ally's own QuickFight turn ran before ours and may have walked;
+    // put it back beside the actor and give it a held target so the flip's
+    // `actions.target = null` is observable.
+    state.fighters[2].pos = GridPos::new(4, 5);
+    state.fighters[2].target = Some(1);
+    state.rebuild_occupancy();
+    state.issue(&mut rng, TurnCmd::ConfirmAttackAlly).unwrap();
+    state
+        .issue(&mut rng, TurnCmd::AttackTarget { target: 2 })
+        .expect("a confirmed ally commit swings");
+    assert_eq!(
+        state.roster()[2].team,
+        crate::combat::Team::Monster,
+        "a conscious NPC ally flips to Enemy"
+    );
+    assert_eq!(
+        state.roster()[2].target,
+        None,
+        "and its held target is dropped (actions.target = null)"
+    );
+}
+
+/// The consent is **one-shot**: `can_attack_target` asks once per commit, so a
+/// second ally swing needs a second `Y`.
+#[test]
+fn ally_confirmation_is_consumed_by_one_commit() {
+    let mut rng = EngineRng::new(SEED);
+    let mut state = duel_with_ally(false);
+    assert_eq!(open_manual_turn(&mut state, &mut rng), 0);
+    state.issue(&mut rng, TurnCmd::ConfirmAttackAlly).unwrap();
+    state
+        .issue(&mut rng, TurnCmd::AttackTarget { target: 2 })
+        .expect("the first commit consumes the confirmation");
+    if state.manual_turn().is_some() {
+        assert_eq!(
+            state.issue(&mut rng, TurnCmd::AttackTarget { target: 2 }),
+            Err(TurnRefusal::AllyTarget { target: 2 }),
+            "the second swing must ask again"
+        );
+    }
 }
 
 #[test]

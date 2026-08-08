@@ -79,6 +79,11 @@ pub const ESCAPE_IS_BLOCKED: &str = "Escape is blocked";
 /// The flee confirmation (`ovr009.cs:510`) — a `yes_no`, so it key-blocks
 /// (M6c).
 pub const FLEE_PROMPT: &str = "Flee:";
+/// `can_attack_target`'s `yes_no(gbl.defaultMenuColors, "Attack Ally: ")`
+/// (`ovr014.cs:1725`) — note the trailing space, which is the original's own
+/// (`displayInput` draws `displayExtraString` at column 0 and the `"Yes No"`
+/// menu immediately after it).
+pub const ATTACK_ALLY_PROMPT: &str = "Attack Ally: ";
 
 // --- the turn's small change ----------------------------------------------
 

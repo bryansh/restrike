@@ -41,6 +41,11 @@ pub enum Stage {
     Speed,
     /// The movement loop's off-map `yes_no("Flee:")`.
     FleePrompt,
+    /// ★ `can_attack_target`'s `yes_no("Attack Ally: ")` (`ovr014.cs:1725`) —
+    /// opened when the core refuses a commit at a team-mate. `Y` re-issues the
+    /// refused command behind a [`TurnCmd::ConfirmAttackAlly`]; `N` goes back
+    /// to where the commit came from, which is what `result = false` does.
+    AllyPrompt,
     /// The caster's queued spell resolving before any menu opens
     /// (`ovr009.cs:155-163`) — the host aims and resolves; no words show.
     PendingCast,
@@ -104,6 +109,21 @@ pub struct ManualUi {
     /// *and* takes that step (`ovr009.cs:243-252`). The loop's entry snapshot
     /// has to land first, so the step waits here for one command.
     pending_step: Option<u8>,
+    /// ★ The command the core refused with [`TurnRefusal::AllyTarget`], held
+    /// while [`Stage::AllyPrompt`] asks — re-issued behind a
+    /// [`TurnCmd::ConfirmAttackAlly`] if the player answers `Y`. The original
+    /// asks its `yes_no` *inside* `can_attack_target`, so from the outside the
+    /// one keypress becomes two commands, exactly as a main-menu direction key
+    /// becomes `BeginMove` + `MoveStep`.
+    pending_retry: Option<TurnCmd>,
+    /// The refused command itself, parked while the question is on screen. It
+    /// only becomes a [`Self::pending_retry`] once the player answers `Y` —
+    /// arming it earlier would re-issue it (unconfirmed, refused again) before
+    /// the prompt was ever read.
+    ally_held: Option<TurnCmd>,
+    /// Where [`Stage::AllyPrompt`] returns on `N` — the stage the refused
+    /// command came from.
+    ally_prompt_return: Stage,
     /// The original's own transient line ("can't go there", "Not with that
     /// weapon", "Already been targeted"), shown until the next keypress.
     message: Option<String>,
@@ -144,6 +164,9 @@ impl ManualUi {
             focus_of_target: GridPos::new(0, 0),
             cursor_occupant: None,
             pending_step: None,
+            pending_retry: None,
+            ally_held: None,
+            ally_prompt_return: Stage::Main,
             message: None,
             selected: 0,
         };
@@ -151,10 +174,14 @@ impl ManualUi {
         ui
     }
 
-    /// The step a main-menu direction key owes, once its `BeginMove` has been
-    /// issued (`ovr009.cs:243-252` opens the loop *with* the direction).
-    pub fn take_pending_step(&mut self) -> Option<TurnCmd> {
-        self.pending_step.take().map(TurnCmd::MoveStep)
+    /// The second command a single keypress owes, if any — the movement loop's
+    /// entry step (`ovr009.cs:243-252` opens the loop *with* the direction), or
+    /// the commit re-issued behind a confirmed `"Attack Ally: "`
+    /// (`ovr014.cs:1725-1746`). The host issues it right behind the first.
+    pub fn take_follow_up(&mut self) -> Option<TurnCmd> {
+        self.pending_retry
+            .take()
+            .or_else(|| self.pending_step.take().map(TurnCmd::MoveStep))
     }
 
     /// **Boundary read.** Re-reads every legality condition and the actor's
@@ -246,9 +273,24 @@ impl ManualUi {
     /// the acting combatant otherwise (`RedrawCombatIfFocusOn(true, 2, actor)`
     /// at the turn head).
     pub fn focus_cell(&self) -> Option<GridPos> {
+        if self.aiming() {
+            Some(self.focus_of_target)
+        } else {
+            Some(self.actor_pos)
+        }
+    }
+
+    /// Is the aim cursor on screen? `Target`'s `"Attack Ally: "` question is
+    /// asked from *inside* `sub_411D8`, before it clears `drawTargetCursor`
+    /// (`ovr014.cs:1806-1821`), so the box stays on the target while the
+    /// player answers.
+    fn aiming(&self) -> bool {
         match self.stage {
-            Stage::Aim | Stage::Cursor => Some(self.focus_of_target),
-            _ => Some(self.actor_pos),
+            Stage::Aim | Stage::Cursor => true,
+            Stage::AllyPrompt => {
+                matches!(self.ally_prompt_return, Stage::Aim | Stage::Cursor)
+            }
+            _ => false,
         }
     }
 
@@ -259,10 +301,7 @@ impl ManualUi {
     /// board (D-CV2): a box placed from a boundary read would jump ahead of
     /// the walk it is following.
     pub fn aim_focus_cell(&self) -> Option<GridPos> {
-        match self.stage {
-            Stage::Aim | Stage::Cursor => Some(self.focus_of_target),
-            _ => None,
-        }
+        self.aiming().then_some(self.focus_of_target)
     }
 
     /// The cell the free cursor is on (its own, or the focused target's).
@@ -301,6 +340,9 @@ impl ManualUi {
                 strings::game_speed_words(self.game_speed)
             ),
             Stage::FleePrompt => format!("{} {}", strings::FLEE_PROMPT, strings::YES_NO),
+            // `yes_no(defaultMenuColors, "Attack Ally: ")` (`ovr014.cs:1725`)
+            // — the prompt already carries its own trailing space.
+            Stage::AllyPrompt => format!("{}{}", strings::ATTACK_ALLY_PROMPT, strings::YES_NO),
             Stage::PendingCast => String::new(),
         }
     }
@@ -363,6 +405,7 @@ impl ManualUi {
             Stage::Done => self.key_done(ev),
             Stage::Speed => self.key_speed(ev),
             Stage::FleePrompt => self.key_flee(ev),
+            Stage::AllyPrompt => self.key_ally_prompt(ev),
             // The host drives the aim menu itself here and issues
             // `ResolvePendingCast`; no keys of our own.
             Stage::PendingCast => MenuAction::None,
@@ -436,16 +479,26 @@ impl ManualUi {
         }
     }
 
-    /// React to a refusal. Two of them are the original's own player-facing
-    /// lines rather than driver bugs, and print as such; the rest are bugs the
-    /// host reports.
-    pub fn note_refusal(&mut self, refusal: &TurnRefusal) {
+    /// React to a refusal of `cmd`. Two of them are the original's own
+    /// player-facing lines rather than driver bugs and print as such; one is a
+    /// question the original asks mid-commit and this UI must now ask; the rest
+    /// are bugs the host reports.
+    pub fn note_refusal(&mut self, cmd: &TurnCmd, refusal: &TurnRefusal) {
         match refusal {
             TurnRefusal::NotWithThatWeapon => {
                 self.message = Some(strings::NOT_WITH_THAT_WEAPON.to_string());
             }
             TurnRefusal::DuplicateTarget { .. } => {
                 self.message = Some(strings::ALREADY_BEEN_TARGETED.to_string());
+            }
+            // ★ `can_attack_target`'s `yes_no("Attack Ally: ")`
+            // (`ovr014.cs:1725`). The core cannot block on a modal, so it
+            // refuses an unconfirmed ally target and the menu asks here; `Y`
+            // re-issues `cmd` behind a `ConfirmAttackAlly`.
+            TurnRefusal::AllyTarget { .. } => {
+                self.ally_prompt_return = self.stage;
+                self.stage = Stage::AllyPrompt;
+                self.ally_held = Some(cmd.clone());
             }
             _ => {}
         }
@@ -552,6 +605,33 @@ impl ManualUi {
             }
             b'N' => {
                 self.stage = Stage::Moving;
+                MenuAction::None
+            }
+            _ => MenuAction::None,
+        }
+    }
+
+    /// `yes_no(defaultMenuColors, "Attack Ally: ")` (`ovr014.cs:1725` →
+    /// `ovr027.cs:676-689`): loops until `Y` or `N`, ESC included — the
+    /// original's `yes_no` has no escape.
+    fn key_ally_prompt(&mut self, ev: InputEvent) -> MenuAction {
+        let InputEvent::Char(key) = ev else {
+            return MenuAction::None;
+        };
+        match key.to_ascii_uppercase() {
+            // `result = true` plus the betrayal flip — the core does both once
+            // the consent is armed, and the held command follows immediately
+            // (`take_follow_up`).
+            b'Y' => {
+                self.stage = self.ally_prompt_return;
+                self.pending_retry = self.ally_held.take();
+                MenuAction::Issue(TurnCmd::ConfirmAttackAlly)
+            }
+            // `result = false`: nothing happens and the menu it came from
+            // re-prompts.
+            b'N' => {
+                self.stage = self.ally_prompt_return;
+                self.ally_held = None;
                 MenuAction::None
             }
             _ => MenuAction::None,

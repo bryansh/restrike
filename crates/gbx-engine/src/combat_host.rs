@@ -715,7 +715,7 @@ impl CombatHost {
                 // own player-facing lines; the rest name a driver bug, and the
                 // transcript is where this host says so.
                 if let Some(ui) = self.manual.as_mut() {
-                    ui.note_refusal(&refusal);
+                    ui.note_refusal(&cmd, &refusal);
                 }
                 ctx.vm_memory
                     .transcript
@@ -830,7 +830,21 @@ impl CombatHost {
                 return;
             };
             match ui.key(event) {
-                MenuAction::None => {}
+                // ★ A key that changed only the UI's own state still needs the
+                // boundary reads refreshed. Found live, 2026-08-08: `A` opens
+                // Aim with an EMPTY scan list (`ManualUi::key` builds the
+                // `AimState` but only `refresh` fills `aim.list` from
+                // `copy_sorted_players`), so `Next`/`Prev` had nothing to walk
+                // and the cursor sat on the actor forever — the list half of
+                // §9.4's aim menu was unusable from the keyboard, while its
+                // unit tests passed because they call `refresh` themselves.
+                // `MenuAction::Issue` refreshes inside `issue`; this is the
+                // other arm.
+                MenuAction::None => {
+                    if let Some(ui) = self.manual.as_mut() {
+                        ui.refresh(&mut self.state);
+                    }
+                }
                 MenuAction::OpenSheet => {
                     let actor = ui.actor();
                     // The party member behind the roster index — the fight's
@@ -841,10 +855,11 @@ impl CombatHost {
                 }
                 MenuAction::Issue(cmd) => {
                     self.issue(ctx, cmd);
-                    // A direction key at the main menu opens the loop *and*
-                    // steps (`ovr009.cs:243`): the step rides right behind its
-                    // `BeginMove`.
-                    let pending = self.manual.as_mut().and_then(|ui| ui.take_pending_step());
+                    // One keypress can owe a second command: a direction key at
+                    // the main menu opens the loop *and* steps
+                    // (`ovr009.cs:243`), and a `Y` to `"Attack Ally: "` re-runs
+                    // the commit the core just refused (`ovr014.cs:1725-1746`).
+                    let pending = self.manual.as_mut().and_then(|ui| ui.take_follow_up());
                     if let Some(step) = pending {
                         self.issue(ctx, step);
                     }

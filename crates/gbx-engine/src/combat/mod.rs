@@ -1462,6 +1462,13 @@ pub struct CombatState {
     /// occurrence schedule ([`auto_cast_toggles`](Self::auto_cast_toggles)),
     /// which is unchanged.
     pending_space: bool,
+    /// `gbl.area2_ptr.field_666` — raised by `can_attack_target`'s betrayal
+    /// branch (`ovr014.cs:1733`) when a player confirms `"Attack Ally: "` with
+    /// `Y`, and zeroed at combat teardown (`ovr011.cs:1197`). Nothing in the
+    /// decompilation READS it; carried because it is one of the two things that
+    /// branch does, and a future staged capture can pin it.
+    #[serde(default)]
+    area_field_666: u8,
 }
 
 impl CombatState {
@@ -1507,6 +1514,7 @@ impl CombatState {
             interactive: false,
             manual: None,
             pending_space: false,
+            area_field_666: 0,
         };
         s.rebuild_occupancy();
         // The entry-state team counts (the MainCombatLoop pre-loop
@@ -1562,6 +1570,7 @@ impl CombatState {
             interactive: false,
             manual: None,
             pending_space: false,
+            area_field_666: 0,
         }
     }
 
@@ -4021,7 +4030,20 @@ impl CombatState {
     // --- the round loop (MainCombatLoop, ovr009.cs:22) ---------------------
 
     /// `(live party, live monsters)`.
-    fn live_counts(&self) -> (usize, usize) {
+    /// `gbl.friends_count`/`gbl.foe_count`, written by every
+    /// `CountCombatTeamMembers()` call site.
+    pub(crate) fn set_team_counts(&mut self, party: usize, monsters: usize) {
+        self.friends_count = party;
+        self.foe_count = monsters;
+    }
+
+    /// `gbl.area2_ptr.field_666` — 1 once a player has confirmed an ally
+    /// attack (`ovr014.cs:1733`). A read seam for tests and the inspector.
+    pub fn area_field_666(&self) -> u8 {
+        self.area_field_666
+    }
+
+    pub(crate) fn live_counts(&self) -> (usize, usize) {
         let mut party = 0;
         let mut monsters = 0;
         for f in &self.fighters {

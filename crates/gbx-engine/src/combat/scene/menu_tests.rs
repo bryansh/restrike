@@ -148,8 +148,8 @@ fn a_direction_key_at_the_main_menu_opens_the_loop_and_owes_its_step() {
         MenuAction::Issue(TurnCmd::BeginMove)
     );
     assert_eq!(ui.stage(), Stage::Moving);
-    assert_eq!(ui.take_pending_step(), Some(TurnCmd::MoveStep(2)));
-    assert_eq!(ui.take_pending_step(), None, "owed exactly once");
+    assert_eq!(ui.take_follow_up(), Some(TurnCmd::MoveStep(2)));
+    assert_eq!(ui.take_follow_up(), None, "owed exactly once");
 }
 
 #[test]
@@ -214,10 +214,16 @@ fn blocked_and_refused_steps_print_the_originals_own_lines() {
     ui.key(InputEvent::Char(b'X'));
     assert_eq!(ui.prompt(), "Move/Attack, Move Left = 12 ");
 
-    ui.note_refusal(&crate::combat::TurnRefusal::NotWithThatWeapon);
+    ui.note_refusal(
+        &TurnCmd::MoveStep(2),
+        &crate::combat::TurnRefusal::NotWithThatWeapon,
+    );
     assert_eq!(ui.prompt(), "Not with that weapon");
     ui.key(InputEvent::Char(b'X'));
-    ui.note_refusal(&crate::combat::TurnRefusal::DuplicateTarget { target: 1 });
+    ui.note_refusal(
+        &TurnCmd::AttackTarget { target: 1 },
+        &crate::combat::TurnRefusal::DuplicateTarget { target: 1 },
+    );
     assert_eq!(ui.prompt(), "Already been targeted");
 }
 
@@ -473,4 +479,53 @@ fn the_selection_seeds_from_the_hosts_memory() {
 
 fn gbx_len_of_menu(ui: &ManualUi) -> usize {
     crate::widgets::build_words(&ui.prompt()).len()
+}
+
+// === `can_attack_target`'s "Attack Ally: " (ovr014.cs:1717-1749) ==========
+
+/// The core refuses an unconfirmed ally commit; the UI turns that into the
+/// original's own `yes_no` prompt rather than swallowing it.
+#[test]
+fn an_ally_refusal_opens_the_attack_ally_prompt() {
+    let (_state, _rng, mut ui) = open_fight();
+    let cmd = TurnCmd::AttackTarget { target: 2 };
+    ui.note_refusal(&cmd, &crate::combat::TurnRefusal::AllyTarget { target: 2 });
+    assert_eq!(ui.stage(), Stage::AllyPrompt);
+    assert_eq!(ui.prompt(), "Attack Ally: Yes No");
+}
+
+/// `Y` → `ConfirmAttackAlly`, and the refused command follows it as the
+/// keypress's second half (the host issues `take_follow_up` right behind).
+#[test]
+fn answering_yes_arms_the_confirmation_and_re_issues_the_commit() {
+    let (_state, _rng, mut ui) = open_fight();
+    ui.key(InputEvent::Char(b'a')); // open Aim so the return stage is real
+    assert_eq!(ui.stage(), Stage::Aim);
+    let cmd = TurnCmd::AttackTarget { target: 2 };
+    ui.note_refusal(&cmd, &crate::combat::TurnRefusal::AllyTarget { target: 2 });
+
+    assert_eq!(
+        ui.key(InputEvent::Char(b'y')),
+        MenuAction::Issue(TurnCmd::ConfirmAttackAlly)
+    );
+    assert_eq!(ui.stage(), Stage::Aim, "back where the commit came from");
+    assert_eq!(ui.take_follow_up(), Some(cmd));
+    assert_eq!(ui.take_follow_up(), None, "owed exactly once");
+}
+
+/// `N` → nothing happens and the aim menu re-prompts (`result = false`,
+/// `ovr014.cs:1727`). ESC does not answer a `yes_no` (`ovr027.cs:682`).
+#[test]
+fn answering_no_drops_the_commit_and_esc_does_not_answer_at_all() {
+    let (_state, _rng, mut ui) = open_fight();
+    ui.key(InputEvent::Char(b'a'));
+    let cmd = TurnCmd::AttackTarget { target: 2 };
+    ui.note_refusal(&cmd, &crate::combat::TurnRefusal::AllyTarget { target: 2 });
+
+    assert_eq!(ui.key(InputEvent::Escape), MenuAction::None);
+    assert_eq!(ui.stage(), Stage::AllyPrompt, "yes_no has no escape");
+
+    assert_eq!(ui.key(InputEvent::Char(b'n')), MenuAction::None);
+    assert_eq!(ui.stage(), Stage::Aim);
+    assert_eq!(ui.take_follow_up(), None, "N drops the held commit");
 }

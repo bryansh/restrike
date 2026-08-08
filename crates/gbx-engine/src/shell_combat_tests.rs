@@ -858,6 +858,44 @@ fn a_manual_fight_is_played_from_the_menus_and_won() {
     );
 }
 
+/// ★ Regression, found live 2026-08-08 while wiring the ally prompt: pressing
+/// `A` opened Aim with an **empty** scan list. `ManualUi::key` builds the
+/// `AimState` but only `refresh` fills `aim.list` from `copy_sorted_players`
+/// (`ovr014.cs:2073`), and the host refreshed only after a `MenuAction::Issue`
+/// — so `Next`/`Prev` had nothing to walk, the cursor sat on the actor
+/// forever, and §9.4's whole list half was unusable from the keyboard. The
+/// unit tests passed throughout because they call `refresh` themselves.
+#[test]
+fn opening_aim_fills_the_scan_list() {
+    let mut e = engine_with_program(load_then_combat_program(1, b"AFTERWARD"), manual_pcs());
+    let mut opened = false;
+    for _ in 0..MAX_TICKS {
+        if matches!(
+            e.shell().combat_host().map(|h| h.stage()),
+            Some(Stage::PlayerTurn)
+        ) {
+            opened = true;
+            break;
+        }
+        e.tick(&[]);
+    }
+    assert!(opened, "a manual party turn opened");
+
+    // The key may wait a tick or two while the last batch finishes playing
+    // (the D-CV2 lockstep rule); the point is that it never needs a *command*
+    // to load the list.
+    e.tick(&[crate::input::InputEvent::Char(b'A')]);
+    for _ in 0..8 {
+        e.tick(&[]);
+    }
+    let host = e.shell().combat_host().expect("still parked on the fight");
+    let ui = host.manual().expect("the menus are open");
+    assert!(
+        ui.aim_target().is_some(),
+        "Aim must open with copy_sorted_players' list already loaded"
+    );
+}
+
 #[test]
 fn space_during_a_fight_hands_the_next_turn_to_the_player() {
     // ★ M6c: SPACE is a real key at last (`process_input_in_monsters_turn`,
