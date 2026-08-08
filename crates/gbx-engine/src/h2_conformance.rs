@@ -221,6 +221,102 @@ fn horizontal_menu_reply_writes_memory() {
     );
 }
 
+/// ★ A real `Request::VerticalMenu` (0x15) prints its prompt into the bottom
+/// text region FIRST (`press_any_key`, `ovr003.cs:681`), then parks the list
+/// on the row after it (`gbl.textYCol + 1`, `:689`) — and the commit writes
+/// `VertMenuSelect`'s 0-based index back to real `ScriptMemory` (`:691`).
+///
+/// Before this slice, 0x15 had a decoder and disassembly but **no interpreter
+/// arm at all**: any script reaching it halted. The bar's drink submenu
+/// (`ECL2.DAX` block 1 `@0x886A`, the only VERTICAL MENU in reachable CotAB
+/// code) is what that cost.
+#[test]
+fn vertical_menu_prints_its_prompt_then_parks_a_list_and_writes_the_index() {
+    use crate::widgets::Widget;
+    const DEST: u16 = 0x5002;
+    let block = simple_block(|b| {
+        b.op(0x15) // VERTICAL MENU
+            .mem(DEST)
+            .inline_str(b"AND WHAT CAN I GET YOU?")
+            .imm_byte(3)
+            .inline_str(b"ALE")
+            .inline_str(b"MEAD")
+            .inline_str(b"WATER");
+        b.op(0x00); // EXIT
+    });
+    let mut e = engine_with(block, vec![]);
+
+    let mut parked_rows = None;
+    for _ in 0..400 {
+        e.tick(&[]);
+        if let Some(Widget::ListMenu(l)) = e.shell.parked_widget_for_tests() {
+            parked_rows = l.layout;
+            break;
+        }
+    }
+    let layout = parked_rows.expect("the VerticalMenu Request must park a laid-out ListMenu");
+    // The prompt is one wrapped line in `NormalBottom` (rows 0x11..0x16), so
+    // the list opens on 0x12 — `textYCol + 1` with `textYCol` left at 0x11.
+    assert_eq!(layout.start_row, 0x12, "the list opens under the prompt");
+    assert_eq!(
+        (layout.start_col, layout.end_row, layout.end_col),
+        (1, 0x16, 0x26)
+    );
+
+    // Step down one row (End / numpad 1 — `sl_select_item`'s `'O'` arm), then
+    // commit: MEAD, index 1.
+    e.tick(&[InputEvent::Ext(crate::input::ExtKey::End)]);
+    e.tick(&[InputEvent::Enter]);
+    for _ in 0..20 {
+        if matches!(e.shell, Shell::WorldMenu { .. }) {
+            break;
+        }
+        e.tick(&[]);
+    }
+    assert!(matches!(e.shell, Shell::WorldMenu { .. }));
+    assert_eq!(
+        e.vm_memory().raw_word(DEST),
+        Some(1),
+        "VertMenuSelect's 0-based index must reach the destination cell"
+    );
+}
+
+/// `VertMenuSelect` returns `index` on **every** exit — ESC included
+/// (`ovr027.cs:653-658` leaves `index_ptr` alone on the cancel arm, and
+/// `ovr008.cs:1217-1226` returns it regardless). A cancelled drink menu
+/// therefore writes the highlighted row, exactly as a commit would.
+#[test]
+fn a_cancelled_vertical_menu_still_writes_the_highlighted_index() {
+    use crate::widgets::Widget;
+    const DEST: u16 = 0x5004;
+    let block = simple_block(|b| {
+        b.op(0x15)
+            .mem(DEST)
+            .inline_str(b"PICK")
+            .imm_byte(3)
+            .inline_str(b"ALE")
+            .inline_str(b"MEAD")
+            .inline_str(b"WATER");
+        b.op(0x00);
+    });
+    let mut e = engine_with(block, vec![]);
+    for _ in 0..400 {
+        e.tick(&[]);
+        if matches!(e.shell.parked_widget_for_tests(), Some(Widget::ListMenu(_))) {
+            break;
+        }
+    }
+    e.tick(&[InputEvent::Ext(crate::input::ExtKey::End)]); // highlight MEAD
+    e.tick(&[InputEvent::Escape]); // cancel
+    for _ in 0..20 {
+        if matches!(e.shell, Shell::WorldMenu { .. }) {
+            break;
+        }
+        e.tick(&[]);
+    }
+    assert_eq!(e.vm_memory().raw_word(DEST), Some(1));
+}
+
 /// `DELAY` (0x3A) parks a `Request::Delay` -> `Widget::Delay`, which counts
 /// down real ticks (the placeholder 24-tick duration, `shell.rs`'s
 /// `widget_for_request`) rather than resolving instantly.

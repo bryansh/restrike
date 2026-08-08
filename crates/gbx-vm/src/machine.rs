@@ -683,6 +683,7 @@ impl EclMachine {
             0x12 => self.op_print(activation, host, pc, opcode, true),
             0x13 => self.op_return(activation),
             0x14 => self.op_compare_and(activation, host, pc, opcode),
+            0x15 => self.op_vertical_menu(activation, host, pc, opcode),
             0x16..=0x1B => self.op_if(activation, host, pc, opcode),
             0x1C => self.op_clearmonsters(activation, host),
             0x20 => self.op_newecl(activation, host, pc, opcode),
@@ -1301,6 +1302,44 @@ impl EclMachine {
             activation,
             pc,
             Request::HorizontalMenu { options },
+            Completion::WriteWordThenAdvance { dest, next },
+        ))
+    }
+
+    /// VERTICAL MENU (0x15), `CMD_VertMenu` ovr003.cs:663-694. The same
+    /// variable-tail shape HORIZONTAL MENU has, one fixed operand wider:
+    /// `mem_loc`, an inline PROMPT string, the entry count, then that many
+    /// reloaded tail strings via the `ecl_offset--; vm_LoadCmdSets(count)`
+    /// rewind (`:672-673`).
+    ///
+    /// The prompt is `gbl.unk_1D972[1]` (`:668`) — the string register the
+    /// fixed batch's one string-mode operand filled, exactly as
+    /// `vm_LoadCmdSets`'s own `strIndex` counts. `vm_SetMemoryValue(index,
+    /// mem_loc)` (`:691`) is [`Completion::WriteWordThenAdvance`]'s job, so the
+    /// reply's 0-based index reaches the destination cell unchanged.
+    ///
+    /// Presentation — `textXCol`/`textYCol`, `press_any_key`'s wrap into the
+    /// bottom region, `VertMenuSelect`'s list box and the closing
+    /// `draw8x8_clear_area(NormalBottom)` (`:676-693`) — is the engine's, like
+    /// every other `Request`: none of it is `ScriptMemory`-addressable.
+    fn op_vertical_menu(
+        &mut self,
+        activation: &mut Activation,
+        host: &mut dyn VmHost,
+        pc: u16,
+        opcode: u8,
+    ) -> Result<VmStep, VmError> {
+        let (args, cursor) = self.load_cmd_sets(pc.wrapping_add(1), 3, host, pc);
+        let dest = self.resolve_target(&args[0], pc, opcode)?;
+        let prompt = self.strings.get(1).clone();
+        let count = self.resolve_numeric(&args[2], pc, opcode, host)? as u8;
+        let (_tail, next) = self.load_cmd_sets(cursor, count, host, pc);
+
+        let options = (1..=count).map(|i| self.strings.get(i).clone()).collect();
+        Ok(Self::yield_request(
+            activation,
+            pc,
+            Request::VerticalMenu { prompt, options },
             Completion::WriteWordThenAdvance { dest, next },
         ))
     }

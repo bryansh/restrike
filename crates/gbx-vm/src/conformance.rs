@@ -972,6 +972,95 @@ mod opcodes {
         assert_eq!(m.current_pc(), Some(after));
     }
 
+    /// VERTICAL MENU (0x15), `CMD_VertMenu` ovr003.cs:663-694: three fixed
+    /// operands (dest, PROMPT string, entry count), then the count reloaded
+    /// tail strings. Suspends with the prompt and the entries and writes
+    /// `VertMenuSelect`'s 0-based index to the destination cell on resume.
+    #[test]
+    fn vertical_menu_suspends_with_prompt_and_entries_then_writes_the_index() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x15)
+            .imm_word(0x4B00) // mem_loc
+            .inline_str(b"PICK ONE") // gbl.unk_1D972[1], press_any_key's text
+            .imm_byte(3) // menuCount
+            .inline_str(b"ALE")
+            .inline_str(b"MEAD")
+            .inline_str(b"WATER");
+        b.label("after");
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let after = b.addr_of("after");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+
+        let request = Request::VerticalMenu {
+            prompt: VmString::from_bytes(*b"PICK ONE"),
+            options: vec![
+                VmString::from_bytes(*b"ALE"),
+                VmString::from_bytes(*b"MEAD"),
+                VmString::from_bytes(*b"WATER"),
+            ],
+        };
+        assert_eq!(m.step(&mut h), Ok(VmStep::Request(request.clone())));
+        assert_eq!(m.pending(), Some(&request));
+        assert_continue(m.resume(Reply::Selection(2), &mut h));
+        assert_eq!(h.word(0x4B00), Some(2), "the index is written 0-based");
+        assert_eq!(m.current_pc(), Some(after));
+    }
+
+    /// The reload trick's own edge: a zero-entry VERTICAL MENU decodes its
+    /// three fixed operands, suspends with no entries, and still lands on the
+    /// instruction after them.
+    #[test]
+    fn vertical_menu_with_no_entries_still_suspends_and_advances() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x15)
+            .imm_word(0x4B00)
+            .inline_str(b"NOTHING")
+            .imm_byte(0);
+        b.label("after");
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let after = b.addr_of("after");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+
+        assert_eq!(
+            m.step(&mut h),
+            Ok(VmStep::Request(Request::VerticalMenu {
+                prompt: VmString::from_bytes(*b"NOTHING"),
+                options: vec![],
+            }))
+        );
+        assert_continue(m.resume(Reply::Selection(0), &mut h));
+        assert_eq!(h.word(0x4B00), Some(0));
+        assert_eq!(m.current_pc(), Some(after));
+    }
+
+    /// A `Reply` of the wrong kind is refused for VERTICAL MENU exactly as it
+    /// is for every other request (`resume`'s kind check).
+    #[test]
+    fn vertical_menu_refuses_a_mismatched_reply() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x15)
+            .imm_word(0x4B00)
+            .inline_str(b"P")
+            .imm_byte(1)
+            .inline_str(b"ALE");
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+        assert!(matches!(m.step(&mut h), Ok(VmStep::Request(_))));
+        assert_eq!(m.resume(Reply::Delay, &mut h), Err(VmError::ReplyMismatch));
+    }
+
     /// CALL (0x2D) case `0xAE11`, `CMD_Call` ovr003.cs:1843-1866.
     #[test]
     fn call_0xae11_queries_wall_roof_and_wall_type() {

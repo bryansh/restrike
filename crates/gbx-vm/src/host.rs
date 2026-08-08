@@ -256,6 +256,22 @@ pub enum Request {
     /// script order (1-indexed register fill order, but presented 0-indexed
     /// here for the reply to select by).
     HorizontalMenu { options: Vec<VmString> },
+    /// VERTICAL MENU (0x15), `CMD_VertMenu` (`ovr003.cs:663-694`): a prompt
+    /// printed into the bottom text region followed by a vertical list.
+    ///
+    /// `prompt` is the fixed batch's single inline string (`gbl.unk_1D972[1]`,
+    /// `:670`) — `press_any_key`'s text, not a menu word. `options` are the
+    /// reloaded tail strings, in script order, 0-indexed like
+    /// [`Request::HorizontalMenu`]'s. Answered by [`Reply::Selection`]: the
+    /// engine writes `VertMenuSelect`'s returned index to the destination cell
+    /// (`vm_SetMemoryValue(index, mem_loc)`, `:691`), and the index is
+    /// **0-based** — the sole real occurrence (`ECL2.DAX` block 1 `@0x886A`,
+    /// the tavern's drink list) feeds it straight to an `ON GOTO` with four
+    /// targets.
+    VerticalMenu {
+        prompt: VmString,
+        options: Vec<VmString>,
+    },
     /// DELAY (0x3A) and CALL (0x2D) case `0xE804`'s trailing pause — both
     /// wrap `GameDelay()`/`SysDelay(game_speed_var*100)`. `game_speed_var`
     /// is an engine pacing setting the VM doesn't have a `ScriptMemory`
@@ -273,7 +289,8 @@ pub enum Request {
 /// matches the outstanding request's kind (`VmError::ReplyMismatch` if not).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Reply {
-    /// A 0-indexed selection into a `Request::HorizontalMenu`'s `options`.
+    /// A 0-indexed selection into a `Request::HorizontalMenu`'s or
+    /// `Request::VerticalMenu`'s `options`.
     Selection(u8),
     Delay,
     Combat,
@@ -285,6 +302,7 @@ impl Reply {
         matches!(
             (self, request),
             (Reply::Selection(_), Request::HorizontalMenu { .. })
+                | (Reply::Selection(_), Request::VerticalMenu { .. })
                 | (Reply::Delay, Request::Delay)
                 | (Reply::Combat, Request::Combat)
         )

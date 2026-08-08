@@ -216,6 +216,14 @@ fn describe_request(request: &Request) -> String {
             let opts: Vec<String> = options.iter().map(vm_string_to_display).collect();
             format!("HorizontalMenu[{}]", opts.join(", "))
         }
+        Request::VerticalMenu { prompt, options } => {
+            let opts: Vec<String> = options.iter().map(vm_string_to_display).collect();
+            format!(
+                "VerticalMenu({})[{}]",
+                vm_string_to_display(prompt),
+                opts.join(", ")
+            )
+        }
         Request::Delay => "Delay".to_string(),
         Request::Combat => "Combat".to_string(),
     }
@@ -332,7 +340,9 @@ impl ReplyPolicy {
     /// eventually owns pacing and combat resolution).
     fn answer(&mut self, request: &Request) -> Reply {
         match request {
-            Request::HorizontalMenu { .. } => Reply::Selection(self.menu.pop_front().unwrap_or(0)),
+            Request::HorizontalMenu { .. } | Request::VerticalMenu { .. } => {
+                Reply::Selection(self.menu.pop_front().unwrap_or(0))
+            }
             Request::Delay => Reply::Delay,
             Request::Combat => Reply::Combat,
         }

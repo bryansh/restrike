@@ -293,13 +293,33 @@ impl ListItem {
     }
 }
 
+/// A [`ListMenu`]'s on-screen box — `sl_select_item`'s `startY`/`startX`/
+/// `endY`/`endX` (`ovr027.cs:532-541`), from which it derives
+/// `listDisplayHeight = (endY - startY) + 1` and `listDisplayWidth = (endX -
+/// startX) + 1`. Inclusive at both ends, in 8×8 cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ListLayout {
+    pub start_row: usize,
+    pub start_col: usize,
+    pub end_row: usize,
+    pub end_col: usize,
+}
+
+impl ListLayout {
+    pub fn page_size(&self) -> usize {
+        (self.end_row + 1).saturating_sub(self.start_row).max(1)
+    }
+    pub fn fill_width(&self) -> usize {
+        (self.end_col + 1).saturating_sub(self.start_col)
+    }
+}
+
 /// `sl_select_item` (`ovr027.cs:532-673`): a vertical list combined with a
-/// Hotbar whose text grows `" Next"`/`" Prev"`/`" Exit"` (the growth itself
-/// is presentation, not modeled here — this struct owns selection/scroll
-/// state only). Movement is transcribed directly from coab's own routines
-/// (`menu_scroll_in_page` `:497`, `menu_scroll_page` `:464`, `skipHeadings`
-/// `:sub_6CC08`), so it inherits their exact heading-inclusive,
-/// page-relative-wrapping behavior — see [`ListMenu::tick`].
+/// Hotbar whose text grows `" Next"`/`" Prev"`/`" Exit"`. Movement is
+/// transcribed directly from coab's own routines (`menu_scroll_in_page`
+/// `:497`, `menu_scroll_page` `:464`, `skipHeadings` `:sub_6CC08`), so it
+/// inherits their exact heading-inclusive, page-relative-wrapping behavior —
+/// see [`ListMenu::tick`].
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ListMenu {
     pub items: Vec<ListItem>,
@@ -310,9 +330,14 @@ pub struct ListMenu {
     /// `gbl.menuScreenIndex`) — the scroll position, in list coordinates.
     screen_index: usize,
     /// Visible row count (coab `listDisplayHeight` = `endY − startY + 1`).
-    /// The list's *screen* origin (§1.5's `textYCol + 1` coupling) is a
-    /// presentation concern owned by the consuming screen, not tracked here.
     pub page_size: usize,
+    /// Where the list paints, when the *shell* owns the paint — the VERTICAL
+    /// MENU case, whose origin is `gbl.textYCol + 1`, i.e. wherever the
+    /// prompt's own text stopped (`ovr003.cs:689`). `None` for a list whose
+    /// consuming screen composes it itself (the shop's Buy list draws its own
+    /// stock listing).
+    #[serde(default)]
+    pub layout: Option<ListLayout>,
 }
 
 impl ListMenu {
@@ -325,10 +350,19 @@ impl ListMenu {
             index: 0,
             screen_index: 0,
             page_size: page_size.max(1),
+            layout: None,
         };
         if m.items.iter().any(|it| !it.is_heading()) {
             m.index = m.scroll_in_page(false, 1);
         }
+        m
+    }
+
+    /// [`ListMenu::new`] in a [`ListLayout`]'s box — `page_size` is the box's
+    /// own `listDisplayHeight`, and the shell paints the list there.
+    pub fn boxed(items: Vec<ListItem>, layout: ListLayout) -> Self {
+        let mut m = Self::new(items, layout.page_size());
+        m.layout = Some(layout);
         m
     }
 
@@ -340,6 +374,35 @@ impl ListMenu {
             Some(ListItem::Entry(_)) => Some(self.index),
             _ => None,
         }
+    }
+
+    /// coab's `index_ptr` verbatim — the highlighted row whether or not it is
+    /// selectable. `VertMenuSelect` returns exactly this, **including when the
+    /// loop ended on ESC/`'E'`** (`ovr027.cs:653-658` leaves `index_ptr`
+    /// untouched; `ovr008.cs:1217-1226` returns it regardless), which is why a
+    /// cancelled VERTICAL MENU writes the same cell a commit would.
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
+    /// Which row sits at the top of the window (`gbl.menuScreenIndex`).
+    pub fn screen_index(&self) -> usize {
+        self.screen_index
+    }
+
+    /// The words `sl_select_item` appends to its caller's prompt each
+    /// iteration (`ovr027.cs:585-604`): `" Next"` while rows lie below the
+    /// window, `" Prev"` while any lie above. `showExit` is `false` for
+    /// `CMD_VertMenu` (`ovr008.cs:1217`), so no `" Exit"`.
+    pub fn prompt_words(&self) -> String {
+        let mut out = String::new();
+        if self.items.len().saturating_sub(self.page_size) > self.screen_index {
+            out.push_str(" Next");
+        }
+        if self.screen_index > 0 {
+            out.push_str(" Prev");
+        }
+        out
     }
 
     /// `menu_scroll_in_page` (`ovr027.cs:497`, `sub_6CDCA`): single-step

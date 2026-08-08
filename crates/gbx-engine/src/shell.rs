@@ -106,8 +106,65 @@ fn draw_hotbar_prompt(
     font: &gbx_formats::font::Font,
     hotbar: &Hotbar,
 ) {
-    let span = hotbar.selected.and_then(|i| hotbar.words().get(i)).copied();
-    crate::combat::scene::render::draw_menu_line(fb, font, &hotbar.text, span);
+    crate::combat::scene::render::draw_menu_line(fb, font, &hotbar.text, hotbar.selected_span());
+}
+
+/// A parked [`ListMenu`] with its own on-screen box — `sub_6C897`'s page paint
+/// (`ovr027.cs:355-376`) plus `ListItemHighlighted` (`:384-398`), then
+/// `sl_select_item`'s own grown prompt line (`:585-604`).
+///
+/// Colors are `defaultMenuColors` (`Gbl.cs:189`): foreground 10 for a normal
+/// row, prompt 13 for a heading, highlight 15 as the selected row's background
+/// with foreground 0. Both paint functions `Trim()`/offset by the row's leading
+/// spaces, so an indented entry keeps its indent and the inverse-video block
+/// covers only the text.
+fn draw_list_menu(
+    fb: &mut crate::framebuffer::Framebuffer,
+    font: &gbx_formats::font::Font,
+    list: &crate::widgets::ListMenu,
+) {
+    use crate::widgets::ListItem;
+    const NORMAL: u8 = 10;
+    const HEADING: u8 = 13;
+    const HIGHLIGHT: u8 = 15;
+    let Some(layout) = list.layout else {
+        return;
+    };
+    // `draw8x8_clear_area(yEnd, xEnd, yStart, xStart)` (`ovr027.cs:357`).
+    crate::draw::cell_rect_fill(
+        fb,
+        0,
+        layout.start_row,
+        layout.end_row,
+        layout.start_col,
+        layout.end_col,
+    );
+    let screen = list.screen_index();
+    let visible = list.page_size.min(list.items.len().saturating_sub(screen));
+    for offset in 0..visible {
+        let i = screen + offset;
+        let row = layout.start_row + offset;
+        let (text, heading) = match &list.items[i] {
+            ListItem::Heading(t) => (t.as_str(), true),
+            ListItem::Entry(t) => (t.as_str(), false),
+        };
+        let indent = text.len() - text.trim_start_matches(' ').len();
+        let trimmed = text.trim();
+        let selected = i == list.index();
+        let (bg, fg) = match (selected, heading) {
+            (true, _) => (HIGHLIGHT, 0),
+            (false, true) => (0, HEADING),
+            (false, false) => (0, NORMAL),
+        };
+        crate::text::draw_string(fb, font, trimmed, row, layout.start_col + indent, bg, fg);
+    }
+    // The prompt line the list's own `displayInput` shows: `inputString` is
+    // empty for `CMD_VertMenu` (`ovr008.cs:1218`), so this is just the
+    // `" Next"`/`" Prev"` growth — highlighted by the same `sub_6C1E9` painter
+    // as any other menu.
+    let words = list.prompt_words();
+    let span = crate::widgets::build_words(&words).first().copied();
+    crate::combat::scene::render::draw_menu_line(fb, font, &words, span);
 }
 
 /// The vector/chain half of a flow's probe line.
@@ -149,6 +206,14 @@ impl PartialEq for VmPhase {
 enum PendingOutcome {
     Request(Request),
     Exit(Exit),
+    /// ★ VERTICAL MENU's two-beat shape (`CMD_VertMenu`, `ovr003.cs:676-691`):
+    /// `press_any_key` prints the prompt into the bottom text region FIRST, and
+    /// only then does `VertMenuSelect` open its list — on the row after
+    /// wherever that text stopped (`gbl.textYCol + 1`). This variant is the
+    /// state between the two: the prompt is a live [`TextJob`], the request is
+    /// held for the list about to open. Appended last so the `.rsav` encoding
+    /// of every existing variant is untouched.
+    VerticalPrompt(Request),
 }
 
 /// One buffered [`Effect`] plus the sliver of engine state its
@@ -254,14 +319,44 @@ pub struct FlowCtx<'a> {
     pub pictures: &'a mut crate::picture::PictureCache,
 }
 
+/// `VertMenuSelect`'s box for `CMD_VertMenu` (`ovr003.cs:689`): `endY = 0x16`,
+/// `endX = 0x26`, `startX = 1`. Only `startY` is dynamic — `gbl.textYCol + 1`,
+/// the row after wherever `press_any_key` left the prompt's own text.
+const VERT_MENU_END_ROW: usize = 0x16;
+const VERT_MENU_END_COL: usize = 0x26;
+const VERT_MENU_START_COL: usize = 1;
+
+/// `Request::VerticalMenu`'s widget: the entries as a [`ListMenu`] in
+/// `VertMenuSelect`'s box (`ovr008.cs:1217-1226` → `sl_select_item`, which is
+/// the SAME routine [`ListMenu`] already transcribes — the two are not
+/// separate originals, `VertMenuSelect` is a five-argument wrapper).
+///
+/// Every entry is a plain `MenuItem(string)` (`Classes/MenuItem.cs:19-24` sets
+/// `Heading = false`), so no row is ever a heading here.
+fn vertical_menu_widget(options: &[gbx_vm::VmString], start_row: usize) -> Widget {
+    let items = options
+        .iter()
+        .map(|s| crate::widgets::ListItem::Entry(String::from_utf8_lossy(&s.0).into_owned()))
+        .collect();
+    Widget::ListMenu(crate::widgets::ListMenu::boxed(
+        items,
+        crate::widgets::ListLayout {
+            start_row: start_row.min(VERT_MENU_END_ROW),
+            start_col: VERT_MENU_START_COL,
+            end_row: VERT_MENU_END_ROW,
+            end_col: VERT_MENU_END_COL,
+        },
+    ))
+}
+
 /// `Request` -> `Widget` (design doc's table, M2 slice). Engine-owned
 /// interactions (world menu, door menu, pagination) never go through this —
 /// only a real `VectorRun`'s `Request` does. Only the `Request` variants
 /// `gbx-vm`'s interpreter can currently emit are handled
-/// (`HorizontalMenu`/`Delay`/`Combat`) — `VerticalMenu`/`InputNumber`/
-/// `InputString`/`SelectPlayer` await their opcodes (`0x15`/`0x0F`/`0x10`/
-/// `0x39`) landing in the interpreter; `ListMenu`/`TextEntry` already exist
-/// and are ready (step 3), this is purely a `gbx-vm` coverage gap, docketed.
+/// (`HorizontalMenu`/`VerticalMenu`/`Delay`/`Combat`) — `InputNumber`/
+/// `InputString`/`SelectPlayer` await their opcodes (`0x0F`/`0x10`/`0x39`)
+/// landing in the interpreter; `TextEntry` already exists and is ready
+/// (step 3), this is purely a `gbx-vm` coverage gap, docketed.
 fn widget_for_request(request: &Request) -> Widget {
     match request {
         Request::HorizontalMenu { options } => {
@@ -277,6 +372,12 @@ fn widget_for_request(request: &Request) -> Widget {
             // research): '0'-'9','A'-'Z'.
             hotbar.valid_keys = Some((b'0'..=b'9').chain(b'A'..=b'Z').collect());
             Widget::Hotbar(hotbar)
+        }
+        // The real site is `tick_present`, which knows where the prompt's text
+        // stopped; this fallback opens the list on the first row under an
+        // unprinted prompt.
+        Request::VerticalMenu { options, .. } => {
+            vertical_menu_widget(options, NORMAL_BOTTOM.y_start + 1)
         }
         // `game_speed_var`-scaled duration is engine-owned and not on the
         // wire (host.rs's doc comment); placeholder tick count pending the
@@ -301,6 +402,17 @@ fn describe_request(request: &Request) -> String {
                 .collect::<Vec<_>>()
                 .join(" ");
             format!("menu: {text}")
+        }
+        Request::VerticalMenu { prompt, options } => {
+            let text = options
+                .iter()
+                .map(|s| String::from_utf8_lossy(&s.0).into_owned())
+                .collect::<Vec<_>>()
+                .join(" / ");
+            format!(
+                "vertical menu: {} [{text}]",
+                String::from_utf8_lossy(&prompt.0)
+            )
         }
         Request::Delay => "delay".to_string(),
         // Reached only for the DEFERRED non-combat COMBAT branch (no monsters
@@ -498,77 +610,119 @@ impl VectorRun {
                     }
                 }
             }
-            let Some(QueuedEffect {
-                effect,
-                head_block_id,
-            }) = self.queue.pop_front()
-            else {
-                break;
-            };
-            match effect {
-                Effect::Print { text, clear_first } => {
-                    let text = String::from_utf8_lossy(&text.0).into_owned();
-                    ctx.vm_memory
-                        .transcript
-                        .push(crate::vmhost::TranscriptEntry::Print {
-                            text: text.clone(),
-                            clear_first,
-                        });
-                    self.current_job = Some(TextJob::new(
-                        &text,
-                        10,
-                        NORMAL_BOTTOM,
-                        clear_first,
-                        ctx.cursor,
-                        ctx.fb,
-                    ));
-                }
-                Effect::PrintReturn => {
-                    ctx.cursor.row += 1;
-                    ctx.cursor.col = NORMAL_BOTTOM.x_start;
-                }
-                Effect::Sound(variant) => ctx.sounds.push(SoundEvent(variant)),
-                // `CMD_Picture`'s two halves and the ANIMATION call
-                // (`crate::picture`): these draw for real as of the
-                // scene-pictures slice. M2 drained them into redraw flags
-                // only — and set `can_draw_bigpic = true` on every
-                // `Picture`, having read the `0xFF` clear branch's line
-                // (`ovr003.cs:348`) into the non-`0xFF` branch, which
-                // actually sets it *false* after a BIGPIC draw (`:332`).
-                Effect::Picture(block) => crate::picture::cmd_picture(ctx, block, head_block_id),
-                Effect::ClearPicture => crate::picture::cmd_clear_picture(ctx),
-                Effect::AnimationFrame => crate::picture::animation_frame(ctx),
+            if let Some(queued) = self.queue.pop_front() {
+                self.present_effect(ctx, queued);
+                continue;
             }
-        }
 
-        match self
-            .pending
-            .take()
-            .expect("Present entered with no pending outcome")
-        {
-            PendingOutcome::Exit(exit) => PresentTick::Done(exit),
-            PendingOutcome::Request(request) => {
-                // COMBAT (0x24) real-combat branch (`CMD_Combat` else, monsters
-                // loaded): **park** the vector on a live fight
-                // (`combat-visualizer.md` §8.1) instead of running it headlessly
-                // inside this tick. The `VmHost` borrow was released when
-                // `step()` yielded the request, so the host can own the tick
-                // loop from here (D8). The run resumes with `Reply::Combat` only
-                // once the fight's ExitStage completes — §8.2's whole point.
-                if matches!(request, Request::Combat) && ctx.state.pending_combat.monsters_loaded {
-                    self.phase = VmPhase::Combat(Box::new(CombatHost::open(ctx)));
+            match self
+                .pending
+                .take()
+                .expect("Present entered with no pending outcome")
+            {
+                PendingOutcome::Exit(exit) => return PresentTick::Done(exit),
+                // The prompt finished printing: `VertMenuSelect(0, true, false,
+                // menuList, 0x16, 0x26, gbl.textYCol + 1, 1)` (`ovr003.cs:689`)
+                // — the list opens on the row after the text, wherever it
+                // stopped.
+                PendingOutcome::VerticalPrompt(request) => {
+                    let Request::VerticalMenu { options, .. } = &request else {
+                        unreachable!("VerticalPrompt only ever holds a VerticalMenu")
+                    };
+                    let widget = vertical_menu_widget(options, ctx.cursor.row + 1);
+                    self.pending = Some(PendingOutcome::Request(request));
+                    self.phase = VmPhase::Gate(widget);
                     return PresentTick::OpenedGate;
                 }
+                PendingOutcome::Request(request) => {
+                    // COMBAT (0x24) real-combat branch (`CMD_Combat` else,
+                    // monsters loaded): **park** the vector on a live fight
+                    // (`combat-visualizer.md` §8.1) instead of running it
+                    // headlessly inside this tick. The `VmHost` borrow was
+                    // released when `step()` yielded the request, so the host
+                    // can own the tick loop from here (D8). The run resumes
+                    // with `Reply::Combat` only once the fight's ExitStage
+                    // completes — §8.2's whole point.
+                    if matches!(request, Request::Combat)
+                        && ctx.state.pending_combat.monsters_loaded
+                    {
+                        self.phase = VmPhase::Combat(Box::new(CombatHost::open(ctx)));
+                        return PresentTick::OpenedGate;
+                    }
+                    ctx.vm_memory
+                        .transcript
+                        .push(crate::vmhost::TranscriptEntry::Request(describe_request(
+                            &request,
+                        )));
+                    // ★ VERTICAL MENU's first beat (`ovr003.cs:676-681`):
+                    // `textXCol = 1; textYCol = 0x11;` then
+                    // `press_any_key(delay_text, true, 10, 22, 38, 17, 1)` —
+                    // which is [`TextJob`] over [`NORMAL_BOTTOM`] with
+                    // `clear_first`, pagination included. The list opens on the
+                    // next pass, once the text is on screen.
+                    if let Request::VerticalMenu { prompt, .. } = &request {
+                        ctx.cursor.col = NORMAL_BOTTOM.x_start;
+                        ctx.cursor.row = NORMAL_BOTTOM.y_start;
+                        let text = String::from_utf8_lossy(&prompt.0).into_owned();
+                        self.current_job = Some(TextJob::new(
+                            &text,
+                            10,
+                            NORMAL_BOTTOM,
+                            true,
+                            ctx.cursor,
+                            ctx.fb,
+                        ));
+                        self.pending = Some(PendingOutcome::VerticalPrompt(request));
+                        continue;
+                    }
+                    let widget = widget_for_request(&request);
+                    self.pending = Some(PendingOutcome::Request(request));
+                    self.phase = VmPhase::Gate(widget);
+                    return PresentTick::OpenedGate;
+                }
+            }
+        }
+    }
+
+    /// One buffered [`Effect`] presented (D-VM3's ordered drain).
+    fn present_effect(&mut self, ctx: &mut FlowCtx, queued: QueuedEffect) {
+        let QueuedEffect {
+            effect,
+            head_block_id,
+        } = queued;
+        match effect {
+            Effect::Print { text, clear_first } => {
+                let text = String::from_utf8_lossy(&text.0).into_owned();
                 ctx.vm_memory
                     .transcript
-                    .push(crate::vmhost::TranscriptEntry::Request(describe_request(
-                        &request,
-                    )));
-                let widget = widget_for_request(&request);
-                self.pending = Some(PendingOutcome::Request(request));
-                self.phase = VmPhase::Gate(widget);
-                PresentTick::OpenedGate
+                    .push(crate::vmhost::TranscriptEntry::Print {
+                        text: text.clone(),
+                        clear_first,
+                    });
+                self.current_job = Some(TextJob::new(
+                    &text,
+                    10,
+                    NORMAL_BOTTOM,
+                    clear_first,
+                    ctx.cursor,
+                    ctx.fb,
+                ));
             }
+            Effect::PrintReturn => {
+                ctx.cursor.row += 1;
+                ctx.cursor.col = NORMAL_BOTTOM.x_start;
+            }
+            Effect::Sound(variant) => ctx.sounds.push(SoundEvent(variant)),
+            // `CMD_Picture`'s two halves and the ANIMATION call
+            // (`crate::picture`): these draw for real as of the
+            // scene-pictures slice. M2 drained them into redraw flags
+            // only — and set `can_draw_bigpic = true` on every
+            // `Picture`, having read the `0xFF` clear branch's line
+            // (`ovr003.cs:348`) into the non-`0xFF` branch, which
+            // actually sets it *false* after a BIGPIC draw (`:332`).
+            Effect::Picture(block) => crate::picture::cmd_picture(ctx, block, head_block_id),
+            Effect::ClearPicture => crate::picture::cmd_clear_picture(ctx),
+            Effect::AnimationFrame => crate::picture::animation_frame(ctx),
         }
     }
 
@@ -629,6 +783,13 @@ impl VectorRun {
             unreachable!("tick_gate called outside Gate phase")
         };
         let outcome = widget.tick(ctx.input, ctx.dt_ticks);
+        // `VertMenuSelect` returns `index` however its loop ended
+        // (`ovr008.cs:1217-1226`), so the highlighted row is read here — after
+        // the key, before the widget is dropped — and used for a cancel too.
+        let list_index = match widget {
+            Widget::ListMenu(l) => l.index(),
+            _ => 0,
+        };
 
         // A PressAnyKey gate nested under a paginating TextJob: release the
         // job and resume presenting, rather than resuming the VM.
@@ -667,6 +828,13 @@ impl VectorRun {
             (Request::HorizontalMenu { options }, WidgetOutcome::Hotbar(key)) => {
                 resolve_horizontal_menu_reply(options, key)
             }
+            // `vm_SetMemoryValue((ushort)index, mem_loc)` (`ovr003.cs:691`)
+            // takes whatever `VertMenuSelect` returned — and it returns the
+            // highlighted `index` on EVERY exit, commit or ESC/`'E'` alike
+            // (`ovr027.cs:653-658` never touches `index_ptr` on the cancel
+            // arm). So a cancelled drink menu still orders the highlighted
+            // drink; transcribed, not corrected.
+            (Request::VerticalMenu { .. }, _) => Reply::Selection(list_index as u8),
             (Request::Delay, _) => Reply::Delay,
             (Request::Combat, _) => Reply::Combat,
             _ => Reply::Selection(0), // unreachable in practice; a safe fallback, not a panic
@@ -1252,6 +1420,13 @@ impl Shell {
         }
     }
 
+    /// [`Shell::parked_widget`] as a test seam (which widget currently holds
+    /// the keyboard, and in what state).
+    #[cfg(test)]
+    pub(crate) fn parked_widget_for_tests(&self) -> Option<&Widget> {
+        self.parked_widget()
+    }
+
     /// Draws the parked widget's prompt-row line — called every tick after the
     /// flows have run, skipped while a fight owns the screen. Idempotent (the
     /// row is cleared and redrawn), and the resolution paths call
@@ -1272,6 +1447,8 @@ impl Shell {
         };
         match widget {
             Widget::Hotbar(h) => draw_hotbar_prompt(ctx.fb, ctx.font, h),
+            // A VERTICAL MENU's list paints its own box AND its prompt row.
+            Widget::ListMenu(l) if l.layout.is_some() => draw_list_menu(ctx.fb, ctx.font, l),
             other => {
                 if let Some(line) = other.display_line() {
                     crate::combat::scene::render::draw_prompt(ctx.fb, ctx.font, &line);
