@@ -117,6 +117,13 @@ pub struct Engine {
     /// engine that skips `boot()` carries an empty store, and an unloaded slot
     /// simply draws nothing (`ovr034.cs:92`).
     combat_icons: crate::combat_art::CombatIcons,
+    /// The picture layer's decoded-asset cache (`crate::picture`): the
+    /// resident PIC animation, BIGPIC, HEAD and BODY blocks, keyed by block
+    /// id exactly as the original keys its own `lastDaxBlockId`/
+    /// `bigpic_block_id`/`current_head_id`/`current_body_id`. Derivable from
+    /// `EngineState::picture` + `data`, so it is not serialized and simply
+    /// re-decodes on demand after a restore.
+    pictures: crate::picture::PictureCache,
     /// D-RP4's verify-on-load report, computed once at boot against `data`
     /// and retained for the `verify_report` getter (boot diagnostics, the
     /// `restrike verify` CLI subcommand, and the inspector). Advisory only
@@ -339,6 +346,7 @@ impl Engine {
             symbol_sets,
             sky,
             combat_icons,
+            pictures: crate::picture::PictureCache::new(),
             verify_report,
             rules,
             slots: crate::saveload::SlotDirectory::new(),
@@ -357,6 +365,20 @@ impl Engine {
         let mut fb = a.fb;
         crate::frames::draw8x8_03(&mut fb, &a.symbol_sets)
             .expect("Engine::assemble: symbol set 4 must be loaded for the exploration frame");
+        // A save taken mid-scene carries the picture layer (D-SAVE3): put the
+        // picture back before the first tick, since nothing else will —
+        // `redraw_view` would only *clear* it. A picture whose asset is
+        // missing simply doesn't draw; restore is not the place to be loud.
+        let mut pictures = crate::picture::PictureCache::new();
+        let _ = crate::picture::compose_into(
+            &mut fb,
+            &a.symbol_sets,
+            &a.data,
+            GAME_AREA,
+            &a.state.picture,
+            &mut pictures,
+            0,
+        );
         Engine {
             fb,
             font: a.font,
@@ -380,6 +402,10 @@ impl Engine {
             symbol_sets: a.symbol_sets,
             sky: a.sky,
             combat_icons: a.combat_icons,
+            // Not carried in the save: re-decoded on demand from
+            // `state.picture` + `data` (`crate::picture::PictureCache`), and
+            // already warm from the restore-time compose above.
+            pictures,
             verify_report: a.verify_report,
             // Reloaded from the embedded packs (not carried in the save/import).
             rules: RuleSet::load(),
@@ -620,6 +646,7 @@ impl Engine {
                 symbols: &mut self.symbol_sets,
                 sky: &self.sky,
                 combat_icons: &self.combat_icons,
+                pictures: &mut self.pictures,
             };
             self.shell.tick(&mut ctx);
             // The parked widget's prompt-row line (`Widget::display_line`) —

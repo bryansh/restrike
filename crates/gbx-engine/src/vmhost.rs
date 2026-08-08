@@ -10,7 +10,13 @@
 //! `sub_30580` (`:220-276`); every address/behavior below cites that pass.
 //! Per the M2 step 4 task brief's scope note, `load_3d_map`/`load_bigpic`
 //! **record** resident-block state; they do not draw (3D/area-map rendering
-//! is step 5). `load_walldef` graduated to a real implementation in step 5
+//! is step 5). `load_bigpic` keeps that posture for a different reason since
+//! the scene-pictures slice: it is only ever called for the *wilderness*
+//! overland map (`ovr003.cs:532,1010`, `in_dungeon == 0`), whose display goes
+//! through `RedrawView`'s non-dungeon branch (`ovr029.cs:41-44`) and so waits
+//! on a wilderness `game_state` this engine does not reach yet.
+//! `CMD_Picture`'s own `blockId >= 0x78` arm — the BIGPIC path that *does*
+//! draw — lives in `crate::picture`. `load_walldef` graduated to a real implementation in step 5
 //! (task deliverable 1): it now actually loads the walldef's tile-id table
 //! and its paired 8×8 pixel data into [`crate::symbols::SymbolSets`], which
 //! `crate::corridor`'s renderer reads from.
@@ -196,7 +202,28 @@ const CLOCK_BASE: u16 = 0x4BC6;
 const IN_DUNGEON_ADDR: u16 = 0x4BE6;
 /// Both addresses set the same `byte_1EE94` redraw-dirty flag on write
 /// (research §1.5) — recorded, never meaningfully consumed this session.
+///
+/// (Scene-pictures slice finding, not acted on here: under the Area window's
+/// confirmed `DataOffset = (addr - 0x4B00) * 2` mapping — see
+/// `crate::picture::PICTURE_FADE_ADDR`'s derivation — these two are
+/// `Area1.outdoor_sky_colour` / `indoor_sky_colour` (`DataOffset`
+/// `0x1FA`/`0x1FC`), which is exactly why writing them dirties the view.
+/// `crate::corridor`'s `OUTDOOR_SKY_COLOUR_ADDR`/`INDOOR_SKY_COLOUR_ADDR`
+/// currently name `0x4CFA`/`0x4CFC` instead; docketed.)
 const FORCE_REDRAW_ADDRS: [u16; 2] = [0x4BFD, 0x4BFE];
+
+/// `area2_ptr.HeadBlockId` (`Classes/Area2.cs:62`, `DataOffset 0x5C2`) —
+/// `CMD_Picture`'s arm selector (`ovr003.cs:322`), written directly by real
+/// ECL content: every `PICTURE` in Tilverton's `ECL2` block 1 is preceded by
+/// `SAVE <head-id>, 0x7EE1` and followed by `SAVE 0xFF, 0x7EE1`.
+///
+/// The Area2 window's mapping is `DataOffset = (addr - 0x7C00) * 2`
+/// (`ovr008.cs:721` passes `(location * 2) + 0x800` to `field_800_Set`, and
+/// `0x7C00 * 2 + 0x800` is `0x10000` — zero in the `ushort` index it masks
+/// to), so `0x5C2 / 2 + 0x7C00 == 0x7EE1`. The rest of this window is still
+/// raw+logged (`alter_character` is unmodelled); this one cell is named
+/// because the picture layer reads it every `PICTURE`.
+const HEAD_BLOCK_ID_ADDR: u16 = 0x7EE1;
 
 /// One access kind, for the unknown-access log's `(addr, kind)` dedup key
 /// (D-VM5).
@@ -379,9 +406,20 @@ pub struct VmMemoryState {
     pub sprite_changed: bool,
     /// `gbl.can_draw_bigpic`: set at many command/init sites and
     /// unconditionally by `LoadPic`; read only by `RedrawView`'s own
-    /// non-dungeon (wilderness/bigpic, M6) branch — recorded for state
-    /// fidelity, no M2 consumer.
+    /// non-dungeon (wilderness/bigpic) branch, and cleared by every
+    /// `RedrawView` (`ovr029.cs:46`, `crate::corridor::redraw_view`'s tail).
+    /// The non-dungeon branch itself needs a wilderness `game_state` this
+    /// engine does not reach yet — `CMD_Picture`'s own `blockId >= 0x78` arm
+    /// is the BIGPIC path the scene-pictures slice draws.
     pub can_draw_bigpic: bool,
+    /// `gbl.byte_1EE8D`: set by `CMD_Picture`'s plain arms and its `0xFF`
+    /// clear, cleared by `set_and_draw_head_body` (`ovr008.cs:210`). Its one
+    /// consumer is `CMD_HorizontalMenu`'s overlay decision,
+    /// `useOverlay = spriteChanged && byte_1EE8D` (`ovr003.cs:730-738`) —
+    /// which is what makes an encounter menu re-blit (and so *animate*) the
+    /// picture behind it. This engine tracks the flag; driving the menu-loop
+    /// animation from it is docketed, not done here.
+    pub byte_1ee8d: bool,
 }
 
 impl VmMemoryState {
@@ -567,6 +605,9 @@ impl ScriptMemory for EngineVmHost<'_> {
         if AREA_WINDOW.contains(&addr) {
             return self.read_area(addr, origin);
         }
+        if addr == HEAD_BLOCK_ID_ADDR {
+            return self.state.head_block_id as u16;
+        }
         if TABLE_WINDOW.contains(&addr) || PARTY_WINDOW.contains(&addr) {
             self.vm.unknown_log.record(addr, AccessKind::Read, origin);
             return self.vm.raw_words.get(&addr).copied().unwrap_or(0);
@@ -577,6 +618,10 @@ impl ScriptMemory for EngineVmHost<'_> {
     fn write(&mut self, addr: u16, value: u16, origin: Origin) {
         if AREA_WINDOW.contains(&addr) {
             return self.write_area(addr, value, origin);
+        }
+        if addr == HEAD_BLOCK_ID_ADDR {
+            self.state.head_block_id = value as u8;
+            return;
         }
         if TABLE_WINDOW.contains(&addr) || PARTY_WINDOW.contains(&addr) {
             self.vm.unknown_log.record(addr, AccessKind::Write, origin);
@@ -980,6 +1025,14 @@ impl gbx_vm::EngineServices for EngineVmHost<'_> {
     fn load_bigpic(&mut self, id: u8) {
         self.vm.calls.push(RecordedCall::LoadBigpic { id });
         self.vm.assets.bigpic_block = Some(id);
+        // `gbl.bigpic_block_id` and `DaxArrayFreeDaxBlocks(byte_1D556)`
+        // (`ovr030.cs:228-239`): the picture layer is the one place that
+        // bookkeeping lives, so it is written here too. The decoded-asset
+        // cache is keyed by block id and needs no explicit free — a stale
+        // entry is never *selected*, only re-keyed.
+        self.state.picture.bigpic_block = Some(id);
+        self.state.picture.anim_block = None;
+        self.state.picture.anim_frame = 0;
     }
 
     fn reset_wall_set(&mut self, index: u8) {

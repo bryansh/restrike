@@ -151,6 +151,25 @@ enum PendingOutcome {
     Exit(Exit),
 }
 
+/// One buffered [`Effect`] plus the sliver of engine state its
+/// *presentation* needs but which the VM has already moved past by the time
+/// the effect is drained.
+///
+/// D-VM3 buffers effects: `step()` yields them and the VM keeps running, so
+/// by the time [`VectorRun::tick_present`] draws a `PICTURE` the script has
+/// typically already reset the cell that decides *how* to draw it. Real
+/// CotAB content does exactly that — `SAVE <head>, 0x7EE1` / `PICTURE <body>`
+/// / `SAVE 0xFF, 0x7EE1` is the shape of every picture in Tilverton's `ECL2`
+/// block 1. The original has no such gap (`CMD_Picture` draws inline, reading
+/// `area2_ptr.HeadBlockId` at `ovr003.cs:322`), so the faithful thing is to
+/// capture the cell at *queue* time, which is execution time.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct QueuedEffect {
+    effect: Effect,
+    /// `area2_ptr.HeadBlockId` as of the step that yielded `effect`.
+    head_block_id: u8,
+}
+
 /// One vector's execution against the real [`EclMachine`]: pumps steps,
 /// buffers `Effect`s into an ordered presentation queue, drains that queue
 /// (pacing text through [`TextJob`], gating on pagination) before any
@@ -159,7 +178,7 @@ enum PendingOutcome {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct VectorRun {
     phase: VmPhase,
-    queue: VecDeque<Effect>,
+    queue: VecDeque<QueuedEffect>,
     current_job: Option<TextJob>,
     pending: Option<PendingOutcome>,
     /// Set by [`VectorRun::tick_gate`] once a parked widget resolves;
@@ -228,6 +247,11 @@ pub struct FlowCtx<'a> {
     /// fills the party/monster slots over the top, which is `BattleSetup`'s own
     /// division of labour (M6 slice 6).
     pub combat_icons: &'a crate::combat_art::CombatIcons,
+    /// The resident decoded PICTURE/BIGPIC/HEAD/BODY assets
+    /// (`crate::picture::PictureCache`) — the cache half of the original's
+    /// `byte_1D556`/`bigpic_dax`/`headX_dax`/`bodyX_dax` globals. Derivable
+    /// from [`EngineState::picture`] + `data`, so it is never serialized.
+    pub pictures: &'a mut crate::picture::PictureCache,
 }
 
 /// `Request` -> `Widget` (design doc's table, M2 slice). Engine-owned
@@ -405,25 +429,32 @@ impl VectorRun {
             // this happens within the same scope, not across a call
             // boundary (a `&mut FlowCtx`-taking helper would opaquely
             // borrow the whole struct from the caller's view).
-            let mut host = EngineVmHost {
-                state: &mut *ctx.state,
-                vm: &mut *ctx.vm_memory,
-                geo: ctx.geo,
-                party: &mut *ctx.party,
-                rng: &mut *ctx.rng,
-                sounds: &mut *ctx.sounds,
-                data: ctx.data,
-                game_area: ctx.game_area,
-                symbols: &mut *ctx.symbols,
-            };
-            let result = if let Some(reply) = self.pending_reply.take() {
-                ctx.machine.resume(reply, &mut host)
-            } else {
-                ctx.machine.step(&mut host)
+            let result = {
+                let mut host = EngineVmHost {
+                    state: &mut *ctx.state,
+                    vm: &mut *ctx.vm_memory,
+                    geo: ctx.geo,
+                    party: &mut *ctx.party,
+                    rng: &mut *ctx.rng,
+                    sounds: &mut *ctx.sounds,
+                    data: ctx.data,
+                    game_area: ctx.game_area,
+                    symbols: &mut *ctx.symbols,
+                };
+                if let Some(reply) = self.pending_reply.take() {
+                    ctx.machine.resume(reply, &mut host)
+                } else {
+                    ctx.machine.step(&mut host)
+                }
             };
             match result {
                 Ok(VmStep::Continue) => continue,
-                Ok(VmStep::Effect(e)) => self.queue.push_back(e),
+                // The `head_block_id` snapshot is taken here, after the step
+                // that yielded the effect — see [`QueuedEffect`].
+                Ok(VmStep::Effect(effect)) => self.queue.push_back(QueuedEffect {
+                    effect,
+                    head_block_id: ctx.state.head_block_id,
+                }),
                 Ok(VmStep::Request(r)) => {
                     self.pending = Some(PendingOutcome::Request(r));
                     break;
@@ -467,7 +498,11 @@ impl VectorRun {
                     }
                 }
             }
-            let Some(effect) = self.queue.pop_front() else {
+            let Some(QueuedEffect {
+                effect,
+                head_block_id,
+            }) = self.queue.pop_front()
+            else {
                 break;
             };
             match effect {
@@ -493,19 +528,16 @@ impl VectorRun {
                     ctx.cursor.col = NORMAL_BOTTOM.x_start;
                 }
                 Effect::Sound(variant) => ctx.sounds.push(SoundEvent(variant)),
-                // Picture/animation *rendering* is out of M2's scope
-                // (pictures land in a later milestone); the effect is
-                // consumed (drained) here so the queue-before-gate ordering
-                // obligation still holds for it. `CMD_Picture`'s own
-                // redraw-flag side effects (`spriteChanged`/`can_draw_bigpic`
-                // — `ovr003.cs:320,348`, this session's redraw-flag
-                // consolidation research) are real regardless of whether
-                // the picture itself draws, so they're tracked here.
-                Effect::Picture(_) => {
-                    ctx.vm_memory.sprite_changed = true;
-                    ctx.vm_memory.can_draw_bigpic = true;
-                }
-                Effect::ClearPicture | Effect::AnimationFrame => {}
+                // `CMD_Picture`'s two halves and the ANIMATION call
+                // (`crate::picture`): these draw for real as of the
+                // scene-pictures slice. M2 drained them into redraw flags
+                // only — and set `can_draw_bigpic = true` on every
+                // `Picture`, having read the `0xFF` clear branch's line
+                // (`ovr003.cs:348`) into the non-`0xFF` branch, which
+                // actually sets it *false* after a BIGPIC draw (`:332`).
+                Effect::Picture(block) => crate::picture::cmd_picture(ctx, block, head_block_id),
+                Effect::ClearPicture => crate::picture::cmd_clear_picture(ctx),
+                Effect::AnimationFrame => crate::picture::animation_frame(ctx),
             }
         }
 
@@ -768,9 +800,15 @@ pub struct EngineState {
     pub game_state: GameState,
     pub last_game_state: GameState,
     /// `area2_ptr.HeadBlockId`: `0xFF` = no specific portrait head (reset by
-    /// `vm_init_ecl`); M4/combat scope carries this even though M2 draws
-    /// nothing from it yet.
+    /// `vm_init_ecl`). Written both by the encounter-visual path
+    /// (`sub_30580`) and directly by scripts through the Area2 window cell
+    /// `0x7EE1` (`vmhost.rs`'s `write_party`) — `CMD_Picture` reads it to
+    /// pick between its head/body arm and its plain-picture arm
+    /// (`ovr003.cs:322`).
     pub head_block_id: u8,
+    /// What the viewport's picture layer shows, and the running animation's
+    /// frame cursor (D-SAVE3's "active animation's frame index").
+    pub picture: crate::picture::PictureLayer,
     /// The pending-combat monster roster the `LOAD MONSTER`/`CLEARMONSTERS`
     /// opcodes accumulate and `COMBAT` consumes (coab `gbl.TeamList` monster
     /// half + `monstersLoaded`/`monster_icon_id`, M4 combat #6). Transient
@@ -812,6 +850,7 @@ impl EngineState {
             game_state: GameState::DungeonMap,
             last_game_state: GameState::DungeonMap,
             head_block_id: 0xFF,
+            picture: crate::picture::PictureLayer::default(),
             pending_combat: crate::monster::PendingCombat::default(),
         }
     }
@@ -1274,6 +1313,13 @@ impl Shell {
     /// call-site choreography without needing to model the save-load-only
     /// `reload_ecl_and_pictures` gate this session's research found the
     /// original's boot-recompose path actually depends on.
+    ///
+    /// The recompose destroys any picture on the viewport, which is exactly
+    /// the original's behavior — every picture-bearing vector exits through
+    /// `PICTURE 0xFF` and/or the `CALL 0xAE11` redraw gate, so a picture
+    /// never outlives its scene (`crate::picture`'s module doc has the
+    /// evidence). `crate::corridor::redraw_view` clears the picture layer
+    /// itself; this call site needs no special handling.
     fn enter_world_menu(ctx: &mut FlowCtx) -> Shell {
         ctx.state.field_592 = 0;
         crate::corridor::redraw_view(ctx);
@@ -1518,6 +1564,7 @@ mod tests {
         symbols: crate::symbols::SymbolSets,
         sky: [gbx_formats::image::ImageBlock; 3],
         combat_icons: crate::combat_art::CombatIcons,
+        pictures: crate::picture::PictureCache,
     }
 
     impl Harness {
@@ -1549,6 +1596,7 @@ mod tests {
                 symbols: crate::symbols::SymbolSets::new(),
                 sky: [empty_sky_block(), empty_sky_block(), empty_sky_block()],
                 combat_icons: crate::combat_art::CombatIcons::new(),
+                pictures: crate::picture::PictureCache::new(),
             }
         }
 
@@ -1580,6 +1628,7 @@ mod tests {
                 symbols: &mut self.symbols,
                 sky: &self.sky,
                 combat_icons: &self.combat_icons,
+                pictures: &mut self.pictures,
             }
         }
     }

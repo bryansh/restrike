@@ -28,6 +28,7 @@ pub mod money;
 pub mod monster;
 pub mod movement;
 pub mod party;
+pub mod picture;
 pub mod rng;
 pub mod save;
 pub mod saveload;
@@ -52,6 +53,8 @@ mod demo;
 mod h2_conformance;
 #[cfg(test)]
 mod hash_goldens;
+#[cfg(test)]
+mod picture_tests;
 #[cfg(test)]
 mod save_roundtrip_tests;
 

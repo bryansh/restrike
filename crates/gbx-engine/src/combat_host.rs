@@ -499,6 +499,10 @@ impl CombatHost {
                 ctx.fb.clear(0);
                 crate::frames::draw8x8_03(ctx.fb, ctx.symbols)
                     .expect("symbol set 4 is resident whenever a fight can start");
+                // `LoadPic`'s `DungeonMap` arm (`ovr025.cs:1435-1441`) is
+                // `draw8x8_03` + `RedrawView` + party summary + status line —
+                // it never puts a pre-combat picture back, and `redraw_view`
+                // clears the picture layer for exactly that reason.
                 crate::corridor::redraw_view(ctx);
                 HostTick::Finished {
                     outcome: self.outcome.unwrap_or(CombatOutcome::Stalemate),

@@ -12,16 +12,18 @@
 //! one candidate (the text pacer's fractional accumulator) is already
 //! stored as fixed-point millis (`crate::text::TextPacer`), not `f32`.
 //!
-//! **Two documented, real scope gaps** (not silently omitted — flagged
-//! per this project's own discipline): D-SAVE3 names "the active
-//! animation's frame index + countdown" and "game_speed" as pixel-affecting
-//! state a save must carry. Neither exists as *live, mutable* engine state
-//! yet — `Effect::AnimationFrame` has no consumer beyond a no-op match arm
-//! (`shell.rs`), and the text pacer's speed is a boot-time constant
-//! (`TextPacer::new(4)`, `engine.rs`), not a runtime-settable `game_speed`.
-//! There is nothing to serialize for either until a future session adds the
-//! feature; `SaveState` will grow a field then, bumping
-//! [`SAVE_FORMAT_VERSION`] (D-SAVE2).
+//! **One documented, real scope gap** (not silently omitted — flagged per
+//! this project's own discipline): D-SAVE3 names "the active animation's
+//! frame index + countdown" and "game_speed" as pixel-affecting state a save
+//! must carry. The **frame index landed** with the scene-pictures slice —
+//! `EngineState::picture` (`crate::picture::PictureLayer`) carries the whole
+//! picture layer, the running animation's 1-based `curFrame` included, and
+//! the decoded-asset cache re-derives from it. The animation *countdown* and
+//! `game_speed` still do not exist as live, mutable engine state: the
+//! ANIMATION opcode's pacing is the VM's own `Request::Delay`, and the text
+//! pacer's speed is a boot-time constant (`TextPacer::new(4)`, `engine.rs`),
+//! not a runtime-settable `game_speed`. `SaveState` will grow a field when
+//! either does, bumping [`SAVE_FORMAT_VERSION`] (D-SAVE2).
 
 use crate::engine::Engine;
 use crate::party::Party;
@@ -50,7 +52,14 @@ pub const CONTAINER_VERSION: u16 = 1;
 /// field rather than erroring — so this is a hard version bump (reject-not-
 /// migrate, D-SAVE2; pre-1.0, no migration path owed). The committed golden was
 /// recomputed in the same commit.
-pub const SAVE_FORMAT_VERSION: u32 = 2;
+/// **v3** (scene-pictures slice): `EngineState` gained `picture`
+/// (`crate::picture::PictureLayer`) — what the viewport's picture layer shows
+/// plus the running animation's 1-based frame cursor, which D-SAVE3 names as
+/// pixel-affecting state a save must carry. It is a new postcard field in the
+/// middle of the payload, so a v2 save would misparse everything after it:
+/// reject-not-migrate, hard version bump. The committed golden was recomputed
+/// in the same commit.
+pub const SAVE_FORMAT_VERSION: u32 = 3;
 
 /// This engine's one shipped flavor (M3's slice — `xxvc` is M7). An 8-byte
 /// ASCII tag rather than a numeric id, matching the header's own

@@ -760,6 +760,15 @@ fn draw_3d_world(
 /// — see that function's doc comment for the deliberate call-site
 /// simplification).
 pub fn redraw_view(ctx: &mut FlowCtx) {
+    // The 3D world is painted over the very cells a picture occupies (a PIC
+    // is 88x88 at cell (3,3), exactly the viewport), so a redraw destroys it
+    // — in the original too, which is why every picture-bearing vector in the
+    // real scripts ends with `PICTURE 0xFF` and/or the `CALL 0xAE11` redraw
+    // gate. `crate::picture`'s module doc carries the evidence; the layer is
+    // what makes the destruction *state* rather than just pixels, so a save
+    // taken mid-scene restores the picture (D-SAVE3).
+    ctx.state.picture.hide();
+
     let square = ctx
         .geo
         .square(ctx.state.pos.0 as usize, ctx.state.pos.1 as usize);
@@ -784,6 +793,11 @@ pub fn redraw_view(ctx: &mut FlowCtx) {
         ctx.state.area_map_shown,
         sky_colour,
     );
+
+    // `RedrawView`'s own tail (`ovr029.cs:46`): the bigpic permission is
+    // one-shot, consumed by every redraw whether or not the non-dungeon
+    // branch used it.
+    ctx.vm_memory.can_draw_bigpic = false;
 
     // The consolidated gate's own clear (`ovr003.cs:1855-1859`) — see
     // `VmMemoryState::clear_redraw_flags`'s doc comment for why this

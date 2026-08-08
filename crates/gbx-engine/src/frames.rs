@@ -130,6 +130,22 @@ pub fn draw8x8_03(fb: &mut Framebuffer, sets: &SymbolSets) -> Result<(), SymbolE
     Ok(())
 }
 
+/// `DrawFrame_WildernessMap` / `draw8x8_04` (`seg037.cs:105-118`):
+/// [`draw_frame_outer`] plus the row-16 horizontal divider — and nothing
+/// else. It is [`draw8x8_03`] minus the col-16 vertical divider and the
+/// inner 3D-viewport frame, because what goes inside it is a full-width
+/// 304×120 BIGPIC, not a 88×88 viewport (`ovr030.draw_bigpic`, `:243-247`).
+pub fn draw_frame_wilderness_map(
+    fb: &mut Framebuffer,
+    sets: &SymbolSets,
+) -> Result<(), SymbolError> {
+    draw_frame_outer(fb, sets)?;
+    for (col_x, &v) in X8X8_07.iter().enumerate() {
+        draw_symbol(fb, sets, v as u32 + OUTER_BASE, 0x10, col_x)?;
+    }
+    Ok(())
+}
+
 /// `DrawFrame_Combat` / `draw8x8_06` (`seg037.cs:148-172`): the combat
 /// screen's border — clear rows 0..=0x17 / cols 0..=0x27, then the top bar
 /// (row 0), the **three** vertical bars (cols 0, 0x16, 0x27, rows 0..=0x16)
