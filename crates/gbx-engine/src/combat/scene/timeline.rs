@@ -211,6 +211,14 @@ struct Composer<'a> {
     /// Where a missile flight left the presented window, so the `Camera` the
     /// engine emits right after can be checked against it.
     flight_camera: Option<GridPos>,
+    /// Who the grey focus box is under — `Pick` sets it, and every `Move`
+    /// the SAME combatant makes re-emits the box at its new cell. The
+    /// original's per-step redraw draws the box at the focused player's
+    /// CURRENT position (`RedrawCombatIfFocusOn`, the sub_3E748 step
+    /// redraws), so a walking actor carries its box; ours parked the box on
+    /// the turn-start cell (Bryan's ratification find, 2026-08-08: "the
+    /// highlighter isn't always highlighting an enemy" during AI turns).
+    focused: Option<usize>,
     /// The cast being resolved, waiting for its `SpellTarget` run to finish
     /// before the projectile can be aimed.
     cast: Option<PendingCast>,
@@ -249,6 +257,7 @@ pub fn compose(
         out: Vec::new(),
         run: None,
         flight_camera: None,
+        focused: None,
         cast: None,
         events,
         at: 0,
@@ -312,11 +321,21 @@ impl Composer<'_> {
                 self.board.apply(event);
                 self.push(Op::Camera(top_left));
             }
-            ActionEvent::Move { .. } => {
+            ActionEvent::Move { combatant_id, .. } => {
                 // §1.4: a movement step has no timer at all — a redraw (the
                 // radius the engine already applied) and a step sound, which
                 // arrives as its own `Sound`.
                 self.board_op(event);
+                // The box rides the focused mover (`RedrawCombatIfFocusOn` at
+                // the step redraws — the original draws it at the CURRENT
+                // position, so a walking actor carries its box).
+                if self.focused == Some(combatant_id) {
+                    let cursor = self.board.combatant(combatant_id).map(|c| FocusCursor {
+                        pos: c.pos,
+                        size: c.size,
+                    });
+                    self.push(Op::Focus(cursor));
+                }
             }
             ActionEvent::Bled { .. } => {
                 // The round-end bleed tick displays nothing (`ovr009.cs:373-381`
@@ -342,6 +361,7 @@ impl Composer<'_> {
             // --- the turn head (`ovr009.cs:118-124`) ----------------------
             ActionEvent::Pick { combatant_id, .. } => {
                 self.close_run();
+                self.focused = Some(combatant_id);
                 let cursor = self.board.combatant(combatant_id).map(|c| FocusCursor {
                     pos: c.pos,
                     size: c.size,

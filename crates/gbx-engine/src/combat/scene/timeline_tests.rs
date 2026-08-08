@@ -155,6 +155,55 @@ fn the_turn_head_parks_the_focus_box_then_the_panel() {
 }
 
 #[test]
+fn the_focus_box_rides_the_focused_mover() {
+    // The original's step redraws draw the box at the focused player's
+    // CURRENT position (`RedrawCombatIfFocusOn`) — a walking actor carries
+    // its box (the 2026-08-08 ratification find: ours parked it on the
+    // turn-start cell for the whole AI walk).
+    let schedule = compose(
+        &scene_board(),
+        BeatClock::default(),
+        &[
+            ActionEvent::Pick {
+                pass: 0,
+                combatant_id: 2,
+                delay: 3,
+                roll: 40,
+            },
+            ActionEvent::Move {
+                combatant_id: 2,
+                from_x: 21,
+                from_y: 12,
+                to_x: 22,
+                to_y: 12,
+                cost: 2,
+            },
+            // Another combatant's move must NOT re-aim the box.
+            ActionEvent::Move {
+                combatant_id: 1,
+                from_x: 20,
+                from_y: 13,
+                to_x: 20,
+                to_y: 14,
+                cost: 2,
+            },
+        ],
+    );
+    let focus_ops: Vec<&Op> = schedule
+        .iter()
+        .filter(|i| matches!(i.op, Op::Focus(_)))
+        .map(|i| &i.op)
+        .collect();
+    assert_eq!(
+        focus_ops.len(),
+        2,
+        "Pick parks it, the focused move carries it"
+    );
+    assert!(matches!(focus_ops[0], Op::Focus(Some(c)) if c.pos == GridPos::new(21, 12)));
+    assert!(matches!(focus_ops[1], Op::Focus(Some(c)) if c.pos == GridPos::new(22, 12)));
+}
+
+#[test]
 fn a_swing_plays_pose_then_message_then_the_pose_comes_down() {
     let played = play(compose(
         &scene_board(),
