@@ -893,6 +893,11 @@ fn begin_chain(ctx: &mut FlowCtx, id: BlockId) -> Option<ChainRunner> {
         }
     };
     *ctx.machine = EclMachine::load_block(bytes, &COTAB).unwrap_or_else(|never| match never {});
+    // `CMD_NewECL` runs `vm_init_ecl` right after the load (`ovr003.cs:491-492`),
+    // whose engine-state half includes `HeadBlockId = 0xFF` (`ovr008.cs:109`) —
+    // the fresh block starts with no portrait head armed, whatever the last
+    // script (or an imported save) left in the cell.
+    ctx.state.head_block_id = 0xFF;
 
     match enter_vector(ctx.machine, VECTOR_ENTRY_POINT) {
         Some(run) => Some(ChainRunner { run }),
@@ -1053,6 +1058,15 @@ pub struct BootFlow {
 impl BootFlow {
     pub fn start(machine: &mut EclMachine, state: &mut EngineState) -> Self {
         state.last_selected_player = state.selected_player; // `:2232`
+                                                            // The block-entry preamble calls `vm_init_ecl` unconditionally before
+                                                            // running the entry vector (`ovr003.cs:2278`), and its engine-state
+                                                            // half includes `HeadBlockId = 0xFF` (`ovr008.cs:109`). Load-bearing
+                                                            // for an imported original save: the save's own Area2 bytes carry a
+                                                            // stale head id (the bundled GOG save says `0x00`), and without this
+                                                            // reset the intro's first `PICTURE 0x0a` takes the head/body arm
+                                                            // (HEAD2 block 0's face + a BODY2 block that does not exist) instead
+                                                            // of the plain-PIC sword arm — Bryan's 2026-08-08 playtest find.
+        state.head_block_id = 0xFF;
         let run = enter_vector(machine, VECTOR_ENTRY_POINT);
         BootFlow {
             stage: BootStage::EntryVector,
@@ -1910,6 +1924,47 @@ mod tests {
         tick_until(&mut shell, &mut h, 10, |s| {
             matches!(s, Shell::WorldMenu { .. })
         });
+    }
+
+    /// ★ `vm_init_ecl`'s engine-state half at the block-entry preamble
+    /// (`ovr003.cs:2278` → `ovr008.cs:109`): booting resets `HeadBlockId` to
+    /// the no-portrait sentinel `0xFF`, no matter what an imported original
+    /// save left in the Area2 cell. The bundled GOG save carries `0x00` there,
+    /// which sent the intro's first `PICTURE` down the head/body arm (a wrong
+    /// face + a `BODY2` block that does not exist) instead of the plain-PIC
+    /// sword arm — Bryan's 2026-08-08 playtest find.
+    #[test]
+    fn boot_resets_the_imported_head_block_id_to_none() {
+        let mut h = Harness::new();
+        h.state.head_block_id = 0x00; // what the bundled save's Area2 bytes say
+        let _shell = Shell::boot(&mut h.machine, &mut h.state);
+        assert_eq!(
+            h.state.head_block_id, 0xFF,
+            "the block-entry preamble must arm the no-portrait sentinel"
+        );
+    }
+
+    /// The same reset at `CMD_NewECL`'s own `vm_init_ecl` call
+    /// (`ovr003.cs:491-492`): a chained-to block starts with no portrait head
+    /// armed, whatever the previous block's scripts wrote to the cell.
+    #[test]
+    fn newecl_chain_resets_head_block_id() {
+        let newecl = simple_block(|b| {
+            b.op(0x20).imm_byte(2); // NEWECL block 2
+        });
+        let mut h = Harness::with_blocks(vec![(1, newecl), (2, exit_only_block())]);
+        let mut shell = Shell::boot(&mut h.machine, &mut h.state);
+        // Poke a stale head AFTER boot's own reset so the chain site is the
+        // one under test.
+        h.state.head_block_id = 0x05;
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::WorldMenu { .. })
+        });
+        assert_eq!(h.state.ecl_block_id, 2, "the chain fired");
+        assert_eq!(
+            h.state.head_block_id, 0xFF,
+            "NEWECL's vm_init_ecl must re-arm the no-portrait sentinel"
+        );
     }
 
     #[test]
