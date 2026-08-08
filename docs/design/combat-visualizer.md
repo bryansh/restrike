@@ -1,11 +1,18 @@
 # Design: The Combat Visualizer (M6) — watching fights, then fighting them
 
-**Status: v2 — drafted and adversarially reviewed 2026-08-01 (the day the M5
-§46 exit gate passed, guard 15/15). Two independent review lenses ran
-(architecture attack + line-level evidence audit): no model-level blocker;
-eight design gaps and three evidence errors found, all folded in below (the
-per-finding trail is in the session journal). Exit gate is a PROPOSAL until
-Bryan ratifies it.**
+**Status: ★ CLOSED — RATIFIED BY BRYAN 2026-08-08 ★. All §4 exit-gate
+conditions met: all 16 captures play in the reel with live draw equality
+(62K+ draws); boot→bar brawl watched live (M6b) and won manually (M6c); the
+manual-turn capture closed in the guard (twice — the original was lost to
+the D13 overwrite incident and its re-staged successor was reconstructed to
+2,973/2,973, nine hand-played turns); guard 16/16 + all CI gates green
+throughout; D13 side-by-side verdict "looks better in restrike", with its
+two deltas (the menu highlight incl. the build_words transcription
+correction, and the focus box riding the focused mover) closed before
+ratification. Doc history: v2 drafted + adversarially reviewed 2026-08-01
+(two lenses, eight design gaps + three evidence errors folded); v2.1
+Bryan's conditions (speed door pinned open, per-slice agent plan); v2.2
+implementer tier → Opus 5. Seven slices, seven merges, three days.**
 
 Working-ledger milestone **M6 = the visualizer + the manual-combat UI** (per
 the §46 ruling in `h4-entry-state-snapshot.md`). Note on numbering: PLAN.md's
