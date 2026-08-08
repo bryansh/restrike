@@ -454,15 +454,22 @@ impl GameClock {
 
 /// `display_map_position_time` (`ovr025.cs:1476-1511`): `"X,Y DIR HH:MM"`,
 /// plus `" search"`/`" camping"` when applicable.
+///
+/// The two suffixes are an `else if` in the original (`ovr025.cs:1500-1507`):
+/// while `game_state == Camping` the line reads `" camping"` **whether or not**
+/// search mode is on, and only a non-camping state can show `" search"`.
 pub fn position_time_text(
     pos: (u8, u8),
     facing: Facing,
     clock: &GameClock,
     search_mode: bool,
+    camping: bool,
 ) -> String {
     let (hh, mm) = clock.hh_mm();
     let mut s = format!("{},{} {} {:02}:{:02}", pos.0, pos.1, facing.glyph(), hh, mm);
-    if search_mode {
+    if camping {
+        s.push_str(" camping");
+    } else if search_mode {
         s.push_str(" search");
     }
     s
@@ -739,9 +746,22 @@ mod tests {
     #[test]
     fn position_time_text_includes_search_suffix_only_when_searching() {
         let clock = GameClock::default();
-        let plain = position_time_text((3, 4), Facing::North, &clock, false);
+        let plain = position_time_text((3, 4), Facing::North, &clock, false, false);
         assert!(!plain.contains("search"));
-        let searching = position_time_text((3, 4), Facing::North, &clock, true);
+        let searching = position_time_text((3, 4), Facing::North, &clock, true, false);
         assert!(searching.ends_with(" search"));
+    }
+
+    /// `ovr025.cs:1500-1507`: the two suffixes are an `else if`, so camping
+    /// wins outright — a party that camps while search mode is on reads
+    /// " camping", never " search".
+    #[test]
+    fn camping_suffix_wins_over_search() {
+        let clock = GameClock::default();
+        let camping = position_time_text((3, 4), Facing::North, &clock, false, true);
+        assert!(camping.ends_with(" camping"));
+        let both = position_time_text((3, 4), Facing::North, &clock, true, true);
+        assert!(both.ends_with(" camping"));
+        assert!(!both.contains("search"));
     }
 }

@@ -1301,6 +1301,40 @@ impl Shell {
         Shell::Boot(BootFlow::start(machine, state))
     }
 
+    /// ★ Leaving a full-screen [`Shell::Screen`] recomposes the exploration
+    /// screen whole.
+    ///
+    /// Every screen paints a WHOLE screen (camp's `LoadPic`, the character
+    /// sheet's `render_sheet`, the save/training/shop backdrops), so putting
+    /// the 3D viewport back is not enough: the border, the right panel and both
+    /// text areas are still screen pixels until something paints over them.
+    /// Bryan's 2026-08-08 playtest symptom — a stale "Camp" title, torn camp
+    /// text and a frameless viewport after leaving camp — is exactly that.
+    ///
+    /// This is the combat host's `Restore` idiom (`combat_host.rs:490-494`,
+    /// itself `free_combat_stuff` + `CMD_Combat`'s `LoadPic` rebuild), minus
+    /// the palette swap: **no screen touches the palette registers** — only
+    /// combat does (`ovr033.Color_0_8_inverse` on entry / `palette_normal` on
+    /// exit), which is why `MakeCamp`'s own exit tail has no palette step. The
+    /// three steps that remain are `LoadPic`'s DungeonMap arm
+    /// (`ovr025.cs:1435-1441`): clear, `draw8x8_03`, redraw the view — the
+    /// caller's [`Shell::enter_world_menu`] supplies the third.
+    ///
+    /// `MakeCamp`'s tail (`ovr016.cs:1148-1158`) additionally runs
+    /// `ClearPlayerTextArea` (`ovr025.cs:822`: rows 0x12-0x16, cols 1-0x26) and
+    /// `ClearPromptArea` (`ovr027.cs:350-353`: row 0x18) — both subsumed by the
+    /// full clear here. The text CURSOR is deliberately left where it was: the
+    /// original's clears are plain rect fills that never touch
+    /// `textXCol`/`textYCol` either. The status line comes back on its own,
+    /// from the engine tick (`display_map_position_time()` at `:1157`), the
+    /// instant the shell is no longer a `Screen`.
+    fn rebuild_exploration_screen(ctx: &mut FlowCtx) {
+        ctx.fb.clear(0);
+        // A fixture engine with no symbol set 4 simply gets no border, exactly
+        // as the screens' own `draw_frame_outer` calls already tolerate.
+        let _ = crate::frames::draw8x8_03(ctx.fb, ctx.symbols);
+    }
+
     /// `main_3d_world_menu`'s entry bookkeeping (`ovr015.cs:352`): zeroes
     /// `field_592` on *every* entry, no exceptions — the required
     /// "field_592 zeroing at menu entry" test target. Also recomposes the
@@ -1401,7 +1435,10 @@ impl Shell {
                 use crate::screens::ScreenTransition;
                 match screen.tick(ctx) {
                     ScreenTransition::Stay => {}
-                    ScreenTransition::Exit => *self = Self::enter_world_menu(ctx),
+                    ScreenTransition::Exit => {
+                        Self::rebuild_exploration_screen(ctx);
+                        *self = Self::enter_world_menu(ctx);
+                    }
                     ScreenTransition::To(next) => *self = Shell::Screen(next),
                 }
             }
@@ -1504,7 +1541,34 @@ impl Shell {
     /// The status line every command refreshes (§1.6): `"X,Y DIR HH:MM"`
     /// (+ `" search"`).
     pub fn status_line(state: &EngineState) -> String {
-        position_time_text(state.pos, state.facing, &state.clock, state.search_mode())
+        position_time_text(
+            state.pos,
+            state.facing,
+            &state.clock,
+            state.search_mode(),
+            false,
+        )
+    }
+
+    /// Whether the engine-level tick should paint the position/time line over
+    /// whatever this shell state just drew.
+    ///
+    /// The original never draws `display_map_position_time` "every frame": it
+    /// runs at explicit recomposition sites only — `LoadPic`'s per-`game_state`
+    /// arms (`ovr025.cs:1398-1455`), the walk loop (`ovr003.cs:600,1749-1752`),
+    /// `main_3d_world_menu`/`locked_door` (`ovr015.cs:452,579`) and `MakeCamp`'s
+    /// exit tail (`ovr016.cs:1157`). None of those fire while a full-screen
+    /// state owns the screen, so the unconditional per-tick line landed
+    /// mid-layout on every [`Shell::Screen`].
+    ///
+    /// A fight is excluded for the same reason it always was
+    /// (`combat-visualizer.md` §1.1: combat replaces the exploration screen and
+    /// row 15 col 17 is inside its right panel). Screens whose *original*
+    /// layout does include the line — Camping and Shop, the two `LoadPic` arms
+    /// at `ovr025.cs:1425`/`:1432` — draw it themselves, as part of their own
+    /// composition (`crate::screens::draw_position_time`).
+    pub fn draws_engine_status_line(&self) -> bool {
+        self.combat_host().is_none() && !matches!(self, Shell::Screen(_))
     }
 }
 
@@ -2072,6 +2136,55 @@ mod tests {
         tick_until(&mut shell, &mut h, 10, |s| {
             matches!(s, Shell::WorldMenu { .. })
         });
+    }
+
+    /// ★ Bryan's 2026-08-08 playtest find: leaving camp left a stale "Camp"
+    /// title, torn camp text and a frameless viewport. Every screen paints a
+    /// WHOLE screen, so the exit has to recompose one (`ovr025.cs:1435-1441`'s
+    /// DungeonMap `LoadPic` arm; `combat_host.rs:490-494`'s same idiom).
+    #[test]
+    fn leaving_a_screen_rebuilds_the_exploration_screen_instead_of_leaving_stale_pixels() {
+        let (mut shell, mut h) = boot_with_party();
+        h.input.push_all(&[char_key(b'e')]); // Encamp
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::Camp(_)))
+        });
+        // One more tick so camp actually paints its layout.
+        {
+            let mut ctx = h.ctx();
+            shell.tick(&mut ctx);
+        }
+        assert_ne!(
+            h.fb.get_pixel(8, 8),
+            0,
+            "camp must have painted its own title at cell (1,1)"
+        );
+
+        h.input.push_all(&[char_key(b'e')]); // camp Exit
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::WorldMenu { .. })
+        });
+        assert_eq!(
+            h.fb.get_pixel(8, 8),
+            0,
+            "the screen's own pixels must not survive its exit"
+        );
+    }
+
+    /// The status-line decision, per shell state ((a)'s coab derivation lives
+    /// on the method).
+    #[test]
+    fn the_engine_status_line_is_suppressed_only_over_screens_and_fights() {
+        let (mut shell, mut h) = boot_with_party();
+        assert!(shell.draws_engine_status_line(), "the walk loop draws it");
+        h.input.push_all(&[char_key(b'e')]); // Encamp
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::Camp(_)))
+        });
+        assert!(
+            !shell.draws_engine_status_line(),
+            "a parked full-screen Screen composes its own line (or none)"
+        );
     }
 
     #[test]

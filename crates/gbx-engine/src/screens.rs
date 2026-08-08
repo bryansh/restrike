@@ -60,6 +60,27 @@ impl Screen {
     }
 }
 
+/// `display_map_position_time` (`ovr025.cs:1476-1509`) drawn by a screen that
+/// composes it itself: `draw8x8_clear_area(15, 0x26, 15, 17)` then
+/// `displayString(output, 0, 10, 15, 17)`.
+///
+/// The engine-level per-tick line is suppressed while any screen is parked
+/// ([`crate::shell::Shell::draws_engine_status_line`]), so a screen whose
+/// original layout includes the line calls this from inside its own paint.
+/// `camping` picks the `" camping"` suffix the `GameState.Camping` arm shows
+/// (`ovr025.cs:1500-1503`).
+pub(crate) fn draw_position_time(ctx: &mut FlowCtx, camping: bool) {
+    crate::draw::cell_rect_fill(ctx.fb, 0, 15, 15, 17, 0x26);
+    let text = crate::movement::position_time_text(
+        ctx.state.pos,
+        ctx.state.facing,
+        &ctx.state.clock,
+        ctx.state.search_mode(),
+        camping,
+    );
+    crate::text::draw_string(ctx.fb, ctx.font, &text, 15, 17, 0, 10);
+}
+
 /// Paints a simple full-screen menu backdrop: clear, outer frame, a title in
 /// the top-left, and the command bar along the bottom row. Shared by the camp
 /// and magic menus (their own richer layouts are cosmetic polish; the
@@ -208,6 +229,11 @@ impl Camp {
             "Save View Magic Rest Alter Fix Exit",
             self.status.as_deref(),
         );
+        // `LoadPic`'s Camping arm ends with `display_map_position_time()`
+        // (`ovr025.cs:1432`) — camp is one of the two screens whose own layout
+        // carries the line, and `game_state == Camping` gives it the
+        // " camping" suffix (`ovr025.cs:1500-1503`).
+        draw_position_time(ctx, true);
         match self.menu.tick(ctx.input, ctx.dt_ticks) {
             WidgetOutcome::Pending => ScreenTransition::Stay,
             WidgetOutcome::Hotbar(key) => self.dispatch(key, ctx),
@@ -691,6 +717,13 @@ impl Shop {
             ShopPhase::Buy => "Buy an item (Esc to cancel)",
         };
         crate::text::draw_string(ctx.fb, ctx.font, bar, 24, 1, 0, 0x0F);
+        // `LoadPic`'s Shop arm ends with `display_map_position_time()`
+        // (`ovr025.cs:1425`) — the shop is the other screen whose own layout
+        // carries the line, without camp's suffix (`game_state == Shop`).
+        // (Our shop *body* is still the M3 placeholder listing rather than the
+        // original's picture + `PartySummary` composition; the line's presence
+        // is what this arm pins.)
+        draw_position_time(ctx, false);
 
         match self.phase {
             ShopPhase::Menu => match self.menu.tick(ctx.input, ctx.dt_ticks) {

@@ -661,11 +661,11 @@ impl Engine {
         // discipline is step-5 rendering scope; unconditional redraw is
         // idempotent and keeps hash-goldens simple).
         //
-        // Except over a fight: combat **fully replaces** the exploration
-        // screen (`combat-visualizer.md` §1.1), and row 15 col 17 lands inside
-        // the combat right panel. The reel host skips it the same way
-        // (`tick_reel` never reaches here).
-        if self.shell.combat_host().is_none() {
+        // Except over a fight, and except over a full-screen `Shell::Screen`
+        // — see [`Shell::draws_engine_status_line`] for the per-state coab
+        // derivation. The reel host skips it the same way (`tick_reel` never
+        // reaches here).
+        if self.shell.draws_engine_status_line() {
             let status = Shell::status_line(&self.state);
             draw_string(&mut self.fb, &self.font, &status, 15, 17, 0, 10);
         }
@@ -853,5 +853,36 @@ mod tests {
             e.tick(&[]);
         }
         assert!(matches!(e.shell, Shell::WorldMenu { .. }));
+    }
+
+    /// Any pixel lit inside the position/time line's cells (row 15, cols
+    /// 17-38).
+    fn status_band_lit(e: &Engine) -> bool {
+        let fb = e.framebuffer_for_demo();
+        (17 * 8..39 * 8).any(|x| (15 * 8..16 * 8).any(|y| fb.get_pixel(x, y) != 0))
+    }
+
+    /// ★ The status line no longer overdraws a full-screen `Shell::Screen`
+    /// (`display_map_position_time` runs only at `LoadPic`'s own recomposition
+    /// sites, `ovr025.cs:1398-1455` — never over the character sheet or the
+    /// save/load screen).
+    #[test]
+    fn the_position_time_line_is_suppressed_while_a_screen_is_parked() {
+        let mut e = engine();
+        for _ in 0..5 {
+            e.tick(&[]);
+        }
+        assert!(matches!(e.shell, Shell::WorldMenu { .. }));
+        assert!(status_band_lit(&e), "the walk loop paints the status line");
+
+        e.shell = Shell::Screen(crate::screens::Screen::SaveLoad(
+            crate::screens::SaveLoad::new(crate::screens::ReturnTo::World),
+        ));
+        e.tick(&[]);
+        assert!(
+            !status_band_lit(&e),
+            "the save/load screen's layout has no position/time line — the engine \
+             must not paint one over it"
+        );
     }
 }
