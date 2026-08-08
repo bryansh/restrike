@@ -883,6 +883,106 @@ stays the one place showing the complete open-hypothesis picture.
 - **Cross-reference:** `docs/design/oracle-rig.md` D-OR4 part B / §6,
   `crates/gbx-rules/src/flavor.rs`.
 
+### FD-31: The Area/Area2 window's `DataOffset` is **twice** the ECL address offset — `corridor.rs`'s sky-colour cells are off by that factor
+
+- **Status:** narrowed (derivation confirmed three ways; the correction is
+  deliberately *not* applied — it moves the 3D view's sky colour and every
+  golden that depends on it, which is not the scene-pictures slice's business)
+- **Question:** which ECL address does a given `Classes/Area1.cs` /
+  `Classes/Area2.cs` `[DataOffset(N)]` field live at?
+- **Evidence (this slice's redraw-gate research):** `vm_SetMemoryValue`
+  (`ovr008.cs:688-722`) passes `0x6A00 + location * 2` to
+  `Area1::field_6A00_Set` and `(location * 2) + 0x800` to
+  `Area2::field_800_Set`; both constants vanish in the `ushort` the setters
+  index with (`0x6A00 + 0x4B00*2 == 0x10000`, `0x7C00*2 + 0x800 == 0x10000`),
+  so **`DataOffset = (addr - base) * 2`**, i.e. `addr = base + DataOffset/2`
+  with `base` `0x4B00` (Area1) / `0x7C00` (Area2). Confirmed three ways:
+  (1) `inDungeon` is `DataOffset 0x1CC` and coab's own check is
+  `(location - 0x4B00) == 0xE6` (`ovr008.cs:704`); (2) the two addresses that
+  set `byte_1EE94` (`ovr008.cs:698`, offsets `0xFD`/`0xFE`) land on
+  `DataOffset 0x1FA`/`0x1FC` = `outdoor_sky_colour`/`indoor_sky_colour`, which
+  is exactly why writing a sky colour dirties the view; (3) real ECL content
+  writes `0x7EE1` (= `Area2.HeadBlockId`, `DataOffset 0x5C2`) before every
+  `PICTURE`, and `0x4CFF` (= `Area1.picture_fade`, `DataOffset 0x3FE`) before
+  the one faded picture in the game (`ECL3` block 18, `0x95E5`).
+- **Consequences already acted on:** `vmhost.rs` names `0x7EE1` →
+  `EngineState::head_block_id` (the picture layer's arm selector) and
+  `picture.rs` reads `picture_fade` from `0x4CFF`.
+- **Still open:** `crate::corridor`'s `OUTDOOR_SKY_COLOUR_ADDR`/
+  `INDOOR_SKY_COLOUR_ADDR` use the un-halved offsets (`0x4CFA`/`0x4CFC`) and so
+  always read 0 → `SKY_COLOURS[0]` = black; the correct cells are `0x4BFD`/
+  `0x4BFE`, which `vmhost.rs` already special-cases as `FORCE_REDRAW_ADDRS`.
+  `vmhost.rs`'s ECL-clock cluster has the same shape problem: it addresses the
+  seven clock words at `CLOCK_BASE + 2*i`, where the confirmed mapping makes
+  them seven *consecutive* addresses `0x4BC6..=0x4BCC`.
+- **Settled by:** a dedicated Area-window slice that re-derives every named
+  cell under this mapping, regenerates the walk/H2 goldens with the corrected
+  sky colour eyeballed, and re-checks the clock cluster against a real save.
+- **Cross-reference:** `crates/gbx-engine/src/picture.rs`
+  (`PICTURE_FADE_ADDR`'s doc comment carries the derivation),
+  `crates/gbx-engine/src/vmhost.rs` `FORCE_REDRAW_ADDRS`/`HEAD_BLOCK_ID_ADDR`,
+  `crates/gbx-engine/src/corridor.rs`.
+
+### FD-32: `picture_fade`'s progressive fade needs an in-place recolor our idempotent composition refuses
+
+- **Status:** deferred (documented divergence; the only exerciser is the
+  ending sequence plus one `ECL3` scene)
+- **Question:** the original's `DrawMaybeOverlayed` recolors the **cached**
+  `DaxBlock` in place when `picture_fade > 0` (`ovr030.cs:19-22` →
+  `DaxBlock.Recolor(useRandom: true, …)`, `DaxBlock.cs:71-94`), so each
+  redraw fades the same block *further* — that is how the ending's
+  `ShowAnimation` dissolve works (`ovr019.cs:510-514`). Our
+  `crate::picture::draw_maybe_overlayed` applies the pass to a scratch copy,
+  keeping the decoded asset pristine.
+- **Why:** composition must be idempotent (D-UI4) and must not leave a save
+  mid-fade; and our dither is a position hash, not a PRNG draw (FD-28), so an
+  in-place pass would converge after one application anyway rather than
+  progressing. Both halves of the divergence are already non-comparable
+  renderer territory.
+- **Settled by:** the session that implements the ending sequence — it needs a
+  real fade *animation* model (a fade step counter in `PictureLayer`, driven
+  by the ANIMATION cadence), at which point the progressive behavior can be
+  expressed without mutating the cache.
+- **Cross-reference:** FD-28, `crates/gbx-engine/src/picture.rs`.
+
+### FD-33: `CMD_HorizontalMenu`'s `useOverlay` animation is tracked but not driven
+
+- **Status:** open (flag modelled, consumer not wired)
+- **Question:** `CMD_HorizontalMenu` computes
+  `useOverlay = spriteChanged && byte_1EE8D` (`ovr003.cs:730-738`) and passes
+  it to `displayInput`, whose wait loop then re-blits **and advances** the
+  running animation every iteration while the menu is up
+  (`ovr027.cs:185-199`, honoring `CurrentDelay() * 100` ms). That is what makes
+  an encounter picture animate behind its menu. This engine tracks
+  `byte_1EE8D` (`VmMemoryState`) and `sprite_changed`, and can draw and
+  advance a frame (`crate::picture::animation_frame`), but nothing drives the
+  cadence from a parked `Widget`.
+- **Settled by:** an interactive-rendering slice that gives parked widgets a
+  per-tick animation hook; the frame cursor and delay are both already
+  available (`PictureLayer::anim_frame`, `AnimFrame::delay`).
+- **Cross-reference:** `crates/gbx-engine/src/picture.rs`,
+  `crates/gbx-engine/src/vmhost.rs` `byte_1ee8d`.
+
+### FD-34: `sub_30580` (CMD_Approach's encounter-visual dispatch) still records rather than draws
+
+- **Status:** open (scope call, scene-pictures slice)
+- **Question:** `sub_30580` (`ovr008.cs:220-276`) is the *other* picture
+  producer: it loads a `SPRIT{area}` animation for the approach sprite
+  (`load_pic_final(…, 1, sprite_block_id, "SPRIT")`, masked) and can call
+  `set_and_draw_head_body` for the encounter portrait, driving
+  `displayPlayerSprite`/`encounter_flags` alongside. `EngineVmHost::
+  load_encounter_visual` records its state effects only.
+- **Why deferred:** the scene-pictures slice's acceptance scenes (the amnesia
+  intro, the innkeeper, the tavern) reach the picture layer through
+  `CMD_Picture`, never through `CMD_Approach`; and `encounter_flags` +
+  `displayPlayerSprite` + `Show3DSprite`'s per-frame `x_pos/y_pos` placement
+  (`ovr030.cs:207-217`) are a distinct model from the picture layer's.
+- **Settled by:** the encounter-approach slice. `crate::picture`'s
+  `PictureCache` already has the shape a `SPRIT` cache needs, and
+  `Shown` grows one variant.
+- **Cross-reference:** `crates/gbx-engine/src/vmhost.rs`
+  `load_encounter_visual`, `crates/gbx-engine/src/picture.rs`.
+
 ## 5. How new entries get added
 
 Any session that surfaces a behavioral hypothesis not derivable purely from
