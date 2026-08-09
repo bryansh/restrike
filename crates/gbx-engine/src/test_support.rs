@@ -101,3 +101,42 @@ pub fn ecl_game_data(game_area: u8, blocks: Vec<(u8, EclBuilder)>) -> GameData {
     let dax_bytes = build_dax_file(&raw_blocks);
     GameData::from_files([(format!("ECL{game_area}.DAX"), dax_bytes)])
 }
+
+/// A field-complete zeroed [`Character`] for tests that need a roster member
+/// without hand-writing the whole literal (charsheet's sheet tests, the
+/// engine's party-panel test).
+pub(crate) fn blank_character() -> crate::party::Character {
+    use crate::party::*;
+    Character {
+        name: String::new(),
+        race: 0,
+        class_id: 0,
+        sex: 0,
+        alignment: 0,
+        age: 0,
+        monster_type: 0,
+        monster_index: 0,
+        icon: Default::default(),
+        control_morale: 0,
+        stats: AbilityScores::default(),
+        exp: 0,
+        class_level: [0; 8],
+        class_levels_old: [0; 8],
+        hit_dice: 0,
+        multiclass_level: 0,
+        lost_levels: 0,
+        lost_hp: 0,
+        hit_point_max: 0,
+        hit_point_current: 0,
+        hit_point_rolled: 0,
+        combat: CombatStats::default(),
+        magic: Default::default(),
+        skills: Default::default(),
+        money: Money::default(),
+        status: Default::default(),
+        opaque: Default::default(),
+        items: vec![],
+        readied_items: Default::default(),
+        affects: vec![],
+    }
+}

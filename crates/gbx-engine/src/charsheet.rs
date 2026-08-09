@@ -477,6 +477,8 @@ mod tests {
     /// through the sheet's display transforms, must reproduce every value on
     /// screen. (Synthetic — self-authored, no game bytes; the real bundled
     /// save is exercised by the local-tier test in `import.rs`/the demo.)
+    use crate::test_support::blank_character;
+
     fn mathew() -> Character {
         let mut ch = blank_character();
         ch.name = "MATHEW".into();
@@ -535,41 +537,6 @@ mod tests {
         };
         ch.status.health_status = 0; // Okay
         ch
-    }
-
-    fn blank_character() -> Character {
-        Character {
-            name: String::new(),
-            race: 0,
-            class_id: 0,
-            sex: 0,
-            alignment: 0,
-            age: 0,
-            monster_type: 0,
-            monster_index: 0,
-            icon: Default::default(),
-            control_morale: 0,
-            stats: AbilityScores::default(),
-            exp: 0,
-            class_level: [0; 8],
-            class_levels_old: [0; 8],
-            hit_dice: 0,
-            multiclass_level: 0,
-            lost_levels: 0,
-            lost_hp: 0,
-            hit_point_max: 0,
-            hit_point_current: 0,
-            hit_point_rolled: 0,
-            combat: CombatStats::default(),
-            magic: Default::default(),
-            skills: Default::default(),
-            money: Money::default(),
-            status: Default::default(),
-            opaque: Default::default(),
-            items: vec![],
-            readied_items: Default::default(),
-            affects: vec![],
-        }
     }
 
     #[test]

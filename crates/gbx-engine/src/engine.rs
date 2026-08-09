@@ -676,6 +676,26 @@ impl Engine {
         // derivation. The reel host skips it the same way (`tick_reel` never
         // reaches here).
         if self.shell.draws_engine_status_line() {
+            // The right-panel roster (`PartySummary`, `ovr025.cs:216-261`):
+            // the original repaints it at every walk-loop step
+            // (`ovr003.cs:2217-2219`) and every recompose (`LoadPic`'s
+            // arms), so outside combat and the full-screen Screens it is
+            // simply always there — over the intro's pictures and parked
+            // script menus too (Bryan's 2026-08-08 DOSBox side-by-sides).
+            // Camp composes its own copy inside its layout; combat replaces
+            // the whole screen. An empty roster draws nothing at all: a
+            // bare fixture boot has no party, and the original cannot reach
+            // the walk loop partyless.
+            if !self.party.members.is_empty() {
+                let rows: Vec<_> = self
+                    .party
+                    .members
+                    .iter()
+                    .map(crate::charsheet::sheet_view)
+                    .collect();
+                let selected = Some((self.state.selected_player as usize) % rows.len());
+                crate::charsheet::render_party_summary(&mut self.fb, &self.font, &rows, selected);
+            }
             let status = Shell::status_line(&self.state);
             draw_string(&mut self.fb, &self.font, &status, 15, 17, 0, 10);
         }
@@ -829,6 +849,49 @@ mod tests {
         let mut sets = SymbolSets::new();
         sets.load(4, synthetic_set4());
         Engine::new_fixture(synthetic_font(), sets, open_geo(), exit_only_game_data(), 1)
+    }
+
+    /// Any pixel lit inside the roster panel's cells (rows 2-9, cols 17-38).
+    fn roster_band_lit(e: &Engine) -> bool {
+        let fb = e.framebuffer_for_demo();
+        (17 * 8..39 * 8).any(|x| (2 * 8..10 * 8).any(|y| fb.get_pixel(x, y) != 0))
+    }
+
+    /// ★ The walk loop draws the right-panel roster (`PartySummary`,
+    /// `ovr025.cs:216-261`; repainted per step at `ovr003.cs:2217-2219`) —
+    /// Bryan's 2026-08-08 DOSBox side-by-sides show it over the intro and
+    /// the bar menu alike, where ours drew a black panel. Empty roster =
+    /// nothing (a bare fixture boot); a full-screen `Shell::Screen`
+    /// suppresses it exactly as it does the status line.
+    #[test]
+    fn the_walk_loop_paints_the_party_roster_panel() {
+        let mut e = engine();
+        for _ in 0..5 {
+            e.tick(&[]);
+        }
+        assert!(
+            !roster_band_lit(&e),
+            "an empty roster draws no panel (bare fixture boot)"
+        );
+
+        let mut member = crate::test_support::blank_character();
+        member.name = "MATHEW".into();
+        member.hit_point_current = 49;
+        e.party.members.push(member);
+        e.tick(&[]);
+        assert!(
+            roster_band_lit(&e),
+            "a real roster paints the NAME/AC/HP panel every walk-loop tick"
+        );
+
+        e.shell = Shell::Screen(crate::screens::Screen::SaveLoad(
+            crate::screens::SaveLoad::new(crate::screens::ReturnTo::World),
+        ));
+        e.tick(&[]);
+        assert!(
+            !roster_band_lit(&e),
+            "a full-screen Screen owns the whole framebuffer — no panel over it"
+        );
     }
 
     #[test]
