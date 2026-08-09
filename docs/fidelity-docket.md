@@ -1009,6 +1009,214 @@ stays the one place showing the complete open-hypothesis picture.
 - **Cross-reference:** `crates/gbx-engine/src/vmhost.rs`
   `load_encounter_visual`, `crates/gbx-engine/src/picture.rs`.
 
+### FD-35: `CALL 0xAE11`'s redraw gate has a SIXTH condition we do not model — the outer `byte_1AB0B`
+
+- **Status:** open (found by the adversarial review of the 2026-08-08
+  playtest-fix run; the five inner flags landed in `ea25309`)
+- **Question:** the gate is a *nested pair*, not one disjunction
+  (`ovr003.cs:1846-1864`):
+
+  ```
+  if (gbl.byte_1AB0B == true)
+      if (spriteChanged || displayPlayerSprite || byte_1EE91 ||
+          positionChanged || byte_1EE94) { … }
+  ```
+
+  `EngineServices::redraw_view_gate` implements only the inner five (minus
+  `displayPlayerSprite`, which is FD-34's). `byte_1AB0B` is set `true` by
+  `CMD_LoadFiles`/`CMD_LoadPieces` (`ovr003.cs:505`) and by
+  `sub_29758`'s no-reload arm (`:2275`), and set `false` at the head of
+  `sub_29758` (`:2238`) — i.e. **false out of the load path**, so the
+  original's own first `CALL 0xAE11` after a save load draws nothing until
+  a LOAD FILES/PIECES has run. Its other reader is `sub_29677`'s post-vector
+  redraw condition (`:2203`).
+- **Why it matters:** the amnesia intro's page-1 view happens to be armed
+  either way (the intro block runs `LOAD FILES` early), but a block that
+  reaches `CALL 0xAE11` before any `LOAD FILES` would repaint here and not
+  in the original.
+- **Settled by:** a `VmMemoryState::byte_1ab0b` cell written at those three
+  sites, ANDed into `redraw_view_gate`, with a conformance case per arm. A
+  DOSBox side-by-side of a `CALL 0xAE11`-before-`LOAD FILES` block would
+  confirm the visible consequence.
+- **Cross-reference:** `crates/gbx-engine/src/vmhost.rs` `redraw_view_gate`,
+  FD-34.
+
+### FD-36: the redraw gate's `can_draw_bigpic = true` write, and its wilderness coupling
+
+- **Status:** open (same review)
+- **Question:** the gate's body writes `gbl.can_draw_bigpic = true`
+  *before* calling `RedrawView` (`ovr003.cs:1854`). Our
+  `redraw_view_gate`/`Effect::RedrawView` pair does not, and
+  `crate::corridor::redraw_view` clears the flag at its tail
+  (`ovr029.cs:46`) as the original does — so a gated redraw leaves the flag
+  in the same state it found it, where the original leaves it cleared *after
+  having granted the permission*. The difference is invisible today because
+  `RedrawView`'s only reader of `can_draw_bigpic` is its **non-dungeon**
+  branch (`ovr029.cs:41-44`, `draw_bigpic()`), which this engine does not
+  reach: the wilderness/BIGPIC screen is unimplemented.
+- **Settled by:** the wilderness/BIGPIC slice, which has to model
+  `RedrawView`'s branch anyway. Wire the write at the same time.
+- **Cross-reference:** `crates/gbx-engine/src/corridor.rs` `redraw_view`,
+  `crates/gbx-engine/src/vmhost.rs` `can_draw_bigpic`.
+
+### FD-37: `vm_init_ecl`'s engine-half reset is wider than the three cells we replay
+
+- **Status:** open (same review)
+- **Question:** `vm_init_ecl` (`sub_301E8`, `ovr008.cs:89-132`) resets
+  fourteen-odd cells at every ECL initialization. Our three
+  `vm_init_ecl` analogues (`VmMemoryState::new`, `begin_chain`,
+  `import_original`) replay `spriteChanged = false` / `byte_1EE91 = true`
+  (`:91,94`) and `HeadBlockId = 0xFF` (`:109`). Unmodeled, with their
+  lines: `redrawPartySummary1/2 = false` (`:92-93`),
+  `encounter_flags[0..2] = false` (`:96-97`), `monster_icon_id = 8`
+  (`:98` — ours lives on `PendingCombat`, which is `#[serde(skip)]` and
+  reset by `CLEARMONSTERS`, not by block entry), `byte_1DA70 = false`
+  (`:100`), `compare_flags[0..6] = false` (`:104-107` — `gbx-vm` owns
+  these and does not clear them on `load_block`),
+  `rest_incounter_period`/`rest_incounter_percentage = 0` (`:111-112`),
+  `can_cast_spells = false` (`:113`), and the
+  `reload_ecl_and_pictures == false` guard around `RestField200Values`/
+  `RestField6F2Values` (`:128-131`).
+- **The asymmetry worth flagging:** `:126` writes
+  `gbl.area_ptr.inDungeon = 1` **directly on the struct**, bypassing
+  `vm_SetMemoryValue`'s Area-window hook (`ovr008.cs:704-715`, which is what
+  turns an inDungeon *script* write into a `game_state`/`last_game_state`
+  update). So the original leaves the cell saying "dungeon" while
+  `game_state` keeps whatever the load computed — a script `SAVE` to the
+  same cell would have flipped it. Our `write_area` models the hook; nothing
+  models the direct write, so we are accidentally consistent, but for the
+  wrong reason.
+- **Settled by:** a slice that gives `vm_init_ecl` one real implementation
+  (all three call sites through it), cell by cell, each with a
+  conformance/shell test. `compare_flags` needs a `gbx-vm` seam.
+- **Cross-reference:** `crates/gbx-engine/src/vmhost.rs`
+  `vm_init_ecl_redraw_flags`, `crates/gbx-engine/src/shell.rs` `begin_chain`,
+  `crates/gbx-engine/src/import.rs`.
+
+### FD-38: menus have per-menu colour sets; our prompt painter has one
+
+- **Status:** open (same review)
+- **Question:** `CMD_HorizontalMenu` picks `MenuColorSet(15, 15, 13)` for a
+  ONE-option menu and `gbl.defaultMenuColors` otherwise
+  (`ovr003.cs:713-726`), and passes it to `sub_317AA` → `displayInput` →
+  `display_highlighed_text`, whose three-way colouring is
+  `(prompt, foreground, highlight)` (`ovr027.cs:89-120`). Our
+  `scene::render::draw_menu_line` hardcodes one palette for every menu, so
+  the single-option continue prompt paints in the ordinary menu colours.
+  Related: `displayInput`'s `var_8F = (colours.foreground != 0) ||
+  (colours.highlight != 0)` (`ovr027.cs:137`) is what gates Enter's
+  "resolve the highlighted word" behaviour at all — a menu opened with an
+  all-zero colour set would return `'\r'` instead.
+- **Settled by:** an interactive-rendering slice that plumbs a
+  `MenuColorSet` from the request to the painter. Cheap; the painter already
+  splits highlight/hotkey/plain.
+- **Cross-reference:** `crates/gbx-engine/src/shell.rs`
+  `horizontal_menu_option_texts`, `crates/gbx-engine/src/combat/scene/render.rs`
+  `draw_menu_line`.
+
+### FD-39: two `buildMenuStrings`/`displayInput` text quirks we smooth over
+
+- **Status:** open (same review; the mechanisms re-read in coab, the ECL
+  census is the review's)
+- **Question:** two shipped-data behaviours our menu builder does not
+  reproduce.
+  1. **An empty option yields a SPACE hotkey.** `CMD_HorizontalMenu` joins
+     with `text += "~" + option + " "` (`ovr003.cs:739-745`), so an empty
+     option contributes `"~ "`: the `~` marks the *space*, which
+     `buildMenuStrings` uppercases (a no-op) and appends to the key string
+     (`ovr008.cs:1148-1155`) — and `displayInput` treats `0x20` as a
+     resolving key (`ovr027.cs:271-274`). Ours skips empty options entirely
+     (`widget_for_request`'s `chars.next()` guard), so the option indexes
+     after it shift.
+  2. **Duplicate initials paint twice and settle on the LAST.** The
+     letter-scan loop has no `break` (`ovr027.cs:279-292`): it repaints the
+     highlight at *every* match and leaves `gbl.menuSelectedWord` on the
+     last one, while `sub_317AA`'s own index scan
+     (`ovr008.cs:1196-1203`) stops at the FIRST — so the resolved option and
+     the left-behind highlight disagree. The review's decoded-ECL census
+     names `PICK POCKETS` / `PASS ON BY` (ECL4 block 32) as a live instance;
+     ours takes the first match for both.
+- **Settled by:** a menu-fidelity slice, ideally with a DOSBox capture of the
+  `PICK POCKETS`/`PASS ON BY` menu to confirm the transient paint is
+  visible rather than swallowed by the immediate `ClearPromptArea`.
+- **Cross-reference:** `crates/gbx-engine/src/shell.rs`
+  `widget_for_request`/`resolve_horizontal_menu_reply`,
+  `crates/gbx-engine/src/widgets.rs` `Hotbar::select_word_starting_with`.
+
+### FD-40: `gbl.menuSelectedWord` is ONE global; we model it twice
+
+- **Status:** open (follow-up from the 2026-08-09 remediation slice, which
+  gave script menus their own persistent cell)
+- **Question:** `gbl.menuSelectedWord` (`byte_1D5BE`, `Classes/Gbl.cs:375`)
+  is a single process-wide global shared by every `displayInput` caller —
+  script menus, the world menu, camp, save/load, the combat menus, and the
+  handful of sites that preset it (`ovr015.cs:384` 'C' → 1,
+  `ovr027.cs:548`, `ovr027.cs:680`, `ovr009.cs:204` → 2). This engine now
+  has *two* independent cells: `EngineState::menu_selected_word` (script
+  menus) and `CombatHost::menu_selected` (the manual-turn UI), and the
+  engine-owned world/camp/save-load menus have none at all — each opens on
+  word 0.
+- **Why it matters:** the original carries the highlight ACROSS these
+  contexts. Leaving a fight with QUICK selected leaves the next script menu
+  on its option 1; picking Cast in the world menu (`ovr015.cs:384`) presets
+  the global to 1 for whatever opens next.
+- **Settled by:** hoisting the cell to one engine-owned home that
+  `widget_for_request`, `Screen`'s menus and `CombatHost` all read and
+  write. Keep it `#[serde(skip)]`: `SaveGame` (`ovr017.cs:1109-1156`) does
+  not persist `byte_1D5BE`, so a fresh process loading a save starts at 0.
+- **Cross-reference:** `crates/gbx-engine/src/shell.rs`
+  `EngineState::menu_selected_word`, `crates/gbx-engine/src/combat_host.rs`
+  `menu_selected`, `crates/gbx-engine/src/screens.rs`.
+
+### FD-41: `block_area_view` is imported but never read — the area map is always permitted
+
+- **Status:** open (found while investigating the "imported boot lands in
+  the area map" report, 2026-08-09 — see that entry's resolution below)
+- **Question:** `area_ptr.block_area_view` (`Classes/Area1.cs:79`,
+  DataOffset `0x1F6` → addr `0x4BFB` under FD-31's halved mapping) blocks
+  the area map when nonzero: `main_3d_world_menu`'s `'A'` shows the timed
+  `"Not Here"` instead of toggling (`ovr015.cs:368-379`), and `RedrawView`
+  force-clears `mapAreaDisplay` on every redraw while it is set
+  (`ovr029.cs:34-38`). `EngineState::area_view_allowed` models the
+  predicate but nothing ever writes it — it is hardcoded `true` at
+  `EngineState::new`, and `import_original` does not derive it from the
+  restored word even though the word IS in the raw store. The `RedrawView`
+  force-clear is unmodeled entirely.
+- **Evidence:** GOG's bundled slot-A save carries `block_area_view == 0`, so
+  Tilverton's behaviour is accidentally correct; a block that sets the cell
+  would diverge.
+- **Settled by:** reading `0x4BFB` where `area_view_allowed` is consulted
+  (it is a live cell a script can `SAVE` into, so a boot-time copy would be
+  wrong), plus the `redraw_view` force-clear.
+- **Cross-reference:** `crates/gbx-engine/src/shell.rs`
+  `EngineState::area_view_allowed`, `crates/gbx-engine/src/corridor.rs`
+  `redraw_view`, `crates/gbx-engine/src/movement.rs` `world_menu_command`.
+
+### FD-42: the imported boot's "area map at startup" report — NOT a divergence
+
+- **Status:** resolved 2026-08-09 (reproduced headlessly, cause identified)
+- **Question:** an imported slot-A boot was reported reaching the world menu
+  with the AREA MAP in the viewport, where a bare fixture boot shows the 3D
+  view.
+- **Evidence:** driven headlessly through
+  `examples/replay_debug_log.rs` (slot-A import, real data, hand-authored
+  input schedule). With NO input after the intro's two `PRESS BUTTON`
+  pages, the world menu shows the **3D view** — `EngineState::area_map_shown`
+  is `false` at `EngineState::new`, `import_original` never writes it, and
+  the only writer is the `'A'` toggle (`shell.rs:1726`). Frames dumped and
+  eyeballed at ticks 60/210/250/400.
+  With ONE extra Enter at the world menu the area map appears — because
+  `AREA` is the default-highlighted word and `displayInput`'s Enter arm
+  resolves the *highlighted* word (`ovr027.cs:226-240`), which is `'A'`.
+  That is faithful: the original does the same, and neither `displayInput`
+  nor `sub_317AA` drains the keyboard between menus, so an extra keypress
+  behind the intro's last page lands on the world menu in both.
+- **Residual:** confirm in DOSBox that a double-Enter through the amnesia
+  intro lands on the area map there too (expected: yes). The unmodeled
+  `block_area_view` cell is FD-41, separately.
+- **Cross-reference:** FD-41, `crates/gbx-engine/src/shell.rs`
+  `world_menu_command`'s `'A'` arm.
+
 ## 5. How new entries get added
 
 Any session that surfaces a behavioral hypothesis not derivable purely from
