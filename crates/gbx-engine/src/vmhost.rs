@@ -446,12 +446,32 @@ impl VmMemoryState {
         // of a session — so a fresh engine starts with the redraw gate armed,
         // which is what makes a fresh block's first `CALL 0xAE11` repaint the
         // world (the amnesia intro's page-1 view, Bryan's 2026-08-08 DOSBox
-        // side-by-side). `begin_chain` re-arms it per NEWECL, the other
-        // `vm_init_ecl` site.
-        VmMemoryState {
-            byte_1ee91: true,
-            ..Self::default()
-        }
+        // side-by-side). `begin_chain` re-arms it per NEWECL, and
+        // `import_original` re-arms it AFTER its `restore_windows` — the two
+        // other `vm_init_ecl` sites.
+        let mut vm = Self::default();
+        vm.vm_init_ecl_redraw_flags();
+        vm
+    }
+
+    /// `vm_init_ecl`'s redraw-flag half (`ovr008.cs:91,94`): `spriteChanged
+    /// = false` then `byte_1EE91 = true`. Every engine-side `vm_init_ecl`
+    /// analogue runs this — fresh boot ([`VmMemoryState::new`]), `CMD_NewECL`
+    /// (`shell.rs`'s `begin_chain`, `ovr003.cs:491-492`), and the load path
+    /// (`import.rs`, `sub_29758`'s `ovr003.cs:2278`).
+    ///
+    /// **Ordering matters and is the whole point of this being a named
+    /// method:** the original loads the save into its windows and only THEN
+    /// calls `vm_init_ecl` (`ovr003.cs:2262-2278` — `load_ecl_dax`, then
+    /// `vm_init_ecl`, then `RunEclVm(ecl_initial_entryPoint)`), so on the
+    /// import path the arm must follow [`VmMemoryState::restore_windows`],
+    /// which otherwise writes the snapshot's own (false) flag bytes straight
+    /// over it. A native `.rsav` restore is NOT a `vm_init_ecl` moment — it
+    /// resumes a machine mid-execution — so it deliberately does not call
+    /// this and keeps the flag value the save carried.
+    pub(crate) fn vm_init_ecl_redraw_flags(&mut self) {
+        self.sprite_changed = false;
+        self.byte_1ee91 = true;
     }
 
     /// The raw fallback word store's current value at `addr` (D-VM5's

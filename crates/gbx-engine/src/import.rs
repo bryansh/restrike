@@ -195,6 +195,18 @@ pub fn import_original(
 
     let mut vm_memory = VmMemoryState::new();
     vm_memory.restore_windows(windows_from_master(master));
+    // ★ THE ORDER IS LOAD-THEN-`vm_init_ecl` (`sub_29758`, `ovr003.cs:2262-
+    // 2278`): the original restores `area_ptr`/`area2_ptr`/`stru_1B2CA` from
+    // the save file, loads the resident block, and only *then* runs
+    // `vm_init_ecl` — whose `byte_1EE91 = true` (`ovr008.cs:94`) arms the
+    // `CALL 0xAE11` redraw gate for the entry vector that runs next
+    // (`:2280`). `restore_windows` writes the snapshot's own flag bytes, and
+    // the original save format carries none (so `windows_from_master`'s
+    // `..Default::default()` leaves them false) — arming any earlier
+    // (`VmMemoryState::new`, or `Shell::boot` on line 194, which runs before
+    // this restore) is silently undone. Every imported boot's first
+    // `CALL 0xAE11` must find the gate armed, exactly as a fresh boot does.
+    vm_memory.vm_init_ecl_redraw_flags();
 
     let geo_block_id = resolve_block(master.current_3d_map_block_id(), DEFAULT_GEO_BLOCK);
     let geo = load_geo_block(&data, GAME_AREA, geo_block_id)?;

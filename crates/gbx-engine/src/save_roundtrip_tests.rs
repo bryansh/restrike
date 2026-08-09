@@ -112,12 +112,36 @@ fn exit_only_ecl_block() -> Vec<u8> {
     raw
 }
 
+/// The amnesia intro's shape in miniature: an entry vector whose first op is
+/// `CALL 0xAE11` (the consolidated redraw gate, `ovr003.cs:1843-1866`), then
+/// EXIT. `0x2D`'s operand is the CALL key biased by `0x7FFF`, matching
+/// `gbx_vm`'s own conformance fixtures.
+fn call_ae11_ecl_block() -> Vec<u8> {
+    let mut b = EclBuilder::new();
+    for _ in 0..5 {
+        b.raw(&[0]);
+        b.imm_word_label("entry");
+    }
+    b.label("entry");
+    b.op(0x2D).imm_word(0x7FFFu16.wrapping_add(0xAE11));
+    b.op(0x00); // EXIT
+    let bytecode = b.build_bytes();
+
+    let mut raw = vec![0u8, 0u8]; // load_ecl_dax's 2-byte prefix
+    raw.extend_from_slice(&bytecode);
+    raw
+}
+
 /// Builds the full boot-compatible synthetic [`GameData`] (8X8D1.DAX's
 /// font/set4/set0, COMSPR.DAX's thirteen icon pairs, SKY.DAX's 3 blocks,
 /// `GEO{GAME_AREA}.DAX` block [`GEO_BLOCK_ID`], `ECL{GAME_AREA}.DAX` block
 /// [`ECL_BLOCK_ID`]) — D10: every byte here is self-authored, no extracted
 /// game content.
 fn synthetic_game_data() -> GameData {
+    synthetic_game_data_with_ecl(exit_only_ecl_block())
+}
+
+fn synthetic_game_data_with_ecl(ecl_block: Vec<u8>) -> GameData {
     use gbx_formats::combat_art::ATTACK_BLOCK_OFFSET;
 
     let set4 = tiny_image_bytes(40); // draw8x8_03 indexes up to set 4's higher items
@@ -127,7 +151,6 @@ fn synthetic_game_data() -> GameData {
     let eight_by_eight_d1 = build_dax(&[(201, &font), (0xCA, &set4), (0xCB, &set0)]);
     let sky = build_dax(&[(250, &sky_image), (251, &sky_image), (252, &sky_image)]);
     let geo = build_dax(&[(GEO_BLOCK_ID, &vec![0u8; gbx_formats::geo::GEO_BLOCK_SIZE])]);
-    let ecl_block = exit_only_ecl_block();
     let ecl = build_dax(&[(ECL_BLOCK_ID, &ecl_block)]);
 
     // Boot's COMSPR slice: blocks 0..=0x0B and 0x19, each with its +0x80
@@ -224,6 +247,71 @@ fn synthetic_save_set() -> OriginalSaveSet {
 fn imported_engine() -> Engine {
     let set = synthetic_save_set();
     import_original(&set, synthetic_game_data(), 1234).expect("synthetic import must succeed")
+}
+
+/// ★ The redraw gate survives the imported boot. `import_original` calls
+/// `VmMemoryState::new()` (armed) and then `restore_windows`, which writes
+/// the snapshot's own flag bytes — and the original save format carries
+/// none, so the snapshot's are false. The original's ordering is
+/// load-save-THEN-`vm_init_ecl` (`sub_29758`, `ovr003.cs:2262-2278`), whose
+/// `byte_1EE91 = true` (`ovr008.cs:94`) is what makes the entry vector's
+/// first `CALL 0xAE11` repaint the world — the amnesia intro's page-1 view.
+/// Before this, every slot-A boot reached that CALL with a dead gate.
+#[test]
+fn an_imported_boots_first_call_0xae11_finds_the_redraw_gate_armed() {
+    let set = synthetic_save_set();
+    let mut engine = import_original(
+        &set,
+        synthetic_game_data_with_ecl(call_ae11_ecl_block()),
+        1234,
+    )
+    .expect("synthetic import must succeed");
+
+    assert!(
+        engine.vm_memory().byte_1ee91,
+        "vm_init_ecl's arm must survive restore_windows on the import path"
+    );
+
+    for _ in 0..5 {
+        engine.tick(&[]);
+    }
+    let gates: Vec<bool> = engine
+        .vm_memory()
+        .calls
+        .iter()
+        .filter_map(|c| match c {
+            gbx_vm::RecordedCall::RedrawViewGate { armed } => Some(*armed),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        gates.first(),
+        Some(&true),
+        "the imported boot's first CALL 0xAE11 must yield Effect::RedrawView \
+         (gate armed); saw {gates:?}"
+    );
+}
+
+/// A native `.rsav` restore is NOT a `vm_init_ecl` moment — it resumes a
+/// machine mid-execution, so the restored save's own flag value stands and
+/// nothing re-arms it. (`SaveGame`, `ovr017.cs:1109-1156`, never writes the
+/// flag at all; our `.rsav` does, and it must round-trip.)
+#[test]
+fn an_rsav_restore_keeps_the_saved_redraw_flag_instead_of_re_arming() {
+    let mut engine = imported_engine();
+    for _ in 0..5 {
+        engine.tick(&[]);
+    }
+    // The exit-only fixture block never calls 0xAE11, so the flag is still
+    // armed from import; clear it the way the gate would and round-trip.
+    let saved = engine.vm_memory().byte_1ee91;
+    let bytes = engine.save();
+    let restored = Engine::restore(&bytes, synthetic_game_data()).expect("restore must succeed");
+    assert_eq!(
+        restored.vm_memory().byte_1ee91,
+        saved,
+        "restore replays the saved flag, it does not re-run vm_init_ecl"
+    );
 }
 
 #[test]

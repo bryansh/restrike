@@ -970,8 +970,7 @@ fn begin_chain(ctx: &mut FlowCtx, id: BlockId) -> Option<ChainRunner> {
     // false` and `byte_1EE91 = true` (`ovr008.cs:91,94`): the redraw gate is
     // armed, so the new block's first `CALL 0xAE11` repaints the world.
     ctx.state.head_block_id = 0xFF;
-    ctx.vm_memory.sprite_changed = false;
-    ctx.vm_memory.byte_1ee91 = true;
+    ctx.vm_memory.vm_init_ecl_redraw_flags();
 
     match enter_vector(ctx.machine, VECTOR_ENTRY_POINT) {
         Some(run) => Some(ChainRunner { run }),
