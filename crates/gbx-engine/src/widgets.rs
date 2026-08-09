@@ -160,6 +160,28 @@ impl Hotbar {
         self.selected.and_then(|i| self.words.get(i)).copied()
     }
 
+    /// `displayInput`'s open-time seed-and-clamp (`ovr027.cs:142-145`):
+    /// `gbl.menuSelectedWord` is a GLOBAL that survives from the previous
+    /// menu, and the only thing `displayInput` does to it on entry is
+    /// `if (gbl.menuSelectedWord >= highlistCount) gbl.menuSelectedWord = 0;`
+    /// — it clamps to ZERO, not to the last group. A menu with no
+    /// highlightable word has nothing to select.
+    pub fn seed_selected_word(&mut self, stored: usize) {
+        self.selected = if self.words.is_empty() {
+            None
+        } else if stored >= self.words.len() {
+            Some(0)
+        } else {
+            Some(stored)
+        };
+    }
+
+    /// `gbl.menuSelectedWord`'s live value — what the owning flow writes back
+    /// into its persistent cell.
+    pub fn selected_word(&self) -> usize {
+        self.selected.unwrap_or(0)
+    }
+
     /// The highlighted word's first character, uppercased — Enter's normal
     /// resolution, and `'\r'` when nothing is highlightable (§1.5).
     pub fn highlighted_char(&self) -> Option<u8> {
@@ -247,6 +269,18 @@ impl Hotbar {
                 // word's first letter (e.g. a plain 'E' exit key).
                 if let Some(valid) = &self.valid_keys {
                     return if valid.contains(&up) {
+                        // `displayInput`'s letter scan MOVES the highlight
+                        // before it stops the loop (`ovr027.cs:279-292`:
+                        // `gbl.menuSelectedWord = var_61` then
+                        // `display_highlighed_text`). Visible in the
+                        // same-tick paint, and load-bearing now that the
+                        // shell writes the resolved index back into its
+                        // persistent `gbl.menuSelectedWord` cell — a `valid`
+                        // key that isn't a word initial (none exist in the
+                        // shipped menus, but the arm allows it) simply
+                        // leaves the highlight where it was, as the
+                        // original's own no-match scan does.
+                        self.select_word_starting_with(up);
                         WidgetOutcome::Hotbar(up)
                     } else {
                         WidgetOutcome::Pending

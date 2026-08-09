@@ -362,7 +362,45 @@ fn vertical_menu_widget(options: &[gbx_vm::VmString], start_row: usize) -> Widge
 /// `InputString`/`SelectPlayer` await their opcodes (`0x0F`/`0x10`/`0x39`)
 /// landing in the interpreter; `TextEntry` already exists and is ready
 /// (step 3), this is purely a `gbx-vm` coverage gap, docketed.
-fn widget_for_request(request: &Request) -> Widget {
+/// `CMD_HorizontalMenu`'s single-option prompt rewrite (`ovr003.cs:711-721`):
+/// when `string_count == 1` and the sole option is EXACTLY
+/// `"PRESS BUTTON OR RETURN TO CONTINUE."` (trailing period included), the
+/// original swaps in `"PRESS <ENTER>/<RETURN> TO CONTINUE"` (no trailing
+/// period) *before* `buildMenuStrings` ever sees the text — the shipped ECL
+/// still carries the mouse-era prompt, and the engine canonicalizes it to
+/// the keyboard one at display time. A census of the shipped scripts finds
+/// this firing in every one-option HORIZONTAL MENU in the game, the amnesia
+/// intro's two pages included, so it is the prompt a player actually reads.
+///
+/// The match is byte-exact and the option count is part of the condition: a
+/// multi-option menu that happens to contain the same string is untouched.
+///
+/// **NIT, docketed not implemented:** the single-option arm also picks the
+/// colour set `(15, 15, 13)` instead of `gbl.defaultMenuColors`
+/// (`ovr003.cs:713-716`). This engine's prompt painter carries no per-menu
+/// colours yet; plumbing them is its own slice (see `fidelity-docket.md`).
+const PRESS_BUTTON_RAW: &str = "PRESS BUTTON OR RETURN TO CONTINUE.";
+const PRESS_BUTTON_CANONICAL: &str = "PRESS <ENTER>/<RETURN> TO CONTINUE";
+
+/// The option strings a HORIZONTAL MENU actually presents — raw script text
+/// with [`PRESS_BUTTON_RAW`]'s canonicalization applied. Shared by the
+/// widget builder and the transcript label, because the original applies it
+/// once, in `CMD_HorizontalMenu`, upstream of both the painter and anything
+/// that could observe the text.
+fn horizontal_menu_option_texts(options: &[gbx_vm::VmString]) -> Vec<String> {
+    let mut texts: Vec<String> = options
+        .iter()
+        .map(|s| String::from_utf8_lossy(&s.0).into_owned())
+        .collect();
+    if texts.len() == 1 && texts[0] == PRESS_BUTTON_RAW {
+        texts[0] = PRESS_BUTTON_CANONICAL.to_string();
+    }
+    texts
+}
+
+/// `Request` -> `Widget`, with the caller's persistent `gbl.menuSelectedWord`
+/// (`EngineState::menu_selected_word`) seeded into whatever menu opens.
+fn widget_for_request(request: &Request, menu_selected_word: usize) -> Widget {
     match request {
         Request::HorizontalMenu { options } => {
             // ★ `buildMenuStrings` (`ovr008.cs:1131-1165`): `CMD_HorizontalMenu`
@@ -383,11 +421,10 @@ fn widget_for_request(request: &Request) -> Widget {
             // digit at ANY option position; letters-only here.)
             let mut text = String::new();
             let mut keys: Vec<u8> = Vec::new();
-            for (i, opt) in options.iter().enumerate() {
+            for (i, opt) in horizontal_menu_option_texts(options).iter().enumerate() {
                 if i > 0 {
                     text.push(' ');
                 }
-                let opt = String::from_utf8_lossy(&opt.0).into_owned();
                 let mut chars = opt.chars();
                 if let Some(first) = chars.next() {
                     let hot = first.to_ascii_uppercase();
@@ -397,6 +434,13 @@ fn widget_for_request(request: &Request) -> Widget {
                 }
             }
             let mut hotbar = Hotbar::new(text);
+            // `gbl.menuSelectedWord` is global and NEVER reset between menus
+            // (`ovr027.cs:142-145` only clamps it) — a looping script menu
+            // re-opens with the option the player last picked still
+            // highlighted. The Tilverton bar is the case that matters: press
+            // 'H', drink, the menu re-opens, and Enter must order another
+            // drink rather than start the brawl option 0 sits on.
+            hotbar.seed_selected_word(menu_selected_word);
             hotbar.accept_ext = true;
             hotbar.ext_scrolls_party = true;
             // Only the menu's own hotkeys resolve it. `displayInput`'s
@@ -429,12 +473,12 @@ fn widget_for_request(request: &Request) -> Widget {
 /// or a fixed descriptive label for the non-textual requests.
 fn describe_request(request: &Request) -> String {
     match request {
+        // The canonicalized text, not the raw script bytes: the original
+        // rewrites in `CMD_HorizontalMenu` (`ovr003.cs:711-721`) and the
+        // player only ever sees the result, so a transcript meant to be
+        // diffed against a DOSBox side-by-side must carry it too.
         Request::HorizontalMenu { options } => {
-            let text = options
-                .iter()
-                .map(|s| String::from_utf8_lossy(&s.0).into_owned())
-                .collect::<Vec<_>>()
-                .join(" ");
+            let text = horizontal_menu_option_texts(options).join(" ");
             format!("menu: {text}")
         }
         Request::VerticalMenu { prompt, options } => {
@@ -492,9 +536,13 @@ pub(crate) fn facing_to_map_dir(facing: crate::movement::Facing) -> u8 {
 /// the option index directly rather than re-deriving it from the key).
 fn resolve_horizontal_menu_reply(options: &[gbx_vm::VmString], key: u8) -> Reply {
     let upper = key.to_ascii_uppercase();
-    let idx = options
+    // Over the canonicalized texts, matching `sub_317AA`'s own index scan
+    // (`ovr008.cs:1196-1203`), which runs over `buildMenuStrings`' output —
+    // i.e. downstream of `CMD_HorizontalMenu`'s rewrite. (Both prompt spellings
+    // start with 'P', so this is exactness, not a behaviour change.)
+    let idx = horizontal_menu_option_texts(options)
         .iter()
-        .position(|opt| opt.0.first().map(|b| b.to_ascii_uppercase()) == Some(upper))
+        .position(|opt| opt.bytes().next().map(|b| b.to_ascii_uppercase()) == Some(upper))
         // Not-found is `sub_317AA`'s `-1`, which `CMD_HorizontalMenu` writes
         // as the `(byte)-1 = 0xFF` sentinel (`ovr003.cs:748-750`) — ON GOTO's
         // bound check then falls through. Unreachable through the widget's
@@ -715,7 +763,7 @@ impl VectorRun {
                         self.pending = Some(PendingOutcome::VerticalPrompt(request));
                         continue;
                     }
-                    let widget = widget_for_request(&request);
+                    let widget = widget_for_request(&request, ctx.state.menu_selected_word);
                     self.pending = Some(PendingOutcome::Request(request));
                     self.phase = VmPhase::Gate(widget);
                     return PresentTick::OpenedGate;
@@ -838,6 +886,14 @@ impl VectorRun {
             Widget::ListMenu(l) => l.index(),
             _ => 0,
         };
+        // `gbl.menuSelectedWord`'s write-back. The original's `','`/`'.'`/
+        // letter-scan arms assign the global *inside* `displayInput`'s loop
+        // (`ovr027.cs:244-292`), so it is already current whether this tick
+        // cycled the highlight, resolved the menu, or neither — mirroring
+        // that here, once, covers all three.
+        if let Widget::Hotbar(h) = widget {
+            ctx.state.menu_selected_word = h.selected_word();
+        }
 
         // A PressAnyKey gate nested under a paginating TextJob: release the
         // job and resume presenting, rather than resuming the VM.
@@ -1063,6 +1119,28 @@ pub struct EngineState {
     /// deserializes back to [`crate::monster::PendingCombat::default`]).
     #[serde(skip)]
     pub pending_combat: crate::monster::PendingCombat,
+    /// ★ `gbl.menuSelectedWord` (`byte_1D5BE`, `Classes/Gbl.cs:375`): the
+    /// highlighted word index, GLOBAL in the original and never reset —
+    /// `displayInput` only clamps it on entry (`ovr027.cs:142-145`) and its
+    /// `','`/`'.'`/letter arms write it (`:244-292`); a handful of callers
+    /// preset it (`ovr015.cs:384` 'C' → 1, `ovr027.cs:548`/`:680`,
+    /// `ovr009.cs:204`). So a looping script menu re-opens on the option the
+    /// player last chose.
+    ///
+    /// **Not serialized, and that is the faithful choice:** `SaveGame`
+    /// (`ovr017.cs:1109-1156`) writes `game_area`, `area_ptr`, `area2_ptr`,
+    /// `stru_1B2CA`, `ecl_ptr`, the position bytes, the game states,
+    /// `setBlocks` and the party — `byte_1D5BE` is in none of them. It is
+    /// transient process state, zeroed at process init (`seg001.cs`'s
+    /// `menuScreenIndex` neighbourhood, and `ovr007.cs:23`), so a
+    /// `#[serde(skip)]` field that deserializes to 0 matches a freshly
+    /// launched original loading the same save — and costs no
+    /// `SAVE_FORMAT_VERSION` bump.
+    ///
+    /// Combat's menus model the same global separately
+    /// (`combat_host.rs`'s `menu_selected`); unifying the two is docketed.
+    #[serde(skip)]
+    pub menu_selected_word: usize,
 }
 
 /// `gbl.game_state`'s M2 slice (`Classes/Gbl.cs`'s `GameState` enum —
@@ -1098,6 +1176,7 @@ impl EngineState {
             head_block_id: 0xFF,
             picture: crate::picture::PictureLayer::default(),
             pending_combat: crate::monster::PendingCombat::default(),
+            menu_selected_word: 0,
         }
     }
 
@@ -2004,9 +2083,12 @@ mod tests {
             VmString(b"HAVE A DRINK".to_vec()),
             VmString(b"LEAVE".to_vec()),
         ];
-        let Widget::Hotbar(mut h) = widget_for_request(&Request::HorizontalMenu {
-            options: options.clone(),
-        }) else {
+        let Widget::Hotbar(mut h) = widget_for_request(
+            &Request::HorizontalMenu {
+                options: options.clone(),
+            },
+            0,
+        ) else {
             panic!("a HORIZONTAL MENU parks a Hotbar");
         };
         assert_eq!(h.text, "Punch barkeep Have a drink Leave");
@@ -2042,6 +2124,51 @@ mod tests {
         assert_eq!(
             resolve_horizontal_menu_reply(&options, b'X'),
             Reply::Selection(0xFF)
+        );
+    }
+
+    /// ★ `CMD_HorizontalMenu`'s single-option prompt rewrite
+    /// (`ovr003.cs:711-721`): the shipped ECL's mouse-era
+    /// `"PRESS BUTTON OR RETURN TO CONTINUE."` is canonicalized to
+    /// `"PRESS <ENTER>/<RETURN> TO CONTINUE"` before `buildMenuStrings`, so
+    /// the displayed text (and the transcript that mirrors it) carries the
+    /// keyboard prompt the player actually reads.
+    #[test]
+    fn the_single_option_continue_prompt_is_canonicalized() {
+        use gbx_vm::VmString;
+        let request = Request::HorizontalMenu {
+            options: vec![VmString(PRESS_BUTTON_RAW.as_bytes().to_vec())],
+        };
+        let Widget::Hotbar(h) = widget_for_request(&request, 0) else {
+            panic!("a HORIZONTAL MENU parks a Hotbar");
+        };
+        // `buildMenuStrings` then lowercases everything but the one `~` mark.
+        assert_eq!(h.text, "Press <enter>/<return> to continue");
+        assert_eq!(
+            describe_request(&request),
+            "menu: PRESS <ENTER>/<RETURN> TO CONTINUE",
+            "the transcript shows what the player saw, not the raw script bytes"
+        );
+
+        // The rewrite is exact-match and single-option only.
+        let two = Request::HorizontalMenu {
+            options: vec![
+                VmString(PRESS_BUTTON_RAW.as_bytes().to_vec()),
+                VmString(b"QUIT".to_vec()),
+            ],
+        };
+        assert_eq!(
+            describe_request(&two),
+            format!("menu: {PRESS_BUTTON_RAW} QUIT"),
+            "a multi-option menu is untouched (string_count == 1 is part of the condition)"
+        );
+        let near_miss = Request::HorizontalMenu {
+            options: vec![VmString(b"PRESS BUTTON OR RETURN TO CONTINUE".to_vec())],
+        };
+        assert_eq!(
+            describe_request(&near_miss),
+            "menu: PRESS BUTTON OR RETURN TO CONTINUE",
+            "the match includes the trailing period"
         );
     }
 
@@ -2105,6 +2232,99 @@ mod tests {
             matches!(shell, Shell::WorldMenu { .. }),
             "'N' resolved the menu and the script ran out"
         );
+    }
+
+    /// ★ `gbl.menuSelectedWord` is GLOBAL and never reset — the Tilverton
+    /// bar's own scenario. The script menu loops (press 'H', drink, the menu
+    /// re-opens); the original re-opens with HAVE A DRINK still highlighted
+    /// (`displayInput` only clamps the global on entry, `ovr027.cs:142-145`,
+    /// and its letter-scan arm wrote it at `:289`), so Enter orders another
+    /// drink. Ours used to re-open on option 0 — PUNCH BARKEEP — and Enter
+    /// after a re-open started the brawl.
+    #[test]
+    fn a_looping_script_menu_reopens_on_the_last_chosen_option() {
+        use crate::input::InputEvent;
+        let bar = |b: &mut EclBuilder| {
+            b.op(0x2B) // HORIZONTAL MENU
+                .mem(0x5000)
+                .imm_byte(3)
+                .inline_str(b"PUNCH BARKEEP")
+                .inline_str(b"HAVE A DRINK")
+                .inline_str(b"LEAVE");
+        };
+        let block = simple_block(|b| {
+            bar(b);
+            bar(b); // the loop's second pass
+            b.op(0x00);
+        });
+        let mut h = Harness::with_blocks(vec![(1, block)]);
+        let mut shell = Shell::boot(&mut h.machine, &mut h.state);
+
+        let selected_text = |shell: &Shell| -> String {
+            let Some(Widget::Hotbar(hb)) = shell.parked_widget_for_tests() else {
+                panic!("a script menu parks a Hotbar");
+            };
+            let span = hb.selected_span().expect("something is highlighted");
+            hb.text[span.0..span.1].to_string()
+        };
+
+        tick_until(&mut shell, &mut h, 10, |s| s.gate_open());
+        assert_eq!(
+            selected_text(&shell),
+            "Punch barkeep",
+            "a fresh global (0) opens on option 0"
+        );
+
+        // 'H' resolves the menu AND moves the highlight (`ovr027.cs:279-292`).
+        h.input.push_all(&[InputEvent::Char(b'H')]);
+        {
+            let mut ctx = h.ctx();
+            shell.tick(&mut ctx);
+        }
+        assert_eq!(
+            h.state.menu_selected_word, 1,
+            "the resolving hotkey wrote the global"
+        );
+
+        // The menu re-opens: HAVE A DRINK is still highlighted.
+        tick_until(&mut shell, &mut h, 10, |s| s.gate_open());
+        assert_eq!(selected_text(&shell), "Have a drink");
+
+        // ...so Enter orders another drink instead of starting the brawl.
+        h.input.push_all(&[InputEvent::Enter]);
+        {
+            let mut ctx = h.ctx();
+            shell.tick(&mut ctx);
+        }
+        assert_eq!(h.state.menu_selected_word, 1);
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::WorldMenu { .. })
+        });
+        assert_eq!(
+            h.vm_memory.raw_word(0x5000),
+            Some(1),
+            "Enter after the re-open selected HAVE A DRINK (index 1), not PUNCH BARKEEP"
+        );
+    }
+
+    /// `displayInput`'s entry clamp (`ovr027.cs:142-145`) resets to ZERO when
+    /// the stored word is at or past the new menu's group count — it does not
+    /// clamp to the last group.
+    #[test]
+    fn a_stored_word_past_the_new_menus_group_count_clamps_to_zero() {
+        use gbx_vm::VmString;
+        let request = Request::HorizontalMenu {
+            options: vec![VmString(b"YES".to_vec()), VmString(b"NO".to_vec())],
+        };
+        let Widget::Hotbar(h) = widget_for_request(&request, 1) else {
+            panic!("a HORIZONTAL MENU parks a Hotbar");
+        };
+        assert_eq!(h.selected_word(), 1, "an in-range stored word survives");
+
+        let Widget::Hotbar(h) = widget_for_request(&request, 5) else {
+            panic!("a HORIZONTAL MENU parks a Hotbar");
+        };
+        assert_eq!(h.selected_word(), 0, "out of range resets to 0, not to 1");
     }
 
     #[test]
@@ -2348,11 +2568,11 @@ mod tests {
     #[test]
     fn combat_request_maps_to_press_any_key_stub() {
         let options = vec![gbx_vm::VmString::from_bytes(*b"Yes")];
-        let w = widget_for_request(&Request::HorizontalMenu { options });
+        let w = widget_for_request(&Request::HorizontalMenu { options }, 0);
         assert!(matches!(w, Widget::Hotbar(_)));
-        let w = widget_for_request(&Request::Combat);
+        let w = widget_for_request(&Request::Combat, 0);
         assert!(matches!(w, Widget::PressAnyKey(_)));
-        let w = widget_for_request(&Request::Delay);
+        let w = widget_for_request(&Request::Delay, 0);
         assert!(matches!(w, Widget::Delay(_)));
     }
 
