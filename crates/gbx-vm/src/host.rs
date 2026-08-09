@@ -190,6 +190,14 @@ pub trait EngineServices {
     fn wall_roof(&mut self) -> u8;
     /// CALL (0x2D) case `0xAE11`/`0x4019` — `getMap_wall_type`.
     fn wall_type(&mut self) -> u8;
+    /// CALL (0x2D) case `0xAE11`'s consolidated redraw gate
+    /// (`ovr003.cs:1848-1860`): checks the redraw-dirty flags
+    /// (`spriteChanged || displayPlayerSprite || byte_1EE91 ||
+    /// positionChanged || byte_1EE94`), **clears them**, and reports whether
+    /// they were armed — the original's check-and-clear happens right here at
+    /// execution time, while the *draw* it guards travels as
+    /// [`Effect::RedrawView`] so it presents in queue order (D-VM3).
+    fn redraw_view_gate(&mut self) -> bool;
 
     // --- CALL (0x2D) case 0x3201 ---
     /// Selects which sound effect CALL's `0x3201` case plays, from
@@ -247,6 +255,15 @@ pub enum Effect {
     /// payload-less from the VM's perspective, since that animation object
     /// isn't `ScriptMemory`-addressable state.
     AnimationFrame,
+    /// CALL (0x2D) case `0xAE11`'s `RedrawView()` +
+    /// `display_map_position_time()` pair (`ovr003.cs:1848-1860`), emitted
+    /// only when [`EngineServices::redraw_view_gate`] reported the dirty
+    /// flags armed. This is what puts the 3D view on screen *mid-vector* —
+    /// `vm_init_ecl` arms `byte_1EE91` (`ovr008.cs:94`), so the first
+    /// `CALL 0xAE11` a fresh block runs repaints the world before the
+    /// script's own text (the amnesia intro's page 1, Bryan's 2026-08-08
+    /// DOSBox side-by-side).
+    RedrawView,
 }
 
 /// Interactions that suspend the activation awaiting a reply (D-VM3).
@@ -448,6 +465,9 @@ pub enum RecordedCall {
     MovePositionForward,
     WallRoof,
     WallType,
+    RedrawViewGate {
+        armed: bool,
+    },
 
     CallSoundVariant,
 }

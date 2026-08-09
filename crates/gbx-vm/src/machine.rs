@@ -1368,6 +1368,13 @@ impl EclMachine {
             0xAE11 => {
                 host.wall_roof();
                 host.wall_type();
+                // The consolidated redraw gate (`ovr003.cs:1848-1860`): the
+                // flag check-and-clear happens here at execution time, the
+                // guarded draw travels the effect queue (D-VM3) so it lands
+                // before any text the script prints next.
+                if host.redraw_view_gate() {
+                    return Ok(Self::yield_effect(activation, pc, Effect::RedrawView, next));
+                }
             }
             1 => host.setup_duel(true),
             2 => host.setup_duel(false),

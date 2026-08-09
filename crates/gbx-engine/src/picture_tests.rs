@@ -458,3 +458,49 @@ fn a_missing_picture_block_is_reported_and_stops_showing() {
         "the failure must be in the halt log, got {halts:?}"
     );
 }
+
+/// ★ FD-33's menu-wait half (`ovr027.cs:184-198` via `tick_gate`): a
+/// HORIZONTAL MENU parked over a fresh PICTURE keeps re-blitting the running
+/// animation and advances it once per frame's own `delay * 100` ms — the
+/// synthetic block's delay is 2, i.e. 12 ticks at 60 Hz. `CMD_Picture`
+/// itself armed `useOverlay`'s two flags (`spriteChanged` `ovr003.cs:320`,
+/// `byte_1EE8D` `:324`), which is what makes the intro's sword-arm sigils
+/// cycle while "PRESS BUTTON OR RETURN" waits (Bryan's 2026-08-08 DOSBox
+/// side-by-side).
+#[test]
+fn a_parked_menu_animates_the_picture_at_the_frames_own_delay() {
+    let mut engine = engine_running(|b| {
+        b.op(0x0E).imm_byte(1); // PICTURE 1 -> curFrame 1, flags armed
+        b.op(0x2B) // HORIZONTAL MENU parks a Hotbar gate over it
+            .mem(0x5000)
+            .imm_byte(1)
+            .inline_str(b"WAIT");
+        b.op(0x00);
+    });
+    let px = tick_pixels(&mut engine, &[]);
+    assert_eq!(at(&px, 24, 24), PIC_FILL, "frame 1 up at the parked menu");
+    assert_eq!(engine.state.picture.anim_frame, 1);
+
+    let mut advanced_at = None;
+    for waited in 1..=30u32 {
+        tick_pixels(&mut engine, &[]);
+        if engine.state.picture.anim_frame == 2 {
+            advanced_at = Some(waited);
+            break;
+        }
+    }
+    let at_tick = advanced_at.expect("the parked menu must advance the animation");
+    assert!(
+        (11..=13).contains(&at_tick),
+        "the dwell is the frame's own delay*6 = 12 ticks, got {at_tick}"
+    );
+    // The advancing tick drew the *current* frame before moving the cursor
+    // (the original's draw-then-NextFrame order); frame 2's pixels land on
+    // the next re-blit.
+    let px = tick_pixels(&mut engine, &[]);
+    assert_eq!(
+        at(&px, 24, 24),
+        PIC_FRAME2_FILL,
+        "frame 2 is on screen while the menu still waits"
+    );
+}

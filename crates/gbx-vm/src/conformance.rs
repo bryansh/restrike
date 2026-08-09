@@ -1076,6 +1076,46 @@ mod opcodes {
         assert_eq!(run_until_done(&mut m, &mut h), Exit::Ended);
         assert!(h.calls.contains(&RecordedCall::WallRoof));
         assert!(h.calls.contains(&RecordedCall::WallType));
+        // The gate was consulted and, unarmed, drew nothing.
+        assert!(h
+            .calls
+            .contains(&RecordedCall::RedrawViewGate { armed: false }));
+    }
+
+    /// `0xAE11`'s consolidated redraw gate (`ovr003.cs:1848-1860`): with the
+    /// dirty flags armed, the CALL yields `Effect::RedrawView` — the draw
+    /// rides the effect queue so it presents before any text the script
+    /// prints next (the amnesia intro's page-1 view: `vm_init_ecl` arms
+    /// `byte_1EE91`, `ovr008.cs:94`). The check-and-clear is the host's, so
+    /// a second `CALL 0xAE11` with nothing re-arming the flags draws nothing.
+    #[test]
+    fn call_0xae11_armed_gate_yields_one_redraw_view_effect() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x2D).imm_word(0x7FFFu16.wrapping_add(0xAE11)); // armed → redraw
+        b.op(0x2D).imm_word(0x7FFFu16.wrapping_add(0xAE11)); // cleared → silent
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+        h.redraw_flags_armed = true;
+
+        let step = m.step(&mut h);
+        assert!(
+            matches!(step, Ok(VmStep::Effect(Effect::RedrawView))),
+            "the armed gate's draw travels the effect queue: {step:?}"
+        );
+        assert_eq!(run_until_done(&mut m, &mut h), Exit::Ended);
+        let gates: Vec<bool> = h
+            .calls
+            .iter()
+            .filter_map(|c| match c {
+                RecordedCall::RedrawViewGate { armed } => Some(*armed),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(gates, vec![true, false], "check-and-clear is one-shot");
     }
 
     /// CALL (0x2D) cases `1`/`2`: `SetupDuel(bool)`.

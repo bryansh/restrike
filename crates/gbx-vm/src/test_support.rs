@@ -276,6 +276,9 @@ pub struct TestHost {
     strings: HashMap<u16, VmString>,
     pub calls: Vec<RecordedCall>,
     pub rng: FixedRng,
+    /// Arms the next [`EngineServices::redraw_view_gate`] call (one-shot,
+    /// mirroring the real gate's check-and-clear).
+    pub redraw_flags_armed: bool,
 
     pub retarget_selected_player_replies: VecDeque<Result<(), NotFound>>,
     pub free_current_player_replies: VecDeque<PlayerId>,
@@ -562,6 +565,14 @@ impl EngineServices for TestHost {
     fn call_sound_variant(&mut self) -> u8 {
         self.calls.push(RecordedCall::CallSoundVariant);
         Self::next_or_default(&mut self.call_sound_variant_replies)
+    }
+
+    /// Mock gate: armed exactly when the test pre-set `redraw_flags_armed`;
+    /// one-shot (the real gate clears the flags it read).
+    fn redraw_view_gate(&mut self) -> bool {
+        let armed = std::mem::take(&mut self.redraw_flags_armed);
+        self.calls.push(RecordedCall::RedrawViewGate { armed });
+        armed
     }
 }
 

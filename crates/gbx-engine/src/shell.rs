@@ -251,6 +251,11 @@ pub struct VectorRun {
     /// `machine.resume(reply, ...)` instead of `machine.step(...)` exactly
     /// once.
     pending_reply: Option<Reply>,
+    /// The parked gate's animation timer (`displayInput`'s `timeStart`,
+    /// `ovr027.cs:150,196` — a wait-loop stack local, so transient here too:
+    /// a restored save simply restarts the current frame's dwell).
+    #[serde(skip)]
+    anim_wait: u32,
 }
 
 /// One tick's result from [`VectorRun::tick`].
@@ -478,6 +483,7 @@ fn enter_vector(machine: &mut EclMachine, index: usize) -> Option<VectorRun> {
         current_job: None,
         pending: None,
         pending_reply: None,
+        anim_wait: 0,
     })
 }
 
@@ -723,6 +729,14 @@ impl VectorRun {
             Effect::Picture(block) => crate::picture::cmd_picture(ctx, block, head_block_id),
             Effect::ClearPicture => crate::picture::cmd_clear_picture(ctx),
             Effect::AnimationFrame => crate::picture::animation_frame(ctx),
+            // `0xAE11`'s guarded `RedrawView()` (`ovr003.cs:1848-1860`): the
+            // gate already checked-and-cleared the dirty flags at execution
+            // time (`EngineServices::redraw_view_gate`); this is the draw it
+            // authorized, mid-vector — the walk-loop's own unconditional
+            // recompose only ever runs at world-menu entry, which an intro
+            // vector never reaches. Its `display_map_position_time()` pair
+            // is covered by the engine's per-tick status line.
+            Effect::RedrawView => crate::corridor::redraw_view(ctx),
         }
     }
 
@@ -813,8 +827,15 @@ impl VectorRun {
         }
 
         if matches!(outcome, WidgetOutcome::Pending) {
+            // The `displayInput` wait-loop's animation beat (FD-33,
+            // `ovr027.cs:184-198`): script menus are the loop's callers with
+            // `useOverlay` in play — the world/door menus never park here.
+            if matches!(widget, Widget::Hotbar(_)) {
+                crate::picture::menu_wait_animation(ctx, &mut self.anim_wait);
+            }
             return false;
         }
+        self.anim_wait = 0;
 
         // Any resolution: build the real Reply matching the pending
         // Request, then resume pumping. `displayInput` ends with
@@ -896,8 +917,12 @@ fn begin_chain(ctx: &mut FlowCtx, id: BlockId) -> Option<ChainRunner> {
     // `CMD_NewECL` runs `vm_init_ecl` right after the load (`ovr003.cs:491-492`),
     // whose engine-state half includes `HeadBlockId = 0xFF` (`ovr008.cs:109`) —
     // the fresh block starts with no portrait head armed, whatever the last
-    // script (or an imported save) left in the cell.
+    // script (or an imported save) left in the cell — plus `spriteChanged =
+    // false` and `byte_1EE91 = true` (`ovr008.cs:91,94`): the redraw gate is
+    // armed, so the new block's first `CALL 0xAE11` repaints the world.
     ctx.state.head_block_id = 0xFF;
+    ctx.vm_memory.sprite_changed = false;
+    ctx.vm_memory.byte_1ee91 = true;
 
     match enter_vector(ctx.machine, VECTOR_ENTRY_POINT) {
         Some(run) => Some(ChainRunner { run }),
@@ -1954,17 +1979,30 @@ mod tests {
         });
         let mut h = Harness::with_blocks(vec![(1, newecl), (2, exit_only_block())]);
         let mut shell = Shell::boot(&mut h.machine, &mut h.state);
-        // Poke a stale head AFTER boot's own reset so the chain site is the
-        // one under test.
+        // Poke stale values AFTER boot's own reset so the chain site is the
+        // one under test. Assert right after the tick that fires the chain —
+        // the world-menu entry's own recompose clears the redraw flags again
+        // (`corridor::redraw_view` → `clear_redraw_flags`), so the armed
+        // gate is only observable mid-chain.
         h.state.head_block_id = 0x05;
-        tick_until(&mut shell, &mut h, 10, |s| {
-            matches!(s, Shell::WorldMenu { .. })
-        });
+        h.vm_memory.byte_1ee91 = false;
+        {
+            let mut ctx = h.ctx();
+            shell.tick(&mut ctx);
+        }
         assert_eq!(h.state.ecl_block_id, 2, "the chain fired");
         assert_eq!(
             h.state.head_block_id, 0xFF,
             "NEWECL's vm_init_ecl must re-arm the no-portrait sentinel"
         );
+        assert!(
+            h.vm_memory.byte_1ee91,
+            "NEWECL's vm_init_ecl must arm byte_1EE91 (`ovr008.cs:94`)"
+        );
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::WorldMenu { .. })
+        });
+        assert_eq!(h.state.head_block_id, 0xFF, "the sentinel survives");
     }
 
     #[test]

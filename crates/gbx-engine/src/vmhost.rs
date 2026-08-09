@@ -442,7 +442,17 @@ impl VmMemoryState {
 
 impl VmMemoryState {
     pub fn new() -> Self {
-        Self::default()
+        // `vm_init_ecl` arms `byte_1EE91` at every ECL initialization
+        // (`ovr008.cs:94`), and it has always run before the first script op
+        // of a session — so a fresh engine starts with the redraw gate armed,
+        // which is what makes a fresh block's first `CALL 0xAE11` repaint the
+        // world (the amnesia intro's page-1 view, Bryan's 2026-08-08 DOSBox
+        // side-by-side). `begin_chain` re-arms it per NEWECL, the other
+        // `vm_init_ecl` site.
+        VmMemoryState {
+            byte_1ee91: true,
+            ..Self::default()
+        }
     }
 
     /// The raw fallback word store's current value at `addr` (D-VM5's
@@ -1073,6 +1083,23 @@ impl gbx_vm::EngineServices for EngineVmHost<'_> {
     fn wall_type(&mut self) -> u8 {
         self.vm.calls.push(RecordedCall::WallType);
         self.wall_type_value() as u8
+    }
+
+    /// The `0xAE11` consolidated redraw gate (`ovr003.cs:1848-1860`):
+    /// check-and-clear at execution time; the guarded draw is
+    /// `Effect::RedrawView`'s job at present time. Four of the original's
+    /// five flags are modeled — `displayPlayerSprite` (the encounter-sprite
+    /// path, `sub_30580`) is FD-34 territory and has no engine cell yet, so
+    /// it cannot arm the gate here; when FD-34 lands its flag joins this
+    /// check.
+    fn redraw_view_gate(&mut self) -> bool {
+        let armed = self.vm.sprite_changed
+            || self.vm.byte_1ee91
+            || self.vm.position_changed
+            || self.vm.byte_1ee94;
+        self.vm.clear_redraw_flags();
+        self.vm.calls.push(RecordedCall::RedrawViewGate { armed });
+        armed
     }
 
     /// CALL `0x3201`'s variant selector (research §1.3/§1.5): `word_1EE76

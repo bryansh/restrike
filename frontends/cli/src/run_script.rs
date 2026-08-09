@@ -190,6 +190,7 @@ fn print_effect(effect: &Effect) {
         Effect::ClearPicture => println!("-- [clear picture] --"),
         Effect::Sound(id) => println!("-- [sound {id:#04X}] --"),
         Effect::AnimationFrame => println!("-- [animation frame] --"),
+        Effect::RedrawView => println!("-- [redraw view] --"),
     }
 }
 
@@ -626,6 +627,14 @@ impl EngineServices for CliHost {
     fn call_sound_variant(&mut self) -> u8 {
         eprintln!("svc: call_sound_variant()");
         0
+    }
+
+    /// Headless runner: no framebuffer, so the gate reports unarmed — the
+    /// `-- [redraw view] --` marker never fires, matching this host's other
+    /// draw-free stubs.
+    fn redraw_view_gate(&mut self) -> bool {
+        eprintln!("svc: redraw_view_gate()");
+        false
     }
 }
 

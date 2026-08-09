@@ -947,7 +947,17 @@ stays the one place showing the complete open-hypothesis picture.
 
 ### FD-33: `CMD_HorizontalMenu`'s `useOverlay` animation is tracked but not driven
 
-- **Status:** open (flag modelled, consumer not wired)
+- **Status:** RESOLVED 2026-08-08 for the menu wait — Bryan's live-play find
+  (the intro arm's sigils cycle in DOSBox, sat static here).
+  `crate::picture::menu_wait_animation`, driven per tick from `tick_gate`'s
+  parked-Hotbar wait, re-blits the running animation and advances it on the
+  frame's own `delay * 100` ms (6 ticks per unit at 60 Hz); the timer is the
+  gate's transient (`VectorRun::anim_wait`, `#[serde(skip)]` — the original's
+  `timeStart` is a wait-loop stack local). Pinned by
+  `a_parked_menu_animates_the_picture_at_the_frames_own_delay`. The
+  `picture_fade != 0` arm of the same loop stays with FD-32; the camp
+  screen's campfire (`screens::Camp::draw_campfire`, a static frame-0 blit)
+  joins this mechanism whenever it swaps onto the picture layer.
 - **Question:** `CMD_HorizontalMenu` computes
   `useOverlay = spriteChanged && byte_1EE8D` (`ovr003.cs:730-738`) and passes
   it to `displayInput`, whose wait loop then re-blits **and advances** the

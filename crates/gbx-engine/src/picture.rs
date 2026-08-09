@@ -298,6 +298,15 @@ impl PictureCache {
             .as_ref()
             .map_or(0, |(_, a)| a.frames.len().min(255) as u8)
     }
+
+    /// The resident PIC animation's per-frame `delay` for the 1-based frame
+    /// cursor (`DaxArray.CurrentDelay()`) — original units, ×100 ms each.
+    fn pic_frame_delay(&self, frame: u8) -> Option<u32> {
+        let (_, anim) = self.pic.as_ref()?;
+        anim.frames
+            .get(frame.saturating_sub(1) as usize)
+            .map(|f| f.delay)
+    }
 }
 
 fn load_image(data: &GameData, file: &str, block: u8) -> Result<ImageBlock, PictureLoadError> {
@@ -463,6 +472,41 @@ pub fn animation_frame(ctx: &mut FlowCtx) {
     compose(ctx);
     let count = ctx.pictures.pic_frame_count();
     ctx.state.picture.next_frame(count);
+}
+
+/// ★ FD-33 discharged for the menu wait: `displayInput`'s wait-loop
+/// animation (`ovr027.cs:184-198`). While a prompt waits with `useOverlay`
+/// armed — `CMD_HorizontalMenu` computes it as `spriteChanged && byte_1EE8D`
+/// (`ovr003.cs:730-738`), both flags untouched while the VM is suspended, so
+/// a per-tick recompute equals the original's at-open snapshot — and the
+/// running PIC animation loaded (`byte_1D556.curFrame > 0`), each loop
+/// iteration re-blits the current frame and advances it once
+/// `CurrentDelay() * 100` ms have passed (per-frame delay from the DAX
+/// data). At [`crate::input::TICK_HZ`] = 60, 100 ms = 6 ticks — the
+/// GameDelay conversion combat already uses. `waited` is the loop's
+/// transient `timeStart`, owned by the parked gate and never serialized
+/// (the original's is a stack local).
+///
+/// The `picture_fade != 0` arm of the same loop (fade dissolves advance
+/// every iteration regardless of delay) stays with FD-32.
+pub fn menu_wait_animation(ctx: &mut FlowCtx, waited: &mut u32) {
+    let use_overlay = ctx.vm_memory.sprite_changed && ctx.vm_memory.byte_1ee8d;
+    if !use_overlay || ctx.state.picture.anim_frame == 0 {
+        return;
+    }
+    // `DrawMaybeOverlayed(byte_1D556.CurrentPicture(), useOverlay, 3, 3)` —
+    // straight from the animation object, the PIC arm's geometry.
+    ctx.state.picture.shown = Shown::Pic;
+    compose(ctx);
+    let Some(delay) = ctx.pictures.pic_frame_delay(ctx.state.picture.anim_frame) else {
+        return;
+    };
+    *waited = waited.saturating_add(ctx.dt_ticks);
+    if *waited >= delay.saturating_mul(6) {
+        let count = ctx.pictures.pic_frame_count();
+        ctx.state.picture.next_frame(count);
+        *waited = 0;
+    }
 }
 
 /// One decoded picture ready to blit: pixels + geometry, lifted out of the
