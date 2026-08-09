@@ -240,10 +240,16 @@ fn draw_3d_world_background(
     let _ = symbols; // reserved: wall pieces overlay the same region next
 }
 
-/// `seg040.OverlayBounded`: a direct blit of `block`'s first item (SKY
-/// blocks are single-item), landing at cell `(row+1, col+1)` — confirmed by
-/// the horizon backdrop's literal call args `(7, 2)` landing at the design
-/// doc's stated cell row 8.
+/// `seg040.OverlayBounded` (`seg040.cs:29-32`): a direct blit of `block`'s
+/// first item (SKY blocks are single-item), landing at cell `(row+1, col+1)`
+/// — confirmed by the horizon backdrop's literal call args `(7, 2)` landing
+/// at the design doc's stated cell row 8.
+///
+/// It forwards to `draw_combat_picture` (`seg040.cs:115-118`), whose clip is
+/// the 8..176 px box, NOT the whole canvas — [`crate::draw::Clip::OVERLAY`].
+/// (`color_no_draw` is 17, an impossible EGA colour, everywhere outside
+/// `DrawAreaMap`'s own save/restore pair at `ovr031.cs:74-88`, so these
+/// blits are opaque: no transparent index.)
 fn overlay_sky(fb: &mut Framebuffer, block: &ImageBlock, row: i32, col: i32) {
     let Some(item) = block.items.first() else {
         return;
@@ -258,7 +264,7 @@ fn overlay_sky(fb: &mut Framebuffer, block: &ImageBlock, row: i32, col: i32) {
         block.height as usize,
         (row + 1) as usize,
         (col + 1) as usize,
-        crate::draw::Clip::FULL,
+        crate::draw::Clip::OVERLAY,
         None,
         None,
     );
@@ -1253,6 +1259,246 @@ mod tests {
         // Sky fill pixel (well inside the 24-67 band, away from the
         // horizon backdrop's 8x8 footprint at cell row 8).
         assert_eq!(fb.get_pixel(80, 30), 0x0B);
+    }
+
+    // --- FD-31 follow-through: the sun/moon overlay, against REAL art ---
+
+    /// Writes a `.ppm` beside the other demo dumps so the overlay can be
+    /// eyeballed, not just asserted.
+    fn dump(fb: &Framebuffer, name: &str) {
+        let path = std::env::var_os("RESTRIKE_DEMO_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join(format!("restrike-sky-{name}.ppm"));
+        let mut out = format!(
+            "P6\n{} {}\n255\n",
+            crate::framebuffer::WIDTH,
+            crate::framebuffer::HEIGHT
+        )
+        .into_bytes();
+        for y in 0..crate::framebuffer::HEIGHT {
+            for x in 0..crate::framebuffer::WIDTH {
+                out.extend_from_slice(&fb.palette()[fb.get_pixel(x, y) as usize]);
+            }
+        }
+        let _ = std::fs::write(&path, &out);
+        eprintln!("sky overlay frame -> {}", path.display());
+    }
+
+    /// The horizon backdrop's own footprint: `OverlayBounded(sky_dax_252, 1,
+    /// 0, 7, 2)` (`ovr031.cs:136`) is UNCONDITIONAL and runs LAST, so it
+    /// paints over any sun/moon that landed in cells `(8,3)`..`(13,13)` —
+    /// which is exactly how the sun sets: as the hour advances its row walks
+    /// down until the backdrop swallows it whole.
+    const HORIZON: (usize, usize, usize, usize) = (3 * 8, 8 * 8, 3 * 8 + 88, 8 * 8 + 48);
+
+    /// Asserts the two renders differ ONLY inside the 8×8-cell rect
+    /// `(cell_row, cell_col)` + `(w, h)` pixels — and that they differ *at
+    /// all* unless that rect lies entirely under [`HORIZON`]. (Containment,
+    /// not an exact bbox match: art whose edge pixels happen to equal the
+    /// sky fill leaves the box a pixel or two narrow.)
+    fn assert_blit_at(
+        base: &Framebuffer,
+        drawn: &Framebuffer,
+        cell_row: usize,
+        cell_col: usize,
+        size: (usize, usize),
+        what: &str,
+    ) {
+        let (w, h) = size;
+        let (x0, y0) = (cell_col * 8, cell_row * 8);
+        let behind_horizon =
+            x0 >= HORIZON.0 && y0 >= HORIZON.1 && x0 + w <= HORIZON.2 && y0 + h <= HORIZON.3;
+        match diff_box(base, drawn) {
+            None => assert!(
+                behind_horizon,
+                "{what}: nothing drew, and it was not hidden behind the horizon backdrop"
+            ),
+            Some(bb) => {
+                assert!(
+                    !behind_horizon,
+                    "{what}: drew at {bb:?} even though the horizon backdrop covers it"
+                );
+                assert!(
+                    bb.0 >= x0 && bb.1 >= y0 && bb.2 <= x0 + w && bb.3 <= y0 + h,
+                    "{what}: drew at {bb:?}, outside the expected cell \
+                     ({cell_row},{cell_col}) rect ({x0},{y0})..({},{})",
+                    x0 + w,
+                    y0 + h
+                );
+            }
+        }
+    }
+
+    /// The pixel bounding box where two renders differ, as
+    /// `(x0, y0, x1_exclusive, y1_exclusive)`.
+    fn diff_box(a: &Framebuffer, b: &Framebuffer) -> Option<(usize, usize, usize, usize)> {
+        let mut bb: Option<(usize, usize, usize, usize)> = None;
+        for y in 0..crate::framebuffer::HEIGHT {
+            for x in 0..crate::framebuffer::WIDTH {
+                if a.get_pixel(x, y) != b.get_pixel(x, y) {
+                    bb = Some(match bb {
+                        None => (x, y, x + 1, y + 1),
+                        Some((x0, y0, x1, y1)) => {
+                            (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1))
+                        }
+                    });
+                }
+            }
+        }
+        bb
+    }
+
+    /// ★ FD-31 follow-through (local tier, needs `GBX_DATA_DIR`): the
+    /// `Draw3dWorldBackground` sun/moon overlay (`ovr031.cs:99-135`) has been
+    /// dead since M2 — it only runs when `sky_colour == 11`, which nothing
+    /// could produce until FD-31 corrected the Area window's halved address
+    /// mapping. This is its first exercise against the real `SKY.DAX` art.
+    ///
+    /// Every landing cell is checked against `ovr031`'s own arithmetic:
+    /// `OverlayBounded(block, 1, 0, rowY, colX)` blits at cell
+    /// `(rowY + 1, colX + 1)` (`seg040.cs:29-32`), i.e. pixel
+    /// `(8*(colX+1), 8*(rowY+1))`.
+    #[test]
+    fn the_sun_and_moon_overlay_lands_where_ovr031_says() {
+        let Some(dir) = std::env::var_os("GBX_DATA_DIR") else {
+            eprintln!(
+                "SKIPPED: local tier needs GBX_DATA_DIR \
+                 (corridor::the_sun_and_moon_overlay_lands_where_ovr031_says)"
+            );
+            return;
+        };
+        let data = gbx_formats::game_data::load_dir(std::path::Path::new(&dir))
+            .expect("GBX_DATA_DIR must be readable");
+        let assets = crate::boot::boot(&data).expect("boot must succeed against real CotAB data");
+        let sky = assets.sky;
+        // Moon (SKY 250), sun (SKY 251), horizon backdrop (SKY 252).
+        let (moon_w, moon_h) = (sky[0].width_px(), sky[0].height as usize);
+        let (sun_w, sun_h) = (sky[1].width_px(), sky[1].height as usize);
+        eprintln!(
+            "SKY art: moon {moon_w}x{moon_h}, sun {sun_w}x{sun_h}, \
+             horizon {}x{}",
+            sky[2].width_px(),
+            sky[2].height
+        );
+
+        // An all-zero GEO is outdoor everywhere, so the `get_wall_x2(Y, Y)`
+        // guard passes; no wallset is loaded, so nothing but the background
+        // and the overlays ever draws.
+        let geo = open_geo();
+        let symbols = SymbolSets::new();
+        let render = |facing: Facing, hour: u8| {
+            let mut fb = Framebuffer::new();
+            draw_3d_world_background(&mut fb, &symbols, &sky, &geo, PARTY, facing, hour, 0x0B);
+            fb
+        };
+
+        // The neutral reference: facing East at an hour in neither window,
+        // so only the unconditional horizon backdrop draws.
+        let none = render(Facing::East, 8);
+        dump(&none, "none-east-h8");
+        assert!(
+            diff_box(&none, &render(Facing::West, 8)).is_none(),
+            "hour 8 is outside both windows, and West is not the moon's facing"
+        );
+
+        // Moon: facing North, unconditional on hour (`ovr031.cs:130-133` is
+        // a SIBLING `if`, not nested under the hour checks) — row 2, col 2.
+        let moon = render(Facing::North, 8);
+        dump(&moon, "moon-north-h8");
+        assert_blit_at(
+            &none,
+            &moon,
+            3,
+            3,
+            (moon_w, moon_h),
+            "the moon at cell (3,3)",
+        );
+
+        // Sun, morning window (`:105-116`): hours 1-5 facing East land at
+        // row `2 + 5 - hour`, col `12 - 3` = 9 -> cell (8 - hour, 10).
+        for hour in 1..=5u8 {
+            let sun = render(Facing::East, hour);
+            dump(&sun, &format!("sun-east-h{hour}"));
+            let row = 2 + 5 - hour as i32;
+            assert_blit_at(
+                &none,
+                &sun,
+                (row + 1) as usize,
+                10,
+                (sun_w, sun_h),
+                &format!("morning sun at hour {hour}"),
+            );
+        }
+
+        // The morning South window is NARROWER: `hour > 2` (`:113`), and its
+        // column tracks the hour (`col_x + hour - 3`).
+        assert!(
+            diff_box(&none, &render(Facing::South, 2)).is_none(),
+            "facing South at hour 2 draws no sun (the > 2 guard)"
+        );
+        let south_dawn = render(Facing::South, 5);
+        dump(&south_dawn, "sun-south-h5");
+        assert_blit_at(
+            &none,
+            &south_dawn,
+            3,
+            5,
+            (sun_w, sun_h),
+            "hour 5 South: row 2+5-5 = 2, col 2+5-3 = 4 -> cell (3, 5)",
+        );
+
+        // Sun, evening window (`:118-127`): hours 13-18 facing West land at
+        // row `2 + hour - 13`, col 2; the South half needs `hour >= 16`.
+        for hour in 13..=18u8 {
+            let sun = render(Facing::West, hour);
+            dump(&sun, &format!("sun-west-h{hour}"));
+            let row = 2 + hour as i32 - 13;
+            assert_blit_at(
+                &none,
+                &sun,
+                (row + 1) as usize,
+                3,
+                (sun_w, sun_h),
+                &format!("evening sun at hour {hour}"),
+            );
+        }
+        assert!(
+            diff_box(&none, &render(Facing::South, 15)).is_none(),
+            "facing South at hour 15 draws no sun (the >= 16 guard)"
+        );
+        let south_dusk = render(Facing::South, 18);
+        dump(&south_dusk, "sun-south-h18");
+        assert_blit_at(
+            &none,
+            &south_dusk,
+            8,
+            13,
+            (sun_w, sun_h),
+            "hour 18 South: row 2+18-13 = 7, col 2+18-8 = 12 -> cell (8, 13)",
+        );
+
+        // An indoor square kills the whole block (`get_wall_x2(Y, Y) < 0x80`,
+        // `:99` — the confirmed Y-passed-twice bug, replicated).
+        let mut indoor_data = vec![0u8; GEO_BLOCK_SIZE];
+        // x2's high bit at (PARTY.1, PARTY.1) — the cell the bug queries.
+        indoor_data[2 + 2 * 256 + PARTY.1 as usize + 16 * PARTY.1 as usize] = 0x80;
+        let indoor = GeoBlock::parse(&indoor_data).unwrap();
+        let mut fb = Framebuffer::new();
+        draw_3d_world_background(
+            &mut fb,
+            &symbols,
+            &sky,
+            &indoor,
+            PARTY,
+            Facing::North,
+            8,
+            0x0B,
+        );
+        assert!(
+            diff_box(&none, &fb).is_none(),
+            "indoor: no moon, no sun -- only the unconditional backdrop"
+        );
     }
 
     fn dummy_sky() -> [ImageBlock; 3] {

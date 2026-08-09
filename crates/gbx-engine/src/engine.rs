@@ -984,6 +984,51 @@ mod tests {
         assert!(lit, "the outdoor sky band must show SKY_COLOURS[3]");
     }
 
+    /// ★ The indoor sibling: `RedrawView` picks between the two Area cells on
+    /// the standing square's `indoor` flag (`ovr029.cs:23-32`,
+    /// `mapWallRoof > 0x7F`), so an INDOOR square must tint from
+    /// `indoor_sky_colour` (DataOffset `0x1FC` = addr `0x4BFE`) and ignore
+    /// the outdoor cell entirely. `0x4BFE` is also one of the two addresses
+    /// whose writes arm `byte_1EE94`, which is why a sky write forces the
+    /// redraw that shows it.
+    #[test]
+    fn an_indoor_square_tints_from_the_indoor_sky_cell() {
+        use crate::test_support::labeled_block;
+        let block = labeled_block(["entry"; 5], |b| {
+            b.label("entry");
+            b.op(0x09).imm_byte(3).imm_word(0x4BFD); // outdoor cell: a decoy
+            b.op(0x09).imm_byte(4).imm_word(0x4BFE); // indoor cell -> SKY_COLOURS[4] = 0x0D
+            b.op(0x00);
+        });
+        let data = crate::test_support::ecl_game_data(GAME_AREA, vec![(1, block)]);
+        let mut sets = SymbolSets::new();
+        sets.load(4, synthetic_set4());
+
+        // The party stands at (0,0); set that square's `x2` high bit
+        // (`indoor`) — plane 2, index `x + 16*y`, after the 2-byte header.
+        let mut geo_bytes = vec![0u8; gbx_formats::geo::GEO_BLOCK_SIZE];
+        geo_bytes[2 + 2 * 256] = 0x80;
+        let geo = GeoBlock::parse(&geo_bytes).unwrap();
+
+        let mut e = Engine::new_fixture(synthetic_font(), sets, geo, data, 1);
+        for _ in 0..10 {
+            e.tick(&[]);
+        }
+        let fb = e.framebuffer_for_demo();
+        let band: Vec<u8> = (24..176usize)
+            .flat_map(|x| (24..60usize).map(move |y| (x, y)))
+            .map(|(x, y)| fb.get_pixel(x, y))
+            .collect();
+        assert!(
+            band.contains(&0x0D),
+            "an indoor square must show SKY_COLOURS[4] = 0x0D from the indoor cell"
+        );
+        assert!(
+            !band.contains(&0x0B),
+            "the outdoor cell's SKY_COLOURS[3] = 0x0B must not appear indoors"
+        );
+    }
+
     #[test]
     fn tick_returns_a_frame_and_bumps_serial_on_change() {
         let mut e = engine();
