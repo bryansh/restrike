@@ -358,6 +358,9 @@ pub fn sheet_view(ch: &Character) -> SheetView {
 const WHITE: u8 = 0x0F;
 const GREEN: u8 = 0x0A;
 const CYAN: u8 = 0x0B;
+/// `display_hp`'s wounded color (`ovr025.cs:276`) — yellow, drawn whenever
+/// `hit_point_current < hit_point_max`.
+const HP_WOUNDED: u8 = 0x0E;
 const BG: u8 = 0;
 
 /// Paints `view` into `fb` as the full character sheet, at coab's exact
@@ -434,11 +437,21 @@ pub fn render_sheet(fb: &mut Framebuffer, font: &Font, sets: &SymbolSets, view: 
 ///
 /// `selected` is `PartySummary`'s own `player` argument: that one row's name
 /// draws white (`displayString(name, 0, 15, …)`, `ovr025.cs:238-239`), every
-/// other goes through `displayPlayerName` (`ovr025.cs:827-846`). Of that
-/// function's three colors only the live-team-member arm (`0x0B`) is used
-/// here: the other two read the runtime `in_combat`/`combat_team` cells, which
-/// a roster [`Character`] outside a fight does not carry — docketed rather
-/// than guessed.
+/// other goes through `displayPlayerName` (`ovr025.cs:827-846`), whose three
+/// colors are `0x0C` (`in_combat == false`), `0x0E` (`combat_team ==
+/// Enemy`), else `0x0B`. Only the `0x0B` arm can fire for a walk-loop
+/// roster, and the reason is *not* that the cells are runtime-only —
+/// `in_combat` is a persistent character field (`Player.cs:589-591`,
+/// DataOffset `0x196`), set `true` at creation (`ovr018.cs:347`) and
+/// restored from the save (`ovr017.cs:359`), which [`crate::party::Character`]
+/// carries verbatim. It is that a live party member's stored value is
+/// `true` with `combat_team` on our own team, so the third arm is the one
+/// the original itself paints here.
+///
+/// **Wilderness:** `PartySummary` early-returns outright when
+/// `game_state == WildernessMap` (`ovr025.cs:218-221`) — the panel is not a
+/// wilderness fixture. That predicate belongs to the caller (the engine's
+/// per-tick paint), not here.
 pub fn render_party_summary(
     fb: &mut Framebuffer,
     font: &Font,
@@ -460,10 +473,21 @@ pub fn render_party_summary(
         draw_string(fb, font, &r.name, y, 17, BG, name_color);
         // AC left-justified width 3 at col 31 (ovr025.cs:244, "{0,-3}").
         draw_string(fb, font, &format!("{:<3}", r.ac), y, 31, BG, GREEN);
-        // HP right-aligned near col 36 (ovr025.cs:246-256).
+        // HP right-aligned so the LAST digit cell is always 0x26 = 38
+        // (ovr025.cs:246-256: `hpXPos` is 2 for a 1-digit value, 1 for 2
+        // digits, 0 otherwise, and the draw goes to `hpXPos + 0x24`) — so
+        // the string STARTS at 39 - len, not 38 - len.
         let hp = r.hp_current.to_string();
-        let col = 38usize.saturating_sub(hp.len());
-        draw_string(fb, font, &hp, y, col, BG, GREEN);
+        let col = 39usize.saturating_sub(hp.len());
+        // `display_hp` (ovr025.cs:270-289): 0x0E while wounded, 0x0A at full
+        // health. (Its third color, 0x0D, is the `hightlighted` argument's,
+        // which `PartySummary` always passes `false`.)
+        let hp_color = if r.hp_current < r.hp_max {
+            HP_WOUNDED
+        } else {
+            GREEN
+        };
+        draw_string(fb, font, &hp, y, col, BG, hp_color);
     }
 }
 
@@ -635,6 +659,63 @@ mod tests {
         assert_eq!(command_bar(&ch), "Trade Drop Exit");
         ch.items.push(vec![0u8; 4]);
         assert_eq!(command_bar(&ch), "Items Trade Drop Exit");
+    }
+
+    /// Every glyph fully lit, so "which cells did this string land in" is
+    /// readable straight off the framebuffer.
+    fn solid_font() -> Font {
+        gbx_formats::font::decode(&vec![
+            0xFFu8;
+            gbx_formats::font::GLYPH_COUNT
+                * gbx_formats::font::GLYPH_BYTES
+        ])
+    }
+
+    /// The columns a roster row's HP string occupies, and the colour it drew.
+    fn hp_cells(rows: &[SheetView]) -> (Vec<usize>, u8) {
+        let mut fb = Framebuffer::new();
+        render_party_summary(&mut fb, &solid_font(), rows, Some(0));
+        let y = 4 * 8; // row 4 = the first roster row
+        let mut cols = Vec::new();
+        let mut colour = 0;
+        // From 35: the AC field's own `{:<3}` occupies 31..=33.
+        for col in 35..40usize {
+            let px = fb.get_pixel(col * 8, y);
+            if px != BG {
+                cols.push(col);
+                colour = px;
+            }
+        }
+        (cols, colour)
+    }
+
+    /// ★ `PartySummary`'s HP column is RIGHT-aligned on cell `0x26` = 38
+    /// (`ovr025.cs:246-256`: `hpXPos` 2/1/0 by digit count, drawn at
+    /// `hpXPos + 0x24`), so the string starts at `39 - len`. Ours started at
+    /// `38 - len` — a whole cell left of the original, every row.
+    #[test]
+    fn roster_hp_is_right_aligned_on_column_38() {
+        let mut ch = mathew();
+        for (hp, expected) in [(7u8, vec![38]), (49, vec![37, 38]), (100, vec![36, 37, 38])] {
+            ch.hit_point_current = hp;
+            ch.hit_point_max = hp;
+            let (cols, _) = hp_cells(&[sheet_view(&ch)]);
+            assert_eq!(cols, expected, "hp {hp} must end on column 38");
+        }
+    }
+
+    /// ★ `display_hp` (`ovr025.cs:270-289`) draws `0x0E` while
+    /// `hit_point_current < hit_point_max` and `0x0A` at full health. Ours
+    /// was always green, so a wounded party read as healthy.
+    #[test]
+    fn roster_hp_is_yellow_while_wounded_and_green_at_full() {
+        let mut ch = mathew();
+        ch.hit_point_max = 49;
+        ch.hit_point_current = 49;
+        assert_eq!(hp_cells(&[sheet_view(&ch)]).1, GREEN);
+
+        ch.hit_point_current = 12;
+        assert_eq!(hp_cells(&[sheet_view(&ch)]).1, HP_WOUNDED);
     }
 
     #[test]

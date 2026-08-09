@@ -686,7 +686,14 @@ impl Engine {
             // the whole screen. An empty roster draws nothing at all: a
             // bare fixture boot has no party, and the original cannot reach
             // the walk loop partyless.
-            if !self.party.members.is_empty() {
+            //
+            // ★ NOT in the wilderness: `PartySummary` opens with
+            // `if (gbl.game_state == GameState.WildernessMap) return;`
+            // (`ovr025.cs:218-221`) — the overland screen has no roster
+            // band. The status line's own predicate is separate
+            // (`Shell::draws_engine_status_line`) and unchanged.
+            let wilderness = self.state.game_state == crate::shell::GameState::WildernessMap;
+            if !wilderness && !self.party.members.is_empty() {
                 let rows: Vec<_> = self
                     .party
                     .members
@@ -891,6 +898,61 @@ mod tests {
         assert!(
             !roster_band_lit(&e),
             "a full-screen Screen owns the whole framebuffer — no panel over it"
+        );
+    }
+
+    fn roster_band_pixels(e: &Engine) -> Vec<u8> {
+        let fb = e.framebuffer_for_demo();
+        (2 * 8..10 * 8)
+            .flat_map(|y| (17 * 8..39 * 8).map(move |x| (x, y)))
+            .map(|(x, y)| fb.get_pixel(x, y))
+            .collect()
+    }
+
+    /// ★ `PartySummary` early-returns in the wilderness
+    /// (`ovr025.cs:218-221`: `if (gbl.game_state == GameState.WildernessMap)
+    /// return;`) — the overland screen carries no roster band, and the
+    /// original's own wilderness recompose (`draw_bigpic`) is what covers
+    /// the cells, so "returns before drawing" is the whole behaviour: the
+    /// band simply stops being repainted. Only the roster's predicate
+    /// moves; the status line has its own
+    /// (`Shell::draws_engine_status_line`) and keeps drawing.
+    #[test]
+    fn the_roster_panel_stops_repainting_in_the_wilderness() {
+        let mut e = engine();
+        let mut member = crate::test_support::blank_character();
+        member.name = "MATHEW".into();
+        member.hit_point_current = 49;
+        member.hit_point_max = 49;
+        e.party.members.push(member);
+        for _ in 0..5 {
+            e.tick(&[]);
+        }
+        assert!(roster_band_lit(&e), "the dungeon walk loop paints it");
+        let painted = roster_band_pixels(&e);
+
+        // In the wilderness, a roster change must not reach the panel.
+        e.state.game_state = crate::shell::GameState::WildernessMap;
+        e.party.members[0].name = "SOMEONEELSE".into();
+        e.party.members[0].hit_point_current = 1;
+        e.tick(&[]);
+        assert_eq!(
+            roster_band_pixels(&e),
+            painted,
+            "PartySummary returns before drawing anything in the wilderness"
+        );
+        assert!(
+            status_band_lit(&e),
+            "the status line's own predicate is unchanged"
+        );
+
+        // Indoors again, the same change lands.
+        e.state.game_state = crate::shell::GameState::DungeonMap;
+        e.tick(&[]);
+        assert_ne!(
+            roster_band_pixels(&e),
+            painted,
+            "and the panel comes back indoors"
         );
     }
 
