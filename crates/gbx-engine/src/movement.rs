@@ -429,11 +429,11 @@ impl GameClock {
         )
     }
 
-    /// The 7 raw ScriptMemory clock words at `0x4BC6..=0x4BD2` (this
-    /// session's research, `Classes/Area1.cs:41-61`): two unlabeled
-    /// bracketing words (kept `0`, matching the original's own "never
-    /// separately assigned" fields), minutes-ones, minutes-tens, hour, day,
-    /// year.
+    /// The 7 ScriptMemory clock words at the CONSECUTIVE addresses
+    /// `0x4BC6..=0x4BCC` (FD-31's halved Area mapping;
+    /// `Classes/Area1.cs:41-61`): two unlabeled bracketing words (kept `0`,
+    /// matching the original's own "never separately assigned" fields),
+    /// minutes-ones, minutes-tens, hour, day, year.
     pub fn raw_clock_words(&self) -> [u16; 7] {
         let total_minutes = self.total_units * Self::MINUTES_PER_UNIT;
         let minutes = total_minutes % 60;

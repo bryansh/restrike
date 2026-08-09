@@ -195,21 +195,20 @@ const AREA_WINDOW: std::ops::RangeInclusive<u16> = 0x4B00..=0x4EFF;
 const TABLE_WINDOW: std::ops::RangeInclusive<u16> = 0x7A00..=0x7BFF;
 const PARTY_WINDOW: std::ops::RangeInclusive<u16> = 0x7C00..=0x7FFF;
 
-/// The Area window's ECL-clock word cluster (this session's research §1.5):
-/// 7 consecutive words at `0x4BC6..=0x4BD2`, two unlabeled bracketing words
-/// around minutes-ones/minutes-tens/hour/day/year.
+/// The Area window's ECL-clock word cluster (FD-31 resolved): 7 consecutive
+/// addresses `0x4BC6..=0x4BCC` under the halved mapping — `field_18C`,
+/// minutes-ones, minutes-tens, hour, day, year, `field_198` (`Area1.cs`
+/// DataOffsets `0x18C..=0x198`, the `field_6A00_Get`/`Set` switches being
+/// the authority over the file's own duplicate-attribute typo on
+/// `field_18C`).
 const CLOCK_BASE: u16 = 0x4BC6;
 const IN_DUNGEON_ADDR: u16 = 0x4BE6;
 /// Both addresses set the same `byte_1EE94` redraw-dirty flag on write
-/// (research §1.5) — recorded, never meaningfully consumed this session.
-///
-/// (Scene-pictures slice finding, not acted on here: under the Area window's
-/// confirmed `DataOffset = (addr - 0x4B00) * 2` mapping — see
-/// `crate::picture::PICTURE_FADE_ADDR`'s derivation — these two are
+/// (research §1.5) — and under the confirmed halved mapping (see
+/// `crate::picture::PICTURE_FADE_ADDR`'s derivation) they ARE
 /// `Area1.outdoor_sky_colour` / `indoor_sky_colour` (`DataOffset`
-/// `0x1FA`/`0x1FC`), which is exactly why writing them dirties the view.
-/// `crate::corridor`'s `OUTDOOR_SKY_COLOUR_ADDR`/`INDOOR_SKY_COLOUR_ADDR`
-/// currently name `0x4CFA`/`0x4CFC` instead; docketed.)
+/// `0x1FA`/`0x1FC`), which is exactly why writing a sky colour dirties the
+/// view. `crate::corridor` reads them at these same addresses (FD-31).
 const FORCE_REDRAW_ADDRS: [u16; 2] = [0x4BFD, 0x4BFE];
 
 /// `area2_ptr.HeadBlockId` (`Classes/Area2.cs:62`, `DataOffset 0x5C2`) —
@@ -674,8 +673,16 @@ impl EngineVmHost<'_> {
     /// The Area window (`0x4B00..=0x4EFF`): the ECL clock cluster + the two
     /// named flags, everything else raw+logged (research §1.5).
     fn read_area(&mut self, addr: u16, origin: Origin) -> u16 {
-        if (CLOCK_BASE..=CLOCK_BASE + 12).contains(&addr) && (addr - CLOCK_BASE).is_multiple_of(2) {
-            let idx = ((addr - CLOCK_BASE) / 2) as usize;
+        // FD-31 RESOLVED: under the Area window's confirmed
+        // `addr = 0x4B00 + DataOffset/2` mapping, the seven clock words
+        // (`Area1.cs` DataOffsets `0x18C..=0x198`, stride 2) live at seven
+        // CONSECUTIVE addresses `0x4BC6..=0x4BCC`. The stride-2 addressing
+        // this replaced answered only even addresses — and the real
+        // Tilverton entry script reads `0x4BC9`, the HOUR, which fell to the
+        // raw store (0 on a fresh boot, the save's stale byte after an
+        // import): time-of-day gates never saw the live clock.
+        if (CLOCK_BASE..=CLOCK_BASE + 6).contains(&addr) {
+            let idx = (addr - CLOCK_BASE) as usize;
             return self.state.clock.raw_clock_words()[idx];
         }
         if addr == IN_DUNGEON_ADDR {
@@ -1261,8 +1268,25 @@ mod tests {
         let mut f = Fixture::new();
         let mut host = f.host();
         host.step_game_time(1, 100); // 100 units, normal rate
-        let hour_addr = CLOCK_BASE + 2 * 3;
-        assert!(host.read(hour_addr, origin()) > 0 || host.read(CLOCK_BASE + 2, origin()) > 0);
+                                     // FD-31: the seven clock words are CONSECUTIVE (`0x4BC6..=0x4BCC`
+                                     // under the halved Area mapping) — hour is `CLOCK_BASE + 3`.
+        let hour_addr = CLOCK_BASE + 3;
+        assert!(host.read(hour_addr, origin()) > 0 || host.read(CLOCK_BASE + 1, origin()) > 0);
+    }
+
+    /// ★ FD-31's live consequence: the real Tilverton entry script reads
+    /// `0x4BC9` — the HOUR under the halved mapping. The stride-2 dispatch
+    /// this replaced only answered even addresses, so this exact read fell
+    /// to the raw store and time-of-day gates never saw the live clock.
+    #[test]
+    fn the_hour_cell_the_tilverton_script_reads_is_the_live_clock() {
+        let mut f = Fixture::new();
+        let mut host = f.host();
+        // 100 units × 10 min = 1000 minutes -> 16:40.
+        host.step_game_time(1, 100);
+        assert_eq!(host.read(0x4BC9, origin()), 16, "hour");
+        assert_eq!(host.read(0x4BC7, origin()), 0, "minutes ones (40 % 10)");
+        assert_eq!(host.read(0x4BC8, origin()), 4, "minutes tens");
     }
 
     #[test]

@@ -72,18 +72,18 @@ const SKY_COLOURS: [u8; 16] = [
 ];
 
 /// `area_ptr.outdoor_sky_colour`/`indoor_sky_colour` (`Area1.cs` DataOffset
-/// `0x1FA`/`0x1FC`, this session's research): hypothesized as Area-window
-/// ScriptMemory cells at these offsets from the window's `0x4B00` base —
-/// this mapping (that `Area1`'s `DataOffset` is literally relative to
-/// `0x4B00`) was not independently re-verified against `vmhost.rs`'s own
-/// address table this session, so it's a documented hypothesis, not a
-/// confirmed cell; unwritten (the common case — nothing in this session's
-/// scope models loading the Area data block these would normally come
-/// from), both default to raw-store `0` → `SKY_COLOURS[0]` = black, a
-/// neutral placeholder. Docketed alongside `vm-scriptmemory.md`'s other
-/// open `ScriptMemory` items.
-const OUTDOOR_SKY_COLOUR_ADDR: u16 = 0x4B00 + 0x1FA;
-const INDOOR_SKY_COLOUR_ADDR: u16 = 0x4B00 + 0x1FC;
+/// `0x1FA`/`0x1FC`) — FD-31 RESOLVED: the Area window's confirmed mapping is
+/// `addr = 0x4B00 + DataOffset/2` (`vm_SetMemoryValue` passes
+/// `0x6A00 + location*2` to the setter and the constant vanishes in the
+/// `ushort` index, `ovr008.cs:715`; full three-way derivation in
+/// `crate::picture::PICTURE_FADE_ADDR`'s doc), so the sky cells are
+/// `0x4BFD`/`0x4BFE` — exactly the pair whose writes dirty `byte_1EE94`
+/// (`vmhost.rs`'s `FORCE_REDRAW_ADDRS`), which is *why* writing a sky
+/// colour forces a redraw. The un-halved `0x4CFA`/`0x4CFC` this replaced
+/// always read raw-store `0`: every sky since M2 was `SKY_COLOURS[0]` black
+/// regardless of what the imported save or a script put in the real cells.
+const OUTDOOR_SKY_COLOUR_ADDR: u16 = 0x4B00 + 0x1FA / 2;
+const INDOOR_SKY_COLOUR_ADDR: u16 = 0x4B00 + 0x1FC / 2;
 
 /// `MapDirectionXDelta`/`MapDirectionYDelta`, restricted to the cardinal
 /// (even-code) entries this engine's [`Facing`] models — `dir_left`/

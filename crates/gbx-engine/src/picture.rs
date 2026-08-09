@@ -101,10 +101,8 @@ const BIGPIC_COL: usize = 1;
 /// immediately before a `PICTURE` (`0x95E5`), which is exactly a
 /// "fade the next picture" script.
 ///
-/// (`crate::corridor`'s `OUTDOOR_SKY_COLOUR_ADDR`/`INDOOR_SKY_COLOUR_ADDR`
-/// predate this derivation and use the un-halved offsets; correcting them
-/// changes the 3D view's sky colour and is deliberately **not** part of this
-/// slice — docketed in `docs/fidelity-docket.md`.)
+/// (FD-31 resolved: `crate::corridor`'s sky cells and `vmhost.rs`'s clock
+/// cluster now use this same halved mapping.)
 const PICTURE_FADE_ADDR: u16 = 0x4B00 + 0x1FF;
 
 /// What the viewport's picture layer currently shows — one of `CMD_Picture`'s

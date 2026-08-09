@@ -894,6 +894,34 @@ mod tests {
         );
     }
 
+    /// ★ FD-31 resolved: the sky colour reads the REAL Area cells
+    /// (`outdoor_sky_colour`/`indoor_sky_colour`, DataOffset `0x1FA`/`0x1FC`
+    /// = addrs `0x4BFD`/`0x4BFE` under the halved mapping). A script `SAVE`
+    /// into the outdoor cell must tint the 3D view's sky band — the
+    /// un-halved addresses this replaces always read 0, so every sky since
+    /// M2 was black no matter what the save or a script put there.
+    #[test]
+    fn a_script_written_sky_colour_tints_the_view() {
+        use crate::test_support::labeled_block;
+        let block = labeled_block(["entry"; 5], |b| {
+            b.label("entry");
+            b.op(0x09).imm_byte(3).imm_word(0x4BFD); // SAVE 3 -> outdoor sky
+            b.op(0x00);
+        });
+        let data = crate::test_support::ecl_game_data(GAME_AREA, vec![(1, block)]);
+        let mut sets = SymbolSets::new();
+        sets.load(4, synthetic_set4());
+        let mut e = Engine::new_fixture(synthetic_font(), sets, open_geo(), data, 1);
+        for _ in 0..10 {
+            e.tick(&[]);
+        }
+        // SKY_COLOURS[3] = 0x0B; the sky band sits above the horizon in the
+        // viewport interior. An all-zero GEO is outdoor everywhere.
+        let fb = e.framebuffer_for_demo();
+        let lit = (24..176usize).any(|x| (24..60usize).any(|y| fb.get_pixel(x, y) == 0x0B));
+        assert!(lit, "the outdoor sky band must show SKY_COLOURS[3]");
+    }
+
     #[test]
     fn tick_returns_a_frame_and_bumps_serial_on_change() {
         let mut e = engine();

@@ -885,9 +885,25 @@ stays the one place showing the complete open-hypothesis picture.
 
 ### FD-31: The Area/Area2 window's `DataOffset` is **twice** the ECL address offset — `corridor.rs`'s sky-colour cells are off by that factor
 
-- **Status:** narrowed (derivation confirmed three ways; the correction is
-  deliberately *not* applied — it moves the 3D view's sky colour and every
-  golden that depends on it, which is not the scene-pictures slice's business)
+- **Status:** RESOLVED 2026-08-09 — the sky cells corrected to
+  `0x4BFD`/`0x4BFE` (a script-`SAVE`d colour now tints the view, pixel-pinned)
+  and the clock cluster re-addressed as seven CONSECUTIVE cells
+  `0x4BC6..=0x4BCC` (the real Tilverton entry script's `0x4BC9` read — the
+  HOUR — now answers from the live clock; regression-pinned at 16:40).
+  Eyeballed on the committed circuit: Tilverton streets show the scripted
+  cyan sky where every frame since M2 was black. Independent Opus review
+  (2026-08-09) triple-confirmed the derivation and corrected the record:
+  the shipped value is **11** (`SAVE 11 → 0x4BFD` in the scripts; slots B-I
+  carry 11/9; the intro's third instruction is `SAVE 9 → 0x4BFE`), and
+  `sky_colour == 11` is also `Draw3dWorldBackground`'s sun/moon-overlay
+  enable (`ovr031.cs:99-100`) — an overlay path dead since M2, now live and
+  owed its own eyeball across facings/hours. Still open, split to the
+  remaining notes below: script WRITES to clock cells still land in the raw
+  store (the read/`STEP GAME TIME` split the old code also had — no shipped
+  script is known to set the clock); `read_area` shadows `0x4BC6`/`0x4BCC`
+  (`field_18C`/`field_198`, hardcoded 0) over imported raw words that
+  `ECL4` blk32 / `ECL6` blk66 do reference; `game_speed` (`0x4BFC`) awaits
+  the Alter ▸ Speed screen.
 - **Question:** which ECL address does a given `Classes/Area1.cs` /
   `Classes/Area2.cs` `[DataOffset(N)]` field live at?
 - **Evidence (this slice's redraw-gate research):** `vm_SetMemoryValue`

@@ -379,7 +379,8 @@ fn widget_for_request(request: &Request) -> Widget {
             // meant PUNCH BARKEEP: an accidental brawl (Bryan, 2026-08-08).
             //
             // (`unk_31673` includes digits, whose `+= 0x20` would garble —
-            // no shipped menu leads with one; letters-only here.)
+            // a census of all 156 shipped HORIZONTAL MENU sites finds no
+            // digit at ANY option position; letters-only here.)
             let mut text = String::new();
             let mut keys: Vec<u8> = Vec::new();
             for (i, opt) in options.iter().enumerate() {
@@ -495,7 +496,7 @@ fn resolve_horizontal_menu_reply(options: &[gbx_vm::VmString], key: u8) -> Reply
         .iter()
         .position(|opt| opt.0.first().map(|b| b.to_ascii_uppercase()) == Some(upper))
         // Not-found is `sub_317AA`'s `-1`, which `CMD_HorizontalMenu` writes
-        // as the `(byte)-1 = 0xFF` sentinel (`ovr003.cs:753-755`) — ON GOTO's
+        // as the `(byte)-1 = 0xFF` sentinel (`ovr003.cs:748-750`) — ON GOTO's
         // bound check then falls through. Unreachable through the widget's
         // own `valid_keys`; kept as the faithful sentinel rather than a
         // silent option 0 (which made any stray key start the bar brawl).
