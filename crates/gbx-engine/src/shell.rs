@@ -868,6 +868,16 @@ impl VectorRun {
             }
             return false;
         }
+        if let WidgetOutcome::PartyScroll(code) = outcome {
+            // `sub_317AA`'s special-key arm (`ovr008.cs:1181-1187`): an
+            // extended key scrolls the team list and RE-PROMPTS — it never
+            // resolves the menu. Before this arm existed the outcome fell
+            // into the resolution match's `_ =>` fallback and replied
+            // option 0, which at the bar menu was PUNCH BARKEEP — Bryan's
+            // left-arrow brawl (2026-08-08).
+            crate::screens::scroll_team_list(ctx, code);
+            return false;
+        }
         self.anim_wait = 0;
 
         // Any resolution: build the real Reply matching the pending
@@ -891,7 +901,12 @@ impl VectorRun {
             (Request::VerticalMenu { .. }, _) => Reply::Selection(list_index as u8),
             (Request::Delay, _) => Reply::Delay,
             (Request::Combat, _) => Reply::Combat,
-            _ => Reply::Selection(0), // unreachable in practice; a safe fallback, not a panic
+            // Unreachable: Hotbar yields only Hotbar(key)/PartyScroll (both
+            // handled), the list arm is exhaustive above. Kept as a quiet
+            // fallback, not a panic — but note option 0 is NOT "safe" at a
+            // script menu (the bar's option 0 is the brawl), which is why
+            // PartyScroll is consumed before this match.
+            _ => Reply::Selection(0),
         };
         self.pending_reply = Some(reply);
         self.phase = VmPhase::Pump;
@@ -2027,6 +2042,68 @@ mod tests {
         assert_eq!(
             resolve_horizontal_menu_reply(&options, b'X'),
             Reply::Selection(0xFF)
+        );
+    }
+
+    /// ★ An extended key at a parked script menu scrolls the team list and
+    /// re-prompts (`sub_317AA`'s special-key arm, `ovr008.cs:1181-1187`) —
+    /// it must NEVER resolve the menu. The left arrow used to fall into the
+    /// resolution match's fallback and reply option 0, which at the bar was
+    /// PUNCH BARKEEP: Bryan's left-arrow brawl (2026-08-08).
+    #[test]
+    fn an_arrow_key_at_a_script_menu_reprompts_instead_of_resolving() {
+        use crate::input::{ExtKey, InputEvent};
+        let menu = simple_block(|b| {
+            b.op(0x2B) // HORIZONTAL MENU
+                .mem(0x5000)
+                .imm_byte(2)
+                .inline_str(b"FIGHT")
+                .inline_str(b"NO");
+            b.op(0x00);
+        });
+        let mut h = Harness::with_blocks(vec![(1, menu)]);
+        let mut shell = Shell::boot(&mut h.machine, &mut h.state);
+        for _ in 0..5 {
+            let mut ctx = h.ctx();
+            shell.tick(&mut ctx);
+        }
+        assert!(shell.gate_open(), "the menu parked");
+
+        // Every arrow/nav key: still parked afterwards.
+        for ext in [
+            ExtKey::Left,
+            ExtKey::Right,
+            ExtKey::Up,
+            ExtKey::Down,
+            ExtKey::Home,
+            ExtKey::End,
+        ] {
+            {
+                let ctx = h.ctx();
+                ctx.input.push_all(&[InputEvent::Ext(ext)]);
+            }
+            {
+                let mut ctx = h.ctx();
+                shell.tick(&mut ctx);
+            }
+            assert!(
+                shell.gate_open(),
+                "{ext:?} must scroll-and-reprompt, not resolve the menu"
+            );
+        }
+
+        // The real hotkey still resolves it.
+        {
+            let ctx = h.ctx();
+            ctx.input.push_all(&[InputEvent::Char(b'N')]);
+        }
+        for _ in 0..5 {
+            let mut ctx = h.ctx();
+            shell.tick(&mut ctx);
+        }
+        assert!(
+            matches!(shell, Shell::WorldMenu { .. }),
+            "'N' resolved the menu and the script ran out"
         );
     }
 

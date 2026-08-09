@@ -418,7 +418,7 @@ fn camp_menu_bar() -> Widget {
 /// arrow keys included, which is FD-18's confirmed behavior for every Gold Box
 /// list. (`crate::screens::PartyView`/`Training` still read `'H'`/`'P'`
 /// instead; that pre-M6 divergence is docketed, not widened here.)
-fn scroll_team_list(ctx: &mut FlowCtx, code: u8) {
+pub(crate) fn scroll_team_list(ctx: &mut FlowCtx, code: u8) {
     let count = ctx.roster.members.len();
     if count == 0 {
         return;
