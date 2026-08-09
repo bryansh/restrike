@@ -174,9 +174,19 @@ fn boot_with_party(
     let set = gbx_formats::save_orig::load_from_lookup(master, letter, |n| saves.raw_file(n))
         .unwrap_or_else(|e| panic!("restrike-desktop: slot {letter} did not parse: {e:?}"));
     let party_size = set.chars.len();
-    let engine = gbx_engine::import::import_original(&set, data, seed)
+    let mut engine = gbx_engine::import::import_original(&set, data, seed)
         .unwrap_or_else(|e| panic!("restrike-desktop: slot {letter} did not import: {e:?}"));
     eprintln!("restrike-desktop: imported save slot {letter} — party of {party_size}");
+    // `RESTRIKE_GAME_SPEED=1..9`: the original's own speed setting (camp
+    // Alter ▸ Speed territory; 1 = fastest text, default 4) as an env knob
+    // until that screen lands.
+    if let Some(speed) = std::env::var("RESTRIKE_GAME_SPEED")
+        .ok()
+        .and_then(|s| s.parse::<u8>().ok())
+    {
+        eprintln!("restrike-desktop: game speed {}", speed.clamp(1, 9));
+        engine.set_game_speed(speed);
+    }
     engine
 }
 

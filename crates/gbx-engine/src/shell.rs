@@ -365,17 +365,45 @@ fn vertical_menu_widget(options: &[gbx_vm::VmString], start_row: usize) -> Widge
 fn widget_for_request(request: &Request) -> Widget {
     match request {
         Request::HorizontalMenu { options } => {
-            let text = options
-                .iter()
-                .map(|s| String::from_utf8_lossy(&s.0).into_owned())
-                .collect::<Vec<_>>()
-                .join(" ");
+            // ★ `buildMenuStrings` (`ovr008.cs:1131-1165`): `CMD_HorizontalMenu`
+            // marks each option's first character with `~`
+            // (`ovr003.cs:741-745`), and this transform lowercases every
+            // letter EXCEPT those marks (which it uppercases and collects as
+            // the menu's hotkeys). One capital per option means
+            // `BuildInputKeys`' capital-delimited grouping lands on WHOLE
+            // options ("Punch barkeep" inverts as a unit, not per letter),
+            // and the `sub_6C1E9` painter's `[0-9A-Z]`-in-highlight rule
+            // lights exactly the hotkeys. The raw all-caps join this
+            // replaced degenerated to per-letter groups — Enter resolved to
+            // "P" and any stray key fell back to option 0, which at the bar
+            // meant PUNCH BARKEEP: an accidental brawl (Bryan, 2026-08-08).
+            //
+            // (`unk_31673` includes digits, whose `+= 0x20` would garble —
+            // no shipped menu leads with one; letters-only here.)
+            let mut text = String::new();
+            let mut keys: Vec<u8> = Vec::new();
+            for (i, opt) in options.iter().enumerate() {
+                if i > 0 {
+                    text.push(' ');
+                }
+                let opt = String::from_utf8_lossy(&opt.0).into_owned();
+                let mut chars = opt.chars();
+                if let Some(first) = chars.next() {
+                    let hot = first.to_ascii_uppercase();
+                    keys.push(hot as u8);
+                    text.push(hot);
+                    text.extend(chars.map(|c| c.to_ascii_lowercase()));
+                }
+            }
             let mut hotbar = Hotbar::new(text);
             hotbar.accept_ext = true;
             hotbar.ext_scrolls_party = true;
-            // `sub_317AA`'s validkeys (`ovr008.cs:1167`, this session's
-            // research): '0'-'9','A'-'Z'.
-            hotbar.valid_keys = Some((b'0'..=b'9').chain(b'A'..=b'Z').collect());
+            // Only the menu's own hotkeys resolve it. `displayInput`'s
+            // letter scan runs over the transformed string, where the sole
+            // capitals ARE the hotkeys — any other letter never matches and
+            // the loop keeps waiting (`ovr027.cs:267-292`), so `sub_317AA`'s
+            // `-1` not-found arm is unreachable in practice.
+            hotbar.valid_keys = Some(keys);
             Widget::Hotbar(hotbar)
         }
         // The real site is `tick_present`, which knows where the prompt's text
@@ -466,7 +494,12 @@ fn resolve_horizontal_menu_reply(options: &[gbx_vm::VmString], key: u8) -> Reply
     let idx = options
         .iter()
         .position(|opt| opt.0.first().map(|b| b.to_ascii_uppercase()) == Some(upper))
-        .unwrap_or(0);
+        // Not-found is `sub_317AA`'s `-1`, which `CMD_HorizontalMenu` writes
+        // as the `(byte)-1 = 0xFF` sentinel (`ovr003.cs:753-755`) — ON GOTO's
+        // bound check then falls through. Unreachable through the widget's
+        // own `valid_keys`; kept as the faithful sentinel rather than a
+        // silent option 0 (which made any stray key start the bar brawl).
+        .unwrap_or(0xFF);
     Reply::Selection(idx as u8)
 }
 
@@ -1940,6 +1973,61 @@ mod tests {
             }
         }
         assert!(done(shell), "did not converge within {max_ticks} ticks");
+    }
+
+    /// ★ `buildMenuStrings`' case transform (`ovr008.cs:1131-1165`) applied
+    /// at `widget_for_request`: one capital per option, so the highlight
+    /// groups are whole options, only real hotkeys resolve, Enter commits
+    /// the highlighted option, and a stray key is ignored — pressing 'X' at
+    /// the bar no longer starts the brawl (Bryan, 2026-08-08).
+    #[test]
+    fn a_script_menu_groups_whole_options_and_ignores_stray_keys() {
+        use crate::input::InputEvent;
+        use gbx_vm::VmString;
+        let options = vec![
+            VmString(b"PUNCH BARKEEP".to_vec()),
+            VmString(b"HAVE A DRINK".to_vec()),
+            VmString(b"LEAVE".to_vec()),
+        ];
+        let Widget::Hotbar(mut h) = widget_for_request(&Request::HorizontalMenu {
+            options: options.clone(),
+        }) else {
+            panic!("a HORIZONTAL MENU parks a Hotbar");
+        };
+        assert_eq!(h.text, "Punch barkeep Have a drink Leave");
+        assert_eq!(
+            h.valid_keys.as_deref(),
+            Some(&b"PHL"[..]),
+            "only the ~-marked hotkeys resolve (sub_317AA via the letter scan)"
+        );
+        let span = h.selected_span().expect("option 0 opens highlighted");
+        assert_eq!(&h.text[span.0..span.1], "Punch barkeep");
+
+        let mut q = crate::input::InputQueue::new();
+
+        // A stray letter is ignored (`displayInput` keeps waiting,
+        // `ovr027.cs:267-292`) — the pre-fix fallback resolved it to
+        // option 0.
+        q.push_all(&[InputEvent::Char(b'X')]);
+        assert_eq!(h.tick(&mut q, 1), WidgetOutcome::Pending);
+
+        // ',' wraps the highlight back to LEAVE; Enter commits it as its
+        // own hotkey (`ovr027.cs:226-240`, the `,`/`.`/Enter loop).
+        q.push_all(&[InputEvent::Char(b',')]);
+        assert_eq!(h.tick(&mut q, 1), WidgetOutcome::Pending);
+        q.push_all(&[InputEvent::Enter]);
+        assert_eq!(h.tick(&mut q, 1), WidgetOutcome::Hotbar(b'L'));
+
+        // The reply maps hotkeys to option indexes, with sub_317AA's
+        // not-found -1 -> 0xFF sentinel instead of a silent option 0.
+        assert_eq!(
+            resolve_horizontal_menu_reply(&options, b'H'),
+            Reply::Selection(1)
+        );
+        assert_eq!(
+            resolve_horizontal_menu_reply(&options, b'X'),
+            Reply::Selection(0xFF)
+        );
     }
 
     #[test]

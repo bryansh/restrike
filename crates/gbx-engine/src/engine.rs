@@ -604,6 +604,16 @@ impl Engine {
         &self.symbol_sets
     }
 
+    /// Sets the game-speed setting text pacing derives from
+    /// (`seg041.cs:97-100`: `SysDelay(game_speed_var * 3)` ms per character;
+    /// the shipped default is 4). This is the knob the original's camp
+    /// Alter ▸ Speed menu adjusts — until that screen lands, frontends may
+    /// expose it directly (`RESTRIKE_GAME_SPEED` on the desktop): the same
+    /// range, the original's own semantics, D4-clean.
+    pub fn set_game_speed(&mut self, speed: u8) {
+        self.pacer = TextPacer::new(speed.clamp(1, 9));
+    }
+
     /// D-RP4's verify-on-load report (boot diagnostics, the `restrike
     /// verify` CLI subcommand, and the inspector). Advisory only.
     pub fn verify_report(&self) -> &VerifyReport {
