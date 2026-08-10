@@ -469,34 +469,182 @@ mod opcodes {
         assert_eq!(m.step(&mut h).unwrap_err(), err);
     }
 
-    /// SETUP MONSTER (0x0C), `CMD_SetupMonster` ovr003.cs:215-236.
+    /// SETUP MONSTER (0x0C), `CMD_SetupMonster` ovr003.cs:215-236: the three
+    /// stores, the ray, the clamp into `area2_ptr.encounter_distance`, and the
+    /// encounter-visual dispatch — in that order, with the draw travelling as
+    /// an effect.
     #[test]
-    fn setup_monster_calls_its_three_services_in_order() {
+    fn setup_monster_stores_clamps_and_dispatches_the_encounter_visual() {
         let mut b = EclBuilder::new();
         b.label("entry");
         b.op(0x0C).imm_byte(1).imm_byte(2).imm_byte(3); // sprite,max_dist,pic
+        b.label("after");
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let after = b.addr_of("after");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+        h.approach_distance_replies.push_back(10);
+
+        assert_eq!(
+            m.step(&mut h),
+            Ok(VmStep::Effect(Effect::EncounterVisual)),
+            "`:235`'s sub_30580 draw travels as an effect"
+        );
+        assert_continue(m.step(&mut h));
+        assert_eq!(m.current_pc(), Some(after));
+
+        let want = [
+            RecordedCall::SetupMonster {
+                sprite_id: 1,
+                max_distance: 2,
+                pic_id: 3,
+            },
+            RecordedCall::ApproachDistance,
+            // Clamped by max_distance (2), matching `if (max_distance <
+            // encounter_distance) encounter_distance = max_distance;`.
+            RecordedCall::SetEncounterDistance { value: 2 },
+            RecordedCall::LoadEncounterVisual,
+        ];
+        assert_eq!(h.calls, want);
+    }
+
+    /// The clamp is ONE-sided (`ovr003.cs:231-234`): a `max_distance` operand
+    /// larger than the ray leaves the ray's own value standing.
+    #[test]
+    fn setup_monster_clamp_is_one_sided() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x0C).imm_byte(1).imm_byte(9).imm_byte(3); // max_dist 9 > ray 1
         b.op(0x00);
 
         let entry = b.addr_of("entry");
         let mut m = machine_from(&b, entry);
         let mut h = TestHost::new();
-        h.approach_distance_replies.push_back(10);
+        h.approach_distance_replies.push_back(1);
 
-        assert_eq!(run_until_done(&mut m, &mut h), Exit::Ended);
-        assert!(h.calls.contains(&RecordedCall::SetupMonster {
-            sprite_id: 1,
-            max_distance: 2,
-            pic_id: 3
-        }));
-        assert!(h.calls.contains(&RecordedCall::ApproachDistance));
-        // Clamped by max_distance (2), matching `if (max_distance <
-        // encounter_distance) encounter_distance = max_distance;`.
-        assert!(h.calls.contains(&RecordedCall::LoadEncounterVisual {
-            flags: 0,
-            distance: 2,
-            pic_id: 3,
-            sprite_id: 1,
-        }));
+        assert_eq!(m.step(&mut h), Ok(VmStep::Effect(Effect::EncounterVisual)));
+        assert!(h
+            .calls
+            .contains(&RecordedCall::SetEncounterDistance { value: 1 }));
+    }
+
+    /// APPROACH (0x0D), `CMD_Approach` ovr003.cs:300-310: decrement and
+    /// re-dispatch.
+    #[test]
+    fn approach_decrements_the_encounter_distance_and_redispatches() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x0D); // APPROACH
+        b.label("after");
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let after = b.addr_of("after");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+        h.encounter_distance = 2;
+
+        assert_eq!(m.step(&mut h), Ok(VmStep::Effect(Effect::EncounterVisual)));
+        assert_continue(m.step(&mut h));
+        assert_eq!(m.current_pc(), Some(after));
+        assert_eq!(h.encounter_distance, 1);
+        assert_eq!(
+            h.calls,
+            [
+                RecordedCall::EncounterDistance,
+                RecordedCall::SetEncounterDistance { value: 1 },
+                RecordedCall::LoadEncounterVisual,
+            ]
+        );
+    }
+
+    /// At distance 0 the whole body is skipped — but the pc still advances
+    /// (`ecl_offset++` sits OUTSIDE the `if`, `ovr003.cs:309`), and no visual
+    /// is dispatched.
+    #[test]
+    fn approach_at_distance_zero_is_a_pure_advance() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x0D); // APPROACH
+        b.label("after");
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let after = b.addr_of("after");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+        h.encounter_distance = 0;
+
+        assert_continue(m.step(&mut h));
+        assert_eq!(m.current_pc(), Some(after));
+        assert_eq!(h.calls, [RecordedCall::EncounterDistance]);
+    }
+
+    /// SPRITE OFF (0x31), `CMD_SpriteOff` ovr003.cs:1707-1717: the guarded
+    /// `RedrawView()` when a sprite is up…
+    #[test]
+    fn sprite_off_with_a_sprite_up_yields_a_redraw() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x31); // SPRITE OFF
+        b.label("after");
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let after = b.addr_of("after");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+        h.display_player_sprite = true;
+
+        assert_eq!(m.step(&mut h), Ok(VmStep::Effect(Effect::RedrawView)));
+        assert_continue(m.step(&mut h));
+        assert_eq!(m.current_pc(), Some(after));
+        assert!(!h.display_player_sprite, "the service clears it");
+    }
+
+    /// …and nothing at all when none is.
+    #[test]
+    fn sprite_off_without_a_sprite_is_a_pure_advance() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x31);
+        b.label("after");
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let after = b.addr_of("after");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+
+        assert_continue(m.step(&mut h));
+        assert_eq!(m.current_pc(), Some(after));
+        assert_eq!(h.calls, [RecordedCall::SpriteOff]);
+    }
+
+    /// PARTYSTRENGTH (0x1D), `CMD_PartyStrength` ovr003.cs:772-810: the
+    /// service's power value written to the operand's RAW `.Word`
+    /// (`gbl.cmd_opps[1].Word`, `:808`) — a destination address, not a
+    /// resolved value. `ECL6#66 @0x827B` writes `0x7F7A`.
+    #[test]
+    fn party_strength_writes_the_power_value_to_the_operand_word() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x1D).mem(0x7F7A);
+        b.label("after");
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let after = b.addr_of("after");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+        h.party_strength_replies.push_back(0x2A);
+
+        assert_continue(m.step(&mut h));
+        assert_eq!(m.current_pc(), Some(after));
+        assert_eq!(h.word(0x7F7A), Some(0x2A));
+        assert!(h.calls.contains(&RecordedCall::PartyStrength));
     }
 
     /// PICTURE (0x0E), `CMD_Picture` ovr003.cs:312-358: a real block id

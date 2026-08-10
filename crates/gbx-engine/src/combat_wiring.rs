@@ -172,6 +172,14 @@ pub(crate) fn engine_with_program(
     // corner (0,0) facing north is genuinely walled off from its own monsters,
     // which is correct behaviour and a useless fixture.
     e.state.pos = (8, 8);
+    // ★ Stand in for the `SETUP MONSTER` every shipped `COMBAT` is preceded by.
+    // Since the encounter slice, `CMD_Combat` places the monster team at
+    // `area2_ptr.encounter_distance` clamped by a fresh ray (`ovr003.cs:997-1001`,
+    // `ovr011.cs:1067-1068`) rather than at the raw ray — so a fixture that
+    // never ran the opcode which *arms* that cell would deploy its monsters on
+    // top of the party, which is faithful for a zeroed `Area2` and a useless
+    // battlefield. Two is what `SETUP MONSTER <s>, 2, <p>` yields here.
+    e.state.encounter_distance = 2;
     e
 }
 

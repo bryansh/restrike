@@ -678,6 +678,7 @@ impl EclMachine {
             0x09 => self.op_save(activation, host, pc, opcode),
             0x0B => self.op_load_monster(activation, host, pc, opcode),
             0x0C => self.op_setup_monster(activation, host, pc, opcode),
+            0x0D => self.op_approach(activation, host, pc),
             0x0E => self.op_picture(activation, host, pc, opcode),
             0x11 => self.op_print(activation, host, pc, opcode, false),
             0x12 => self.op_print(activation, host, pc, opcode, true),
@@ -686,6 +687,7 @@ impl EclMachine {
             0x15 => self.op_vertical_menu(activation, host, pc, opcode),
             0x16..=0x1B => self.op_if(activation, host, pc, opcode),
             0x1C => self.op_clearmonsters(activation, host),
+            0x1D => self.op_party_strength(activation, host, pc, opcode),
             0x20 => self.op_newecl(activation, host, pc, opcode),
             0x21 => self.op_load_files(activation, host, pc, opcode, false),
             0x24 => self.op_combat(activation),
@@ -696,6 +698,7 @@ impl EclMachine {
             0x2D => self.op_call(activation, host, pc, opcode),
             0x2F => self.op_and(activation, host, pc, opcode),
             0x30 => self.op_or(activation, host, pc, opcode),
+            0x31 => self.op_sprite_off(activation, host, pc),
             0x33 => self.op_print_return(activation),
             0x37 => self.op_load_files(activation, host, pc, opcode, true),
             0x3A => self.op_delay(activation),
@@ -939,11 +942,14 @@ impl EclMachine {
         Ok(VmStep::Continue)
     }
 
-    /// SETUP MONSTER (0x0C), `CMD_SetupMonster` ovr003.cs:215-236.
-    /// `approach_distance`'s result is only used engine-side in the original
-    /// (clamped into `area2_ptr.encounter_distance`, which has no
-    /// `ScriptMemory` address) — called here for fidelity of the service
-    /// call itself, result otherwise unused.
+    /// SETUP MONSTER (0x0C), `CMD_SetupMonster` ovr003.cs:215-236, in full:
+    /// the three ids are stashed engine-side (`:225-227`), the approach ray is
+    /// cast and clamped into `area2_ptr.encounter_distance` (`:229-233`), and
+    /// the encounter visual is dispatched (`:235`).
+    ///
+    /// The clamp is the original's `if (max < dist) dist = max`, i.e. `min` —
+    /// note it is one-sided, so a `max_distance` operand *larger* than the ray
+    /// leaves the ray's own value standing.
     fn op_setup_monster(
         &mut self,
         activation: &mut Activation,
@@ -957,7 +963,76 @@ impl EclMachine {
         let pic_id = self.resolve_numeric(&args[2], pc, opcode, host)? as u8;
         host.setup_monster(sprite_id, max_distance, pic_id);
         let distance = host.approach_distance().min(max_distance);
-        host.load_encounter_visual(0, distance, pic_id, sprite_id);
+        host.set_encounter_distance(distance);
+        host.load_encounter_visual();
+        Ok(Self::yield_effect(
+            activation,
+            pc,
+            Effect::EncounterVisual,
+            next,
+        ))
+    }
+
+    /// APPROACH (0x0D), `CMD_Approach` ovr003.cs:300-310. One step closer:
+    /// decrement `area2_ptr.encounter_distance` and re-dispatch the encounter
+    /// visual at the new band. At distance 0 the whole body is skipped — but
+    /// `ecl_offset++` runs either way (`:309`, outside the `if`).
+    fn op_approach(
+        &mut self,
+        activation: &mut Activation,
+        host: &mut dyn VmHost,
+        pc: u16,
+    ) -> Result<VmStep, VmError> {
+        let next = pc.wrapping_add(1);
+        let distance = host.encounter_distance();
+        if distance == 0 {
+            activation.pc = next;
+            return Ok(VmStep::Continue);
+        }
+        host.set_encounter_distance(distance - 1);
+        host.load_encounter_visual();
+        Ok(Self::yield_effect(
+            activation,
+            pc,
+            Effect::EncounterVisual,
+            next,
+        ))
+    }
+
+    /// SPRITE OFF (0x31), `CMD_SpriteOff` ovr003.cs:1707-1717. The service
+    /// does the check-and-clear at execution time (like the `0xAE11` gate);
+    /// the `RedrawView()` it guards travels as an effect.
+    fn op_sprite_off(
+        &mut self,
+        activation: &mut Activation,
+        host: &mut dyn VmHost,
+        pc: u16,
+    ) -> Result<VmStep, VmError> {
+        let next = pc.wrapping_add(1);
+        if host.sprite_off() {
+            Ok(Self::yield_effect(activation, pc, Effect::RedrawView, next))
+        } else {
+            activation.pc = next;
+            Ok(VmStep::Continue)
+        }
+    }
+
+    /// PARTYSTRENGTH (0x1D), `CMD_PartyStrength` ovr003.cs:772-810. One
+    /// operand, the destination cell — taken as the raw `.Word`
+    /// (`gbl.cmd_opps[1].Word`, `:808`) exactly like HORIZONTAL MENU's, not as
+    /// a resolved value. The arithmetic itself is engine-side
+    /// ([`EngineServices::party_strength`]); it is draw-free.
+    fn op_party_strength(
+        &mut self,
+        activation: &mut Activation,
+        host: &mut dyn VmHost,
+        pc: u16,
+        opcode: u8,
+    ) -> Result<VmStep, VmError> {
+        let (args, next) = self.load_cmd_sets(pc.wrapping_add(1), 1, host, pc);
+        let dest = self.resolve_target(&args[0], pc, opcode)?;
+        let power = host.party_strength() as u16;
+        self.mem_write(dest, power, host, Origin { pc });
         activation.pc = next;
         Ok(VmStep::Continue)
     }

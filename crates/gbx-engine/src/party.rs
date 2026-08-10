@@ -326,7 +326,58 @@ impl Character {
     pub fn is_npc(&self) -> bool {
         self.control_morale >= 0x80
     }
+
+    /// `SkillLevel(skill)` (`Player.cs:492-495`): `ClassLevel[skill] +
+    /// ClassLevelsOld[skill] * DualClassExceedsPreviousLevel()`, where the
+    /// dual term (`sub_6B3D1`, `Player.cs:800-828`) is 1 iff the character is
+    /// human AND their first non-zero `ClassLevel[0..7]` exceeds
+    /// `multiclassLevel`. Index with the [`SKILL_CLERIC`]-family constants.
+    ///
+    /// `crate::combat::records` carries the same transcription over the raw
+    /// `CharRecord` (combat decodes straight from bytes and never builds a
+    /// [`Character`]); this is the roster-side twin, for the out-of-combat
+    /// services that walk `gbl.TeamList` — `CMD_PartyStrength` above all.
+    pub fn skill_level(&self, skill: usize) -> i32 {
+        const HUMAN: u8 = 7; // Race.human (`Classes/Enums.cs:54`)
+        let dual = {
+            let current = if self.race != HUMAN {
+                0
+            } else {
+                let mut i = 0;
+                while i < 7 && self.class_level[i] == 0 {
+                    i += 1;
+                }
+                self.class_level[i] as i32
+            };
+            i32::from(current > self.multiclass_level as i32)
+        };
+        self.class_level[skill] as i32 + self.class_levels_old[skill] as i32 * dual
+    }
+
+    /// `player.HasAffect(kind)` — whether any affect record of `kind` is
+    /// present. [`Character::affects`] holds the raw `.fx` records (§5.5
+    /// leaves them opaque), so this decodes each one's header on the way past;
+    /// a record too short to decode simply does not match, which is what the
+    /// original's own list walk does with a null.
+    pub fn has_affect(&self, kind: u8) -> bool {
+        self.affects
+            .iter()
+            .filter_map(|raw| gbx_formats::affects::AffectRecord::decode(raw))
+            .any(|a| a.kind == kind)
+    }
 }
+
+// `SkillType` (`Classes/Enums.cs:57-67`) — the `ClassLevel`/`ClassLevelsOld`
+// index [`Character::skill_level`] takes. Only the ids out-of-combat services
+// actually name are declared here; combat's own copy lives in
+// `crate::combat::records`.
+pub const SKILL_CLERIC: usize = 0;
+pub const SKILL_MAGIC_USER: usize = 5;
+
+/// `Affects.haste` / `Affects.slow` (`Classes/Affect.cs:46,49`) — the two
+/// `calc_group_movement` scales each member's rate by (`ovr008.cs:1380-1387`).
+pub const AFFECT_HASTE: u8 = 0x27;
+pub const AFFECT_SLOW: u8 = 0x2A;
 
 /// The full party roster — a `.rsav`'s `PartySnapshot` (D-SAVE3), also the
 /// direct result of importing `party_count` `CHRDAT` records (D-SAVE5).

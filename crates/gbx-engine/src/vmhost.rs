@@ -273,6 +273,20 @@ const FORCE_REDRAW_ADDRS: [u16; 2] = [0x4BFD, 0x4BFE];
 /// because the picture layer reads it every `PICTURE`.
 const HEAD_BLOCK_ID_ADDR: u16 = 0x7EE1;
 
+/// ★ `area2_ptr.max_encounter_distance` / `area2_ptr.encounter_distance`
+/// (`Classes/Area2.cs:40-43`, DataOffsets `0x580`/`0x582`). Under the Area2
+/// window's `DataOffset = (addr - 0x7C00) * 2` mapping these are `0x7EC0` and
+/// `0x7EC1`.
+///
+/// Both are genuinely script-addressable: `0x580` has an explicit
+/// `field_800_Set` case (`Area2.cs:207-209`) and `0x582` reaches the same
+/// field through the reflection default (`Area2.cs:314-316`) — the asymmetry
+/// is a C#-typing artifact of the port, not a behavior difference. Naming
+/// them here keeps a script write and the encounter cluster's own service
+/// accessors ([`EngineServices::encounter_distance`]) looking at one cell.
+const MAX_ENCOUNTER_DISTANCE_ADDR: u16 = 0x7EC0;
+const ENCOUNTER_DISTANCE_ADDR: u16 = 0x7EC1;
+
 /// ★ `area2_ptr.game_area` (`Classes/Area2.cs:70-71`, `DataOffset 0x624`) —
 /// **the area switch** (roll-credits D-RC1/D-S1a). Under the Area2 window's
 /// `DataOffset = (addr - 0x7C00) * 2` mapping, `0x624 / 2 + 0x7C00 == 0x7F12`.
@@ -473,6 +487,27 @@ pub struct VmMemoryState {
     /// `gbl.spriteChanged`: set by `sub_30580` (encounter-visual dispatch)
     /// and `CMD_Picture` — same consolidated gate above.
     pub sprite_changed: bool,
+    /// ★ `gbl.displayPlayerSprite` (`byte_1EE8F`, `Classes/Gbl.cs:409`) — the
+    /// gate's **fifth** flag, and FD-34's: "a 3D approach sprite is overlaid
+    /// on the dungeon view, so the view must be repainted to erase it". Set
+    /// only by `sub_30580`'s `SPRIT` load (`ovr008.cs:237`); cleared by
+    /// `CMD_SpriteOff` (`ovr003.cs:1714`), by `CMD_Picture`'s `0xFF` arm
+    /// (`:351`) and by the gate itself (`:1861`).
+    pub display_player_sprite: bool,
+    /// `gbl.byte_1EE95` — "we are inside the ENCOUNTER MENU". Set at the head
+    /// of `CMD_EncounterMenu` (`ovr003.cs:1245`), cleared at its tail
+    /// (`:1536`), and read at exactly one place: `sub_30580`'s close-up gate
+    /// (`ovr008.cs:257`). It is what keeps the 3D approach sprite on screen
+    /// while the player picks COMBAT/WAIT/FLEE/ADVANCE, instead of swapping to
+    /// the face the moment the distance reaches 0.
+    pub byte_1ee95: bool,
+    /// `gbl.byte_1EE96` — which `HeadBlockId` the close-up currently on screen
+    /// was built from (`ovr008.cs:253,259`). Its only two sites are that
+    /// change-detector; the original never initializes it, so it starts at 0,
+    /// which is a *valid* head id — an encounter whose `HeadBlockId` is 0 and
+    /// whose `encounter_flags[1]` is already set therefore skips its own
+    /// close-up refresh. Replicated, not "fixed".
+    pub byte_1ee96: u8,
     /// `gbl.can_draw_bigpic`: set at many command/init sites and
     /// unconditionally by `LoadPic`; read only by `RedrawView`'s own
     /// non-dungeon (wilderness/bigpic) branch, and cleared by every
@@ -489,6 +524,15 @@ pub struct VmMemoryState {
     /// picture behind it. This engine tracks the flag; driving the menu-loop
     /// animation from it is docketed, not done here.
     pub byte_1ee8d: bool,
+    /// ★ `sub_30580`'s pending draw plans, one per dispatch, drained in order
+    /// by [`gbx_vm::Effect::EncounterVisual`].
+    ///
+    /// **Not serialized**, on exactly [`crate::monster::PendingCombat`]'s
+    /// rationale: a plan exists only between an instruction's execution and
+    /// the same tick's presentation drain, and no save is ever taken there. A
+    /// restored save deserializes it empty, which is the truthful state.
+    #[serde(skip)]
+    encounter_visual_plans: std::collections::VecDeque<crate::picture::EncounterVisualPlan>,
 }
 
 impl VmMemoryState {
@@ -506,6 +550,20 @@ impl VmMemoryState {
         self.byte_1ee94 = false;
         self.position_changed = false;
         self.sprite_changed = false;
+        // ★ `displayPlayerSprite` is deliberately NOT cleared here. The
+        // original's gate clears all five (`ovr003.cs:1861`), but this method
+        // is also `crate::corridor::redraw_view`'s tail — a documented
+        // over-clear (see this method's doc comment) that `RedrawView` itself
+        // does not perform (`ovr029.cs:10-49` touches only `can_draw_bigpic`).
+        // For the other four the over-clear is harmless; for this one it is
+        // not: `sub_30580`'s already-loaded arm calls `RedrawView()` and then
+        // re-blits the sprite one band closer (`ovr008.cs:241-249`) with the
+        // flag still standing, and clearing it there would leave the next
+        // `CALL 0xAE11` unable to erase the sprite it just drew. The flag is
+        // cleared at its own three sites instead: the gate
+        // ([`EngineVmHost::redraw_view_gate`]), SPRITE OFF
+        // ([`EngineVmHost::sprite_off`]) and `CMD_Picture`'s `0xFF` arm
+        // ([`crate::picture::cmd_clear_picture`]).
     }
 }
 
@@ -569,7 +627,7 @@ impl VmMemoryState {
 /// |---|---|---|
 /// | `:91,94` | `spriteChanged=false`, `byte_1EE91=true` | [`VmMemoryState::vm_init_ecl_redraw_flags`] |
 /// | `:92-93` | `redrawPartySummary1/2=false` | no engine cell — our roster panel repaints every walk-loop tick unconditionally (`engine.rs`'s `tick`), so there is no dirty flag to clear |
-/// | `:96-97` | `encounter_flags[0..1]=false` | no engine cell yet — FD-34/roll-credits G4 territory |
+/// | `:96-97` | `encounter_flags[0..1]=false` | ✔ on [`EngineState::encounter_flags`] (landed with the encounter cluster) |
 /// | `:98` | `monster_icon_id=8` | ✔ on `PendingCombat` |
 /// | `:99` | `ecl_offset=0x8000` | structural: `EclMachine` addresses its block from `ECL_BLOCK_BASE` |
 /// | `:100` | `byte_1DA70=false` | no engine cell, no reader found |
@@ -603,6 +661,7 @@ impl VmMemoryState {
 /// every NEWECL in normal play starts its block with both tables zeroed.
 pub(crate) fn vm_init_ecl(state: &mut EngineState, vm: &mut VmMemoryState) {
     vm.vm_init_ecl_redraw_flags(); // :91, :94
+    state.encounter_flags = [false; 2]; // :96-97
     state.pending_combat.monster_icon_id = 8; // :98
     state.head_block_id = 0xFF; // :109
     vm.poke_raw(REST_INCOUNTER_PERIOD_ADDR, 0); // :111
@@ -629,6 +688,31 @@ impl VmMemoryState {
     /// insert/lookup calls directly).
     pub fn raw_word(&self, addr: u16) -> Option<u16> {
         self.raw_words.get(&addr).copied()
+    }
+
+    /// ★ `gbl.area_ptr.inDungeon`, read from the RAW cell exactly as
+    /// `field_6A00_Get`'s `case 0x1CC` does (`Classes/Area1.cs:495-496`) —
+    /// **not** derived from `game_state`. FD-37 established why: `vm_init_ecl`
+    /// writes the struct field directly (`ovr008.cs:126`), bypassing the hook
+    /// that maintains `game_state`, so the two legitimately disagree and every
+    /// consumer must read the one the original reads. `sub_30580`'s
+    /// sprite-load gate (`ovr008.cs:233`) is such a consumer.
+    pub fn in_dungeon(&self) -> bool {
+        self.raw_word(IN_DUNGEON_ADDR).unwrap_or(0) != 0
+    }
+
+    /// Queues one [`crate::picture::EncounterVisualPlan`] (execution time).
+    pub(crate) fn push_encounter_visual_plan(&mut self, plan: crate::picture::EncounterVisualPlan) {
+        self.encounter_visual_plans.push_back(plan);
+    }
+
+    /// Takes the oldest queued plan (presentation time). `None` means the
+    /// effect arrived without a matching dispatch — impossible by
+    /// construction, and a no-op rather than a panic if it ever happens.
+    pub(crate) fn pop_encounter_visual_plan(
+        &mut self,
+    ) -> Option<crate::picture::EncounterVisualPlan> {
+        self.encounter_visual_plans.pop_front()
     }
 
     /// The raw fallback byte store's current value at `addr` — [`raw_word`](Self::raw_word)'s
@@ -731,6 +815,12 @@ pub struct EngineVmHost<'a> {
     pub vm: &'a mut VmMemoryState,
     pub geo: &'a mut GeoBlock,
     pub party: &'a mut dyn crate::movement::PartyPredicates,
+    /// ★ The real roster (`gbl.TeamList`), needed by the services that walk
+    /// the party member-by-member: `CMD_PartyStrength`'s power sum
+    /// (`ovr003.cs:776-805`) and ENCOUNTER MENU's `calc_group_movement`
+    /// (`ovr008.cs:1370-1398`). Distinct from [`Self::party`], the M2
+    /// door-predicate abstraction.
+    pub roster: &'a mut crate::party::Party,
     pub rng: &'a mut crate::rng::EngineRng,
     pub sounds: &'a mut Vec<crate::shell::SoundEvent>,
     /// `load_walldef`'s real data source (step 5, task deliverable 1):
@@ -794,6 +884,12 @@ impl ScriptMemory for EngineVmHost<'_> {
         if addr == HEAD_BLOCK_ID_ADDR {
             return self.state.head_block_id as u16;
         }
+        if addr == MAX_ENCOUNTER_DISTANCE_ADDR {
+            return self.state.max_encounter_distance;
+        }
+        if addr == ENCOUNTER_DISTANCE_ADDR {
+            return self.state.encounter_distance as u16;
+        }
         if addr == GAME_AREA_ADDR {
             return self.state.game_area as u16;
         }
@@ -810,6 +906,17 @@ impl ScriptMemory for EngineVmHost<'_> {
         }
         if addr == HEAD_BLOCK_ID_ADDR {
             self.state.head_block_id = value as u8;
+            return;
+        }
+        if addr == MAX_ENCOUNTER_DISTANCE_ADDR {
+            self.state.max_encounter_distance = value;
+            return;
+        }
+        if addr == ENCOUNTER_DISTANCE_ADDR {
+            // `ushort` in the original; ours is the `u8` the ray and every
+            // consumer actually use (0..2), so a wild script write truncates
+            // — noted rather than widened, since no shipped script writes it.
+            self.state.encounter_distance = value as u8;
             return;
         }
         if addr == GAME_AREA_ADDR {
@@ -1021,9 +1128,42 @@ impl gbx_vm::EngineServices for EngineVmHost<'_> {
         PlayerId(0)
     }
 
+    /// ★ `CMD_PartyStrength`'s power sum (`ovr003.cs:776-805`), transcribed
+    /// term for term over `gbl.TeamList`:
+    ///
+    /// ```text
+    /// armor_class = ac      > 60 ? ac      - 60 : 0
+    /// hit_bonus   = hitBonus > 39 ? hitBonus - 39 : 0
+    /// power += (byte)((cleric*4 + hp + armor_class*5 + hit_bonus*5 + magic*8) / 10)
+    /// ```
+    ///
+    /// Three things the C# says out loud and this must not smooth over:
+    /// `player.ac` is the RAW stored byte (`Player.cs:597`; display AC is
+    /// `0x3C - ac`), so `> 60` means "better than AC -1" rather than
+    /// "worse than AC 60"; the per-member term is cast to `byte` *before*
+    /// being added, so a single monstrous member truncates rather than
+    /// saturating; and `power_value` is itself a `byte`, so the running total
+    /// wraps. Draw-free.
     fn party_strength(&mut self) -> u8 {
         self.vm.calls.push(RecordedCall::PartyStrength);
-        0
+        let mut power: u8 = 0;
+        for member in self.roster.members.iter() {
+            let hit_points = member.hit_point_current as i32;
+            // `player.ac` is a `byte` in the original; ours is stored `i8`.
+            let ac = member.combat.ac as u8 as i32;
+            let hit_bonus = member.combat.thac0_current as i32;
+            let magic_power = member.skill_level(crate::party::SKILL_MAGIC_USER);
+            let cleric_power = member.skill_level(crate::party::SKILL_CLERIC);
+
+            let armor_class = if ac > 60 { ac - 60 } else { 0 };
+            let hit_bonus = if hit_bonus > 39 { hit_bonus - 39 } else { 0 };
+
+            let term =
+                (cleric_power * 4 + hit_points + armor_class * 5 + hit_bonus * 5 + magic_power * 8)
+                    / 10;
+            power = power.wrapping_add(term as u8);
+        }
+        power
     }
 
     fn check_party(&mut self, query: u16) -> u16 {
@@ -1099,12 +1239,19 @@ impl gbx_vm::EngineServices for EngineVmHost<'_> {
         Ok(MonsterHandle(monster_id as u16))
     }
 
+    /// `CMD_SetupMonster`'s three stores (`ovr003.cs:225-227`). The
+    /// ray/clamp/dispatch that follow them are the VM's own sequence
+    /// (`machine.rs`'s `op_setup_monster`), because the clamp is visible
+    /// arithmetic over an operand.
     fn setup_monster(&mut self, sprite_id: u8, max_distance: u8, pic_id: u8) {
         self.vm.calls.push(RecordedCall::SetupMonster {
             sprite_id,
             max_distance,
             pic_id,
         });
+        self.state.sprite_block_id = sprite_id; // `:225`
+        self.state.max_encounter_distance = max_distance as u16; // `:226`
+        self.state.pic_block_id = pic_id; // `:227`
     }
 
     /// `CMD_ClearMonsters` (`ovr003.cs:758`): drop the pending-combat roster
@@ -1124,31 +1271,81 @@ impl gbx_vm::EngineServices for EngineVmHost<'_> {
         self.vm.calls.push(RecordedCall::SetupDuel { is_duel });
     }
 
+    /// ★ `calc_group_movement` (`ovr008.cs:1370-1398`): `(slowest, fastest)`
+    /// effective movement across the party, `haste` doubling and `slow`
+    /// halving each member's own rate. Draw-free.
+    ///
+    /// The original's degenerate empty-`TeamList` case is preserved verbatim:
+    /// the out-params are pre-seeded `(u8::MAX, u8::MIN)` and an empty loop
+    /// leaves them there, so "no party" reports a slowest of 255 — which,
+    /// against ENCOUNTER MENU's `init_min >= var_407` flee test, would *pass*.
+    /// Replicated, not corrected; an empty party never reaches the opcode.
     fn calc_group_movement(&mut self) -> (u8, u8) {
         self.vm.calls.push(RecordedCall::CalcGroupMovement);
-        (0, 0)
+        let mut min = u8::MAX;
+        let mut max = u8::MIN;
+        for member in self.roster.members.iter() {
+            let mut movement = member.combat.movement;
+            if member.has_affect(crate::party::AFFECT_HASTE) {
+                movement = movement.wrapping_mul(2); // `:1380-1383`, a byte
+            } else if member.has_affect(crate::party::AFFECT_SLOW) {
+                movement /= 2; // `:1384-1387`
+            }
+            min = min.min(movement);
+            max = max.max(movement);
+        }
+        (min, max)
     }
 
-    /// `sub_304B4`'s approach-distance calc: the exact wall-type-driven
-    /// formula wasn't in the material read this session (opcode-
-    /// classification.md's own docket names the same gap) — a documented
-    /// neutral placeholder pending that read.
+    /// `sub_304B4` (`ovr008.cs:156-203`) — the forward line-of-sight ray,
+    /// already transcribed for combat placement as
+    /// [`crate::combat::encounter_distance`]. Its wilderness arm's direct
+    /// `area2_ptr.encounter_distance = 2` write (`:164`) is replicated here:
+    /// the original really does store through the cell before returning, so a
+    /// caller that ignores the return value still sees 2.
     fn approach_distance(&mut self) -> u8 {
         self.vm.calls.push(RecordedCall::ApproachDistance);
-        0
+        let in_dungeon = matches!(self.state.game_state, crate::shell::GameState::DungeonMap);
+        let map_dir = crate::shell::facing_to_map_dir(self.state.facing);
+        let distance = crate::combat::encounter_distance(
+            self.geo,
+            map_dir,
+            self.state.pos.0 as i32,
+            self.state.pos.1 as i32,
+            in_dungeon,
+        );
+        if !in_dungeon {
+            self.state.encounter_distance = 2; // `:164`
+        }
+        distance
     }
 
-    fn load_encounter_visual(&mut self, flags: u8, distance: u8, pic_id: u8, sprite_id: u8) {
-        self.vm.calls.push(RecordedCall::LoadEncounterVisual {
-            flags,
-            distance,
-            pic_id,
-            sprite_id,
-        });
-        // `sub_30580`'s state effects (research §4) — recorded, not drawn.
-        if distance == 0 {
-            self.state.head_block_id = 0xFF;
+    fn encounter_distance(&mut self) -> u8 {
+        self.vm.calls.push(RecordedCall::EncounterDistance);
+        self.state.encounter_distance
+    }
+
+    fn set_encounter_distance(&mut self, value: u8) {
+        self.vm
+            .calls
+            .push(RecordedCall::SetEncounterDistance { value });
+        self.state.encounter_distance = value;
+    }
+
+    fn load_encounter_visual(&mut self) {
+        self.vm.calls.push(RecordedCall::LoadEncounterVisual);
+        crate::picture::encounter_visual_state(self.state, self.vm);
+    }
+
+    fn sprite_off(&mut self) -> bool {
+        self.vm.calls.push(RecordedCall::SpriteOff);
+        if !self.vm.display_player_sprite {
+            return false;
         }
+        self.vm.can_draw_bigpic = true; // `ovr003.cs:1712`
+        self.vm.display_player_sprite = false; // `:1714`
+        self.vm.sprite_changed = false; // `:1715`
+        true
     }
 
     fn create_item(&mut self, item_type: u8) -> ItemHandle {
@@ -1343,17 +1540,18 @@ impl gbx_vm::EngineServices for EngineVmHost<'_> {
 
     /// The `0xAE11` consolidated redraw gate (`ovr003.cs:1848-1860`):
     /// check-and-clear at execution time; the guarded draw is
-    /// `Effect::RedrawView`'s job at present time. Four of the original's
-    /// five flags are modeled — `displayPlayerSprite` (the encounter-sprite
-    /// path, `sub_30580`) is FD-34 territory and has no engine cell yet, so
-    /// it cannot arm the gate here; when FD-34 lands its flag joins this
-    /// check.
+    /// `Effect::RedrawView`'s job at present time. ★ All five inner flags are
+    /// modeled as of the encounter slice — `displayPlayerSprite`, FD-34's,
+    /// joined the check when `sub_30580` grew a real state pass. (The outer
+    /// `byte_1AB0B` conjunct remains FD-35.)
     fn redraw_view_gate(&mut self) -> bool {
         let armed = self.vm.sprite_changed
+            || self.vm.display_player_sprite
             || self.vm.byte_1ee91
             || self.vm.position_changed
             || self.vm.byte_1ee94;
         self.vm.clear_redraw_flags();
+        self.vm.display_player_sprite = false; // `:1861`, the fifth clear
         self.vm.calls.push(RecordedCall::RedrawViewGate { armed });
         armed
     }
@@ -1400,6 +1598,7 @@ mod tests {
         vm: VmMemoryState,
         geo: GeoBlock,
         party: DefaultPartyPredicates,
+        roster: crate::party::Party,
         rng: EngineRng,
         sounds: Vec<SoundEvent>,
         data: GameData,
@@ -1420,6 +1619,7 @@ mod tests {
                 vm: VmMemoryState::new(),
                 geo: GeoBlock::parse(&vec![0u8; GEO_BLOCK_SIZE]).unwrap(),
                 party: DefaultPartyPredicates::default(),
+                roster: crate::party::Party::default(),
                 rng: EngineRng::new(1),
                 sounds: Vec::new(),
                 data,
@@ -1433,6 +1633,7 @@ mod tests {
                 vm: &mut self.vm,
                 geo: &mut self.geo,
                 party: &mut self.party,
+                roster: &mut self.roster,
                 rng: &mut self.rng,
                 sounds: &mut self.sounds,
                 data: &self.data,

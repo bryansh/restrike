@@ -191,6 +191,7 @@ fn print_effect(effect: &Effect) {
         Effect::Sound(id) => println!("-- [sound {id:#04X}] --"),
         Effect::AnimationFrame => println!("-- [animation frame] --"),
         Effect::RedrawView => println!("-- [redraw view] --"),
+        Effect::EncounterVisual => println!("-- [encounter visual] --"),
     }
 }
 
@@ -360,6 +361,9 @@ struct CliHost {
     strings: HashMap<u16, VmString>,
     replies: ReplyPolicy,
     rng: Prng,
+    /// `area2_ptr.encounter_distance` — a live cell, because the encounter
+    /// cluster reads back what it writes (APPROACH's decrement).
+    encounter_distance: u8,
 }
 
 /// Fixed, arbitrary seed — deterministic across runs, not derived from
@@ -374,6 +378,7 @@ impl CliHost {
             words: HashMap::new(),
             bytes: HashMap::new(),
             strings: HashMap::new(),
+            encounter_distance: 0,
             replies,
             rng: Prng::new(RNG_SEED),
         }
@@ -536,11 +541,23 @@ impl EngineServices for CliHost {
         0
     }
 
-    fn load_encounter_visual(&mut self, flags: u8, distance: u8, pic_id: u8, sprite_id: u8) {
-        eprintln!(
-            "svc: load_encounter_visual(flags={flags}, distance={distance}, pic_id={pic_id}, \
-             sprite_id={sprite_id})"
-        );
+    fn encounter_distance(&mut self) -> u8 {
+        eprintln!("svc: encounter_distance()");
+        self.encounter_distance
+    }
+
+    fn set_encounter_distance(&mut self, value: u8) {
+        eprintln!("svc: set_encounter_distance(value={value})");
+        self.encounter_distance = value;
+    }
+
+    fn load_encounter_visual(&mut self) {
+        eprintln!("svc: load_encounter_visual()");
+    }
+
+    fn sprite_off(&mut self) -> bool {
+        eprintln!("svc: sprite_off()");
+        false
     }
 
     fn create_item(&mut self, item_type: u8) -> ItemHandle {

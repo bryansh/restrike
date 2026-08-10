@@ -152,9 +152,55 @@ pub trait EngineServices {
     fn add_npc(&mut self, monster_id: u8, morale: u8);
     /// CALL (0x2D) cases `1`/`2` — `SetupDuel(bool)`.
     fn setup_duel(&mut self, is_duel: bool);
+    /// ENCOUNTER MENU (0x29)'s own first act (`ovr003.cs:1250`):
+    /// `calc_group_movement(out mov_min, out mov_max)` (`ovr008.cs:1370-1398`)
+    /// walks `TeamList` for each member's `movement`, doubled under `haste`
+    /// and halved under `slow`, and reports **(slowest, fastest)** — in that
+    /// order, matching the original's out-parameter order. Draw-free.
+    ///
+    /// The slowest gates the party's FLEE (`init_min >= var_407`,
+    /// `ovr003.cs:1384`); the fastest gates the monsters' own flight
+    /// (`var_408 > var_40A`, `:1442`).
     fn calc_group_movement(&mut self) -> (u8, u8);
+    /// `sub_304B4` (`ovr008.cs:156-203`): the forward line-of-sight ray, 0..2.
+    /// Reads the engine's *ambient* map position/direction (see this trait's
+    /// doc comment); its wilderness arm also writes
+    /// `area2_ptr.encounter_distance = 2` directly (`ovr008.cs:164`), which is
+    /// the engine's business, not the VM's. Draw-free.
     fn approach_distance(&mut self) -> u8;
-    fn load_encounter_visual(&mut self, flags: u8, distance: u8, pic_id: u8, sprite_id: u8);
+    /// `area2_ptr.encounter_distance` (`Classes/Area2.cs:42-43`, DataOffset
+    /// `0x582` → Party-window address `0x7EC1`) — the approach range the
+    /// encounter cluster carries between opcodes: SETUP MONSTER computes and
+    /// clamps it (`ovr003.cs:229-233`), APPROACH decrements it
+    /// (`:302-304`), ENCOUNTER MENU recomputes and re-decrements it, and
+    /// `CMD_Combat` clamps it once more before placement (`:997-1001`).
+    ///
+    /// Exposed as a service rather than left to `ScriptMemory` because the
+    /// original's handlers touch the struct field directly — a script write
+    /// to `0x7EC1` lands on the same cell, so the two views agree.
+    fn encounter_distance(&mut self) -> u8;
+    fn set_encounter_distance(&mut self, value: u8);
+    /// `sub_30580` (`ovr008.cs:220-276`), the encounter-visual dispatch —
+    /// FD-34. Takes no parameters for the same reason
+    /// [`EngineServices::approach_distance`] takes none: all four of the
+    /// original's arguments are engine globals at every one of its eight call
+    /// sites (`gbl.encounter_flags`, `area2_ptr.encounter_distance`,
+    /// `gbl.pic_block_id`, `gbl.sprite_block_id`), never operand-derived.
+    ///
+    /// **State half only.** This mutates the flags the redraw gate reads
+    /// (`encounter_flags`, `displayPlayerSprite`, `spriteChanged`,
+    /// `byte_1EE96`, `can_draw_bigpic`, `mapAreaDisplay`) at *execution* time
+    /// and records what to paint; the paint itself travels as
+    /// [`Effect::EncounterVisual`] so it presents in queue order (D-VM3),
+    /// exactly as [`EngineServices::redraw_view_gate`] pairs with
+    /// [`Effect::RedrawView`].
+    fn load_encounter_visual(&mut self);
+    /// SPRITE OFF (0x31), `CMD_SpriteOff` (`ovr003.cs:1707-1717`): if the
+    /// encounter sprite is on screen, arm `can_draw_bigpic`, clear
+    /// `displayPlayerSprite`/`spriteChanged`, and report `true` so the caller
+    /// emits the [`Effect::RedrawView`] that erases it. A no-op (and `false`)
+    /// when no sprite is up.
+    fn sprite_off(&mut self) -> bool;
 
     // --- Items / treasure ---
     fn create_item(&mut self, item_type: u8) -> ItemHandle;
@@ -263,7 +309,19 @@ pub enum Effect {
     /// `CALL 0xAE11` a fresh block runs repaints the world before the
     /// script's own text (the amnesia intro's page 1, Bryan's 2026-08-08
     /// DOSBox side-by-side).
+    ///
+    /// Also carries SPRITE OFF (0x31)'s own guarded `RedrawView()`
+    /// (`ovr003.cs:1712`) — same draw, same authorization shape
+    /// ([`EngineServices::sprite_off`] does the check-and-clear at execution
+    /// time and reports whether the draw happens).
     RedrawView,
+    /// `sub_30580`'s draw half (`ovr008.cs:220-276`), authorized by
+    /// [`EngineServices::load_encounter_visual`]'s execution-time state pass:
+    /// the encounter view gets repainted, the `SPRIT` approach sprite blitted
+    /// at its distance band, and — at distance 0 — the close-up PIC or
+    /// head+body put up. Payload-less for the same reason [`Effect::RedrawView`]
+    /// is: the plan lives in engine state the VM does not own.
+    EncounterVisual,
 }
 
 /// Interactions that suspend the activation awaiting a reply (D-VM3).
@@ -409,12 +467,12 @@ pub enum RecordedCall {
     },
     CalcGroupMovement,
     ApproachDistance,
-    LoadEncounterVisual {
-        flags: u8,
-        distance: u8,
-        pic_id: u8,
-        sprite_id: u8,
+    EncounterDistance,
+    SetEncounterDistance {
+        value: u8,
     },
+    LoadEncounterVisual,
+    SpriteOff,
 
     CreateItem {
         item_type: u8,

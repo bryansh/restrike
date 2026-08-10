@@ -256,13 +256,25 @@ impl CombatHost {
         let map_dir = crate::shell::facing_to_map_dir(ctx.state.facing);
         let in_dungeon = matches!(ctx.state.game_state, GameState::DungeonMap);
         let party_pos = (ctx.state.pos.0 as i32, ctx.state.pos.1 as i32);
-        let dist = crate::combat::encounter_distance(
+        // ★ `CMD_Combat`'s own re-clamp (`ovr003.cs:997-1001`): cast a FRESH
+        // `sub_304B4` ray and lower `area2_ptr.encounter_distance` to it if the
+        // ray is shorter — `if (var_2 < encounter_distance) encounter_distance
+        // = var_2;`. One-sided, so an approach that already walked the
+        // monsters in close stays close even where the corridor is open.
+        // Placement then reads the CELL (`ovr011.cs:1067-1068`), not the ray,
+        // which is what makes APPROACH mechanically real: `SETUP MONSTER
+        // s,1,p` + `APPROACH` starts the fight adjacent.
+        let ray = crate::combat::encounter_distance(
             ctx.geo,
             map_dir,
             party_pos.0,
             party_pos.1,
             in_dungeon,
         );
+        if ray < ctx.state.encounter_distance {
+            ctx.state.encounter_distance = ray;
+        }
+        let dist = ctx.state.encounter_distance;
 
         // (1) The floor. Wilderness is deferred whole (doc §7) — rather than
         // lay a dungeon floor outdoors, fall back to the flagged provisional

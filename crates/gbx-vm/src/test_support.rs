@@ -279,6 +279,14 @@ pub struct TestHost {
     /// Arms the next [`EngineServices::redraw_view_gate`] call (one-shot,
     /// mirroring the real gate's check-and-clear).
     pub redraw_flags_armed: bool,
+    /// `area2_ptr.encounter_distance` — a live cell, not a reply queue: the
+    /// encounter cluster reads it back after writing it (APPROACH's
+    /// decrement, ENCOUNTER MENU's ADVANCE loop), so a scripted queue would
+    /// model the wrong thing.
+    pub encounter_distance: u8,
+    /// `gbl.displayPlayerSprite` — the flag [`EngineServices::sprite_off`]
+    /// checks and clears.
+    pub display_player_sprite: bool,
 
     pub retarget_selected_player_replies: VecDeque<Result<(), NotFound>>,
     pub free_current_player_replies: VecDeque<PlayerId>,
@@ -474,13 +482,26 @@ impl EngineServices for TestHost {
         Self::next_or_default(&mut self.approach_distance_replies)
     }
 
-    fn load_encounter_visual(&mut self, flags: u8, distance: u8, pic_id: u8, sprite_id: u8) {
-        self.calls.push(RecordedCall::LoadEncounterVisual {
-            flags,
-            distance,
-            pic_id,
-            sprite_id,
-        });
+    fn encounter_distance(&mut self) -> u8 {
+        self.calls.push(RecordedCall::EncounterDistance);
+        self.encounter_distance
+    }
+
+    fn set_encounter_distance(&mut self, value: u8) {
+        self.calls
+            .push(RecordedCall::SetEncounterDistance { value });
+        self.encounter_distance = value;
+    }
+
+    fn load_encounter_visual(&mut self) {
+        self.calls.push(RecordedCall::LoadEncounterVisual);
+    }
+
+    fn sprite_off(&mut self) -> bool {
+        self.calls.push(RecordedCall::SpriteOff);
+        let armed = self.display_player_sprite;
+        self.display_player_sprite = false;
+        armed
     }
 
     fn create_item(&mut self, item_type: u8) -> ItemHandle {

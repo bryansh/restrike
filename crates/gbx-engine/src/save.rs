@@ -69,7 +69,18 @@ pub const CONTAINER_VERSION: u16 = 1;
 /// in the middle of the payload, so a v3 save would misparse everything after
 /// them: reject-not-migrate, hard version bump. The committed golden was
 /// recomputed in the same commit.
-pub const SAVE_FORMAT_VERSION: u32 = 4;
+/// **v5** (roll-credits slice 2, the encounter cluster): the approach state
+/// the original keeps in `Area2` and in `gbl` becomes real state.
+/// `EngineState` gained `encounter_distance` / `max_encounter_distance`
+/// (`Area2` DataOffsets `0x582`/`0x580` — genuinely saved by the original's
+/// own `SaveGame`, which serializes the whole `area2_ptr` blob),
+/// `sprite_block_id` / `pic_block_id` and `encounter_flags`;
+/// `PictureLayer` gained `sprite_block`/`sprite_frame` for the `SPRIT`
+/// approach sprite; `VmMemoryState` gained `display_player_sprite` (the
+/// redraw gate's fifth flag), `byte_1EE95` and `byte_1EE96`. New postcard
+/// fields in the middle of the payload: reject-not-migrate, hard version
+/// bump. The committed golden was recomputed in the same commit.
+pub const SAVE_FORMAT_VERSION: u32 = 5;
 
 /// This engine's one shipped flavor (M3's slice — `xxvc` is M7). An 8-byte
 /// ASCII tag rather than a numeric id, matching the header's own

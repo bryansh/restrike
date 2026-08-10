@@ -119,6 +119,11 @@ pub enum Shown {
     BigPic,
     /// `HeadBlockId != 0xFF` (`ovr003.cs:340`).
     HeadBody,
+    /// ★ `Show3DSprite` (`ovr030.cs:215-226`): the masked `SPRIT{area}`
+    /// approach sprite overlaid on the 3D view, at the distance band
+    /// [`PictureLayer::sprite_frame`] names. Not one of `CMD_Picture`'s arms —
+    /// only `sub_30580` puts this up.
+    Sprite,
 }
 
 /// The picture layer's persistent state: a faithful mirror of the original's
@@ -145,6 +150,16 @@ pub struct PictureLayer {
     /// `0xFF` = none loaded.
     pub head_block: u8,
     pub body_block: u8,
+    /// ★ The `SPRIT{area}` block `sub_30580` loaded into `byte_1D556`
+    /// (`ovr008.cs:235`), and the **1-based** frame `Show3DSprite` blits —
+    /// `encounter_distance + 1` (`ovr008.cs:248`), so `1..=3`.
+    ///
+    /// Real `SPRIT*` blocks carry exactly three frames, largest first: block 1
+    /// of `SPRIT2` is 32×80, 24×65, 16×57 at cells (4,1), (4,1), (5,1). The
+    /// "distance bands" are those three pre-rendered sizes — there is no
+    /// runtime scaling anywhere in the original's draw path.
+    pub sprite_block: Option<u8>,
+    pub sprite_frame: u8,
     pub shown: Shown,
 }
 
@@ -156,6 +171,8 @@ impl Default for PictureLayer {
             bigpic_block: None,
             head_block: 0xFF,
             body_block: 0xFF,
+            sprite_block: None,
+            sprite_frame: 0,
             shown: Shown::Nothing,
         }
     }
@@ -193,6 +210,17 @@ impl PictureLayer {
 #[derive(Debug, Default)]
 pub struct PictureCache {
     pic: Option<(u8, AnimatedPicture)>,
+    /// ★ The masked `SPRIT{area}` approach-sprite set. In the original this
+    /// shares `byte_1D556` with `pic` — one `DaxArray`, one
+    /// `(lastDaxFile, lastDaxBlockId)` key — so loading a close-up `PIC`
+    /// *destroys* the sprite frames. Ours keeps them in their own slot, which
+    /// is strictly more persistent than the original and invisible: the only
+    /// consumer of the sprite frames is `Show3DSprite`, and `sub_30580` gates
+    /// that behind `encounter_flags[1] == false` — the same flag the close-up
+    /// sets when it overwrites the array (`ovr008.cs:222,264,271`). Decoding
+    /// is deterministic and draw-free, so an extra cache hit cannot move a
+    /// pixel or a PRNG draw.
+    sprite: Option<(u8, AnimatedPicture)>,
     bigpic: Option<(u8, ImageBlock)>,
     head: Option<(u8, ImageBlock)>,
     body: Option<(u8, ImageBlock)>,
@@ -238,6 +266,46 @@ impl PictureCache {
             self.pic = Some((block, decoded));
         }
         Ok(&self.pic.as_ref().expect("just populated").1)
+    }
+
+    /// ★ `load_pic_final(ref byte_1D556, 1, sprite_block_id, "SPRIT")`
+    /// (`ovr008.cs:235`): **masked** (mask colour 0 → transparency-16,
+    /// `DaxBlock.SetMaskedColor`) and **not** XOR-delta'd —
+    /// `is_pic_or_final` is false for `SPRIT`, so every frame is independent
+    /// (`ovr030.cs:53,109`).
+    ///
+    /// The masked load also runs a second pass the `PIC` load does not:
+    /// `Recolor(false, transparentNewColors, transparentOldColors)`
+    /// (`ovr030.cs:129-132`), whose only non-identity entry is **13 → 0**
+    /// ([`crate::draw::TRANSPARENT_RECOLOR`]). Order matters and is easy to
+    /// get backwards: the mask is applied first, at decode
+    /// (`DaxToPicture(0, masked, …)`, `:127`), so colour 0 has already become
+    /// transparency-16 by the time 13 is folded onto 0 — the recoloured
+    /// pixels are opaque black, **not** transparent.
+    fn sprite(
+        &mut self,
+        data: &GameData,
+        area: u8,
+        block: u8,
+    ) -> Result<&AnimatedPicture, PictureLoadError> {
+        if self.sprite.as_ref().map(|(id, _)| *id) != Some(block) {
+            let file = format!("SPRIT{area}.DAX");
+            let raw = data
+                .block(&file, block)
+                .map_err(|e| PictureLoadError(format!("{file} block {block}: {e:?}")))?;
+            let mut decoded = anim::decode(&raw, true, false)
+                .map_err(|e| PictureLoadError(format!("{file} block {block}: {e:?}")))?;
+            if decoded.frames.is_empty() {
+                return Err(PictureLoadError(format!(
+                    "{file} block {block}: zero frames"
+                )));
+            }
+            for frame in decoded.frames.iter_mut() {
+                crate::draw::apply_recolor(&mut frame.pixels, &crate::draw::TRANSPARENT_RECOLOR);
+            }
+            self.sprite = Some((block, decoded));
+        }
+        Ok(&self.sprite.as_ref().expect("just populated").1)
     }
 
     /// `load_bigpic` (`ovr030.cs:228-239`): `LoadDax(0, 0, block_id,
@@ -430,15 +498,16 @@ fn set_and_draw_head_body(ctx: &mut FlowCtx, body_id: u8, head_id: u8) {
 /// `CMD_Picture`'s `blockId == 0xFF` half (`ovr003.cs:343-356`).
 ///
 /// The gate is the original's verbatim: a state pair plus "something is
-/// actually on screen". `encounter_flags` are not modeled here (they live in
-/// the encounter-visual path, `sub_30580`, which is still record-not-draw) —
-/// their clear at `:354-355` is a no-op for this slice and is noted, not
-/// faked.
+/// actually on screen" — the latter now including `displayPlayerSprite`
+/// (`:346`), the flag `sub_30580` raises, which is why an encounter's
+/// `PICTURE 0xFF` erases the approach sprite even when no `CMD_Picture` ever
+/// set `spriteChanged`. Both `encounter_flags` clear unconditionally
+/// (`:354-355`), outside the gate.
 pub fn cmd_clear_picture(ctx: &mut FlowCtx) {
     use crate::shell::GameState;
     let gate = (ctx.state.last_game_state != GameState::DungeonMap
         || ctx.state.game_state == GameState::DungeonMap)
-        && ctx.vm_memory.sprite_changed;
+        && (ctx.vm_memory.sprite_changed || ctx.vm_memory.display_player_sprite);
     if gate {
         ctx.vm_memory.can_draw_bigpic = true; // `:347`
                                               // `RedrawView()` (`:348`) repaints the viewport — and nothing puts
@@ -446,7 +515,139 @@ pub fn cmd_clear_picture(ctx: &mut FlowCtx) {
         ctx.state.picture.hide();
         crate::corridor::redraw_view(ctx);
         ctx.vm_memory.sprite_changed = false; // `:350`
+        ctx.vm_memory.display_player_sprite = false; // `:351`
         ctx.vm_memory.byte_1ee8d = true; // `:352`
+    }
+    ctx.state.encounter_flags = [false; 2]; // `:354-355`
+}
+
+/// ★ One `sub_30580` dispatch's **draw** half, computed by
+/// [`encounter_visual_state`] at execution time and replayed by
+/// [`encounter_visual`] at present time (D-VM3's ordering rule — the flags the
+/// `0xAE11` gate reads must move when the instruction runs, the pixels must
+/// land in queue order behind whatever `PRINT`s preceded them).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EncounterVisualPlan {
+    /// `can_draw_bigpic = true; RedrawView();` — either the auto-map
+    /// dismissal (`ovr008.cs:226-231`) or the "sprite already up, repaint
+    /// before re-blitting it one band closer" arm (`:241-244`).
+    pub redraw_view: bool,
+    /// `Show3DSprite(byte_1D556, encounter_distance + 1)` (`:248`):
+    /// `(SPRIT block id, 1-based frame)`.
+    pub sprite: Option<(u8, u8)>,
+    /// The distance-0 close-up: [`Shown::Pic`] (`:263-266`) or
+    /// [`Shown::HeadBody`] (`:270`).
+    pub close_up: Option<Shown>,
+}
+
+/// ★ **`sub_30580`** (`ovr008.cs:220-276`) — FD-34's state half.
+///
+/// A two-flag state machine over `gbl.encounter_flags`: `[0]` = "the `SPRIT`
+/// approach-sprite set is loaded and on screen", `[1]` = "a close-up owns the
+/// picture window". Both start false at every block entry (`vm_init_ecl`,
+/// `:96-97`), so the first dispatch of an encounter loads the sprite set, and
+/// each later one (APPROACH, ENCOUNTER MENU's ADVANCE) repaints the view and
+/// re-blits one band closer — until the distance reaches 0, when the close-up
+/// takes over the window and `[1]` latches.
+///
+/// Two guards on the close-up are easy to miss and both matter:
+/// - `byte_1EE95` (`:257`) suppresses it for the whole of ENCOUNTER MENU, which
+///   is what keeps the 3D sprite visible behind COMBAT/WAIT/FLEE/ADVANCE
+///   instead of cutting to the face the instant the distance hits 0.
+/// - `byte_1EE96 != HeadBlockId` (`:253`) is a change detector, not a
+///   dirty flag: it lets a *second* close-up through when the script has
+///   swapped `HeadBlockId` since the first, and it starts at 0 — a valid head
+///   id — because the original never initializes it.
+pub fn encounter_visual_state(
+    state: &mut crate::shell::EngineState,
+    vm: &mut crate::vmhost::VmMemoryState,
+) {
+    use crate::shell::GameState;
+    let mut plan = EncounterVisualPlan::default();
+    let distance = state.encounter_distance;
+
+    if !state.encounter_flags[1] {
+        // `:222`
+        if !state.encounter_flags[0] {
+            // `:224`
+            if state.area_map_shown {
+                // `:226` — an encounter cancels the auto-map
+                state.area_map_shown = false; // `:228`
+                vm.can_draw_bigpic = true; // `:229`
+                plan.redraw_view = true; // `:230`
+            }
+            if vm.in_dungeon() {
+                // `:233` — the RAW `area_ptr.inDungeon` cell, per FD-37
+                state.picture.sprite_block = Some(state.sprite_block_id); // `:235`
+                state.encounter_flags[0] = true; // `:236`
+                vm.display_player_sprite = true; // `:237`
+            }
+        } else {
+            vm.can_draw_bigpic = true; // `:242`
+            plan.redraw_view = true; // `:243`
+        }
+        if state.game_state == GameState::DungeonMap {
+            // `:246`
+            plan.sprite = Some((state.sprite_block_id, distance + 1)); // `:248`
+        }
+    }
+
+    // `:252-253`
+    if !state.encounter_flags[1] || vm.byte_1ee96 != state.head_block_id {
+        // `:255-257`
+        if distance == 0 && state.game_state == GameState::DungeonMap && !vm.byte_1ee95 {
+            vm.byte_1ee96 = state.head_block_id; // `:259`
+            vm.sprite_changed = true; // `:260`
+            if state.head_block_id == 0xFF {
+                // `:263` load_pic_final(…, 0, pic_block_id, "PIC")
+                state.picture.anim_block = Some(state.pic_block_id);
+                state.picture.anim_frame = 1; // `load_pic_final`, `ovr030.cs:66`
+                state.encounter_flags[1] = true; // `:264`
+                plan.close_up = Some(Shown::Pic); // `:266`
+            } else {
+                // `:270` set_and_draw_head_body(pic_block_id, HeadBlockId) —
+                // note `pic_block_id` is the BODY id on this arm.
+                vm.byte_1ee8d = false; // `set_and_draw_head_body`, `ovr008.cs:210`
+                state.picture.head_block = state.head_block_id; // `:212`
+                state.picture.body_block = state.pic_block_id; // `:213`
+                state.encounter_flags[1] = true; // `:271`
+                plan.close_up = Some(Shown::HeadBody);
+                vm.byte_1ee8d = false; // `:272` — set twice, verbatim
+            }
+        }
+    }
+
+    vm.push_encounter_visual_plan(plan);
+}
+
+/// ★ [`gbx_vm::Effect::EncounterVisual`]: `sub_30580`'s draw half, replayed in
+/// the order the original performs it — repaint, then sprite, then close-up
+/// over the top.
+///
+/// The two composes are not redundant. At `SETUP MONSTER <sprite>, 0, <pic>`
+/// (real content: `ECL2#2 @0x87D7`) a single dispatch both blits the nearest
+/// sprite band and then paints the close-up over it, and the sprite is masked
+/// while the close-up is not — so the intermediate frame is genuinely visible
+/// in the original's retained framebuffer.
+pub fn encounter_visual(ctx: &mut FlowCtx) {
+    let Some(plan) = ctx.vm_memory.pop_encounter_visual_plan() else {
+        return;
+    };
+    if plan.redraw_view {
+        // `RedrawView()` repaints the viewport, which is what erases the
+        // previous band's sprite. It hides the picture layer as its first act,
+        // so everything below re-establishes what is shown.
+        crate::corridor::redraw_view(ctx);
+    }
+    if let Some((block, frame)) = plan.sprite {
+        ctx.state.picture.sprite_block = Some(block);
+        ctx.state.picture.sprite_frame = frame;
+        ctx.state.picture.shown = Shown::Sprite;
+        compose(ctx);
+    }
+    if let Some(shown) = plan.close_up {
+        ctx.state.picture.shown = shown;
+        compose(ctx);
     }
 }
 
@@ -577,6 +778,54 @@ pub fn compose_into(
             // the frame is decoration, the picture is content.
             let _ = crate::frames::draw_frame_wilderness_map(fb, symbols);
             draw_maybe_overlayed(fb, &img, (BIGPIC_ROW, BIGPIC_COL), false, 0);
+        }
+        Shown::Sprite => {
+            // ★ `Show3DSprite(byte_1D556, sprite_index)` (`ovr030.cs:215-226`).
+            // The frame is the block's OWN pre-rendered distance band, blitted
+            // at its own header anchor: `OverlayBounded(block, 1, 0,
+            // y_pos + 3 - 1, x_pos + 3 - 1)` → `draw_combat_picture(block,
+            // y_pos + 3, x_pos + 3, 0)` (`seg040.cs:29-31`, the -1/+1 round
+            // trip), i.e. the overlay clip window ([`Clip::OVERLAY`]).
+            let Some(block) = layer.sprite_block else {
+                return Ok(());
+            };
+            let anim = cache
+                .sprite(data, game_area, block)
+                .map_err(|e| ("SPRITE", e))?;
+            // `Show3DSprite`'s own two guards, in order: the 1..=3 range check
+            // (`:217-220`, a `LogAndExit` in the original — loud here too, via
+            // the caller's diagnose) and the null-frame skip (`:222`).
+            let Some(f) = layer
+                .sprite_frame
+                .checked_sub(1)
+                .and_then(|i| anim.frames.get(i as usize))
+            else {
+                return Err((
+                    "SPRITE",
+                    PictureLoadError(format!(
+                        "SPRIT{game_area} block {block}: frame {} of {}",
+                        layer.sprite_frame,
+                        anim.frames.len()
+                    )),
+                ));
+            };
+            let img = (f.pixels.clone(), f.width_px(), f.height as usize);
+            let (row, col) = (f.y_pos as usize + PIC_ROW, f.x_pos as usize + PIC_COL);
+            // Masked: transparency-16 pixels leave the 3D view showing through
+            // — [`Framebuffer::set_pixel`]'s universal `< 16` guard, which is
+            // `Display.SetPixel3`'s own (`Classes/Display.cs:163-173`). No
+            // `no_draw` colour is needed on top of it.
+            blit_image(
+                fb,
+                &img.0,
+                img.1,
+                img.2,
+                row,
+                col,
+                Clip::OVERLAY,
+                None,
+                None,
+            );
         }
         Shown::HeadBody => {
             // `draw_head_and_body(true, 3, 3)` (`ovr030.cs:193-204`):

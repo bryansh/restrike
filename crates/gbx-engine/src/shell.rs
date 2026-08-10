@@ -683,6 +683,7 @@ impl VectorRun {
                     vm: &mut *ctx.vm_memory,
                     geo: &mut *ctx.geo,
                     party: &mut *ctx.party,
+                    roster: &mut *ctx.roster,
                     rng: &mut *ctx.rng,
                     sounds: &mut *ctx.sounds,
                     data: ctx.data,
@@ -866,6 +867,9 @@ impl VectorRun {
             // vector never reaches. Its `display_map_position_time()` pair
             // is covered by the engine's per-tick status line.
             Effect::RedrawView => crate::corridor::redraw_view(ctx),
+            // ★ `sub_30580`'s draw half (FD-34), authorized by the
+            // execution-time state pass that emitted this effect.
+            Effect::EncounterVisual => crate::picture::encounter_visual(ctx),
         }
     }
 
@@ -911,6 +915,14 @@ impl VectorRun {
         if outcome == crate::combat::CombatOutcome::MonstersWin {
             ctx.state.party_killed = true;
         }
+        // ★ `CMD_Combat`'s own tail (`ovr003.cs:1024-1026`): the encounter is
+        // over, so the two-flag visual state machine resets and the sprite-dirty
+        // flag clears. Without this a second encounter in the same block would
+        // find `encounter_flags[1]` latched from the first and never dispatch
+        // its own visual — exactly what the real content does back-to-back
+        // (`ECL2#2 @0x8780` and `@0x880F` are two approaches in one vector).
+        ctx.state.encounter_flags = [false; 2];
+        ctx.vm_memory.sprite_changed = false;
         // `Reply::Combat` with today's outcome semantics (§8.3 rule 2): a script
         // cannot tell the rendered fight from the headless one.
         self.pending_reply = Some(Reply::Combat);
@@ -1210,6 +1222,41 @@ pub struct EngineState {
     /// pick between its head/body arm and its plain-picture arm
     /// (`ovr003.cs:322`).
     pub head_block_id: u8,
+    /// ★ `area2_ptr.encounter_distance` (`Classes/Area2.cs:42-43`, DataOffset
+    /// `0x582` → Party-window address `0x7EC1`): how many cells ahead the
+    /// monster team deploys, and the approach cluster's whole subject.
+    ///
+    /// SETUP MONSTER computes it from `sub_304B4`'s ray and clamps it down to
+    /// its own `max_distance` operand (`ovr003.cs:229-233`); APPROACH
+    /// decrements it one band at a time (`:302-304`); ENCOUNTER MENU's
+    /// ADVANCE arms do the same; and `CMD_Combat` clamps it once more against
+    /// a *fresh* ray immediately before placement (`:997-1001`) — which is
+    /// what makes a party that walked into a corridor between the approach
+    /// and the fight start adjacent rather than at the old range.
+    pub encounter_distance: u8,
+    /// `area2_ptr.max_encounter_distance` (DataOffset `0x580` → `0x7EC0`):
+    /// SETUP MONSTER / ENCOUNTER MENU operand 2, the ceiling the ray is
+    /// clamped to. A `ushort` in the original, and script-writable through
+    /// its own explicit `field_800_Set` case (`Classes/Area2.cs:207-209`).
+    pub max_encounter_distance: u16,
+    /// `gbl.sprite_block_id` (`byte_1D92B`) / `gbl.pic_block_id`
+    /// (`byte_1D92C`): the `SPRIT{area}` and `PIC{area}` block ids SETUP
+    /// MONSTER (`ovr003.cs:225,227`) and ENCOUNTER MENU (`:1253,1255`) stash
+    /// for `sub_30580` to re-read at every later dispatch. Neither is reset by
+    /// `vm_init_ecl`, so they carry across blocks exactly as the original's
+    /// globals do.
+    ///
+    /// `pic_block_id` doubles as the **body** id when `HeadBlockId != 0xFF`
+    /// (`ovr008.cs:270`), the arm essentially every shipped encounter takes.
+    pub sprite_block_id: u8,
+    pub pic_block_id: u8,
+    /// `gbl.encounter_flags` (`byte_1EE72`, `Classes/Gbl.cs:399`) — the
+    /// two-flag state machine `sub_30580` runs on: `[0]` = the `SPRIT`
+    /// approach-sprite set is loaded and on screen, `[1]` = a close-up (PIC or
+    /// head+body) owns the picture window. Cleared by `vm_init_ecl`
+    /// (`ovr008.cs:96-97`), by `CMD_Picture`'s `0xFF` arm (`ovr003.cs:354-355`),
+    /// by `CMD_NewECL` (`:496-497`) and after every fight (`:1025-1026`).
+    pub encounter_flags: [bool; 2],
     /// What the viewport's picture layer shows, and the running animation's
     /// frame cursor (D-SAVE3's "active animation's frame index").
     pub picture: crate::picture::PictureLayer,
@@ -1283,6 +1330,11 @@ impl EngineState {
             game_state: GameState::DungeonMap,
             last_game_state: GameState::DungeonMap,
             head_block_id: 0xFF,
+            encounter_distance: 0,
+            max_encounter_distance: 0,
+            sprite_block_id: 0,
+            pic_block_id: 0,
+            encounter_flags: [false; 2],
             picture: crate::picture::PictureLayer::default(),
             pending_combat: crate::monster::PendingCombat::default(),
             menu_selected_word: 0,

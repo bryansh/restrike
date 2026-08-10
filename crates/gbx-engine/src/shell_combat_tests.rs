@@ -1076,6 +1076,8 @@ fn placement_uses_the_areas_real_walls() {
         let mut e = Engine::new_fixture(synthetic_font(), sets, open_geo(), data, 1);
         e.party = crate::party::Party { members: two_pcs() };
         e.state.pos = pos;
+        // As `SETUP MONSTER` would have armed it — see `engine_with_program`.
+        e.state.encounter_distance = 2;
         for _ in 0..MAX_TICKS {
             tick(&mut e);
             if let Some(host) = e.shell().combat_host() {

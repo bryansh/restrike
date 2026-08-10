@@ -76,11 +76,36 @@ fn anim_block(width_cols: u16, height: u16, fills: &[u8]) -> Vec<u8> {
     out
 }
 
+/// ★ A `SPRIT` block: masked, **not** XOR-delta'd (`is_pic_or_final` is false
+/// for `SPRIT`, `ovr030.cs:53,109`), one frame per distance band, each with its
+/// own `x_pos`/`y_pos` anchor. Real `SPRIT2` block 1 is 32×80 @(4,1),
+/// 24×65 @(4,1), 16×57 @(5,1) — this mirrors that shape at a size the pixel
+/// assertions can name exactly.
+fn sprit_block(frames: &[(u16, u16, u16, u16, u8)]) -> Vec<u8> {
+    let mut out = vec![frames.len() as u8];
+    for &(width_cols, height, x_pos, y_pos, fill) in frames {
+        out.extend_from_slice(&5u32.to_le_bytes()); // delay
+        out.extend_from_slice(&height.to_le_bytes());
+        out.extend_from_slice(&width_cols.to_le_bytes());
+        out.extend_from_slice(&x_pos.to_le_bytes());
+        out.extend_from_slice(&y_pos.to_le_bytes());
+        out.push(0); // pad byte, never read
+        out.extend_from_slice(&[0u8; 8]); // field_9
+        let px = vec![fill; width_cols as usize * 8 * height as usize];
+        out.extend_from_slice(&pack_nibbles(&px));
+    }
+    out
+}
+
 const PIC_FILL: u8 = 9;
 const PIC_FRAME2_FILL: u8 = 11;
 const HEAD_FILL: u8 = 4;
 const BODY_FILL: u8 = 5;
 const BIGPIC_FILL: u8 = 6;
+/// The three approach bands, near to far — index = `encounter_distance`.
+const SPRITE_FILLS: [u8; 3] = [7, 10, 14];
+/// The `SPRIT` block id the encounter fixtures load.
+const SPRITE_BLOCK: u8 = 2;
 
 /// The full synthetic asset set the tests below draw from: a 3-frame `PIC`
 /// block 1, a `HEAD`/`BODY` pair at block 3, and a `BIGPIC` block `0x78` —
@@ -108,6 +133,17 @@ fn picture_game_data(blocks: Vec<(u8, EclBuilder)>) -> GameData {
         (
             format!("BIGPIC{GAME_AREA}.DAX"),
             build_dax_file(&[(0x78, image_block(38, 120, BIGPIC_FILL))]),
+        ),
+        (
+            format!("SPRIT{GAME_AREA}.DAX"),
+            build_dax_file(&[(
+                SPRITE_BLOCK,
+                sprit_block(&[
+                    (4, 80, 4, 1, SPRITE_FILLS[0]),
+                    (3, 65, 4, 1, SPRITE_FILLS[1]),
+                    (2, 57, 5, 1, SPRITE_FILLS[2]),
+                ]),
+            )]),
         ),
     ])
 }
@@ -502,5 +538,238 @@ fn a_parked_menu_animates_the_picture_at_the_frames_own_delay() {
         at(&px, 24, 24),
         PIC_FRAME2_FILL,
         "frame 2 is on screen while the menu still waits"
+    );
+}
+
+// --- the encounter-visual arm (`sub_30580`, FD-34) -------------------------
+//
+// The synthetic geo block is all zeros, so every wall type reads 0 — but the
+// ray also stops at the map edge, and the fixture boots the party at (0,0)
+// facing North, where it can only step once. The encounter scripts below place
+// the party mid-map first (`SAVE x, 0xC04B` / `SAVE y, 0xC04C`, the mapPos
+// cells) so `sub_304B4` walks its full two cells and `max_distance >= 2` lands
+// at distance 2, the far band.
+
+/// `gbl.mapPosX`/`mapPosY` (`vmhost.rs`'s Global-window arms).
+const MAP_POS_X_ADDR: u16 = 0xC04B;
+const MAP_POS_Y_ADDR: u16 = 0xC04C;
+
+/// Places the party at (5,5) — three clear cells from the northern edge — so
+/// the approach ray is not clipped by the map boundary.
+fn stand_mid_map(b: &mut EclBuilder) {
+    b.op(0x09).imm_byte(5).mem(MAP_POS_X_ADDR);
+    b.op(0x09).imm_byte(5).mem(MAP_POS_Y_ADDR);
+}
+
+/// `SETUP MONSTER` puts the `SPRIT` approach sprite on the 3D view at the band
+/// its own `encounter_distance` names — frame `distance + 1`
+/// (`ovr008.cs:248`), blitted at the frame's own `(y_pos + 3, x_pos + 3)`
+/// anchor (`ovr030.cs:224`).
+#[test]
+fn setup_monster_puts_the_far_approach_sprite_on_the_3d_view() {
+    let mut engine = engine_running(|b| {
+        stand_mid_map(b);
+        b.op(0x0C).imm_byte(SPRITE_BLOCK).imm_byte(2).imm_byte(1); // sprite,max,pic
+        b.op(0x00);
+    });
+    let px = tick_pixels(&mut engine, &[]);
+
+    assert_eq!(
+        engine.state.encounter_distance, 2,
+        "the ray, clamped by max"
+    );
+    assert_eq!(engine.state.picture.shown, Shown::Sprite);
+    assert_eq!(engine.state.picture.sprite_block, Some(SPRITE_BLOCK));
+    assert_eq!(engine.state.picture.sprite_frame, 3, "distance + 1");
+    assert_eq!(
+        engine.state.encounter_flags,
+        [true, false],
+        "the SPRIT set is loaded; no close-up yet"
+    );
+    assert!(
+        engine.vm_memory.display_player_sprite,
+        "the redraw gate's fifth flag is now armed (ovr008.cs:237)"
+    );
+
+    // Frame 2 (0-based) is 16x57 at cell (5,1) -> (row 4, col 8) -> px (64,32).
+    assert_eq!(at(&px, 64, 32), SPRITE_FILLS[2], "far band, top-left");
+    assert_eq!(at(&px, 79, 88), SPRITE_FILLS[2], "far band, bottom-right");
+    assert_ne!(at(&px, 63, 32), SPRITE_FILLS[2], "one pixel left of it");
+    assert_ne!(at(&px, 64, 89), SPRITE_FILLS[2], "one pixel below it");
+}
+
+/// APPROACH decrements the distance and re-dispatches, so the *next* band —
+/// a different, larger pre-rendered frame at its own anchor — replaces it.
+/// There is no runtime scaling anywhere in the original's draw path.
+#[test]
+fn approach_walks_the_sprite_one_band_closer() {
+    let mut engine = engine_running(|b| {
+        stand_mid_map(b);
+        b.op(0x0C).imm_byte(SPRITE_BLOCK).imm_byte(2).imm_byte(1);
+        b.op(0x0D); // APPROACH
+        b.op(0x00);
+    });
+    let px = tick_pixels(&mut engine, &[]);
+
+    assert_eq!(engine.state.encounter_distance, 1);
+    assert_eq!(engine.state.picture.sprite_frame, 2);
+    // Frame 1 is 24x65 at cell (4,1) -> (row 4, col 7) -> px (56,32).
+    assert_eq!(at(&px, 56, 32), SPRITE_FILLS[1], "middle band, top-left");
+    assert_eq!(
+        at(&px, 79, 96),
+        SPRITE_FILLS[1],
+        "middle band, bottom-right"
+    );
+    assert_ne!(
+        at(&px, 64, 88),
+        SPRITE_FILLS[2],
+        "the far band's own pixels were repainted away by RedrawView"
+    );
+}
+
+/// At distance 0 one dispatch does both: the nearest sprite band, then the
+/// close-up painted over it. `HeadBlockId == 0xFF` selects the flat-`PIC` arm
+/// (`ovr008.cs:261-266`), and `encounter_flags[1]` latches so no later
+/// dispatch re-runs it.
+#[test]
+fn at_distance_zero_the_close_up_takes_the_picture_window() {
+    let mut engine = engine_running(|b| {
+        b.op(0x0C).imm_byte(SPRITE_BLOCK).imm_byte(0).imm_byte(1); // max 0
+        b.op(0x00);
+    });
+    let px = tick_pixels(&mut engine, &[]);
+
+    assert_eq!(engine.state.encounter_distance, 0);
+    assert_eq!(engine.state.picture.shown, Shown::Pic);
+    assert_eq!(engine.state.encounter_flags, [true, true]);
+    assert!(
+        engine.vm_memory.sprite_changed,
+        "the close-up sets the redraw-dirty flag (ovr008.cs:260)"
+    );
+    assert_eq!(
+        engine.vm_memory.byte_1ee96, 0xFF,
+        "the change detector caches the HeadBlockId it drew from"
+    );
+    assert_eq!(
+        at(&px, 24, 24),
+        PIC_FILL,
+        "the close-up covers the viewport"
+    );
+    assert_eq!(
+        at(&px, 64, 40),
+        PIC_FILL,
+        "…including over the sprite's cells"
+    );
+}
+
+/// The close-up's other arm: `HeadBlockId != 0xFF` makes `pic_block_id` a BODY
+/// id and draws head+body (`ovr008.cs:270`, via `set_and_draw_head_body`).
+#[test]
+fn a_head_bearing_encounter_closes_up_on_head_and_body() {
+    let mut engine = engine_running(|b| {
+        b.op(0x09).imm_byte(3).mem(HEAD_BLOCK_ID_ADDR); // SAVE 3 -> HeadBlockId
+        b.op(0x0C).imm_byte(SPRITE_BLOCK).imm_byte(0).imm_byte(3); // pic id = BODY id
+        b.op(0x09).imm_byte(0xFF).mem(HEAD_BLOCK_ID_ADDR);
+        b.op(0x00);
+    });
+    let px = tick_pixels(&mut engine, &[]);
+
+    assert_eq!(engine.state.picture.shown, Shown::HeadBody);
+    assert_eq!(engine.state.picture.head_block, 3);
+    assert_eq!(
+        engine.state.picture.body_block, 3,
+        "pic_block_id is the body"
+    );
+    assert!(
+        !engine.vm_memory.byte_1ee8d,
+        "set_and_draw_head_body clears it"
+    );
+    assert_eq!(at(&px, 24, 24), HEAD_FILL);
+    assert_eq!(at(&px, 24, 64), BODY_FILL);
+}
+
+/// SPRITE OFF repaints the view and drops the flag, so the sprite is gone and
+/// the `0xAE11` gate is no longer armed by it (`ovr003.cs:1707-1717`).
+#[test]
+fn sprite_off_erases_the_approach_sprite() {
+    let mut engine = engine_running(|b| {
+        stand_mid_map(b);
+        b.op(0x0C).imm_byte(SPRITE_BLOCK).imm_byte(2).imm_byte(1);
+        b.op(0x31); // SPRITE OFF
+        b.op(0x00);
+    });
+    let px = tick_pixels(&mut engine, &[]);
+
+    assert!(!engine.vm_memory.display_player_sprite);
+    assert!(!engine.vm_memory.sprite_changed);
+    assert_eq!(engine.state.picture.shown, Shown::Nothing);
+    assert_ne!(at(&px, 64, 40), SPRITE_FILLS[2], "the sprite is gone");
+}
+
+/// `PICTURE 0xFF` clears both encounter flags unconditionally
+/// (`ovr003.cs:354-355`) and — via the gate's new `displayPlayerSprite`
+/// disjunct (`:346`) — erases an approach sprite even though no `CMD_Picture`
+/// ever set `spriteChanged`.
+#[test]
+fn picture_0xff_erases_an_approach_sprite_through_the_fifth_flag() {
+    let mut engine = engine_running(|b| {
+        stand_mid_map(b);
+        b.op(0x0C).imm_byte(SPRITE_BLOCK).imm_byte(2).imm_byte(1);
+        // `sub_30580`'s sprite arm does NOT set spriteChanged — only the
+        // distance-0 close-up does — so `displayPlayerSprite` is the only
+        // thing that can open this gate.
+        b.op(0x31); // SPRITE OFF would too; use PICTURE 0xFF instead
+        b.op(0x00);
+    });
+    // Sanity: the sprite arm really left `spriteChanged` alone.
+    let mut probe = engine_running(|b| {
+        stand_mid_map(b);
+        b.op(0x0C).imm_byte(SPRITE_BLOCK).imm_byte(2).imm_byte(1);
+        b.op(0x00);
+    });
+    probe.tick(&[]);
+    assert!(!probe.vm_memory.sprite_changed);
+    assert!(probe.vm_memory.display_player_sprite);
+
+    engine.tick(&[]);
+
+    let mut cleared = engine_running(|b| {
+        stand_mid_map(b);
+        b.op(0x0C).imm_byte(SPRITE_BLOCK).imm_byte(2).imm_byte(1);
+        b.op(0x0E).imm_byte(0xFF); // PICTURE 0xFF
+        b.op(0x00);
+    });
+    let px = tick_pixels(&mut cleared, &[]);
+    assert_eq!(cleared.state.encounter_flags, [false, false]);
+    assert!(!cleared.vm_memory.display_player_sprite);
+    assert_eq!(cleared.state.picture.shown, Shown::Nothing);
+    assert_ne!(at(&px, 64, 40), SPRITE_FILLS[2]);
+}
+
+/// The full shipped shape (`ECL2#2 @0x8780`): head id, `SETUP MONSTER`,
+/// `APPROACH`, head cleared. Two dispatches, two bands, and the second one
+/// takes `sub_30580`'s "already loaded" arm — which repaints before re-blitting
+/// rather than re-loading the `SPRIT` set (`ovr008.cs:241-244`).
+#[test]
+fn the_shipped_approach_shape_runs_two_bands_off_one_sprit_load() {
+    let mut engine = engine_running(|b| {
+        stand_mid_map(b);
+        b.op(0x09).imm_byte(3).mem(HEAD_BLOCK_ID_ADDR);
+        b.op(0x0C).imm_byte(SPRITE_BLOCK).imm_byte(1).imm_byte(3);
+        b.op(0x0D); // APPROACH
+        b.op(0x09).imm_byte(0xFF).mem(HEAD_BLOCK_ID_ADDR);
+        b.op(0x00);
+    });
+    engine.tick(&[]);
+
+    // max_distance 1 clamps the ray to 1, APPROACH takes it to 0 — and at 0 the
+    // close-up fires, on the head/body arm because HeadBlockId was still 1.
+    assert_eq!(engine.state.encounter_distance, 0);
+    assert_eq!(engine.state.encounter_flags, [true, true]);
+    assert_eq!(engine.state.picture.shown, Shown::HeadBody);
+    assert_eq!(engine.state.picture.head_block, 3);
+    assert_eq!(
+        engine.state.head_block_id, 0xFF,
+        "the script's own reset still landed after the drain"
     );
 }
