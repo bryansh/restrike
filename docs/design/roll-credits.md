@@ -3,7 +3,11 @@
 > Door opened 2026-08-09 (post-M6 ratification + the playtest-fix arc); **v2 after the
 > adversarial design review of the same day** (independent Opus pass: 2 BLOCKERs, 8 MAJORs,
 > 6 evidence corrections folded — the reviewer independently re-extracted and re-disassembled
-> all 25 ECL blocks and reproduced the census's 3,582 instructions exactly). This is the
+> all 25 ECL blocks and reproduced the census's 3,582 instructions exactly); **v3 after the
+> same reviewer's re-review of the fold** (verdict: ratify with 8 amendments, all folded —
+> including its catch that v2 mis-folded one of its own findings: LOAD CHARACTER is a
+> party-slot selector, ADD NPC is the original's only join mechanism, and "how do the quest
+> NPCs join?" is now G5's named open research item). This is the
 > working plan for PLAN.md's "M6 Roll credits" (shifted right by the working-ledger
 > renumbering): **finish Curse of the Azure Bonds start-to-end in our engine.** Decisions are
 > locked on Bryan's ratification; per-slice research items are named as such.
@@ -51,8 +55,8 @@ interpreter's dispatch table by hand — the tool does not compute implemented-n
 |---|---|---|
 | D-RC0 | **Save/load wiring + the party-wipe flow is slice 0.** `Engine::take_io_request` / `saveload_fs::fulfill` / the camp Save screen all exist and are tested; **no frontend consumes the request** and `Shell::GameOver`'s tick is empty. A multi-session playthrough is impossible without it, and D-RC3 wants traces from the first session. | Review B2: exit-gate item 1 is unreachable today. Small slice — frontend wiring plus the wipe/reload flow. |
 | D-RC1 | **Area generalization is the foundation slice and goes second.** The mechanism (review B1, from the shipped scripts): the area switch is `SAVE <n> → 0x7F12` — the `Area2.game_area` cell, `DataOffset 0x624`, whose original write hook is `seg042.set_game_area` (`ovr008.cs:654-657`, `seg042.cs:124-128` incl. the `game_area_backup` shadow) — immediately followed by a **cross-file NEWECL** (`load_ecl_dax` interpolates `gbl.game_area` at call time, `ovr008.cs:148`). There is **no transition choreography to invent**: every block's `0x8014` header vector opens with `LOAD FILES`/`LOAD PIECES` naming its own assets. Today the idiom fails **silently** (the `0x7F12` write raw-logs; the NEWECL to a block the resident file lacks halts quietly and the flow continues) — the worst case for D-RC2's loop. | The block-id namespace is globally partitioned 16-per-area across every asset family (the review's table); `GAME_AREA = 2` is an M2 hardcode threaded through every `format!("…{area}.DAX")` site. |
-| D-RC2 | **The playthrough is the discovery engine** — after slices 0–7, Bryan plays; each blocker becomes a slice with a `RESTRIKE_DEBUG_LOG` repro. | The playtest-fix arc proved the loop. The review's gap-map additions (G6–G10) shrink what discovery must carry. |
-| D-RC3 | **H5 checkpoints are engine-state digests, not frame hashes**, defined BEFORE traces accumulate: a checkpoint hashes position/area/block/clock/party (HP/XP/levels/inventory counts)/PRNG state — re-recordable across renderer work. The capture/replay vehicle is the debug-log pipeline promoted to a shipped subcommand that **boots from an imported save** (today's `restrike walk` bare-boots and cannot replay an imported run; `replay_debug_log` is an example binary). | Review M7: frame hashes would be invalidated by slices 2/4/7's own pixel changes — the M6 arc demonstrated exactly this failure. |
+| D-RC2 | **The playthrough is the discovery engine** — after slices 0–8 (item use must exist before the deep dungeons), Bryan plays; slice 9 (the ending) lands during the run, needed only at the finale. Each blocker becomes a slice with a `RESTRIKE_DEBUG_LOG` repro. | The playtest-fix arc proved the loop. The review's gap-map additions (G6–G10) shrink what discovery must carry. |
+| D-RC3 | **H5 checkpoints are engine-state digests, not frame hashes**, defined BEFORE traces accumulate: a checkpoint hashes position/area/block/clock/party (HP/XP/levels/inventory counts)/PRNG state **plus the ScriptMemory windows (`WindowsSnapshot` — where every `SAVE`/`GETTABLE` quest flag lives; `SAVE` is the game's most-used opcode) and `search_flags`** — re-recordable across renderer work, and able to distinguish quest progress, not just position. The capture/replay vehicle is the debug-log pipeline promoted to a shipped subcommand that **boots from an imported save** (today's `restrike walk` bare-boots and cannot replay an imported run; `replay_debug_log` is an example binary). | Review M7: frame hashes would be invalidated by slices 2/4/7's own pixel changes — the M6 arc demonstrated exactly this failure. |
 | D-RC4 | **Copy protection: neutralized, faithfully** — prompt shown with the answer (algorithm + 6×36 table in `docs/copy-protection.md`; verify row-0 length at implementation, per that doc's own flag). | Faithful-optional per D4. |
 | D-RC5 | **Vancian camp magic is in scope (FD-25 closes here).** | The M5 deferral that hard-blocks casters. |
 | D-RC6 | **Temple services are promoted to a named gap (G8): death recovery is critical-path.** The shipped bestiary carries save-or-die poison (giant/phase spiders, wyvern), petrification (hooded medusa), and death rays (beholder) — and the Beholder Corps is plot-critical (`ECL4#37 @0x80CF`). Raise-dead has zero implementation; camp Fix is a status string; `decode_health_status` folds `stoned`/`gone` to `Okey`. Other shop/temple services stay on-demand. | Review M4. Also banked from the same pass: **CotAB ships no level-drain undead** (no vampire/wight/wraith/spectre in any `MON*CHA`) — that worry is settled and need not be re-litigated. |
@@ -93,12 +97,19 @@ Scribe staging, Rest's commit + clock + healing, camp Fix's real behavior.
 `sub_30580` (FD-34, which also completes the redraw gate's fifth flag) + `rest_incounter_*`
 scheduling.
 
-**G5 — Items + roster + mechanics tail.** FIND ITEM / DESTROY ITEMS; LOAD CHARACTER (three
-live sites; the quest-NPC story goes through `LOAD CHARACTER`, **not** ADD NPC — review E1:
-ADD NPC is demo-only); DAMAGE; SAVE TABLE; TREASURE + the deferred combat XP/treasure award
-(one mechanism, M5 ledger). PARLAY is its own small item: its single use
+**G5 — Items + roster + mechanics tail.** FIND ITEM / DESTROY ITEMS; LOAD CHARACTER —
+a **party-slot selector**, not a join op (`CMD_LoadCharacter`, `ovr003.cs:174-210`: sets
+`SelectedPlayer`/`player_not_found` from a TeamList index; the shipped idiom is `ECL5#48
+@0x80A1`'s slot-scan loop; its `ECL1#80` site is not live until slice 7 — acceptance for
+that one is synthetic until then); DAMAGE; SAVE TABLE; TREASURE + the deferred combat
+XP/treasure award (one mechanism, M5 ledger). PARLAY is its own small item: its single use
 (`ECL3#16 @0x8B15`) is a six-operand boolean-outcome negotiation feeding a COMPARE — not a
-dialogue tree (review E6).
+dialogue tree (review E6). **Open research item (re-review A1): how do the quest NPCs
+join?** `CMD_AddNPC` is the original's ONLY join mechanism (`ovr003.cs:1769-1782` →
+`load_npc` → `TeamList.Add`, `ovr017.cs:878-896`; `load_npc` has exactly one caller) — yet
+its only shipped uses are the demo block's, and `ECL5#48` shows Akabar *leaving* plus a
+`Control.NPC_Base` scan at `0x7CB8`. Leads: the imported roster, the NPC-flag scan.
+Resolve before slice 3's spec is final.
 
 **G6 — Out-of-combat item use (review M5).** Potions/scrolls/wands: combat `UseItem` is a
 tripwire and the character sheet has no Use verb at all. The standard Gold Box survival
@@ -118,16 +129,18 @@ poison/petrification arcs need to be survivable-and-recoverable.
 fade, and the credits themselves — named deliverables with their transcription sources
 identified during G2/G1's area work (the finale lives in area 6).
 
-**G10 — The demo/attract mode: explicitly out of scope.** `ECL1#82` (ADD NPC/CLEAR BOX/
-PROGRAM, the fake fight, `PICTURE 0x7B`) is not on any playthrough path; its three opcodes
+**G10 — The demo/attract mode: explicitly out of scope.** `ECL1#82` (the fake fight,
+`PICTURE 0x7B`, CLEAR BOX, PROGRAM) is not on any playthrough path; CLEAR BOX and PROGRAM
 are implemented only if trivial or consciously no-op'd with a docket entry (§4 item 3
-accepts either).
+accepts either). **ADD NPC is NOT descoped here**: it is the game's only join mechanism
+(G5's open item) and holds its scope decision until that resolves.
 
-**Where the playthrough begins (review M8):** the amnesia intro in Tilverton — area 2,
-block 1 — which is exactly our current boot posture with the imported GOG slot. The
-`seg001.cs` `game_area = 1` boot notes remain the docketed UNSURE transliteration quirk;
-slice 1's door resolves what a fresh non-import new-game boots into before we ship party
-creation (not this milestone: the imported-party start stands, per the exit gate).
+**Where the playthrough begins (review M8, settled by the re-review):** the amnesia intro
+in Tilverton — area 2, block 1 (`ECL2#1 @0x8051` carries the real intro text; `ECL1#82`'s
+version is the attract-mode's separate narration) — which is exactly our current boot
+posture with the imported GOG slot. The boot ordering is unambiguous: `seg001.cs:142` sets
+`game_area = 2` for gameplay; `InitFirst`/`InitAgain`'s `game_area = 1` (`:276`, `:369`)
+are the title/demo-loop resets around it, not the gameplay value.
 
 ## 3. Slice plan (per the working model: Fable doors/specs/audits, Opus implements)
 
@@ -150,8 +163,10 @@ owns the version-bump churn**; later slices rebase onto it and batch their enum 
 | 9 | Ending sequence + FD-32 fade (G9) | sized during G2/G1 work | — | 7 |
 | 10+ | D-RC2's playthrough loop | as shaped | per item | rolling |
 
-Slices 4 and 7 can run parallel to 2/3 (disjoint files once 1 owns the churn); everything
-else sequences as listed. Gates at every commit: the standing battery (guard 16/16, reel
+The one genuinely safe parallel is **slice 8** (out-of-combat item use — screens/UI
+territory) against the VM-side slices; everything else sequences as listed (re-review A3:
+slices 3 and 4 both reshape `Character`'s serde, and slice 7 shares `machine.rs`'s
+`op_load_files` and G4's encounter scheduling — the earlier parallel claim was wrong). Gates at every commit: the standing battery (guard 16/16, reel
 smoke 16/16, workspace growing, clippy 0, fmt, draw-parity) plus, from slice 1 on, the
 cross-area walk demo as the standing regression.
 
@@ -162,8 +177,9 @@ cross-area walk demo as the standing regression.
 2. The run exists as **H5 state-digest checkpoint traces** (D-RC3's definition) that replay
    green from imported-save boots; local-tier, hashes-only in CI.
 3. **`restrike census --implemented`** (a small tool addition: the dispatch table exported to
-   the census) reports 100% of *reached, non-demo* opcode uses implemented — or consciously
-   no-op'd with a docket entry (G10's carve-out included). Mechanical, not hand-diffed.
+   the census) reports 100% of reached opcode uses implemented **excluding exactly `ECL1`
+   block 82** (the demo — the tool hardcodes that one exclusion so the number is
+   reproducible) — or consciously no-op'd with a docket entry. Mechanical, not hand-diffed.
 4. A **docket sweep slice** (scheduled in the 10+ loop, before the gate closes) walks every
    open fidelity-docket item to resolved or explicitly deferred-with-rationale — the gate
    names the slice rather than assuming the state.
