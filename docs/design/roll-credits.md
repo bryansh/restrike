@@ -15,6 +15,15 @@
 
 ## 0. Where we stand (the dashboard, census of 2026-08-09)
 
+> ⚠ **SUPERSEDED 2026-08-10 by §7.** Every count in this section came from a
+> census whose flow-follower silently dropped the false arm of the shipped
+> `IF <cmp>` + `GOTO` idiom. With that fixed, the same command reports
+> **14,183 reached instructions, not 3,582** — and the tail below is wrong in
+> both directions (every "unimplemented" count grows; `ADD NPC`, `CLEAR BOX`
+> and `PROGRAM` are *not* demo-only). §7 carries the corrected dashboard and
+> the evidence. The section is kept verbatim because the review that produced
+> it, and D-RC1/D-RC2's sequencing, were reasoned from these numbers.
+
 `restrike census` against the real data (v1.3) reports: **6 ECL files, 25 blocks, 3,582
 reached instructions, 52 distinct opcodes in use, zero decode hazards** (dockets 1–4 and 7
 all clean). The derived numbers below come from diffing that report against the
@@ -375,3 +384,97 @@ caveat, unchanged); `CMD_Picture`'s `0xFF` arm still mutates its flags at
 presentation time rather than execution time — harmless for everything the
 goldens and the shipped scripts reach, and noted here rather than fixed inside
 a slice that did not own it.
+
+## 7. Slice 3: the items/roster/mechanics tail, TREASURE/XP, PARLAY (G5)
+
+### 7.1 ★ Task 0 answered: the quest NPCs join through `ADD NPC`, and the census was blind to it
+
+**Verdict: `ADD NPC` (0x36) is the join mechanism, it is used in shipped
+playthrough content, and it gets a full implementation.** The premise that its
+only uses were the attract-mode demo's was an artifact of the census tool, not
+a fact about the game.
+
+**The tool bug.** `disassemble()` gives `IF` a `SuccessorKind::Branch` that
+enqueued only the *guarded* instruction — the skip successor (the IF-FALSE
+path) was reached incidentally, through that instruction's own fall-through.
+That works while the guarded instruction is `Sequential`. It fails completely
+for `IF <cmp>` + `GOTO`, because `GOTO` is a `Jump` and has no fall-through —
+and `IF <cmp>` + `GOTO` **is** the conditional branch every ECL block is built
+out of. `IF` + `EXIT`/`RETURN` (the early-return idiom) failed the same way.
+`handle_branch_skip` now enqueues the skip target whenever it agrees with the
+guarded instruction's real decoded length (the divergent case still
+quarantines, unchanged — that decode is untrusted by construction).
+
+**What it cost.** Reached instructions went **3,582 → 14,183** on the same 25
+blocks, with **zero decode hazards** and per-block code coverage rising to
+70–98% for most blocks. Roughly three quarters of the shipped scripts were
+being reported as inert data.
+
+**The six join sites** (found by the corrected traversal, monster ids resolved
+against `MON{area}CHA.DAX`):
+
+| site | operands | who |
+|---|---|---|
+| `ECL3#17 @0x8D0F` | `ADD NPC 0x16, 0x64` | ALIAS (`MON3CHA` block 22) |
+| `ECL3#17 @0x8D14` | `ADD NPC 0x17, 0x64` | DRAGONBAIT (`MON3CHA` block 23) |
+| `ECL3#18 @0x9010` | `ADD NPC 0x16, 0x64` | ALIAS (the second quest path) |
+| `ECL3#18 @0x9015` | `ADD NPC 0x17, 0x64` | DRAGONBAIT |
+| `ECL5#49 @0x8BCE` | `ADD NPC 0x3B, 0x64` | AKABAR BEL AKAS (`MON5CHA` block 59) |
+| `ECL6#66 @0x8A04` | `ADD NPC 0x43, 0x64` | RAKSHASA (`MON6CHA` block 67) |
+
+`ECL3#17`'s site reads, in order: `PRINTCLEAR` (the introduction text) →
+`ADD NPC 0x16` → `ADD NPC 0x17` → `SAVE 0x80, 0x4C2E` (the quest flag) →
+three more lines. The decoded block text at that offset is
+"THE FIGHTER INTRODUCES HERSELF AS ALIAS AND HER COMPANION AS DRAGONBAIT."
+followed by "ALIAS AND DRAGONBAIT JOIN YOUR PARTY."
+
+The last row is worth its own line: **area 6 recruits a RAKSHASA into the
+party**. The record carries `control_morale = 0xB2`, which `CMD_AddNPC`
+recomputes to the same value from its own operand (`(0x64 >> 1) + 0x80`).
+
+**The corroborating negatives**, all independently checked this session:
+`gbl.TeamList.Add`/`.Insert` has exactly five call sites in the whole
+reference source — `CMD_LoadMonster`'s two monster spawns (`ovr003.cs:263`,
+`:290`), `SetupDuel`'s cloned opponent (`ovr008.cs:1336`), camp's
+reorder-in-place (`ovr016.cs:657`/`:661`/`:676`/`:680`, a `RemoveAt` +
+re-`Insert` of a member already on the list), and `AssignPlayerIconId`
+(`ovr017.cs:896`), whose only caller is `load_npc`, whose only caller is
+`CMD_AddNPC`. The shipped GOG save's nine slots all hold the same six
+player-generated characters with `control_morale == 0` — **no NPC arrives
+pre-joined**. `Nacacia` and `Olive Ruskettle` have no `MON*CHA` record in any
+area and therefore can never occupy a roster slot at all: the cluebook's
+"joinable NPC" list is looser than the engine's. The engine's real list is
+Alias, Dragonbait, Akabar — plus the area-6 impostor.
+
+**Leaving is the mirror, and it is also shipped**: `ECL5#48 @0x809B` walks
+slots 0..7 with `LOAD CHARACTER`, tests `control_morale >= 0x80` at `0x7CB8`,
+name-matches at `0x7C00`, and calls `DUMP` (0x3E → `FreeCurrentPlayer`) — the
+Akabar farewell.
+
+### 7.2 The corrected dashboard
+
+Same command, same data, after the traversal fix — **6 files, 25 blocks,
+14,183 reached instructions, zero decode hazards**. The tail this slice
+inherited is much bigger than §0 claimed, and G10's "demo-only" carve-out for
+CLEAR BOX/PROGRAM/ADD NPC is **withdrawn**: all three are playthrough content.
+
+| op | name | §0 said | really | this slice |
+|---|---|---|---|---|
+| 0x0A | LOAD CHARACTER | 4 | **42** | implemented |
+| 0x27 | TREASURE | 4 | **63** | implemented |
+| 0x2C | PARLAY | 1 | **15** | implemented |
+| 0x2E | DAMAGE | 1 | **24** | implemented |
+| 0x32 | FIND ITEM | 2 | **8** | implemented |
+| 0x35 | SAVE TABLE | 1 | **8** | implemented |
+| 0x36 | ADD NPC | 3 *(demo)* | **9** | implemented |
+| 0x38 | PROGRAM | 1 *(demo)* | **13** | implemented (cases 0/3/8/9) |
+| 0x3D | CLEAR BOX | 3 *(demo)* | **17** | implemented |
+| 0x3E | DUMP | — | **5** | implemented (ADD NPC's mirror) |
+| 0x3F | FIND SPECIAL | — | **2** | implemented (FIND ITEM's twin) |
+| 0x40 | DESTROY ITEMS | 5 | **13** | implemented |
+
+**Newly visible and still open** (named here rather than discovered later):
+`ROB` (0x28, 10 uses), `WHO` (0x39, 7), `INPUT STRING` (0x10, 5), `SPELL`
+(0x3B, 2). None are in this slice's brief; all four have their
+`EngineServices` seams already declared. `CHECKPARTY` (0x1E, 1) and
+`PROTECTION` (0x3C, 1) are likewise reached and stubbed.

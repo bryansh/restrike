@@ -267,16 +267,35 @@ fn add_target(
     enqueue(worklist, queued, target);
 }
 
-/// Computes an IF instruction's skip successor and, if it diverges from the
-/// following opcode's real decoded length, quarantines it. `next_addr` is
-/// the IF's fall-through address — also where the maybe-skipped instruction
-/// starts.
+/// Computes an IF instruction's skip successor, **enqueues it as reachable
+/// code**, and — if it diverges from the following opcode's real decoded
+/// length — quarantines it instead. `next_addr` is the IF's fall-through
+/// address, which is also where the maybe-skipped instruction starts.
+///
+/// ★ **The IF-false path is a real successor** (roll-credits slice 3). An
+/// `IF` has two outcomes and the traversal must follow both: the guarded
+/// instruction at `next_addr`, and the instruction *after* it when the flag
+/// says skip. Until this slice, only the first was enqueued — the skip
+/// target was reached only incidentally, through the guarded instruction's
+/// own fall-through. That is fine while the guarded instruction is
+/// `Sequential`, and **wrong the moment it is a `GOTO`, `EXIT` or `RETURN`**
+/// (`SuccessorKind::Jump`/`Terminal`, which have no fall-through): the
+/// canonical `IF <cmp>` + `GOTO` conditional-branch idiom, which every
+/// shipped block is built out of, left its entire false arm reported as
+/// inert data.
+///
+/// The cost of that gap was not academic: the census's "reached" set missed
+/// roughly a third of the shipped scripts, including **all six of the game's
+/// `ADD NPC` sites** — which is why `ADD NPC` looked like an attract-mode-only
+/// opcode (roll-credits G5). See §7 of `docs/design/roll-credits.md`.
 fn handle_branch_skip(
     bytes: &BlockBytes,
     dialect: &Dialect,
     if_addr: u16,
     next_addr: u16,
     listing: &mut Listing,
+    worklist: &mut VecDeque<u16>,
+    queued: &mut BTreeSet<u16>,
 ) {
     let skip_opcode = bytes.get(next_addr);
     let Some(skip_info) = dialect.lookup(skip_opcode) else {
@@ -294,9 +313,12 @@ fn handle_branch_skip(
 
     let normal_next = decode(bytes, next_addr, dialect).ok().map(|i| i.next);
     if normal_next == Some(skip_target) {
-        // Skip size matches real operand consumption: the "skip successor"
-        // is just the ordinary continuation, already reached by next_addr's
-        // own normal decode. Not a hazard.
+        // Skip size matches real operand consumption: the skip successor is
+        // the guarded instruction's own continuation address, and decoding
+        // there is trustworthy. Not a hazard — but still a successor, so it
+        // is enqueued (a no-op when the guarded instruction falls through
+        // and has already queued it; the *only* way in when it does not).
+        enqueue(worklist, queued, skip_target);
         return;
     }
 
@@ -406,7 +428,15 @@ pub fn disassemble(bytes: &BlockBytes, dialect: &Dialect, entry_points: &[u16]) 
             }
             SuccessorKind::Branch => {
                 enqueue(&mut worklist, &mut queued, next);
-                handle_branch_skip(bytes, dialect, addr, next, &mut listing);
+                handle_branch_skip(
+                    bytes,
+                    dialect,
+                    addr,
+                    next,
+                    &mut listing,
+                    &mut worklist,
+                    &mut queued,
+                );
             }
         }
 
@@ -557,6 +587,65 @@ mod tests {
         assert!(listing.hazards.is_empty());
         assert!(listing.quarantine.is_empty());
         assert_eq!(listing.instructions.len(), 3);
+    }
+
+    /// ★ The conditional-branch idiom every shipped block is built from:
+    /// `IF <cmp>` + `GOTO elsewhere`, whose FALSE arm is the byte right after
+    /// the GOTO. The GOTO has no fall-through successor, so before
+    /// roll-credits slice 3 the whole false arm was reported as data — the
+    /// gap that hid all six `ADD NPC` sites from the census (G5).
+    #[test]
+    fn if_over_a_goto_still_reaches_the_false_arm() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x16); // IF =
+        b.op(0x01).imm_word_label("taken"); // GOTO taken  (runs when the flag is set)
+        b.label("false_arm");
+        b.op(0x04).imm_byte(1).imm_byte(2).imm_byte(3); // ADD — the skipped-to path
+        b.op(0x00); // EXIT
+        b.label("taken");
+        b.op(0x00); // EXIT
+
+        let entry = b.addr_of("entry");
+        let false_arm = b.addr_of("false_arm");
+        let taken = b.addr_of("taken");
+        let block = b.build();
+        let listing = disassemble(&block, &COTAB, &[entry]);
+
+        assert!(listing.hazards.is_empty(), "{:?}", listing.hazards);
+        assert!(
+            listing.instructions.contains_key(&false_arm),
+            "the IF's false arm must be traversed, not reported as data"
+        );
+        assert!(listing.instructions.contains_key(&taken));
+        assert!(
+            !listing
+                .data_regions
+                .iter()
+                .any(|r| r.start <= false_arm && false_arm < r.start + r.len),
+            "the false arm must not land in a data region"
+        );
+    }
+
+    /// The same shape with a `Terminal` guarded instruction (`EXIT`): the
+    /// early-return script pattern `IF <> ; EXIT ; <rest>`.
+    #[test]
+    fn if_over_an_exit_still_reaches_the_false_arm() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x16); // IF =
+        b.op(0x00); // EXIT (runs when the flag is set)
+        b.label("rest");
+        b.op(0x04).imm_byte(1).imm_byte(2).imm_byte(3); // ADD
+        b.op(0x00); // EXIT
+
+        let entry = b.addr_of("entry");
+        let rest = b.addr_of("rest");
+        let block = b.build();
+        let listing = disassemble(&block, &COTAB, &[entry]);
+
+        assert!(listing.hazards.is_empty(), "{:?}", listing.hazards);
+        assert!(listing.instructions.contains_key(&rest));
     }
 
     #[test]
