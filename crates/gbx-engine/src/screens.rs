@@ -23,6 +23,11 @@ use crate::widgets::{Hotbar, Widget, WidgetOutcome};
 pub enum ReturnTo {
     World,
     Camp,
+    /// The death screen (`Shell::GameOver`) — the save/load screen opened as
+    /// the party-wipe recovery. Declining the load goes back to the death
+    /// screen, never into the world: the original's post-wipe `startGameMenu`
+    /// has no `BEGIN Adventuring` to press (`ovr018.cs:103-114`).
+    GameOver,
 }
 
 /// One screen's result this tick.
@@ -34,6 +39,8 @@ pub enum ScreenTransition {
     /// Replace this screen with another (sub-menu entry, or a sub-screen
     /// returning to its parent).
     To(Screen),
+    /// Back to the death screen ([`ReturnTo::GameOver`]).
+    ToGameOver,
 }
 
 /// The M3 party-facing screens. `Shell::Screen` holds one of these.
@@ -142,6 +149,10 @@ impl PartyView {
         match self.return_to {
             ReturnTo::World => ScreenTransition::Exit,
             ReturnTo::Camp => ScreenTransition::To(Screen::Camp(Camp::new(ctx))),
+            // Unreachable by construction (only the save/load screen is ever
+            // opened from the death screen), but "back where you came from" is
+            // the right answer for any screen that ever is.
+            ReturnTo::GameOver => ScreenTransition::ToGameOver,
         }
     }
 
@@ -149,10 +160,7 @@ impl PartyView {
         let count = ctx.roster.members.len();
         if count == 0 {
             // Nothing to view (no party imported/created) — leave immediately.
-            return match self.return_to {
-                ReturnTo::World => ScreenTransition::Exit,
-                ReturnTo::Camp => ScreenTransition::To(Screen::Camp(Camp::new(ctx))),
-            };
+            return self.exit(ctx);
         }
         self.selected = self.selected.min(count - 1);
 
@@ -576,12 +584,26 @@ impl SaveLoad {
         }
     }
 
+    /// The party-wipe recovery screen: straight into the slot list, no
+    /// chooser. The original's post-wipe `startGameMenu` disables Save
+    /// outright (`menuFlags[allow_save] = false`, `ovr018.cs:110`) and leaves
+    /// Load as the only door back into the game — offering "Save" to a party
+    /// that no longer exists would be our invention, not the original's.
+    pub fn new_recovery(ctx: &FlowCtx) -> Self {
+        SaveLoad {
+            phase: SlPhase::Pick(SlMode::Load),
+            menu: menu_bar(&load_bar_text(ctx)),
+            return_to: ReturnTo::GameOver,
+        }
+    }
+
     fn exit(&self) -> ScreenTransition {
         match self.return_to {
             ReturnTo::World => ScreenTransition::Exit,
             // Rebuild camp fresh (its menu is stateless); a status hint would
             // need the outcome of the host's I/O, which isn't known here.
             ReturnTo::Camp => ScreenTransition::To(Screen::Camp(camp_after_saveload())),
+            ReturnTo::GameOver => ScreenTransition::ToGameOver,
         }
     }
 
@@ -626,8 +648,12 @@ impl SaveLoad {
                 _ => ScreenTransition::Stay,
             },
             SlPhase::Pick(mode) => {
-                // Escape / null returns to the chooser rather than leaving.
+                // Escape / null returns to the chooser rather than leaving —
+                // except on the wipe-recovery screen, which never had one.
                 if key == 0 {
+                    if self.return_to == ReturnTo::GameOver {
+                        return self.exit();
+                    }
                     self.phase = SlPhase::Choose;
                     self.menu = menu_bar("Save Load Exit");
                     return ScreenTransition::Stay;
@@ -720,6 +746,7 @@ impl Training {
         match self.return_to {
             ReturnTo::World => ScreenTransition::Exit,
             ReturnTo::Camp => ScreenTransition::To(Screen::Camp(Camp::new(ctx))),
+            ReturnTo::GameOver => ScreenTransition::ToGameOver,
         }
     }
 

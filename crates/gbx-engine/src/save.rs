@@ -413,7 +413,7 @@ mod tests {
             gbx_vm::EclMachine::load_block(block, &COTAB).unwrap_or_else(|never| match never {});
         SaveState {
             ecl: machine.snapshot(),
-            shell: crate::shell::Shell::GameOver,
+            shell: crate::shell::Shell::GameOver(crate::shell::GameOverFlow::awaiting_key()),
             state: EngineState::new(),
             palette: gbx_rules::palette::EGA_PALETTE,
             cursor: TextCursor::new(),

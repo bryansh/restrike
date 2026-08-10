@@ -402,7 +402,7 @@ fn a_wiped_partys_final_beats_all_play_before_the_game_over_unwind() {
         if e.state().party_killed && flag_set_at.is_none() {
             flag_set_at = Some(tick_no);
         }
-        if matches!(e.shell(), Shell::GameOver) {
+        if matches!(e.shell(), Shell::GameOver(_)) {
             game_over_at = Some(tick_no);
             break;
         }

@@ -2329,7 +2329,7 @@ impl BarBrawl {
                 o.party_killed = true;
                 self.dump("08-screen-restored");
             }
-            if matches!(self.engine.shell(), Shell::GameOver) {
+            if matches!(self.engine.shell(), Shell::GameOver(_)) {
                 o.game_over_tick = Some(tick);
                 self.dump("09-game-over");
                 break;
@@ -2360,4 +2360,74 @@ impl BarBrawl {
         eprintln!("[5] last combat text: {tail:?}");
         o
     }
+}
+
+/// ★ The **death screen**, for eyeballing (roll-credits slice 0, G0):
+/// `AfterCombatExpAndTreasure`'s wipe branch (`ovr006.cs:801-809`) — the outer
+/// frame, "The monsters rejoice for the party has been destroyed" printing into
+/// its `yStart=5, xStart=2` box, and `DisplayAndPause`'s "Press any key to
+/// continue" on the prompt row — then the recovery load list.
+///
+/// Dumps three `.ppm` frames outside the repo (D10). Local-only.
+///
+/// Run: `GBX_DATA_DIR=~/goldbox-data/cotab cargo test -p gbx-engine \
+///   -- --nocapture --ignored the_death_screen_and_its_recovery`
+#[test]
+#[ignore]
+fn the_death_screen_and_its_recovery() {
+    use crate::engine::Engine;
+    use crate::shell::Shell;
+
+    let Some(root) = std::env::var_os("GBX_DATA_DIR") else {
+        eprintln!("SKIPPED: needs GBX_DATA_DIR (the_death_screen_and_its_recovery)");
+        return;
+    };
+    let root = std::path::Path::new(&root);
+    let data = load_dir(root).expect("GBX_DATA_DIR must be readable");
+    let saves = load_dir(&root.join("SAVE")).expect("GBX_DATA_DIR/SAVE must be readable");
+    let master = saves.raw_file("SAVGAMA.DAT").expect("slot A must exist");
+    let set = gbx_formats::save_orig::load_from_lookup(master, 'A', |n| saves.raw_file(n))
+        .expect("slot A must parse");
+    let mut engine = crate::import::import_original(&set, data, 1).expect("slot A must import");
+    engine.set_slot_directory(crate::saveload_fs::scan_slot_directory(&root.join("SAVE")));
+
+    let out_dir = std::env::temp_dir();
+    let dump = |engine: &mut Engine, name: &str| {
+        let f = engine.tick(&[]);
+        let mut fb = Framebuffer::new();
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                fb.set_pixel(x, y, f.pixels[y * WIDTH + x]);
+            }
+        }
+        let path = out_dir.join(format!("restrike-{name}.ppm"));
+        write_ppm(&fb, &path);
+        eprintln!("  {name} -> {}", path.display());
+    };
+
+    for _ in 0..200 {
+        engine.tick(&[]);
+        if matches!(engine.shell(), Shell::WorldMenu { .. }) {
+            break;
+        }
+        if engine.shell().gate_open() {
+            engine.tick(&[InputEvent::Enter]);
+        }
+    }
+
+    engine.state.party_killed = true;
+    engine.tick(&[]);
+    dump(&mut engine, "gameover-1-message");
+    for _ in 0..600 {
+        engine.tick(&[]);
+        if engine.probe() == "game-over/press-any-key" {
+            break;
+        }
+    }
+    assert_eq!(engine.probe(), "game-over/press-any-key");
+    dump(&mut engine, "gameover-2-press-any-key");
+
+    engine.tick(&[InputEvent::Char(b' ')]);
+    dump(&mut engine, "gameover-3-recovery-load-list");
+    eprintln!("  recovery slots: {:?}", engine.slot_directory());
 }

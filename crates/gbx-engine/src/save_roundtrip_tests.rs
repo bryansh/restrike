@@ -651,6 +651,95 @@ fn a_camp_save_then_load_restores_the_saved_state() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Ticks until `probe()` says `want`, or panics with what it actually said.
+fn tick_until_probe(engine: &mut Engine, want: &str, limit: usize) {
+    for _ in 0..limit {
+        engine.tick(&[]);
+        if engine.probe() == want {
+            return;
+        }
+    }
+    panic!(
+        "never reached {want:?} — stuck at {:?} after {limit} ticks",
+        engine.probe()
+    );
+}
+
+/// ★ **The party-wipe recovery, end to end** (roll-credits G0): a wiped
+/// playthrough is resumable from the last save without restarting the process.
+///
+/// The original's death path unwinds to `startGameMenu` with the party cleared
+/// and `Load Saved Game` the only door back in (`ovr006.cs:801-809` →
+/// `ovr003.cs:2392-2394` → `seg001.cs:133-153` → `ovr018.cs:103-114`). This
+/// walks ours: wipe → the death screen → a key → the load list → a slot → the
+/// state that was saved before the party died.
+#[test]
+fn a_party_wipe_recovers_through_the_load_screen() {
+    use crate::saveload::SaveLoadRequest;
+    use crate::saveload_fs::{fulfill, save_to_slot, scan_slot_directory};
+    use crate::shell::Shell;
+
+    let dir = std::env::temp_dir().join(format!("restrike-slice0-wipe-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let mut engine = imported_engine();
+    for _ in 0..20 {
+        engine.tick(&[]);
+    }
+    save_to_slot(&engine, &dir, 'A').expect("bank a save before dying");
+    engine.set_slot_directory(scan_slot_directory(&dir));
+    let alive = engine.save();
+
+    // The wipe. `party_killed` is what a lost fight raises
+    // (`tick_combat` → `CombatOutcome::MonstersWin`).
+    let before = engine.tick(&[]).hash_hex();
+    engine.state.party_killed = true;
+    let dying = engine.tick(&[]).hash_hex();
+    assert!(matches!(engine.shell(), Shell::GameOver(_)));
+    assert!(!engine.state().party_killed, "the flag is consumed at once");
+    assert_ne!(before, dying, "the death screen is on the glass");
+    assert_eq!(engine.probe(), "game-over/message");
+
+    // The message paces out (`press_any_key`'s own printer), then the
+    // `DisplayAndPause` gate arms.
+    tick_until_probe(&mut engine, "game-over/press-any-key", 600);
+
+    // Declining the recovery goes back to the death screen — never into the
+    // world with a dead party.
+    engine.tick(&[crate::input::InputEvent::Char(b' ')]);
+    assert_eq!(engine.probe(), "screen", "the load list opened");
+    engine.tick(&[crate::input::InputEvent::Escape]);
+    engine.tick(&[]);
+    assert!(
+        matches!(engine.shell(), Shell::GameOver(_)),
+        "Exit from the recovery list returns to the death screen"
+    );
+
+    // Take the load this time.
+    tick_until_probe(&mut engine, "game-over/press-any-key", 600);
+    engine.tick(&[crate::input::InputEvent::Char(b' ')]);
+    engine.tick(&[crate::input::InputEvent::Char(b'A')]);
+    let request = engine
+        .take_io_request()
+        .expect("picking a slot on the recovery screen emits a Load");
+    assert_eq!(request, SaveLoadRequest::Load('A'));
+    fulfill(&mut engine, request, &dir, synthetic_game_data(), 7)
+        .expect("the host fulfills the recovery Load");
+    engine.recompose_world_screen();
+
+    assert_eq!(
+        engine.save(),
+        alive,
+        "the recovered engine is the one that was saved before the wipe"
+    );
+    assert!(
+        !matches!(engine.shell(), Shell::GameOver(_)),
+        "and the game is playable again"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A host notice is drawn for the player and then retires itself — the M6
 /// forensics rule made mechanical. Pixels only move because a *host* asked
 /// them to, which is why no golden is affected by this path existing.

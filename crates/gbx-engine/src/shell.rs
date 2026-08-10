@@ -1536,6 +1536,152 @@ impl StepFlow {
     }
 }
 
+// --- The total party kill (roll-credits slice 0, G0) ---
+
+/// `AfterCombatExpAndTreasure`'s wipe branch (`ovr006.cs:801-809`), verbatim.
+/// 36 columns of box (`xStart = 2 .. xEnd = 0x25`) wrap it onto two lines.
+const WIPE_TEXT: &str = "The monsters rejoice for the party has been destroyed";
+
+/// `press_any_key(..., yEnd = 0x16, xEnd = 0x25, yStart = 5, xStart = 2)`
+/// (`ovr006.cs:807`) — the box the death message prints into.
+const WIPE_TEXT_REGION: crate::text::TextRegion = crate::text::TextRegion {
+    y_start: 5,
+    y_end: 0x16,
+    x_start: 2,
+    x_end: 0x25,
+};
+
+/// `DisplayAndPause("Press any key to continue", 13)` (`ovr006.cs:808`) —
+/// `ClearPromptAreaNoUpdate`, then this at row 0x18 col 0 in colour 13, then
+/// a blocking `GetInputKey`.
+const WIPE_PROMPT: &str = "Press any key to continue";
+const WIPE_PROMPT_COLOR: u8 = 13;
+
+/// ★ **The party wipe** (`ovr006.cs:801-809` for the screen; `seg001.cs:133-153`
+/// for what happens next).
+///
+/// The original's death path is not a special state at all — it is three
+/// nested loops unwinding on one global. `CleanupPlayersStateAfterCombat`
+/// (`ovr006.cs:169-231`) assumes the party dead and lets any living, non-NPC
+/// member of `CombatTeam.Ours` disprove it; on a real wipe
+/// `AfterCombatExpAndTreasure` takes its `else` branch (`ovr006.cs:784`) —
+/// **no experience, no treasure, no combat-results screen** — draws the outer
+/// frame, prints the message and waits for a key. Then `party_killed` fails
+/// `RunEclVm`'s loop condition (`ovr003.cs:2154-2155`), fails the exploration
+/// loop's `while` (`ovr003.cs:2392`), and `sub_29758` returns into
+/// `seg001.Main`'s `while (true)`, which calls `InitAgain()` — clearing
+/// `TeamList` outright (`seg001.cs:364`) — and re-enters `startGameMenu`. With
+/// a null party that menu offers exactly four things (`ovr018.cs:103-114`):
+/// Create, Add, **Load Saved Game**, Exit; `BEGIN Adventuring` and `Save` are
+/// disabled. `loadGameMenu` is reached only if the player presses `L`
+/// (`ovr018.cs:223-228`).
+///
+/// **Our mapping.** We have no character creation and no start menu (M7+
+/// territory), so the branch of `startGameMenu` that actually matters here —
+/// the one and only way back into the game with a dead party — is the load
+/// list, and that is what we open: the save/load screen, in the same
+/// host-injected slot directory the camp Save screen uses. `ReturnTo::GameOver`
+/// keeps the loop honest in the original's own terms: declining the load puts
+/// the player back on the death screen, never into the world with a dead party
+/// (a state the original cannot express, since `InitAgain` already threw the
+/// party away). A load replaces the whole engine, which is where the recovery
+/// completes — the host's job, exactly as in `frontends/desktop`.
+///
+/// Deliberately NOT transcribed: `InitAgain`'s own resets. Every one of them
+/// (`TeamList.Clear()`, `SelectedPlayer = null`, the position/area defaults) is
+/// preparation for a menu we do not have, and clearing our roster before the
+/// load would only make a failed load unrecoverable. `field_58E = 0x80`
+/// (`ovr006.cs:803`) is the ECL-readable "party was destroyed" cell — no
+/// shipped script reads it on this path, and Area2's cell modelling is slice
+/// 1's business.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GameOverFlow {
+    /// The message being printed (`press_any_key`'s own paced, wrapping,
+    /// paginating job). `None` once it has finished.
+    job: Option<TextJob>,
+    /// `DisplayAndPause`'s blocking `GetInputKey`, armed once the message is
+    /// fully on screen.
+    gate: Option<Widget>,
+}
+
+impl GameOverFlow {
+    /// Paints the death screen and starts the message printing
+    /// (`ovr006.cs:802-807`).
+    fn start(ctx: &mut FlowCtx) -> Self {
+        // A fixture engine with no symbol set 4 gets no border, exactly as
+        // the screens' own `draw_frame_outer` calls already tolerate.
+        let _ = crate::frames::draw_frame_outer(ctx.fb, ctx.symbols);
+        // `gbl.textXCol = 2; gbl.textYCol = 6;` (`ovr006.cs:805-806`) — then
+        // `press_any_key`'s `clear_first` resets the cursor to the box origin
+        // anyway (`seg041.cs:151-158`), which is what actually places the text.
+        ctx.cursor.col = 2;
+        ctx.cursor.row = 6;
+        let job = TextJob::new(WIPE_TEXT, 10, WIPE_TEXT_REGION, true, ctx.cursor, ctx.fb);
+        GameOverFlow {
+            job: Some(job),
+            gate: None,
+        }
+    }
+
+    /// The state a death screen is in once its message has finished printing
+    /// and only the keypress is outstanding — constructible without a
+    /// `FlowCtx` (which [`GameOverFlow::start`] needs in order to *draw*), for
+    /// fixtures and serde round-trips.
+    pub fn awaiting_key() -> Self {
+        GameOverFlow {
+            job: None,
+            gate: Some(Widget::PressAnyKey(PressAnyKey)),
+        }
+    }
+
+    /// `Some(())` once the player has acknowledged the death screen and the
+    /// caller should open the recovery (load) screen.
+    fn tick(&mut self, ctx: &mut FlowCtx) -> Option<()> {
+        if let Some(job) = &mut self.job {
+            let tick_ms = 1000.0 / crate::input::TICK_HZ as f64;
+            let budget = ctx.pacer.tick(tick_ms);
+            match job.advance(budget, ctx.fb, ctx.font, ctx.cursor) {
+                JobStatus::Continuing => return None,
+                // The message is two lines in an eighteen-row box, so this is
+                // unreachable in practice — handled rather than assumed.
+                JobStatus::NeedsKey => {
+                    if matches!(
+                        Widget::PressAnyKey(PressAnyKey).tick(ctx.input, ctx.dt_ticks),
+                        WidgetOutcome::Done
+                    ) {
+                        job.release(ctx.fb);
+                        ctx.input.clear();
+                    }
+                    return None;
+                }
+                JobStatus::Done => {
+                    self.job = None;
+                    // `DisplayAndPause` (`seg041.cs:297-303`).
+                    crate::combat::scene::render::clear_prompt_line(ctx.fb);
+                    crate::text::draw_string(
+                        ctx.fb,
+                        ctx.font,
+                        WIPE_PROMPT,
+                        0x18,
+                        0,
+                        0,
+                        WIPE_PROMPT_COLOR,
+                    );
+                    self.gate = Some(Widget::PressAnyKey(PressAnyKey));
+                }
+            }
+        }
+        let gate = self.gate.as_mut()?;
+        match gate.tick(ctx.input, ctx.dt_ticks) {
+            WidgetOutcome::Done => {
+                ctx.input.clear(); // `clear_keyboard` after the acknowledgement
+                Some(())
+            }
+            _ => None,
+        }
+    }
+}
+
 /// The UI shell (D-UI2): `Boot`/`WorldMenu`/`Step`/`GameOver`, plus `Look`
 /// as its own explicit variant (the `'L'` sub-loop, distinct from
 /// `WorldMenu` and `Step` — both this session's required resume-after-chain
@@ -1548,7 +1694,7 @@ pub enum Shell {
     },
     Look(LookFlow),
     Step(StepFlow),
-    GameOver,
+    GameOver(GameOverFlow),
     /// The M3 step-6 party-facing menu screens (character sheet, camp,
     /// save/load, training, shops) — additive, no VM vector runs here; each
     /// is a parked-widget screen (`crate::screens`).
@@ -1582,7 +1728,10 @@ impl Shell {
                 .door_widget
                 .as_ref()
                 .or_else(|| from_run(&f.run, &f.chain)),
-            Shell::GameOver | Shell::Screen(_) => None,
+            // The death screen's own gate draws nothing on the prompt row
+            // (`DisplayAndPause` already put its line there), so it is not a
+            // `parked_widget` for drawing purposes — see [`GameOverFlow`].
+            Shell::GameOver(_) | Shell::Screen(_) => None,
         }
     }
 
@@ -1633,7 +1782,11 @@ impl Shell {
             Shell::WorldMenu { .. } => "world-menu".to_string(),
             Shell::Look(f) => format!("look/{}", run_probe(&f.run, &f.chain)),
             Shell::Step(f) => format!("step/{}", run_probe(&f.run, &f.chain)),
-            Shell::GameOver => "game-over".to_string(),
+            Shell::GameOver(f) => match (&f.job, &f.gate) {
+                (Some(_), _) => "game-over/message".to_string(),
+                (None, Some(_)) => "game-over/press-any-key".to_string(),
+                _ => "game-over".to_string(),
+            },
             Shell::Screen(_) => "screen".to_string(),
         }
     }
@@ -1735,7 +1888,10 @@ impl Shell {
             Shell::WorldMenu { .. } => true,
             Shell::Look(l) => run_gated(&l.run) || chain_gated(&l.chain),
             Shell::Step(s) => s.door_widget.is_some() || run_gated(&s.run) || chain_gated(&s.chain),
-            Shell::GameOver => false,
+            // The death screen is an interaction like any other: a message
+            // pacing out, then a keypress gate. No vector may pump under it —
+            // and none would, since `party_killed` unwound them all.
+            Shell::GameOver(_) => true,
             // A screen always has a parked widget (its command bar/list); no
             // VM vector ever runs while one is open.
             Shell::Screen(_) => true,
@@ -1745,7 +1901,10 @@ impl Shell {
     /// Advances the whole shell by one tick.
     pub fn tick(&mut self, ctx: &mut FlowCtx) {
         if ctx.state.party_killed {
-            *self = Shell::GameOver;
+            *self = Shell::GameOver(GameOverFlow::start(ctx));
+            // `ovr003.cs:2394`: the flag is consumed the moment the loop it
+            // broke has exited — the death *screen* is a separate state, not
+            // the flag's continued life.
             ctx.state.party_killed = false;
             return;
         }
@@ -1781,7 +1940,15 @@ impl Shell {
                     *self = Self::enter_world_menu(ctx);
                 }
             }
-            Shell::GameOver => {}
+            Shell::GameOver(flow) => {
+                if flow.tick(ctx).is_some() {
+                    // The original's `startGameMenu`-with-a-dead-party offers
+                    // one way back into the game: Load. That is this screen.
+                    *self = Shell::Screen(crate::screens::Screen::SaveLoad(
+                        crate::screens::SaveLoad::new_recovery(ctx),
+                    ));
+                }
+            }
             Shell::Screen(screen) => {
                 use crate::screens::ScreenTransition;
                 match screen.tick(ctx) {
@@ -1791,6 +1958,11 @@ impl Shell {
                         *self = Self::enter_world_menu(ctx);
                     }
                     ScreenTransition::To(next) => *self = Shell::Screen(next),
+                    // Declined the recovery load: back to the death screen,
+                    // repainted from scratch (the load list overwrote it).
+                    ScreenTransition::ToGameOver => {
+                        *self = Shell::GameOver(GameOverFlow::start(ctx))
+                    }
                 }
             }
         }
@@ -1885,7 +2057,7 @@ impl Shell {
             Shell::Boot(b) => in_run(&b.run).or_else(|| in_chain(&b.chain)),
             Shell::Look(l) => in_run(&l.run).or_else(|| in_chain(&l.chain)),
             Shell::Step(s) => in_run(&s.run).or_else(|| in_chain(&s.chain)),
-            Shell::WorldMenu { .. } | Shell::GameOver | Shell::Screen(_) => None,
+            Shell::WorldMenu { .. } | Shell::GameOver(_) | Shell::Screen(_) => None,
         }
     }
 
@@ -1918,8 +2090,12 @@ impl Shell {
     /// layout does include the line — Camping and Shop, the two `LoadPic` arms
     /// at `ovr025.cs:1425`/`:1432` — draw it themselves, as part of their own
     /// composition (`crate::screens::draw_position_time`).
+    /// The death screen is excluded for the same reason: `DrawFrame_Outer`
+    /// wiped the whole interior and `AfterCombatExpAndTreasure`'s wipe branch
+    /// draws nothing but the message and the prompt (`ovr006.cs:801-809`) —
+    /// there is no map position to report when there is no party.
     pub fn draws_engine_status_line(&self) -> bool {
-        self.combat_host().is_none() && !matches!(self, Shell::Screen(_))
+        self.combat_host().is_none() && !matches!(self, Shell::Screen(_) | Shell::GameOver(_))
     }
 }
 
@@ -2449,7 +2625,7 @@ mod tests {
         h.state.party_killed = true;
         let mut ctx = h.ctx();
         shell.tick(&mut ctx);
-        assert!(matches!(shell, Shell::GameOver));
+        assert!(matches!(shell, Shell::GameOver(_)));
         assert!(!h.state.party_killed, "the flag resets on unwind");
     }
 
@@ -2586,9 +2762,13 @@ mod tests {
         let mut h = Harness::new();
 
         assert!(matches!(
-            round_trip_shell(&Shell::GameOver),
-            Shell::GameOver
+            round_trip_shell(&Shell::GameOver(GameOverFlow::awaiting_key())),
+            Shell::GameOver(_)
         ));
+        // The death screen mid-message carries a live `TextJob` — the state a
+        // save taken during the wipe would have to reconstruct.
+        let dying = Shell::GameOver(GameOverFlow::start(&mut h.ctx()));
+        assert!(matches!(round_trip_shell(&dying), Shell::GameOver(_)));
 
         let world_menu = Shell::enter_world_menu(&mut h.ctx());
         assert!(matches!(
