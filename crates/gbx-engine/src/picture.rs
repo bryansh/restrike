@@ -519,7 +519,7 @@ pub fn compose(ctx: &mut FlowCtx) {
         ctx.fb,
         ctx.symbols,
         ctx.data,
-        ctx.game_area,
+        ctx.game_area(),
         &ctx.state.picture,
         ctx.pictures,
         fade,

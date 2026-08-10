@@ -59,7 +59,17 @@ pub const CONTAINER_VERSION: u16 = 1;
 /// middle of the payload, so a v2 save would misparse everything after it:
 /// reject-not-migrate, hard version bump. The committed golden was recomputed
 /// in the same commit.
-pub const SAVE_FORMAT_VERSION: u32 = 3;
+/// **v4** (roll-credits slice 1, area generalization — D-S1c, the one save
+/// break §3's churn rule says later slices rebase onto): `EngineState` gained
+/// four cells the engine previously did not have as state at all —
+/// `game_area`/`game_area_backup` (`gbl.game_area` was the `engine::GAME_AREA`
+/// **constant** until this slice; a save carried no area, so a restore could
+/// only ever land back in Tilverton), `last_pos`
+/// (`area_ptr.lastXPos`/`lastYPos`) and `can_cast_spells`. New postcard fields
+/// in the middle of the payload, so a v3 save would misparse everything after
+/// them: reject-not-migrate, hard version bump. The committed golden was
+/// recomputed in the same commit.
+pub const SAVE_FORMAT_VERSION: u32 = 4;
 
 /// This engine's one shipped flavor (M3's slice — `xxvc` is M7). An 8-byte
 /// ASCII tag rather than a numeric id, matching the header's own
@@ -340,6 +350,18 @@ pub fn load(bytes: &[u8], data: &GameData) -> Result<(ContainerHeader, SaveState
 /// because there are none stored. The VM dialect is always
 /// [`gbx_vm::COTAB`] (this codebase's one shipped dialect; the header's
 /// flavor tag is validated by [`load`] before this is ever called).
+/// The resident-map stand-in for a save/import that is **not in a dungeon**
+/// (roll-credits D-S1c). [`Engine`] holds a `GeoBlock` unconditionally, but
+/// the overland map has none — area 1 ships no `GEO1.DAX`, and the original
+/// simply never calls `Load3DMap` on that arm. An all-zero block parses to
+/// open ground with no walls; nothing reads it while the wilderness owns the
+/// screen (roll-credits slice 7 owns that presentation), and the next
+/// `LOAD FILES` back indoors replaces it wholesale.
+pub(crate) fn blank_geo() -> gbx_formats::geo::GeoBlock {
+    gbx_formats::geo::GeoBlock::parse(&vec![0u8; gbx_formats::geo::GEO_BLOCK_SIZE])
+        .expect("an all-zero GEO block is always parseable")
+}
+
 pub(crate) fn rebuild_engine(
     header: &ContainerHeader,
     state: SaveState,
@@ -348,18 +370,32 @@ pub(crate) fn rebuild_engine(
     let assets = crate::boot::boot(&data).map_err(|e| SaveError::Boot(format!("{e:?}")))?;
     let mut symbol_sets = assets.symbol_sets;
 
+    // ★ The saved area, not `engine::GAME_AREA` (roll-credits D-S1c): a save
+    // taken after a `SAVE <n>, 0x7F12` transition is in area `n`, and its
+    // resident GEO/wallset block ids are that area's — resolving them against
+    // a hardcoded 2 would silently rebuild the party into Tilverton geometry.
+    let area = state.state.game_area;
     let geo_block_id = state
         .windows
         .assets
         .map_3d_block
         .unwrap_or(crate::engine::DEFAULT_GEO_BLOCK);
-    let geo = crate::vmhost::load_geo_block(&data, crate::engine::GAME_AREA, geo_block_id)
-        .map_err(|e| SaveError::Boot(format!("{e:?}")))?;
+    // ...and only when there IS one: `loadSaveGame` reloads the 3D map inside
+    // `if (area_ptr.inDungeon != 0)` and takes `load_bigpic(0x79)` on the
+    // other arm (`ovr017.cs:1076-1095`). The overland area ships no
+    // `GEO1.DAX` at all, so an unconditional load would make every wilderness
+    // save unrestorable.
+    let geo = if state.state.game_state == crate::shell::GameState::DungeonMap {
+        crate::vmhost::load_geo_block(&data, area, geo_block_id)
+            .map_err(|e| SaveError::Boot(format!("{e:?}")))?
+    } else {
+        blank_geo()
+    };
 
     crate::vmhost::reload_walldefs(
         &mut symbol_sets,
         &data,
-        crate::engine::GAME_AREA,
+        area,
         &state.windows.assets.walldefs,
     );
 

@@ -202,6 +202,7 @@ const PARTY_WINDOW: std::ops::RangeInclusive<u16> = 0x7C00..=0x7FFF;
 /// the authority over the file's own duplicate-attribute typo on
 /// `field_18C`).
 const CLOCK_BASE: u16 = 0x4BC6;
+/// `area_ptr.inDungeon` (`Classes/Area1.cs:65-66`, DataOffset `0x1CC`).
 const IN_DUNGEON_ADDR: u16 = 0x4BE6;
 /// Both addresses set the same `byte_1EE94` redraw-dirty flag on write
 /// (research §1.5) — and under the confirmed halved mapping (see
@@ -223,6 +224,27 @@ const FORCE_REDRAW_ADDRS: [u16; 2] = [0x4BFD, 0x4BFE];
 /// raw+logged (`alter_character` is unmodelled); this one cell is named
 /// because the picture layer reads it every `PICTURE`.
 const HEAD_BLOCK_ID_ADDR: u16 = 0x7EE1;
+
+/// ★ `area2_ptr.game_area` (`Classes/Area2.cs:70-71`, `DataOffset 0x624`) —
+/// **the area switch** (roll-credits D-RC1/D-S1a). Under the Area2 window's
+/// `DataOffset = (addr - 0x7C00) * 2` mapping, `0x624 / 2 + 0x7C00 == 0x7F12`.
+///
+/// Write side: `vm_SetMemoryValue`'s Party arm calls `alter_character`, whose
+/// `switch_var == 0x312` case is `seg042.set_game_area(value)`
+/// (`ovr008.cs:654-657` → `seg042.cs:124-128`) — backup ← live, live ← value.
+/// Read side: `get_player_values`' own `arg_4 == 0x312` case returns
+/// `gbl.game_area`, the **live** global, and sets its found-flag, so
+/// `field_800_Get` (which would have answered from the Area2 struct shadow)
+/// is never consulted (`ovr008.cs:545-548`, `:833-838`).
+///
+/// The original's write *also* lands in the `area2_ptr.game_area` struct byte
+/// on its way through `field_800_Set` (`ovr008.cs:721`). That shadow is never
+/// independently observable: `SaveGame` re-syncs it *from* `gbl.game_area`
+/// before serializing (`ovr017.cs:1146`) and `loadSaveGame` reads it straight
+/// back *into* `gbl.game_area` (`:1072`). Our `.rsav` carries
+/// [`EngineState::game_area`](crate::shell::EngineState::game_area) directly,
+/// so this dispatch models the live pair only — deliberately, not by omission.
+const GAME_AREA_ADDR: u16 = 0x7F12;
 
 /// One access kind, for the unknown-access log's `(addr, kind)` dedup key
 /// (D-VM5).
@@ -590,8 +612,17 @@ pub struct EngineVmHost<'a> {
     /// `game_area`-embeds-the-filename convention `load_ecl_dax`/boot's
     /// `Load8x8D` already use.
     pub data: &'a GameData,
-    pub game_area: u8,
     pub symbols: &'a mut SymbolSets,
+}
+
+impl EngineVmHost<'_> {
+    /// The live `gbl.game_area` (roll-credits D-S1b) — read off the state at
+    /// each service call, never snapshotted at host construction: within a
+    /// single VM step a `SAVE <n>, 0x7F12` can move it, and every subsequent
+    /// `{area}`-keyed load in the original reads the new value.
+    fn game_area(&self) -> u8 {
+        self.state.game_area
+    }
 }
 
 impl EngineVmHost<'_> {
@@ -637,6 +668,9 @@ impl ScriptMemory for EngineVmHost<'_> {
         if addr == HEAD_BLOCK_ID_ADDR {
             return self.state.head_block_id as u16;
         }
+        if addr == GAME_AREA_ADDR {
+            return self.state.game_area as u16;
+        }
         if TABLE_WINDOW.contains(&addr) || PARTY_WINDOW.contains(&addr) {
             self.vm.unknown_log.record(addr, AccessKind::Read, origin);
             return self.vm.raw_words.get(&addr).copied().unwrap_or(0);
@@ -650,6 +684,10 @@ impl ScriptMemory for EngineVmHost<'_> {
         }
         if addr == HEAD_BLOCK_ID_ADDR {
             self.state.head_block_id = value as u8;
+            return;
+        }
+        if addr == GAME_AREA_ADDR {
+            self.state.set_game_area(value as u8);
             return;
         }
         if TABLE_WINDOW.contains(&addr) || PARTY_WINDOW.contains(&addr) {
@@ -887,7 +925,7 @@ impl gbx_vm::EngineServices for EngineVmHost<'_> {
             icon_block_id,
         });
         let file = gbx_formats::monster::monster_filename(
-            self.game_area,
+            self.game_area(),
             gbx_formats::monster::MonsterFile::Cha,
         );
         let block = self
@@ -1056,7 +1094,8 @@ impl gbx_vm::EngineServices for EngineVmHost<'_> {
         if let Some(entry) = self.vm.assets.walldefs.get_mut(slot) {
             *entry = Some((set, id));
         }
-        load_walldef_pixels(self.symbols, self.data, self.game_area, set, id);
+        let area = self.game_area();
+        load_walldef_pixels(self.symbols, self.data, area, set, id);
     }
 
     fn load_bigpic(&mut self, id: u8) {
@@ -1183,8 +1222,11 @@ mod tests {
         }
 
         fn with_data(data: GameData) -> Self {
+            let mut state = EngineState::new();
+            state.game_area = GAME_AREA;
+            state.game_area_backup = GAME_AREA;
             Fixture {
-                state: EngineState::new(),
+                state,
                 vm: VmMemoryState::new(),
                 geo: GeoBlock::parse(&vec![0u8; GEO_BLOCK_SIZE]).unwrap(),
                 party: DefaultPartyPredicates::default(),
@@ -1204,7 +1246,6 @@ mod tests {
                 rng: &mut self.rng,
                 sounds: &mut self.sounds,
                 data: &self.data,
-                game_area: GAME_AREA,
                 symbols: &mut self.symbols,
             }
         }
@@ -1307,6 +1348,72 @@ mod tests {
         assert_eq!(host.read(0x4BC9, origin()), 16, "hour");
         assert_eq!(host.read(0x4BC7, origin()), 0, "minutes ones (40 % 10)");
         assert_eq!(host.read(0x4BC8, origin()), 4, "minutes tens");
+    }
+
+    /// ★ D-S1a: `SAVE <n>, 0x7F12` is `seg042.set_game_area`
+    /// (`ovr008.cs:654-657` → `seg042.cs:124-128`) — backup ← live, live ←
+    /// value — and the read side answers from the LIVE global
+    /// (`get_player_values`' `arg_4 == 0x312` arm, `ovr008.cs:545-548`), never
+    /// the raw store the rest of the Party window falls back to.
+    #[test]
+    fn writing_0x7f12_is_set_game_area_and_reading_it_returns_the_live_cell() {
+        let mut f = Fixture::new();
+        let mut host = f.host();
+        assert_eq!(host.read(GAME_AREA_ADDR, origin()), GAME_AREA as u16);
+
+        host.write(GAME_AREA_ADDR, 1, origin());
+        assert_eq!(host.state.game_area, 1, "live cell takes the written value");
+        assert_eq!(
+            host.state.game_area_backup, GAME_AREA,
+            "the previous live value is pushed to the backup shadow"
+        );
+        assert_eq!(host.read(GAME_AREA_ADDR, origin()), 1);
+
+        // A second switch shifts the shadow again — it is a one-deep push,
+        // not a stack.
+        host.write(GAME_AREA_ADDR, 5, origin());
+        assert_eq!((host.state.game_area, host.state.game_area_backup), (5, 1));
+
+        // ...and `restore_game_area` pops it (`seg042.cs:131-134`).
+        host.state.restore_game_area();
+        assert_eq!(host.state.game_area, 1);
+    }
+
+    /// The area cell is NOT the raw-store round-trip every other Party-window
+    /// address gets: a raw write at `0x7F12` would leave `game_area` alone and
+    /// break every `{area}`-keyed load downstream, so the case must be reached
+    /// before the window's fallback arm.
+    #[test]
+    fn the_game_area_cell_never_falls_through_to_the_raw_store() {
+        let mut f = Fixture::new();
+        let mut host = f.host();
+        host.write(GAME_AREA_ADDR, 4, origin());
+        assert_eq!(host.vm.raw_word(GAME_AREA_ADDR), None);
+        assert!(
+            host.vm.unknown_log.is_empty(),
+            "a named cell is not an unknown access"
+        );
+    }
+
+    /// D-S1b: the service surface reads `game_area` off the state at CALL
+    /// TIME. `load_monster` names `MON{area}CHA.DAX` (`load_mob`,
+    /// `ovr017.cs:826,830`), so a mid-run area switch must redirect it — the
+    /// host holds no snapshot to go stale.
+    #[test]
+    fn load_monster_follows_a_mid_run_area_switch() {
+        let data = GameData::from_files([(
+            "MON5CHA.DAX".to_string(),
+            crate::test_support::build_dax_file(&[(3, vec![0u8; 0x1A6])]),
+        )]);
+        let mut f = Fixture::with_data(data);
+        let mut host = f.host();
+        // Area 2 has no MON2CHA.DAX in this fixture set.
+        assert!(host.load_monster(3, 1, 0).is_err());
+        host.write(GAME_AREA_ADDR, 5, origin());
+        assert!(
+            host.load_monster(3, 1, 0).is_ok(),
+            "after SAVE 5 -> 0x7F12 the same monster id resolves in MON5CHA.DAX"
+        );
     }
 
     #[test]

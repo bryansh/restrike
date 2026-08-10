@@ -446,7 +446,7 @@ pub(crate) fn scroll_team_list(ctx: &mut FlowCtx, code: u8) {
 /// of the layout unaffected — whenever the archive isn't there, which is every
 /// synthetic-fixture engine (D10).
 fn decode_camp_picture(ctx: &FlowCtx) -> Option<CampPicture> {
-    let file = format!("PIC{}.DAX", ctx.game_area);
+    let file = format!("PIC{}.DAX", ctx.game_area());
     let bytes = ctx.data.block(&file, CAMP_PIC_BLOCK).ok()?;
     let picture = gbx_formats::anim::decode(&bytes, false, true).ok()?;
     let frame = picture.frames.into_iter().next()?;

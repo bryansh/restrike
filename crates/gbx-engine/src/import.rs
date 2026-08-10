@@ -10,7 +10,7 @@
 //! only in where the state comes from (a decoded `SaveState` vs. a decoded
 //! original save).
 
-use crate::engine::{AssembledEngine, Engine, DEFAULT_GEO_BLOCK, GAME_AREA, INITIAL_ECL_BLOCK};
+use crate::engine::{AssembledEngine, Engine, DEFAULT_GEO_BLOCK, INITIAL_ECL_BLOCK};
 use crate::movement::{Facing, GameClock};
 use crate::party::{character_from_record, Party};
 use crate::rng::EngineRng;
@@ -142,7 +142,23 @@ fn master_to_engine_state(
     ecl_block_id: u8,
 ) -> EngineState {
     let mut state = EngineState::new();
+    // ★ The save's own area (roll-credits D-S1c). `gbx-formats` has parsed
+    // this byte since D-SAVE5 and the engine ignored it, because `game_area`
+    // was a constant: importing a save made anywhere but Tilverton loaded
+    // Tilverton's `ECL2`/`GEO2` blocks under that save's block ids.
+    // `loadSaveGame` reads it twice — from the file's first byte
+    // (`ovr017.cs:988`) and again out of the restored `area2_ptr` shadow
+    // (`:1072`); the two are equal by construction, since `SaveGame` writes
+    // the shadow from the live global right before serializing (`:1146`).
+    state.game_area = master.game_area;
+    state.game_area_backup = master.game_area;
     state.pos = (master.map_pos_x, master.map_pos_y);
+    // `area_ptr.lastXPos`/`lastYPos` — already parsed (`MasterSave::last_pos`,
+    // §1.4's "shadow copy"), now carried into the cell the (7,12)-North
+    // refusal script reads back (FD-19). Truncating the stored words to bytes
+    // matches the live cells' own u8 map coordinates.
+    let (last_x, last_y) = master.last_pos();
+    state.last_pos = (last_x as u8, last_y as u8);
     // §1.4: on-disk `mapDirection` is the *logical* 0..=3 direction (0x033D's
     // "raw (unhalved)" doc comment implies `Facing::raw_code()` is a distinct,
     // doubled representation) — normalize mod 4 before doubling so untrusted
@@ -185,8 +201,13 @@ pub fn import_original(
 ) -> Result<Engine, ImportError> {
     let master = &set.master;
 
+    // ★ Every `{area}`-keyed load below resolves against the SAVE's area, not
+    // `engine::GAME_AREA` (roll-credits D-S1c) — the block-id namespace is
+    // partitioned per area, so `ECL{n}.DAX`/`GEO{n}.DAX` block ids from an
+    // area-5 save mean nothing in area 2's files.
+    let area = master.game_area;
     let ecl_block_id = resolve_block(master.last_ecl_block_id() as u8, INITIAL_ECL_BLOCK);
-    let ecl_bytes = load_ecl_block(&data, GAME_AREA, ecl_block_id)?;
+    let ecl_bytes = load_ecl_block(&data, area, ecl_block_id)?;
     let mut machine =
         EclMachine::load_block(ecl_bytes, &COTAB).unwrap_or_else(|never| match never {});
 
@@ -209,14 +230,22 @@ pub fn import_original(
     vm_memory.vm_init_ecl_redraw_flags();
 
     let geo_block_id = resolve_block(master.current_3d_map_block_id(), DEFAULT_GEO_BLOCK);
-    let geo = load_geo_block(&data, GAME_AREA, geo_block_id)?;
+    // Gated exactly as `loadSaveGame` gates it (`ovr017.cs:1076-1095`): the
+    // 3D map is reloaded only `if (area_ptr.inDungeon != 0)`; the other arm
+    // loads the overland bigpic instead, and area 1 ships no `GEO1.DAX` for
+    // an unconditional load to find.
+    let geo = if master.in_dungeon() {
+        load_geo_block(&data, area, geo_block_id)?
+    } else {
+        crate::save::blank_geo()
+    };
 
     let boot_assets = crate::boot::boot(&data).map_err(|e| ImportError::Boot(format!("{e:?}")))?;
     let mut symbol_sets = boot_assets.symbol_sets;
     reload_walldefs(
         &mut symbol_sets,
         &data,
-        GAME_AREA,
+        area,
         &vm_memory.snapshot().assets.walldefs,
     );
 

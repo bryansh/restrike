@@ -278,7 +278,6 @@ pub struct FlowCtx<'a> {
     pub machine: &'a mut EclMachine,
     pub vm_memory: &'a mut VmMemoryState,
     pub data: &'a GameData,
-    pub game_area: u8,
     pub input: &'a mut InputQueue,
     pub dt_ticks: u32,
     pub state: &'a mut EngineState,
@@ -322,6 +321,21 @@ pub struct FlowCtx<'a> {
     /// `byte_1D556`/`bigpic_dax`/`headX_dax`/`bodyX_dax` globals. Derivable
     /// from [`EngineState::picture`] + `data`, so it is never serialized.
     pub pictures: &'a mut crate::picture::PictureCache,
+}
+
+impl FlowCtx<'_> {
+    /// ★ The live `gbl.game_area` (roll-credits D-S1b).
+    ///
+    /// A **method**, not the field it used to be: the original reads
+    /// `gbl.game_area` at each asset load's own call time (`load_ecl_dax`
+    /// interpolates it into the file name at `ovr008.cs:148`, `Load3DMap` at
+    /// `ovr031.cs:695`, and so on), which is precisely what lets a
+    /// `SAVE <n>, 0x7F12` earlier in the *same* script run redirect the
+    /// `NEWECL` that follows it. A snapshot taken when the tick's context was
+    /// built would be stale by exactly the one instruction that matters.
+    pub fn game_area(&self) -> u8 {
+        self.state.game_area
+    }
 }
 
 /// `VertMenuSelect`'s box for `CMD_VertMenu` (`ovr003.cs:689`): `endY = 0x16`,
@@ -638,7 +652,6 @@ impl VectorRun {
                     rng: &mut *ctx.rng,
                     sounds: &mut *ctx.sounds,
                     data: ctx.data,
-                    game_area: ctx.game_area,
                     symbols: &mut *ctx.symbols,
                 };
                 if let Some(reply) = self.pending_reply.take() {
@@ -1006,7 +1019,11 @@ fn begin_chain(ctx: &mut FlowCtx, id: BlockId) -> Option<ChainRunner> {
     ctx.state.ecl_block_id = id.0;
     ctx.state.chained = true;
 
-    let bytes = match load_ecl_block(ctx.data, ctx.game_area, id.0) {
+    // ★ `load_ecl_dax` interpolates `gbl.game_area` at call time
+    // (`ovr008.cs:148`) — a `SAVE <n>, 0x7F12` earlier in the *same* script
+    // run is exactly how a NEWECL becomes a CROSS-FILE transition
+    // (`ECL4#37 @0x8225`/`ECL5#48 @0x8092`, both `SAVE 1` → `NEWECL 0x50`).
+    let bytes = match load_ecl_block(ctx.data, ctx.game_area(), id.0) {
         Ok(bytes) => bytes,
         Err(err) => {
             ctx.vm_memory.halts.push(HaltRecord {
@@ -1090,6 +1107,55 @@ pub struct EngineState {
     pub ecl_block_id: u8,
     pub last_ecl_block_id: u8,
     pub tried_to_exit_map: bool,
+    /// ★ `gbl.game_area` — **real state since the area-generalization slice**
+    /// (roll-credits D-RC1/D-S1a), not the `engine::GAME_AREA` constant it
+    /// used to be.
+    ///
+    /// Every `{area}`-keyed asset family reads this at load time:
+    /// `ECL{area}.DAX` (`load_ecl_dax`, `ovr008.cs:148`), `GEO{area}.DAX`
+    /// (`Load3DMap`, `ovr031.cs:695`), `WALLDEF{area}`/`8X8D{area}`
+    /// (`LoadWalldef`, `ovr031.cs:646`; `ovr038.cs:12`), `MON{area}CHA`
+    /// (`load_mob`, `ovr017.cs:826`), `PIC{area}`/`BIGPIC{area}`/
+    /// `HEAD{area}`/`BODY{area}` (`ovr030.cs:58,170,237`), `CPIC{area}`
+    /// (`ovr034.cs:80`) and `ITEM{area}.DAX` (`ovr003.cs:1085`). The block-id
+    /// namespace is partitioned across areas, so the same numeric block id in
+    /// a different area is a different block entirely — which is exactly what
+    /// makes `SAVE <n> → 0x7F12` followed by a `NEWECL` a cross-file
+    /// transition.
+    ///
+    /// Written only through [`EngineState::set_game_area`] (the script hook)
+    /// or [`EngineState::restore_game_area`]; boot/import seed it from
+    /// [`crate::engine::GAME_AREA`] / the imported save's own byte.
+    pub game_area: u8,
+    /// `gbl.game_area_backup` (`Classes/Gbl.cs:511`) — the shadow
+    /// [`EngineState::set_game_area`] pushes before overwriting the live cell
+    /// (`seg042.cs:126`), and [`EngineState::restore_game_area`] pops
+    /// (`seg042.cs:133`).
+    pub game_area_backup: u8,
+    /// `area_ptr.lastXPos`/`lastYPos` (`Classes/Area1.cs:72-75`, DataOffsets
+    /// `0x1E0`/`0x1E2` → window addresses `0x4BF0`/`0x4BF1`): the walk loop's
+    /// record of where the party stood when this step's per-step script
+    /// finished, written immediately before `locked_door()`
+    /// (`ovr003.cs:2371-2372`) and compared against the live position right
+    /// after it (`:2377-2381`, the "you were moved" sound).
+    ///
+    /// Load-bearing content state, not bookkeeping: Tilverton's own
+    /// (7,12)-North refusal script copies these two cells straight back into
+    /// `mapPosX`/`mapPosY` (`ECL2#1 @0x9444`/`@0x944B`) to bounce the party
+    /// off the wrong entrance — see `docs/fidelity-docket.md` FD-19.
+    pub last_pos: (u8, u8),
+    /// `area_ptr.can_cast_spells` (`Classes/Area1.cs:89-90`, DataOffset
+    /// `0x1FF`): cleared by `vm_init_ecl` at every block entry
+    /// (`ovr008.cs:113`).
+    ///
+    /// **Deliberately has no reader yet.** `0x1FF` is an ODD DataOffset, and
+    /// the Area window's mapping is `DataOffset = (addr - 0x4B00) * 2` —
+    /// always even — so no script can address this cell at all; its only
+    /// consumers are engine-side spell gates (`ovr009.cs:333`,
+    /// `ovr010.cs:190`, `ovr016.cs:122`) that belong to roll-credits G3/G7.
+    /// Modeled here so the reset FD-37 names is real rather than skipped,
+    /// exactly like the redraw flags were before their gate landed.
+    pub can_cast_spells: bool,
     /// `area2_ptr.field_592`: `< 0xFF` gates `locked_door`'s whole
     /// interaction; zeroed at every world-menu entry.
     pub field_592: u8,
@@ -1167,6 +1233,13 @@ impl EngineState {
             ecl_block_id: 1,
             last_ecl_block_id: 0,
             tried_to_exit_map: false,
+            // The boot/import default (`crate::engine::GAME_AREA`); a real
+            // boot or import overwrites it immediately, and from then on only
+            // `SAVE <n> -> 0x7F12` moves it.
+            game_area: crate::engine::GAME_AREA,
+            game_area_backup: crate::engine::GAME_AREA,
+            last_pos: (0, 0),
+            can_cast_spells: false,
             field_592: 0,
             door_flags: DoorStepFlags::all_true(),
             clock: GameClock::default(),
@@ -1182,6 +1255,39 @@ impl EngineState {
 
     pub(crate) fn search_mode(&self) -> bool {
         self.search_flags & 1 != 0
+    }
+
+    /// ★ `seg042.set_game_area` (`seg042.cs:124-128`) — the whole of the
+    /// original's body, in order: **backup ← live, then live ← value**.
+    ///
+    /// The one script route in is `SAVE <n>, 0x7F12`
+    /// (`vm_SetMemoryValue` → `alter_character`'s `switch_var == 0x312` arm,
+    /// `ovr008.cs:654-657`). Both shipped uses (`ECL4#37 @0x8225`,
+    /// `ECL5#48 @0x8092`) are `SAVE 1` immediately followed by `NEWECL 0x50`,
+    /// which is what makes the *next* `load_ecl_dax` read `ECL1.DAX` rather
+    /// than the file the running block came from.
+    pub fn set_game_area(&mut self, area: u8) {
+        self.game_area_backup = self.game_area;
+        self.game_area = area;
+    }
+
+    /// `seg042.restore_game_area` (`seg042.cs:131-134`): backup → live.
+    ///
+    /// **Correction to the slice-1 door, which expected no reached caller:**
+    /// the original has exactly one, and it *is* reached — `LoadPlayerCombatIcon`
+    /// brackets its work with `set_game_area(1)` … `restore_game_area()`
+    /// (`ovr017.cs:88,120`), and `loadSaveGame` calls it for every non-NPC
+    /// party member (`ovr017.cs:1058`), as does combat setup throughout
+    /// `ovr018`. The bracket is nonetheless *vestigial for asset selection*:
+    /// everything it wraps takes `chead_cbody_comspr_icon`'s `CHEAD`/`CBODY`
+    /// branch (`ovr034.cs:57-66`), which never appends `gbl.game_area` to the
+    /// file name — only the `else` branch (`CPIC`, `:80`) does. Our own party
+    /// icon loader (`combat_art::load_party_icon`) takes no area argument at
+    /// all, so there is nothing here for a bracket to protect; the method
+    /// exists because the cell pair it pops is real, and a caller lands with
+    /// whatever first needs one.
+    pub fn restore_game_area(&mut self) {
+        self.game_area = self.game_area_backup;
     }
 }
 
@@ -2166,12 +2272,15 @@ mod tests {
             let data = ecl_game_data(GAME_AREA, blocks);
             let initial = load_ecl_block(&data, GAME_AREA, 1).expect("block 1 must load");
             let machine = EclMachine::load_block(initial, &COTAB).unwrap_or_else(|e| match e {});
+            let mut state = EngineState::new();
+            state.game_area = GAME_AREA;
+            state.game_area_backup = GAME_AREA;
             Harness {
                 machine,
                 vm_memory: VmMemoryState::new(),
                 data,
                 input: InputQueue::new(),
-                state: EngineState::new(),
+                state,
                 geo: open_geo(),
                 party: DefaultPartyPredicates::default(),
                 roster: crate::party::Party::default(),
@@ -2200,7 +2309,6 @@ mod tests {
                 machine: &mut self.machine,
                 vm_memory: &mut self.vm_memory,
                 data: &self.data,
-                game_area: GAME_AREA,
                 input: &mut self.input,
                 dt_ticks: 1,
                 state: &mut self.state,

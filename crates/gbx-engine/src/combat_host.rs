@@ -387,7 +387,7 @@ impl CombatHost {
             state,
             identities,
             FightArt {
-                cpic_area: ctx.game_area,
+                cpic_area: ctx.game_area(),
                 monster_blocks,
                 in_dungeon,
                 party_icons,
@@ -420,7 +420,7 @@ impl CombatHost {
             state: CombatState::new(crate::combat::CombatMap::uniform(0), Vec::new()),
             identities: Vec::new(),
             art: FightArt {
-                cpic_area: ctx.game_area,
+                cpic_area: ctx.game_area(),
                 monster_blocks: BTreeMap::new(),
                 in_dungeon: true,
                 party_icons: Vec::new(),

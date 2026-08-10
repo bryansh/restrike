@@ -100,9 +100,12 @@ pub(crate) fn state_digest(engine: &Engine) -> String {
         Facing::South => 4,
         Facing::West => 6,
     });
-    // 3. game_area. A const today (`engine::GAME_AREA`); slice 1 moves it into
-    //    `EngineState`. Hashed now so that promotion does not reshape digests.
-    f.u8(crate::engine::GAME_AREA);
+    // 3. game_area. Real state since slice 1 (`EngineState::game_area`), read
+    //    from the same SLOT the const used to fill — the append-only contract
+    //    in this module's doc says a field whose *meaning* changes keeps its
+    //    place, and it does: a digest taken before the promotion, in area 2,
+    //    is bit-identical to one taken after.
+    f.u8(state.game_area);
     // 4. resident ECL block id
     f.u8(state.ecl_block_id);
     // 5. clock

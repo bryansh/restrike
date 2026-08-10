@@ -32,9 +32,17 @@ use gbx_vm::{EclMachine, COTAB};
 pub const DEFAULT_GEO_FILE: &str = "GEO2.DAX";
 pub const DEFAULT_GEO_BLOCK: u8 = 1;
 
-/// `gbl.game_area` (this session's research pass, `vmhost.rs`'s citation):
-/// fixed at the value already validated against real Tilverton data
-/// (`ECL2.DAX`/`GEO2.DAX`, M1's `run-script` + this session's demo).
+/// `gbl.game_area`'s **boot/import default** — no longer the engine's one
+/// area (roll-credits D-S1b): the live value is
+/// [`EngineState::game_area`](crate::shell::EngineState::game_area), which a
+/// script moves with `SAVE <n>, 0x7F12`.
+///
+/// `2` is the gameplay boot value (`seg001.cs:142` sets `game_area = 2` on
+/// the non-demo path; `InitFirst`/`InitAgain`'s `game_area = 1` at `:276`/
+/// `:369` are the title/demo-loop resets around it), and it is the area the
+/// playthrough starts in — Tilverton, `ECL2.DAX`/`GEO2.DAX`. An imported
+/// original save overrides it from its own `game_area` byte, and a `.rsav`
+/// restore from the saved cell.
 pub const GAME_AREA: u8 = 2;
 /// The walk loop's default resident block when none was previously visited
 /// (`area_ptr.LastEclBlockId == 0 -> EclBlockId = 1`, §1.6) — this session's
@@ -321,11 +329,15 @@ impl Engine {
         crate::frames::draw8x8_03(&mut fb, &symbol_sets)
             .expect("Engine::build: symbol set 4 must be loaded for the exploration frame");
 
-        let initial = load_ecl_block(&data, GAME_AREA, INITIAL_ECL_BLOCK)
+        let mut state = EngineState::new();
+        // The fresh-boot area (`seg001.cs:142`); everything below reads it
+        // from the state, never the const.
+        state.game_area = GAME_AREA;
+        state.game_area_backup = GAME_AREA;
+        let initial = load_ecl_block(&data, state.game_area, INITIAL_ECL_BLOCK)
             .expect("Engine::build: the initial resident ECL block must load");
         let mut machine =
             EclMachine::load_block(initial, &COTAB).unwrap_or_else(|never| match never {});
-        let mut state = EngineState::new();
         state.ecl_block_id = INITIAL_ECL_BLOCK;
         let shell = Shell::boot(&mut machine, &mut state);
 
@@ -392,7 +404,7 @@ impl Engine {
             &mut fb,
             &a.symbol_sets,
             &a.data,
-            GAME_AREA,
+            a.state.game_area,
             &a.state.picture,
             &mut pictures,
             0,
@@ -604,7 +616,6 @@ impl Engine {
             machine: &mut self.machine,
             vm_memory: &mut self.vm_memory,
             data: &self.data,
-            game_area: GAME_AREA,
             input: &mut self.input,
             dt_ticks: 1,
             state: &mut self.state,
@@ -752,7 +763,6 @@ impl Engine {
                 machine: &mut self.machine,
                 vm_memory: &mut self.vm_memory,
                 data: &self.data,
-                game_area: GAME_AREA,
                 input: &mut self.input,
                 dt_ticks: 1,
                 state: &mut self.state,
