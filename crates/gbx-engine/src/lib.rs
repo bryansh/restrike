@@ -36,6 +36,7 @@ pub mod monster;
 pub mod movement;
 pub mod party;
 pub mod picture;
+pub mod rest;
 pub mod rng;
 pub mod save;
 pub mod saveload;

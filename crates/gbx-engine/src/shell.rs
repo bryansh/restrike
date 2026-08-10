@@ -1290,6 +1290,19 @@ pub struct EngineState {
     /// (`combat_host.rs`'s `menu_selected`); unifying the two is docketed.
     #[serde(skip)]
     pub menu_selected_word: usize,
+    /// ★ `gbl.rest_incounter_count` (`Classes/Gbl.cs:440`) — the camp rest
+    /// loop's encounter counter. See [`crate::rest`] for the check itself and
+    /// for why this is `#[serde(skip)]`: the original's own `SaveGame` does not
+    /// write it either (it is a `gbl` cell, not an `Area2` one), so a reloaded
+    /// game starts counting from zero exactly as a fresh one does.
+    ///
+    /// **Deliberately has no driver yet.** `resting`'s loop — the sole caller,
+    /// `ovr021.cs:586-604` — belongs to roll-credits G3/slice 4, which owns
+    /// Rest's commit, clock and healing. The cell and the arithmetic are real
+    /// and tested now so that slice wires a transcription rather than
+    /// discovering one; FD-44 records the seam.
+    #[serde(skip)]
+    pub rest_encounter: crate::rest::RestEncounterSchedule,
 }
 
 /// `gbl.game_state`'s M2 slice (`Classes/Gbl.cs`'s `GameState` enum —
@@ -1338,6 +1351,7 @@ impl EngineState {
             picture: crate::picture::PictureLayer::default(),
             pending_combat: crate::monster::PendingCombat::default(),
             menu_selected_word: 0,
+            rest_encounter: crate::rest::RestEncounterSchedule::default(),
         }
     }
 

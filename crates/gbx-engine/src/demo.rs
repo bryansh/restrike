@@ -18,6 +18,17 @@ use crate::frames::draw8x8_03;
 use crate::text::{draw_string, JobStatus, TextCursor, TextJob, NORMAL_BOTTOM};
 use gbx_formats::game_data::load_dir;
 
+/// A `Frame`'s pixels, straight to `.ppm` — for drives that must dump the
+/// frame they just ticked rather than spend an extra tick to get one.
+fn write_ppm_pixels(pixels: &[u8], path: &std::path::Path) {
+    let fb = Framebuffer::new();
+    let mut out = format!("P6\n{WIDTH} {HEIGHT}\n255\n").into_bytes();
+    for &idx in pixels.iter() {
+        out.extend_from_slice(&fb.palette()[idx as usize]);
+    }
+    std::fs::write(path, &out).expect("failed to write demo .ppm");
+}
+
 fn write_ppm(fb: &Framebuffer, path: &std::path::Path) {
     let mut out = format!("P6\n{WIDTH} {HEIGHT}\n255\n").into_bytes();
     for y in 0..HEIGHT {
@@ -2542,4 +2553,241 @@ fn the_death_screen_and_its_recovery() {
     engine.tick(&[InputEvent::Char(b' ')]);
     dump(&mut engine, "gameover-3-recovery-load-list");
     eprintln!("  recovery slots: {:?}", engine.slot_directory());
+}
+
+// --- Roll-credits slice 2: the encounter cluster on real data ---------------
+
+/// ★ **Slice 2's acceptance drive, part 1: the Tilverton approach.**
+///
+/// `ECL2` block 2 `@0x8780` is the first arm of a five-way `ON GOTO` over the
+/// street-encounter table (`@0x876B`), and it is the whole approach cluster in
+/// nine instructions:
+///
+/// ```text
+/// @0x8780  SAVE #0x01, [0x7EE1]        ; HeadBlockId = 1  -> the close-up is head+body
+/// @0x8786  SETUP MONSTER #1, #1, #1    ; SPRIT2 block 1, max distance 1, PIC/BODY 1
+/// @0x878D  PRINTCLEAR "<approach text>"
+/// @0x87A9  GOSUB 0x8D04                ; a one-option HORIZONTAL MENU (press to continue)
+/// @0x87AD  APPROACH                    ; distance 1 -> 0
+/// @0x87AE  PRINTCLEAR "<they close>"
+/// @0x87BA  SAVE #0xFF, [0x7EE1]
+/// @0x87C0  CLEARMONSTERS
+/// @0x87C1  LOAD MONSTER … x2
+/// @0x87CF  COMBAT
+/// ```
+///
+/// Two frames come out of it and both are dumped for eyeballing: the far band
+/// (the masked `SPRIT2` sprite standing in the 3D corridor, script text under
+/// it, the continue prompt on the menu line) and, one `APPROACH` later, the
+/// close-up (`HEAD2`/`BODY2` block 1 filling the viewport where the sprite
+/// was). Run with `GBX_DATA_DIR` set; `RESTRIKE_SLICE2_DEMO_OUT` picks the
+/// output directory (default: the system temp dir). No game data enters the
+/// repo — the `.ppm`s land outside it, like every other demo here.
+///
+/// **One artifact of entering mid-block:** the 3D corridor behind the sprite
+/// is blank. `ECL2#2`'s own entry vector is what runs `LOAD FILES`/`LOAD
+/// PIECES` and makes a wallset resident, and this drive deliberately starts
+/// past it (the route in is the street-encounter roll, not the block's
+/// arrival). The picture layer is what these frames are for, and it composes
+/// over whatever the viewport holds — so the sprite and the portrait land in
+/// exactly the cells they would over a painted corridor.
+#[test]
+fn slice2_the_tilverton_approach() {
+    use crate::input::InputEvent;
+    use crate::picture::Shown;
+
+    let Some(mut engine) = crate::area_transition_tests::real_data_engine(2, 2, 1, true) else {
+        eprintln!("SKIPPED: local tier needs GBX_DATA_DIR (demo::slice2_the_tilverton_approach)");
+        return;
+    };
+    let out_dir = std::env::var_os("RESTRIKE_SLICE2_DEMO_OUT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+
+    // Enter at the encounter arm itself. Everything upstream (`@0x86D5`'s
+    // search-flag test, `@0x871E`'s day counter, the `ON GOTO`) is ordinary
+    // flow this drive has no reason to re-prove.
+    // Stand somewhere the approach ray can actually run: `sub_304B4` walks up
+    // to two cells forward and stops at the first wall (and at the map edge),
+    // so a party facing a wall gets distance 0 and the whole approach collapses
+    // into its own close-up. Pick the first facing at the imported position
+    // that leaves at least one band of room — which is what a party that just
+    // walked down a street has by construction.
+    let (px, py) = (engine.state().pos.0 as i32, engine.state().pos.1 as i32);
+    let facing = [
+        crate::movement::Facing::North,
+        crate::movement::Facing::East,
+        crate::movement::Facing::South,
+        crate::movement::Facing::West,
+    ]
+    .into_iter()
+    .find(|f| {
+        crate::combat::encounter_distance(
+            engine.geo(),
+            crate::shell::facing_to_map_dir(*f),
+            px,
+            py,
+            true,
+        ) >= 1
+    })
+    .expect("Tilverton's streets must have one open direction at the spawn cell");
+    engine.state.facing = facing;
+    eprintln!("slice2 approach: standing at ({px},{py}) facing {facing:?}");
+
+    engine.shell = crate::shell::boot_at_address(&mut engine.machine, 0x8780);
+
+    let mut seen: Vec<(String, u8, u8)> = Vec::new();
+    let mut last = Shown::Nothing;
+    for tick in 0..600 {
+        // Enter answers the one-option continue prompt at `@0x8D04`; before it
+        // parks, the key is simply ignored.
+        let pixels: Vec<u8> = engine.tick(&[InputEvent::Enter]).pixels.to_vec();
+        let shown = engine.state().picture.shown;
+        if shown != last && shown != Shown::Nothing {
+            let label = match shown {
+                Shown::Sprite => "sprite",
+                Shown::HeadBody => "closeup",
+                Shown::Pic => "pic",
+                Shown::BigPic => "bigpic",
+                Shown::Nothing => unreachable!(),
+            };
+            let path = out_dir.join(format!("restrike-slice2-approach-{label}.ppm"));
+            write_ppm_pixels(&pixels, &path);
+            eprintln!(
+                "slice2 approach: tick {tick} -> {label} (distance {}, sprite frame {}) -> {}",
+                engine.state().encounter_distance,
+                engine.state().picture.sprite_frame,
+                path.display()
+            );
+            seen.push((
+                label.to_string(),
+                engine.state().encounter_distance,
+                engine.state().picture.sprite_frame,
+            ));
+            last = shown;
+        }
+        if engine.state().pending_combat.monsters_loaded {
+            break; // the fight is next; the approach is what this drive is for
+        }
+    }
+
+    eprintln!("slice2 approach: halts {:?}", engine.vm_memory().halts);
+    assert!(
+        engine.vm_memory().halts.is_empty(),
+        "the approach must be halt-free: {:?}",
+        engine.vm_memory().halts
+    );
+    assert_eq!(
+        seen.iter().map(|(l, _, _)| l.as_str()).collect::<Vec<_>>(),
+        ["sprite", "closeup"],
+        "SETUP MONSTER puts the SPRIT band up; APPROACH walks it to 0 and the \
+         head+body close-up takes the window (HeadBlockId was still 1)"
+    );
+    assert_eq!(
+        seen[0].1, 1,
+        "max_distance 1 clamps the ray to one band out"
+    );
+    assert_eq!(seen[0].2, 2, "…and Show3DSprite blits frame distance + 1");
+    assert_eq!(seen[1].1, 0, "APPROACH closed the distance");
+    assert_eq!(engine.state().picture.head_block, 1);
+    assert_eq!(
+        engine.state().picture.body_block,
+        1,
+        "pic_block_id doubles as the BODY id when a head is set"
+    );
+    assert_eq!(
+        engine.state().encounter_flags,
+        [true, true],
+        "the SPRIT set loaded, then the close-up latched"
+    );
+}
+
+/// ★ **Slice 2's acceptance drive, part 2: the ENCOUNTER MENU, live.**
+///
+/// `ECL4` block 32 `@0x98A9` is one of the opcode's two shipped uses. Its
+/// operands are `sprite 0x22, max 0, pic 0x22, cell [0x7F79],
+/// var_6 = [0,3,0,0,3], <one approach line>, "", "", 0x0C, 0x0C` — a
+/// `max_distance` of 0, so the monsters are already adjacent and the fourth
+/// word is PARLAY. The script then branches on the cell: `COMPARE [0x7F79],
+/// #0x03 / IF <> / GOTO 0x993F` sends everything except parlay into
+/// `CLEARMONSTERS; LOAD MONSTER 0x20 x8; LOAD MONSTER 0x22 x5; COMBAT`.
+///
+/// This drive answers COMBAT and checks the words on the menu line against the
+/// original's own builder, then re-runs it answering PARLAY (slot 3, which the
+/// remap resolves to slot **4** → class 3 → writes 3) and checks the cell.
+///
+/// The frame it dumps is the one that proves `byte_1EE95` earns its keep: the
+/// distance is 0, so `sub_30580` would normally swap to the close-up — and
+/// does not, because the menu flag is up (`ovr008.cs:257`). What stands in the
+/// viewport under "COMBAT WAIT FLEE PARLAY" is the `SPRIT4` approach sprite,
+/// which is what the original shows here too.
+#[test]
+fn slice2_the_encounter_menu_at_its_shipped_site() {
+    use crate::input::InputEvent;
+
+    const RESULT_CELL: u16 = 0x7F79;
+
+    for (key, want, label) in [(b'C', 1u16, "combat"), (b'P', 3u16, "parlay")] {
+        let Some(mut engine) = crate::area_transition_tests::real_data_engine(4, 32, 32, true)
+        else {
+            eprintln!(
+                "SKIPPED: local tier needs GBX_DATA_DIR \
+                 (demo::slice2_the_encounter_menu_at_its_shipped_site)"
+            );
+            return;
+        };
+        let out_dir = std::env::var_os("RESTRIKE_SLICE2_DEMO_OUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+
+        engine.shell = crate::shell::boot_at_address(&mut engine.machine, 0x98A3);
+
+        // Drive to the parked menu.
+        let mut parked = false;
+        let mut pixels: Vec<u8> = Vec::new();
+        for _ in 0..400 {
+            pixels = engine.tick(&[]).pixels.to_vec();
+            if engine.shell.gate_open() {
+                parked = true;
+                break;
+            }
+        }
+        assert!(
+            parked,
+            "the encounter menu never parked: {:?}",
+            engine.vm_memory().halts
+        );
+
+        let words: Vec<String> = engine
+            .take_transcript()
+            .into_iter()
+            .filter_map(|e| match e {
+                crate::vmhost::TranscriptEntry::Request(l) => Some(l),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            words.iter().any(|w| w == "menu: COMBAT WAIT FLEE PARLAY"),
+            "max_distance 0 means the monsters are adjacent, so the fourth word \
+             is PARLAY: {words:?}"
+        );
+
+        let path = out_dir.join(format!("restrike-slice2-encounter-menu-{label}.ppm"));
+        write_ppm_pixels(&pixels, &path);
+        eprintln!("slice2 encounter menu ({label}): {}", path.display());
+
+        engine.tick(&[InputEvent::Char(key)]);
+        for _ in 0..40 {
+            if engine.vm_memory().raw_word(RESULT_CELL) == Some(want) {
+                break;
+            }
+            engine.tick(&[]);
+        }
+        assert_eq!(
+            engine.vm_memory().raw_word(RESULT_CELL),
+            Some(want),
+            "var_6 = [0,3,0,0,3]: COMBAT is class 0 -> 1, PARLAY resolves to \
+             slot 4 -> class 3 -> 3"
+        );
+    }
 }

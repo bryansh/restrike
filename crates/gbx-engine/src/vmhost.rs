@@ -607,7 +607,7 @@ impl VmMemoryState {
     /// of assigning an `area_ptr`/`area2_ptr` struct field directly, which is
     /// what `vm_init_ecl` does throughout (and what makes its `inDungeon = 1`
     /// the asymmetry FD-37 flagged).
-    fn poke_raw(&mut self, addr: u16, value: u16) {
+    pub(crate) fn poke_raw(&mut self, addr: u16, value: u16) {
         self.raw_words.insert(addr, value);
     }
 }

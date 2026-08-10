@@ -1033,7 +1033,42 @@ stays the one place showing the complete open-hypothesis picture.
 
 ### FD-34: `sub_30580` (CMD_Approach's encounter-visual dispatch) still records rather than draws
 
-- **Status:** open (scope call, scene-pictures slice)
+- **Status:** **resolved** 2026-08-10 (roll-credits slice 2, the encounter
+  cluster). `sub_30580` splits exactly the way `redraw_view_gate` already
+  does: `EngineServices::load_encounter_visual` runs the whole flag pass at
+  execution time — `encounter_flags`, `displayPlayerSprite`, `spriteChanged`,
+  `byte_1EE96`, `can_draw_bigpic`, `mapAreaDisplay` — and records a draw plan;
+  the pixels travel as `Effect::EncounterVisual` and land in queue order behind
+  whatever `PRINT`s preceded them (`crate::picture::encounter_visual_state` /
+  `encounter_visual`). **`displayPlayerSprite` therefore joins the `0xAE11`
+  gate as its fifth flag**, which is the half of FD-35 that was waiting on this
+  entry; the outer `byte_1AB0B` conjunct is still FD-35's.
+- **Four findings from doing it.**
+  1. **The distance bands are pre-rendered, not scaled.** `Show3DSprite`'s
+     second argument is a 1-based frame index (`ovr030.cs:215-226`, with a hard
+     1..=3 range check), and `sub_30580` passes `encounter_distance + 1`. Real
+     `SPRIT` blocks carry exactly three frames, largest first — `SPRIT2` block 1
+     is 32×80, 24×65, 16×57 at cells (4,1), (4,1), (5,1) — each with its own
+     `x_pos`/`y_pos` anchor, drawn at `(y_pos + 3, x_pos + 3)` under the overlay
+     clip. There is no runtime scaling anywhere in the original's draw path.
+  2. **The masked load's recolor is not a second transparency.**
+     `load_pic_final`'s `masked & 1` arm runs `Recolor(false,
+     transparentNewColors, transparentOldColors)` (`ovr030.cs:129-132`), whose
+     only non-identity entry is 13 → 0 — and it runs *after*
+     `DaxToPicture(0, masked, …)` has already mapped colour 0 to
+     transparency-16 (`:127`). So colour-13 pixels end up opaque black, not
+     transparent. Getting the order backwards would punch holes in every
+     approach sprite.
+  3. **`byte_1EE95` is what keeps the sprite up during ENCOUNTER MENU.** Its
+     only reader is this function's close-up gate (`ovr008.cs:257`); without it
+     the menu would cut to the encounter's face the instant the distance
+     reached 0.
+  4. **`byte_1EE96` is a change detector with no initializer.** The original
+     never sets it, so it starts at 0 — a *valid* head id — which means an
+     encounter whose `HeadBlockId` is 0 and whose `encounter_flags[1]` is
+     already set skips its own close-up refresh. Replicated, not fixed.
+- **Superseded status line (kept for provenance):** open (scope call,
+  scene-pictures slice)
 - **Question:** `sub_30580` (`ovr008.cs:220-276`) is the *other* picture
   producer: it loads a `SPRIT{area}` animation for the approach sprite
   (`load_pic_final(…, 1, sprite_block_id, "SPRIT")`, masked) and can call
@@ -1054,7 +1089,9 @@ stays the one place showing the complete open-hypothesis picture.
 ### FD-35: `CALL 0xAE11`'s redraw gate has a SIXTH condition we do not model — the outer `byte_1AB0B`
 
 - **Status:** open (found by the adversarial review of the 2026-08-08
-  playtest-fix run; the five inner flags landed in `ea25309`)
+  playtest-fix run; four inner flags landed in `ea25309`, the fifth
+  — `displayPlayerSprite` — with FD-34 in roll-credits slice 2, so the
+  **inner** disjunction is now complete and only the outer conjunct remains)
 - **Question:** the gate is a *nested pair*, not one disjunction
   (`ovr003.cs:1846-1864`):
 
@@ -1339,6 +1376,46 @@ stays the one place showing the complete open-hypothesis picture.
   stale portrait or scene picture immediately after crossing an area.
 - **Cross-reference:** `docs/design/roll-credits.md` D-RC8/D-S1e,
   `crates/gbx-engine/src/picture.rs` `PictureCache`.
+
+### FD-44: the rest-encounter schedule is transcribed and tested, but has no loop to drive it
+
+- **Status:** open (deferred with a named settling slice — roll-credits
+  G3/slice 4)
+- **Question:** `rest_incounter_period` / `rest_incounter_percentage`
+  (`Classes/Area2.cs:56-59`, `DataOffset` `0x5A4`/`0x5A6` → Party-window
+  `0x7ED2`/`0x7ED3`) have exactly one consumer in the whole reference source:
+  `resting`'s per-iteration check (`ovr021.cs:586-604`). `crate::rest`
+  transcribes that check in full — the pre-increment/`>=`/reset counter, the
+  single `roll_dice(100, 1)` on firing iterations only, the signed `> 0` guard
+  — with unit tests. It has **no caller**, because `resting`'s loop does not
+  exist yet: Rest is still `screens.rs`'s `party_rest` status string, and the
+  loop's other beats (`rest_time_5849F`, `rest_heal`, `CheckForSpellLearning`,
+  `sub_58C03`, and `gbl.timeToRest`'s per-player computation) are FD-25 /
+  roll-credits G3 work.
+- **What the slice that lands the loop must wire, precisely:** call
+  `RestEncounterSchedule::check` once per loop iteration, immediately after
+  `step_game_time(1, 5)` and the healing/learning beats (`ovr021.cs:581-584`),
+  reading the pair through `rest::schedule_cells`. On
+  `RestCheck::Interrupted`, print [`rest::INTERRUPTED_TEXT`] at row `0x13`
+  col 1 colour 15, set both `stop_resting` and `resting_intetrupted`, and
+  `GameDelay()`. The interruption reaches the script only through
+  `TryEncamp`'s `RunEclVm(gbl.CampInterruptedAddr)` — the ECL header's
+  **vector 3** (`ovr003.cs:1920`, `ovr008.cs:121-122`) — not through any flag.
+  `FixTeam`'s non-interactive `resting(false)` must also discard its queued
+  healing when interrupted (`ovr016.cs:1059-1068`).
+- **Two facts worth not rediscovering.** (1) There is **no engine-side
+  encounter roll in the walk loop at all** — `MovePartyForward`
+  (`ovr015.cs:318-346`) and `MovePositionForward` (`ovr008.cs:1256-1279`) touch
+  position and the clock and nothing else; wandering monsters are entirely
+  script-driven (`RANDOM` → `IF` → `COMBAT`), which is what the census's 53
+  `RANDOM` uses are. (2) `period` counts *loop iterations*, each worth five
+  units of clock slot 1 — not minutes.
+- **Draw neutrality:** the d100 is unreachable from any capture path, and
+  today from any path at all (no caller). Captures are combat entry-state
+  snapshots replayed into `CombatState`; they never camp.
+- **Cross-reference:** `crates/gbx-engine/src/rest.rs`,
+  `crates/gbx-engine/src/shell.rs` `EngineState::rest_encounter`,
+  `docs/design/roll-credits.md` G3/G4.
 
 ## 5. How new entries get added
 

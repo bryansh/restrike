@@ -96,7 +96,9 @@ Scribe staging, Rest's commit + clock + healing, camp Fix's real behavior.
 
 **G4 — The encounter cluster.** APPROACH / ENCOUNTER MENU / PARTYSTRENGTH / SPRITE OFF +
 `sub_30580` (FD-34, which also completes the redraw gate's fifth flag) + `rest_incounter_*`
-scheduling.
+scheduling. **LANDED 2026-08-10 — see §6.** All five opcodes implemented and FD-34 resolved;
+the scheduling half is transcribed and tested but has no loop to drive it until G3 lands
+Rest (FD-44).
 
 **G5 — Items + roster + mechanics tail.** FIND ITEM / DESTROY ITEMS; LOAD CHARACTER —
 a **party-slot selector**, not a join op (`CMD_LoadCharacter`, `ovr003.cs:174-210`: sets
@@ -154,7 +156,7 @@ owns the version-bump churn**; later slices rebase onto it and batch their enum 
 |---|---|---|---|---|
 | 0 | Save/load wiring + GameOver/wipe flow (G0) | Opus @ high | No | — |
 | 1 | Area generalization (G1, incl. the save bump + FD-37 + D-RC8) | Opus @ high | **Yes — short** (Fable: the `0x7F12` hook shape + `EngineState` threading + the cache call) | 0 |
-| 2 | Encounter cluster (G4) | Opus @ high | No | 1 |
+| 2 | Encounter cluster (G4) — **landed, §6** | Opus @ high | No | 1 |
 | 3 | Items/roster/mechanics tail + TREASURE/XP + PARLAY (G5) | Opus @ high | No | 1 (rebases on 2's enum batch) |
 | 4 | Vancian camp magic (G3) | Opus @ high | **Yes — short** (the SpellList staging model on the character record) | 1 |
 | 5 | Spell tail must-haves (G7) | Opus @ high | No — G7's enumeration IS the spec | 4 |
@@ -285,3 +287,91 @@ menu (scripted replies; full wilderness PRESENTATION is slice 7 — arrival at t
 the right resident block is the slice-1 bar). (3) The silent-failure regression: a
 cross-file NEWECL that CANNOT resolve still halts loudly — but one that can, never
 half-transitions.
+
+## 6. Slice 2: the encounter cluster (G4) — LANDED 2026-08-10
+
+No door was written for this one (§3: "No"), so this section is the record of
+what the code found. Five opcodes and FD-34, plus the scheduling half of G4.
+
+**What was actually missing.** `area2_ptr.encounter_distance` was never carried
+between opcodes — SETUP MONSTER computed a ray and threw it away, so APPROACH
+had nothing to decrement and `CMD_Combat` placed monsters from a fresh ray
+instead of from the cell. That one gap is why the whole cluster reads as
+presentation-only until you wire it: with the cell real, `SETUP MONSTER s,1,p`
++ `APPROACH` genuinely starts the fight adjacent, which is the mechanical
+content of an approach.
+
+**The save break** (the second and, per §3's churn rule, the last one this
+milestone should need before slice 3 rebases on it): `SAVE_FORMAT_VERSION`
+4 → 5. `EngineState` gained `encounter_distance` / `max_encounter_distance`
+(`Area2` `0x582`/`0x580`, named at Party-window `0x7EC1`/`0x7EC0`),
+`sprite_block_id` / `pic_block_id`, and `encounter_flags`; `PictureLayer`
+gained the `SPRIT` pair and `Shown::Sprite`; `VmMemoryState` gained
+`display_player_sprite`, `byte_1EE95`, `byte_1EE96`. One golden recompute, in
+the same commit, as the discipline requires.
+
+**FD-34 resolved, and it completes the redraw gate's inner disjunction.**
+`sub_30580` splits on the seam `redraw_view_gate` already established: flags at
+execution time, pixels as `Effect::EncounterVisual` at presentation time. That
+is not a stylistic choice — `PICTURE 0xFF` immediately followed by
+`CALL 0xAE11` is real shipped content (`ECL2#2 @0x8307`), and drawing at
+execution time would paint the sprite *before* the queued clear wiped it.
+`displayPlayerSprite` is now the gate's fifth flag; only FD-35's outer
+`byte_1AB0B` conjunct remains.
+
+**Four corrections the code forced, none of which the opcode names imply:**
+
+- **The distance bands are pre-rendered art, not scaling.** `Show3DSprite`'s
+  second argument is a 1-based frame index with a hard 1..=3 range check
+  (`ovr030.cs:215-226`), and `sub_30580` passes `encounter_distance + 1`. Every
+  real `SPRIT` block carries exactly three frames, largest first — `SPRIT2`
+  block 1 is 32×80, 24×65, 16×57 at cells (4,1), (4,1), (5,1) — each blitted at
+  its own header anchor, `(y_pos + 3, x_pos + 3)`.
+- **The masked load's recolor is not a second transparency.** `load_pic_final`
+  masks colour 0 to transparency-16 at decode (`:127`) and only *then* folds
+  13 → 0 (`:129-132`), so colour-13 pixels are opaque black. Reversing the
+  order would punch holes through every approach sprite.
+- **ENCOUNTER MENU's fourth word resolves to slot 4, not slot 3.** PARLAY and
+  ADVANCE share a position but not an index (`ovr003.cs:1363-1368`) — which is
+  why `var_6` has five entries for four words, and why slot 3 is simply
+  unreachable at distance 0. The outcome is chosen by *class*
+  (`var_6[selection]`, one of five tables), not by slot, so the same word means
+  different things in different encounters: `ECL4#32` ships `[0,3,0,0,3]`,
+  `ECL6#64` ships `[2,1,2,3,4]`.
+- **The two flee checks read opposite ends of the party.** The party gets away
+  on its SLOWEST member (`:1384`); the monsters break off on the party's
+  FASTEST (`:1442`). The pair is sampled once, before the loop.
+
+**`byte_1EE95` is the flag that makes the menu look right.** Its only reader is
+`sub_30580`'s close-up gate. Without it, an encounter menu at distance 0 would
+cut to the portrait the moment it opened; with it, the 3D approach sprite stays
+in the viewport for the whole decision — which the `ECL4#32` acceptance frame
+shows directly.
+
+**Random-encounter scheduling is transcribed, tested, and deliberately
+unwired** (`crate::rest`, FD-44). Two facts settle the question this slice was
+asked: it is **rest-only** — the walk loop has no engine-side encounter roll at
+all, wandering monsters being entirely script-driven (`RANDOM` → `IF` →
+`COMBAT`, the census's 53 `RANDOM` uses) — and its `period` counts *rest-loop
+iterations*, each worth five units of clock slot 1, not minutes. The check
+draws exactly one `Random(100) + 1` on firing iterations only, compared `<=`
+against the percentage, so a percentage of 0 still burns the draw. Its sole
+caller is `resting`'s loop, which belongs to G3/slice 4; the cell, the
+arithmetic and its tests are landed now so that slice wires a transcription
+rather than discovering one. The draw is unreachable from every capture path
+(captures never camp) and, today, from every path at all.
+
+**Acceptance.** (1) Micro-ECL conformance per opcode, VM-side, plus a live
+engine drive of the ENCOUNTER MENU loop. (2) Real data: `ECL2#2 @0x8780`'s
+approach driven end to end — the masked `SPRIT2` band standing in the corridor,
+then one `APPROACH` later the `HEAD2`/`BODY2` close-up filling the viewport,
+both dumped and eyeballed. (3) Real data: `ECL4#32 @0x98A9`'s ENCOUNTER MENU
+live, with "COMBAT WAIT FLEE PARLAY" on the menu line under the encounter's own
+text and the sprite still up behind it, answered both ways and checked against
+the outcome table.
+
+**Residual, named:** `CMD_Combat`'s non-monster branch is still a stub (§0's
+caveat, unchanged); `CMD_Picture`'s `0xFF` arm still mutates its flags at
+presentation time rather than execution time — harmless for everything the
+goldens and the shipped scripts reach, and noted here rather than fixed inside
+a slice that did not own it.

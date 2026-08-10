@@ -344,7 +344,12 @@ fn a_resolvable_cross_file_newecl_records_no_halt() {
 /// on ECL block `ecl_block` with GEO block `geo_block`, one party member. The
 /// bytes are all self-authored (D10) — only the *game data* it is imported
 /// against is real.
-fn master_bytes(game_area: u8, ecl_block: u8, geo_block: u8, in_dungeon: bool) -> Vec<u8> {
+pub(crate) fn master_bytes(
+    game_area: u8,
+    ecl_block: u8,
+    geo_block: u8,
+    in_dungeon: bool,
+) -> Vec<u8> {
     use gbx_formats::save_orig::SAVGAM_SIZE;
     let mut buf = vec![0u8; SAVGAM_SIZE];
     let mut off = 0usize;
@@ -376,7 +381,7 @@ fn master_bytes(game_area: u8, ecl_block: u8, geo_block: u8, in_dungeon: bool) -
     buf
 }
 
-fn char_bytes() -> Vec<u8> {
+pub(crate) fn char_bytes() -> Vec<u8> {
     let mut buf = vec![0u8; gbx_formats::save_orig::CHAR_RECORD_SIZE];
     let name = b"WALKER";
     buf[0] = name.len() as u8;
@@ -389,7 +394,7 @@ fn char_bytes() -> Vec<u8> {
 
 /// Imports the synthetic save against REAL CotAB data — the vehicle for
 /// starting a drive anywhere in the shipped content.
-fn real_data_engine(
+pub(crate) fn real_data_engine(
     game_area: u8,
     ecl_block: u8,
     geo_block: u8,
@@ -508,7 +513,7 @@ fn the_ecl5_overland_exit_crosses_into_ecl1_block_80_on_real_data() {
 
 /// Ticks until `done`, feeding Enter so a script menu never stalls the drive.
 /// Returns whether `done` was reached.
-fn run_until(engine: &mut Engine, max: u32, done: impl Fn(&Engine) -> bool) -> bool {
+pub(crate) fn run_until(engine: &mut Engine, max: u32, done: impl Fn(&Engine) -> bool) -> bool {
     for _ in 0..max {
         if done(engine) {
             return true;
