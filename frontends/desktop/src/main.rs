@@ -21,6 +21,24 @@
 //! `--turbo N` multiplies the reel's tick rate (D-CV3's open speed door: frames
 //! are unchanged, only wall time). The long captures want it -- sewer-fight-2 is
 //! 18,185 draws over 49 rounds.
+//!
+//! ## Save slots -- `--saves <DIR>` (roll-credits slice 0, G0)
+//!
+//! The engine's save/load screen is pure (D8): a slot pick sets a
+//! `SaveLoadRequest` and the *host* performs the file I/O. This frontend is
+//! that host -- after every tick it takes the request, fulfills it with
+//! `gbx_engine::saveload_fs`, re-scans the directory so the screen shows real
+//! slots, and reports the verdict on screen via `Engine::report_host_notice`.
+//!
+//! **The saves directory is `<data dir>/SAVE` by default** -- the same
+//! directory the boot import already reads, and the one `saveload.rs`'s
+//! filename convention was designed for: our `SAVGAM{L}.RSAV` snapshots sit
+//! *beside* the originals' `SAVGAM{L}.DAT`, never overwriting them (D-SAVE12),
+//! so a single scan sees both and the Load list can offer either. Override with
+//! `--saves <DIR>` or `RESTRIKE_SAVE_DIR=<dir>` (an install you would rather
+//! not write into); the cost is that the original slots, which live with the
+//! game data, stop appearing in the Load list. The resolved path is printed at
+//! boot.
 
 mod keymap;
 mod scale;
@@ -34,6 +52,7 @@ use std::time::{Duration, Instant};
 use gbx_engine::engine::Engine;
 use gbx_engine::framebuffer::{HEIGHT, WIDTH};
 use gbx_engine::input::{InputEvent, TICK_HZ};
+use gbx_engine::saveload_fs;
 use gbx_formats::game_data::load_dir;
 use gbx_oracle::replay;
 use softbuffer::{Context, Surface};
@@ -55,9 +74,14 @@ fn main() {
     let mut watch: Option<PathBuf> = None;
     let mut turbo: u32 = 1;
     let mut slot: Option<char> = Some('A');
+    let mut saves_arg: Option<PathBuf> = None;
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--saves" => {
+                let v = args.next().expect("--saves requires a directory");
+                saves_arg = Some(PathBuf::from(v));
+            }
             "--seed" => {
                 let v = args.next().expect("--seed requires a value");
                 seed = v.parse().expect("--seed must be a u32");
@@ -92,17 +116,31 @@ fn main() {
         .or_else(|| env::var_os("GBX_DATA_DIR").map(PathBuf::from))
         .expect("restrike-desktop: pass a data directory or set GBX_DATA_DIR");
     let data = load_dir(&dir).expect("restrike-desktop: failed to read the data directory");
-    let engine = match watch {
+    let saves_dir = resolve_saves_dir(saves_arg, &dir);
+    let watching = watch.is_some();
+    let mut engine = match watch {
         Some(capture) => open_reel(data, &capture, turbo),
         None => boot_with_party(data, &dir, slot, seed),
     };
+    if !watching {
+        eprintln!("restrike-desktop: save slots in {}", saves_dir.display());
+        engine.set_slot_directory(saveload_fs::scan_slot_directory(&saves_dir));
+    }
 
     let event_loop = EventLoop::new().expect("failed to create the winit event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
-    let mut app = App::new(engine, square_pixels);
+    let mut app = App::new(engine, square_pixels, saves_dir, seed);
     event_loop
         .run_app(&mut app)
         .expect("the event loop exited with an error");
+}
+
+/// The saves directory (module doc): `--saves DIR`, else `RESTRIKE_SAVE_DIR`,
+/// else `<data dir>/SAVE` — where the originals already live, so one scan sees
+/// our `.rsav` slots and the importable `savgam{letter}.dat` sets together.
+fn resolve_saves_dir(arg: Option<PathBuf>, data_dir: &std::path::Path) -> PathBuf {
+    arg.or_else(|| env::var_os("RESTRIKE_SAVE_DIR").map(PathBuf::from))
+        .unwrap_or_else(|| data_dir.join("SAVE"))
 }
 
 /// `--watch`: parse the capture with `gbx-oracle`, assemble the engine-side
@@ -177,17 +215,34 @@ fn boot_with_party(
     let mut engine = gbx_engine::import::import_original(&set, data, seed)
         .unwrap_or_else(|e| panic!("restrike-desktop: slot {letter} did not import: {e:?}"));
     eprintln!("restrike-desktop: imported save slot {letter} — party of {party_size}");
-    // `RESTRIKE_GAME_SPEED=1..9`: the original's own speed setting (camp
-    // Alter ▸ Speed territory; 1 = fastest text, default 4) as an env knob
-    // until that screen lands.
+    apply_game_speed(&mut engine);
+    engine
+}
+
+/// `RESTRIKE_GAME_SPEED=1..9`: the original's own speed setting (camp
+/// Alter ▸ Speed territory; 1 = fastest text, default 4) as an env knob until
+/// that screen lands. Re-applied after every engine replacement — a `.rsav`
+/// carries its own pacer, but an import starts at the boot default.
+fn apply_game_speed(engine: &mut Engine) {
     if let Some(speed) = std::env::var("RESTRIKE_GAME_SPEED")
         .ok()
         .and_then(|s| s.parse::<u8>().ok())
     {
-        eprintln!("restrike-desktop: game speed {}", speed.clamp(1, 9));
         engine.set_game_speed(speed);
     }
-    engine
+}
+
+/// One line a player can act on for each `SlotIoError` — the whole point of
+/// routing this back to the screen rather than only to stderr.
+fn describe_slot_error(err: &saveload_fs::SlotIoError) -> String {
+    use saveload_fs::SlotIoError as E;
+    match err {
+        E::Io(e) if e.kind() == std::io::ErrorKind::NotFound => "no save file there.".to_string(),
+        E::Io(e) => format!("file error — {e}"),
+        E::Restore(e) => format!("{e}"),
+        E::Import(e) => format!("original save did not import ({e:?})"),
+        E::OriginalParse(msg) => format!("original save unreadable ({msg})"),
+    }
 }
 
 struct App {
@@ -208,10 +263,16 @@ struct App {
     debug_log: Option<std::fs::File>,
     debug_tick: u64,
     debug_last_probe: String,
+    /// Where `SaveLoadRequest`s are fulfilled (module doc).
+    saves_dir: PathBuf,
+    /// The PRNG seed a fresh import gets (the original save format carries
+    /// none) — the same one the boot import used, so re-importing a slot
+    /// mid-session reproduces the launch-time stream.
+    seed: u32,
 }
 
 impl App {
-    fn new(engine: Engine, square_pixels: bool) -> Self {
+    fn new(engine: Engine, square_pixels: bool, saves_dir: PathBuf, seed: u32) -> Self {
         let debug_log = std::env::var_os("RESTRIKE_DEBUG_LOG")
             .map(|p| std::fs::File::create(&p).expect("RESTRIKE_DEBUG_LOG path must be writable"));
         App {
@@ -227,7 +288,49 @@ impl App {
             debug_log,
             debug_tick: 0,
             debug_last_probe: String::new(),
+            saves_dir,
+            seed,
         }
+    }
+
+    /// Fulfills one `SaveLoadRequest` against [`Self::saves_dir`], then puts
+    /// the host's two obligations back on the engine: a fresh slot directory
+    /// (a Save just created a slot; a Load replaced the whole engine, whose
+    /// injected directory starts empty) and a player-visible verdict.
+    ///
+    /// A Load/Import replaces `self.engine` wholesale, so everything the host
+    /// had configured on the old one is re-applied here — including the
+    /// post-restore recompose, which is the only thing that puts the 3D
+    /// viewport back under a shell restored mid-walk-loop.
+    fn fulfill_io(&mut self, request: gbx_engine::saveload::SaveLoadRequest) {
+        use gbx_engine::saveload::SaveLoadRequest as Req;
+        let (verb, letter) = match request {
+            Req::Save(l) => ("saved to", l),
+            Req::Load(l) => ("loaded", l),
+            Req::ImportOriginal(l) => ("imported", l),
+        };
+        let replaced = !matches!(request, Req::Save(_));
+        let data = self.engine.game_data().clone();
+        let result =
+            saveload_fs::fulfill(&mut self.engine, request, &self.saves_dir, data, self.seed);
+        self.engine
+            .set_slot_directory(saveload_fs::scan_slot_directory(&self.saves_dir));
+        apply_game_speed(&mut self.engine);
+        let notice = match result {
+            Ok(()) => {
+                if replaced {
+                    self.engine.recompose_world_screen();
+                }
+                format!("Slot {letter} {verb}.")
+            }
+            Err(err) => format!("Slot {letter}: {}", describe_slot_error(&err)),
+        };
+        eprintln!("restrike-desktop: {notice} ({})", self.saves_dir.display());
+        if let Some(log) = &mut self.debug_log {
+            use std::io::Write;
+            let _ = writeln!(log, "io: {notice}");
+        }
+        self.engine.report_host_notice(notice);
     }
 
     /// Advances the accumulator and calls `tick` at `TICK_HZ` regardless of
@@ -250,6 +353,11 @@ impl App {
                         *dst = [r, g, b, 0xFF];
                     }
                 }
+            }
+            // D8's other half: the tick core deposited a save/load request,
+            // the host performs it. Between ticks, never during one.
+            if let Some(request) = self.engine.take_io_request() {
+                self.fulfill_io(request);
             }
             self.debug_tick += 1;
             if let Some(log) = &mut self.debug_log {

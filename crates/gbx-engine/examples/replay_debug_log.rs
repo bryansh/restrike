@@ -9,6 +9,14 @@
 //!
 //! Prints the same probe/transcript stream the desktop logger wrote, so the
 //! two can be diffed directly.
+//!
+//! **Save/load replays too** (roll-credits slice 0): the desktop is the host
+//! that fulfills the save/load screen's `SaveLoadRequest`, so a replay that
+//! didn't do the same would diverge the moment a recorded session saved. It
+//! fulfills against a **throwaway copy** of the desktop's saves directory
+//! (`<data>/SAVE`) made per run — every slot the live session could see is
+//! there, the writes land in the copy, and the player's own saves are never
+//! touched by a forensics replay.
 
 use gbx_engine::engine::Engine;
 use gbx_engine::input::{ExtKey, InputEvent};
@@ -40,6 +48,22 @@ fn parse_event(s: &str) -> Option<InputEvent> {
             return None;
         }
     })
+}
+
+/// Copies every regular file in `from` into a fresh `to` (no recursion — a
+/// save directory is flat). A missing source is fine: the replay just has no
+/// slots, exactly like a first launch.
+fn copy_dir_shallow(from: &std::path::Path, to: &std::path::Path) {
+    let _ = std::fs::remove_dir_all(to);
+    std::fs::create_dir_all(to).expect("replay: saves sandbox must be creatable");
+    let Ok(entries) = std::fs::read_dir(from) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.path().is_file() {
+            let _ = std::fs::copy(entry.path(), to.join(entry.file_name()));
+        }
+    }
 }
 
 fn main() {
@@ -92,6 +116,14 @@ fn main() {
         gbx_engine::import::import_original(&set, data, 1).expect("slot A imports")
     };
 
+    // The saves directory the desktop would have used, copied somewhere
+    // disposable so a replay can save/load without mutating the real one.
+    let saves_dir =
+        std::env::temp_dir().join(format!("restrike-replay-saves-{}", std::process::id()));
+    copy_dir_shallow(&dir.join("SAVE"), &saves_dir);
+    engine.set_slot_directory(gbx_engine::saveload_fs::scan_slot_directory(&saves_dir));
+    eprintln!("replay: saves sandbox at {}", saves_dir.display());
+
     let dump_at: Vec<u64> = std::env::var("RESTRIKE_REPLAY_DUMP")
         .ok()
         .map(|s| s.split(',').filter_map(|n| n.trim().parse().ok()).collect())
@@ -115,6 +147,24 @@ fn main() {
             }
             std::fs::write(&path, &out).expect("dump writable");
             eprintln!("frame {tick} -> {}", path.display());
+        }
+        if let Some(request) = engine.take_io_request() {
+            let data = engine.game_data().clone();
+            let outcome = gbx_engine::saveload_fs::fulfill(
+                &mut engine,
+                request,
+                &saves_dir,
+                data,
+                1, // the desktop's DEFAULT_SEED, as above
+            );
+            engine.set_slot_directory(gbx_engine::saveload_fs::scan_slot_directory(&saves_dir));
+            match outcome {
+                Ok(()) => {
+                    engine.recompose_world_screen();
+                    println!("tick {tick} | io {request:?} ok");
+                }
+                Err(err) => println!("tick {tick} | io {request:?} FAILED: {err:?}"),
+            }
         }
         let probe = engine.probe();
         let transcript = engine.take_transcript();

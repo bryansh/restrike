@@ -574,3 +574,98 @@ fn saveload_fs_fulfill_save_then_errors_on_empty_slot() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// --- roll-credits slice 0 (G0): the whole in-game save/load loop ---
+
+/// Feeds one key per tick and then idles, so a screen transition that needs a
+/// tick to settle gets one.
+fn press(engine: &mut Engine, keys: &[u8]) {
+    for &k in keys {
+        engine.tick(&[crate::input::InputEvent::Char(k)]);
+        engine.tick(&[]);
+    }
+}
+
+/// ★ **The slice-0 acceptance property**: a player saves from inside the game,
+/// keeps playing, and later loads — and lands back on the state they saved.
+///
+/// This drives the real screens with real keys (`Encamp ▸ Save ▸ Save ▸ slot A`,
+/// then `Encamp ▸ Save ▸ Load ▸ slot A`) and plays the host's part exactly as
+/// `frontends/desktop` does: take the request after the tick,
+/// `saveload_fs::fulfill` it, re-scan the directory. Until this slice no
+/// frontend called any of that, so the screens emitted requests into the void
+/// (D-RC0).
+#[test]
+fn a_camp_save_then_load_restores_the_saved_state() {
+    use crate::saveload::SaveLoadRequest;
+    use crate::saveload_fs::{fulfill, scan_slot_directory};
+
+    let dir = std::env::temp_dir().join(format!("restrike-slice0-loop-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let mut engine = imported_engine();
+    for _ in 0..20 {
+        engine.tick(&[]);
+    }
+    engine.set_slot_directory(scan_slot_directory(&dir));
+
+    // Camp ▸ Save ▸ Save ▸ slot A.
+    press(&mut engine, b"essA");
+    let request = engine
+        .take_io_request()
+        .expect("picking a slot in Save mode emits a request");
+    assert_eq!(request, SaveLoadRequest::Save('A'));
+    fulfill(&mut engine, request, &dir, synthetic_game_data(), 7)
+        .expect("the host fulfills the Save");
+    engine.set_slot_directory(scan_slot_directory(&dir));
+    let saved = engine.save();
+
+    // Keep playing: the search toggle flips real engine state, so a load that
+    // silently did nothing could not pass the comparison below.
+    press(&mut engine, b"s");
+    for _ in 0..20 {
+        engine.tick(&[]);
+    }
+    assert_ne!(engine.save(), saved, "playing on changed the state");
+
+    // Camp ▸ Save ▸ Load ▸ slot A.
+    press(&mut engine, b"eslA");
+    let request = engine
+        .take_io_request()
+        .expect("picking a slot in Load mode emits a request");
+    assert_eq!(request, SaveLoadRequest::Load('A'));
+    fulfill(&mut engine, request, &dir, synthetic_game_data(), 7)
+        .expect("the host fulfills the Load");
+
+    assert_eq!(
+        engine.save(),
+        saved,
+        "the loaded engine must be byte-identical to the one that was saved"
+    );
+
+    // And the host's post-load repaint is a no-panic no-op-or-redraw on
+    // whatever shell the save carried.
+    engine.recompose_world_screen();
+    engine.tick(&[]);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A host notice is drawn for the player and then retires itself — the M6
+/// forensics rule made mechanical. Pixels only move because a *host* asked
+/// them to, which is why no golden is affected by this path existing.
+#[test]
+fn a_host_notice_shows_then_clears_itself() {
+    let mut engine = imported_engine();
+    engine.tick(&[]);
+    let quiet = engine.tick(&[]).hash_hex();
+
+    engine.report_host_notice("Slot A saved.");
+    let shown = engine.tick(&[]).hash_hex();
+    assert_ne!(shown, quiet, "the notice put pixels on the screen");
+    assert_eq!(engine.host_notice(), Some("Slot A saved."));
+
+    // A keypress dismisses it, and the row goes back to background.
+    engine.tick(&[crate::input::InputEvent::Char(b'x')]);
+    assert_eq!(engine.host_notice(), None);
+}

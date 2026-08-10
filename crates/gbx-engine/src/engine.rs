@@ -146,7 +146,24 @@ pub struct Engine {
     /// instead of the UI shell. `None` for a normally-booted engine, which is
     /// what keeps the walk loop and every existing golden untouched.
     reel: Option<Box<crate::combat::reel::Reel>>,
+    /// A host→player notice with a tick budget ([`Engine::report_host_notice`])
+    /// — the save/load outcome the frontend now has and the core never can
+    /// (D8). Transient, never serialized, and drawn only when a frontend put
+    /// one here, so every committed golden is untouched by its existence.
+    host_notice: Option<HostNotice>,
 }
+
+/// [`Engine::report_host_notice`]'s payload: the line to show and how many
+/// ticks it has left.
+struct HostNotice {
+    text: String,
+    ticks_left: u32,
+}
+
+/// How long a host notice stays on screen (~5s at 60 Hz) unless the player
+/// presses a key first. Long enough to read a save-path error, short enough
+/// that it never becomes furniture.
+const HOST_NOTICE_TICKS: u32 = 300;
 
 /// A trivial single-item `ImageBlock` fixture — [`Engine::new_fixture`]'s
 /// stand-in for the boot-loaded `SKY` blocks (moon/sun/horizon) when a
@@ -352,6 +369,7 @@ impl Engine {
             slots: crate::saveload::SlotDirectory::new(),
             io_request: None,
             reel: None,
+            host_notice: None,
         }
     }
 
@@ -412,6 +430,7 @@ impl Engine {
             slots: crate::saveload::SlotDirectory::new(),
             io_request: None,
             reel: None,
+            host_notice: None,
         }
     }
 
@@ -523,6 +542,89 @@ impl Engine {
     /// `saveload_fs`. Clears the request so it fires exactly once.
     pub fn take_io_request(&mut self) -> Option<crate::saveload::SaveLoadRequest> {
         self.io_request.take()
+    }
+
+    /// ★ Shows a host-authored line to the **player** for
+    /// [`HOST_NOTICE_TICKS`] ticks (or until the next keypress).
+    ///
+    /// D8 keeps file I/O outside the tick core, which means the *outcome* of a
+    /// save/load only ever exists on the host side — and the M6 forensics rule
+    /// is that a report no frontend shows is not a report. Bryan's 2026-08-03
+    /// "ghost fight" was three silent failures stacked; a save that quietly
+    /// doesn't write would be the same bug wearing a different hat. So the
+    /// frontend hands the sentence back and the engine paints it, over
+    /// whatever is on screen, in the exploration text window's first row
+    /// (`NORMAL_BOTTOM.y_start`, where the game's own prose goes).
+    ///
+    /// Never called by the core itself: a golden that doesn't set a notice
+    /// draws exactly what it drew before.
+    pub fn report_host_notice(&mut self, text: impl Into<String>) {
+        self.host_notice = Some(HostNotice {
+            text: text.into(),
+            ticks_left: HOST_NOTICE_TICKS,
+        });
+    }
+
+    /// The currently-showing host notice, if any (frontend/test seam).
+    pub fn host_notice(&self) -> Option<&str> {
+        self.host_notice.as_ref().map(|n| n.text.as_str())
+    }
+
+    /// ★ Recomposes the exploration screen from current state — the host's
+    /// post-`.rsav`-restore repaint.
+    ///
+    /// A restored engine's framebuffer carries the static frame and the
+    /// picture layer ([`Engine::assemble`]) but **not** the 3D viewport: the
+    /// walk loop only ever paints that at world-menu entry
+    /// ([`Shell::enter_world_menu`]), and a restore lands *inside* an
+    /// already-entered menu, so nothing would repaint it until the player
+    /// walked. The original has the same problem and the same answer — its
+    /// boot-recompose path is gated on `reload_ecl_and_pictures`, the flag
+    /// **only a save-load sets** (`enter_world_menu`'s design note).
+    ///
+    /// Drawing only: no shell transition, no `field_592` zeroing, no state
+    /// mutation beyond the picture layer's own hide-on-redraw. A no-op while a
+    /// full-screen [`Shell::Screen`], a fight or the reel owns the display —
+    /// each of those repaints itself every tick.
+    pub fn recompose_world_screen(&mut self) {
+        if self.reel.is_some() || !self.shell.draws_engine_status_line() {
+            return;
+        }
+        let mut ctx = self.flow_ctx();
+        crate::corridor::redraw_view(&mut ctx);
+    }
+
+    /// The per-tick [`FlowCtx`] bundle, borrowed out of this engine's own
+    /// fields. `tick` deliberately keeps its own inline copy (it needs
+    /// `self.shell` alongside the context, which a whole-`self` borrow would
+    /// forbid); every other site that just wants to *draw* through the shared
+    /// helpers uses this.
+    fn flow_ctx(&mut self) -> FlowCtx<'_> {
+        FlowCtx {
+            machine: &mut self.machine,
+            vm_memory: &mut self.vm_memory,
+            data: &self.data,
+            game_area: GAME_AREA,
+            input: &mut self.input,
+            dt_ticks: 1,
+            state: &mut self.state,
+            geo: &self.geo,
+            party: &mut self.party_predicates,
+            roster: &mut self.party,
+            rules: &self.rules,
+            slots: &self.slots,
+            io_request: &mut self.io_request,
+            rng: &mut self.rng,
+            fb: &mut self.fb,
+            font: &self.font,
+            cursor: &mut self.cursor,
+            pacer: &mut self.pacer,
+            sounds: &mut self.sounds,
+            symbols: &mut self.symbol_sets,
+            sky: &self.sky,
+            combat_icons: &self.combat_icons,
+            pictures: &mut self.pictures,
+        }
     }
 
     /// The ScriptMemory unknown-access log + service-call log + halt
@@ -707,6 +809,13 @@ impl Engine {
             draw_string(&mut self.fb, &self.font, &status, 15, 17, 0, 10);
         }
 
+        // The host's save/load verdict, last so it lands on top of whatever
+        // owns the screen (the walk loop, camp, the death screen) — but never
+        // over a fight, which composes the whole display itself.
+        if self.shell.combat_host().is_none() {
+            self.draw_host_notice(!input.is_empty());
+        }
+
         let hash = self.fb.hash();
         if self.last_hash != Some(hash) {
             self.serial += 1;
@@ -719,6 +828,27 @@ impl Engine {
             sounds: &self.sounds,
             serial: self.serial,
         }
+    }
+
+    /// Paints the live host notice (if any) into the exploration text
+    /// window's first row, counting its budget down; clears the row once, on
+    /// the tick it expires, so it never becomes permanent furniture.
+    /// `dismissed` (any key this tick) retires it early.
+    fn draw_host_notice(&mut self, dismissed: bool) {
+        let Some(notice) = &mut self.host_notice else {
+            return;
+        };
+        let row = crate::text::NORMAL_BOTTOM.y_start;
+        let (x0, x1) = (0usize, 39usize);
+        if dismissed || notice.ticks_left == 0 {
+            self.host_notice = None;
+            crate::draw::cell_rect_fill(&mut self.fb, 0, row, row, x0, x1);
+            return;
+        }
+        notice.ticks_left -= 1;
+        let text = notice.text.clone();
+        crate::draw::cell_rect_fill(&mut self.fb, 0, row, row, x0, x1);
+        draw_string(&mut self.fb, &self.font, &text, row, 1, 0, 15);
     }
 
     /// The watch-mode tick: the reel advances the captured fight's playback and
