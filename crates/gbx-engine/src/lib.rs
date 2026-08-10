@@ -52,6 +52,11 @@ pub mod training;
 pub mod vmhost;
 pub mod widgets;
 
+/// Roll-credits slice 1's acceptance suite (`roll-credits.md` §5): the
+/// `SAVE → 0x7F12` + cross-file-NEWECL transition, synthetic and against real
+/// CotAB data.
+#[cfg(test)]
+mod area_transition_tests;
 #[cfg(test)]
 mod combat_wiring;
 #[cfg(test)]
