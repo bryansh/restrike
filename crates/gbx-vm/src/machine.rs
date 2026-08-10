@@ -130,7 +130,49 @@ pub enum VmStep {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum Completion {
     Advance(u16),
-    WriteWordThenAdvance { dest: u16, next: u16 },
+    WriteWordThenAdvance {
+        dest: u16,
+        next: u16,
+    },
+    /// ★ ENCOUNTER MENU (0x29)'s `do { … } while (init_max != 0)` loop
+    /// (`ovr003.cs:1281-1531`): the only shipped opcode whose own body re-opens
+    /// a menu. The reply is resolved against the operand-borne outcome table
+    /// and either ends the instruction or arms the next iteration, so this
+    /// carries the decoded operands with it — the original keeps them in stack
+    /// locals across the loop, and `vm_LoadCmdSets` has long since advanced
+    /// past the bytes.
+    EncounterMenu(Box<EncounterMenuState>),
+}
+
+/// ENCOUNTER MENU (0x29)'s decoded operands, held across the menu loop. Field
+/// names follow `CMD_EncounterMenu`'s own locals where the original has no
+/// better name (`ovr003.cs:1227-1269`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct EncounterMenuState {
+    /// `var_43D` — `gbl.cmd_opps[4].Word` (`:1256`), the result cell's raw
+    /// address, taken like every other destination operand.
+    dest: u16,
+    /// `var_6[0..5]` (`:1258-1261`), operands 5..=9: the outcome CLASS for each
+    /// of the five menu slots. Indexed by the *resolved* selection, and it is
+    /// the class — not the slot — that decides what happens, so the same word
+    /// means different things in different encounters.
+    outcomes: [u8; 5],
+    /// `strings[0..3]` (`:1263-1266`) — string registers 1..=3, i.e. operands
+    /// 10, 11 and 12. One approach line per distance band, scanned cyclically
+    /// from the current band (`:1298-1339`).
+    texts: [VmString; 3],
+    /// `var_407` (`:1268`, operand 13): the party's SLOWEST member must reach
+    /// this to get away (`init_min >= var_407`, `:1384`).
+    party_flee_movement: u8,
+    /// `var_408` (`:1269`, operand 14): the monsters break off if this beats
+    /// the party's FASTEST member (`var_408 > var_40A`, `:1442`).
+    monster_flee_movement: u8,
+    /// `init_min` / `var_40A` — `calc_group_movement`'s (slowest, fastest),
+    /// sampled ONCE before the loop (`:1250`), so a party hasted mid-menu would
+    /// not benefit. Verbatim.
+    slowest: u8,
+    fastest: u8,
+    next: u16,
 }
 
 /// Per-opcode continuation state (`docs/design/vm-scriptmemory.md` §3):
@@ -467,6 +509,13 @@ impl EclMachine {
                 activation.pc = next;
                 Ok(VmStep::Continue)
             }
+            Completion::EncounterMenu(state) => {
+                let selection = match reply {
+                    Some(Reply::Selection(v)) => v,
+                    _ => 0,
+                };
+                self.encounter_menu_reply(activation, host, origin_pc, *state, selection)
+            }
         }
     }
 
@@ -595,6 +644,34 @@ impl EclMachine {
         VmStep::Effect(effect)
     }
 
+    /// [`Self::yield_effect`] for an ordered batch: the first effect is
+    /// returned now, the rest queue behind it, and an optional trailing
+    /// request follows them. An empty batch with no request completes
+    /// immediately — but every caller here has at least one effect.
+    fn yield_effects(
+        activation: &mut Activation,
+        pc: u16,
+        mut queue: VecDeque<Effect>,
+        request_after: Option<Request>,
+        completion: Completion,
+    ) -> VmStep {
+        let first = queue.pop_front();
+        activation.pending = Some(Pending {
+            pc,
+            state: PendingState::Effects {
+                queue,
+                request_after,
+                completion,
+            },
+        });
+        match first {
+            Some(effect) => VmStep::Effect(effect),
+            // Nothing to present: fall through to the pending drain on the
+            // next step, which will surface the request (or the completion).
+            None => VmStep::Continue,
+        }
+    }
+
     fn yield_effect_then_request(
         activation: &mut Activation,
         pc: u16,
@@ -693,6 +770,7 @@ impl EclMachine {
             0x24 => self.op_combat(activation),
             0x25 => self.op_on_goto(activation, host, pc, opcode),
             0x26 => self.op_on_gosub(activation, host, pc, opcode),
+            0x29 => self.op_encounter_menu(activation, host, pc, opcode),
             0x2A => self.op_gettable(activation, host, pc, opcode),
             0x2B => self.op_horizontal_menu(activation, host, pc, opcode),
             0x2D => self.op_call(activation, host, pc, opcode),
@@ -961,7 +1039,7 @@ impl EclMachine {
         let sprite_id = self.resolve_numeric(&args[0], pc, opcode, host)? as u8;
         let max_distance = self.resolve_numeric(&args[1], pc, opcode, host)? as u8;
         let pic_id = self.resolve_numeric(&args[2], pc, opcode, host)? as u8;
-        host.setup_monster(sprite_id, max_distance, pic_id);
+        host.setup_monster(sprite_id, max_distance as u16, pic_id);
         let distance = host.approach_distance().min(max_distance);
         host.set_encounter_distance(distance);
         host.load_encounter_visual();
@@ -1015,6 +1093,398 @@ impl EclMachine {
             activation.pc = next;
             Ok(VmStep::Continue)
         }
+    }
+
+    /// ★ ENCOUNTER MENU (0x29), `CMD_EncounterMenu` ovr003.cs:1227-1538 — the
+    /// classic Gold Box COMBAT/WAIT/FLEE/PARLAY decision, and the one shipped
+    /// opcode that loops around its own menu.
+    ///
+    /// **Fourteen operands** (`vm_LoadCmdSets(0x0e)`, `:1251`):
+    ///
+    /// | # | `:line` | meaning |
+    /// |---|---|---|
+    /// | 1 | `:1253` | `sprite_block_id` (`SPRIT{area}` block) |
+    /// | 2 | `:1254` | `max_encounter_distance` — **not** byte-cast here, unlike SETUP MONSTER's `:220` |
+    /// | 3 | `:1255` | `pic_block_id` (also the BODY id when a head is set) |
+    /// | 4 | `:1256` | the result cell, raw `.Word` |
+    /// | 5-9 | `:1258-1261` | `var_6[0..5]`, the per-slot outcome class |
+    /// | 10-12 | `:1263-1266` | the three approach lines (string registers 1..3) |
+    /// | 13 | `:1268` | party-flee movement threshold |
+    /// | 14 | `:1269` | monster-flee movement threshold |
+    ///
+    /// **The preamble runs once** (`:1245-1279`): `byte_1EE95 = true` — which
+    /// is what suppresses `sub_30580`'s close-up for the whole menu, keeping
+    /// the 3D approach sprite on screen — then `calc_group_movement`, the
+    /// operand decode, the `sub_304B4` ray clamped into
+    /// `area2_ptr.encounter_distance`, and one encounter-visual dispatch.
+    ///
+    /// **The loop body** (`:1281-1531`) prints one approach line, opens the
+    /// menu, and resolves the reply; see [`Self::encounter_menu_reply`] for the
+    /// outcome table.
+    ///
+    /// Presentation the original does here and this engine does not model, each
+    /// for a reason already established elsewhere: `bottomTextHasBeenCleared`
+    /// and `DelayBetweenCharacters` (`:1246-1247`, `:1535`) are the teletype
+    /// pacing pair — [`crate::Effect::Print`]'s `TextJob` always paces;
+    /// `useOverlay` (`:1283-1292`) is recomputed per tick by the parked widget
+    /// (FD-33's discharge); `textXCol`/`textYCol` (`:1296-1297`) are
+    /// `NORMAL_BOTTOM`'s own origin; and `ClearPromptArea` (`:1534`) is the
+    /// same call `CMD_HorizontalMenu` ends with and this engine has never
+    /// modelled (the widget closes itself).
+    fn op_encounter_menu(
+        &mut self,
+        activation: &mut Activation,
+        host: &mut dyn VmHost,
+        pc: u16,
+        opcode: u8,
+    ) -> Result<VmStep, VmError> {
+        // `:1245` — set BEFORE anything else, so the dispatch at `:1279` and
+        // every later one already sees it.
+        host.set_encounter_menu_active(true);
+        // `:1250` — sampled once, outside the loop.
+        let (slowest, fastest) = host.calc_group_movement();
+
+        let (args, next) = self.load_cmd_sets(pc.wrapping_add(1), 14, host, pc);
+        let sprite_id = self.resolve_numeric(&args[0], pc, opcode, host)? as u8;
+        let max_distance = self.resolve_numeric(&args[1], pc, opcode, host)?;
+        let pic_id = self.resolve_numeric(&args[2], pc, opcode, host)? as u8;
+        let dest = self.resolve_target(&args[3], pc, opcode)?;
+        let mut outcomes = [0u8; 5];
+        for (i, slot) in outcomes.iter_mut().enumerate() {
+            *slot = self.resolve_numeric(&args[4 + i], pc, opcode, host)? as u8;
+        }
+        // `:1263-1266` — the string REGISTERS, not the operands: `strIndex`
+        // counts only string-mode operands, so these are registers 1..=3
+        // whatever positions the strings occupied.
+        let texts = [
+            self.strings.get(1).clone(),
+            self.strings.get(2).clone(),
+            self.strings.get(3).clone(),
+        ];
+        let party_flee_movement = self.resolve_numeric(&args[12], pc, opcode, host)? as u8;
+        let monster_flee_movement = self.resolve_numeric(&args[13], pc, opcode, host)? as u8;
+
+        // `:1253-1255` — the same three stores SETUP MONSTER makes.
+        host.setup_monster(sprite_id, max_distance, pic_id);
+        // `:1271-1276` — the ray, clamped.
+        let distance = host.approach_distance();
+        let distance = if max_distance < distance as u16 {
+            max_distance as u8
+        } else {
+            distance
+        };
+        host.set_encounter_distance(distance);
+        host.load_encounter_visual(); // `:1279`
+
+        let state = EncounterMenuState {
+            dest,
+            outcomes,
+            texts,
+            party_flee_movement,
+            monster_flee_movement,
+            slowest,
+            fastest,
+            next,
+        };
+        let mut effects = VecDeque::new();
+        effects.push_back(Effect::EncounterVisual);
+        let request = self.encounter_menu_iteration(host, pc, &state, &mut effects);
+        Ok(Self::yield_effects(
+            activation,
+            pc,
+            effects,
+            Some(request),
+            Completion::EncounterMenu(Box::new(state)),
+        ))
+    }
+
+    /// One turn of ENCOUNTER MENU's loop body (`ovr003.cs:1283-1361`): the
+    /// approach line, then the menu.
+    ///
+    /// The line is chosen by a **cyclic scan starting at the current distance
+    /// band** (`:1298-1339`) — band 0 scans `0,1,2` and stops at the end; bands
+    /// 1 and 2 wrap (`1,2,0` and `2,0,1`) and stop when the cursor returns to
+    /// where it began. So a script that fills only one of the three strings
+    /// still has something to say at every range, and the empty-string case
+    /// additionally suppresses the region clear (`:1341-1344`).
+    ///
+    /// The fourth menu word is PARLAY when the monsters are already adjacent
+    /// (or the party is outdoors) and ADVANCE otherwise (`:1348-1355`) — the
+    /// words a player sees differ, while the slot they resolve to does not,
+    /// which is the presentation/execution split the combat menus already use.
+    fn encounter_menu_iteration(
+        &mut self,
+        host: &mut dyn VmHost,
+        pc: u16,
+        state: &EncounterMenuState,
+        effects: &mut VecDeque<Effect>,
+    ) -> Request {
+        let distance = host.encounter_distance();
+        let in_dungeon = self.in_dungeon(host, pc);
+
+        // `:1294` — `clearTextArea = (area_ptr.inDungeon != 0)`.
+        let mut clear_first = in_dungeon;
+        let text = Self::encounter_menu_text(state, distance);
+        if text.0.is_empty() {
+            clear_first = false; // `:1341-1344`
+        }
+        // `:1346` — `press_any_key(text, clearTextArea, 10, NormalBottom)`.
+        effects.push_back(Effect::Print { text, clear_first });
+
+        Request::HorizontalMenu {
+            options: Self::encounter_menu_words(distance, in_dungeon),
+        }
+    }
+
+    /// `:1298-1339`'s cyclic scan, as one expression: try the band's own
+    /// string first, then each following band in turn, wrapping, and take the
+    /// first non-empty. Falls back to the last one visited when all three are
+    /// empty — which is what the original's `do`/`while` leaves in `text`.
+    fn encounter_menu_text(state: &EncounterMenuState, distance: u8) -> VmString {
+        // Only 0..=2 are reachable (the clamp caps the ray at 2); a wilder
+        // value would fall through the original's `switch` and reuse the
+        // PREVIOUS iteration's `text`, a stack local it never resets. Band 0's
+        // scan is the closest honest stand-in and cannot be reached anyway.
+        let start = (distance as usize).min(2);
+        let order: [usize; 3] = if start == 0 {
+            [0, 1, 2] // `:1300-1307` — no wrap; this arm stops at index 3
+        } else {
+            [start, (start + 1) % 3, (start + 2) % 3] // `:1309-1338`
+        };
+        let mut last = VmString::default();
+        for i in order {
+            last = state.texts[i].clone();
+            if !last.0.is_empty() {
+                return last;
+            }
+        }
+        last
+    }
+
+    /// `:1348-1355`. The menu is built as a literal `"~COMBAT ~WAIT ~FLEE
+    /// ~PARLAY"`/`"…~ADVANCE"` string in the original and handed to the same
+    /// `sub_317AA` `CMD_HorizontalMenu` uses, so it presents identically —
+    /// `buildMenuStrings` lowercases everything but the `~`-marked initials,
+    /// leaving "Combat Wait Flee Parlay" with C/W/F/P as the hotkeys.
+    fn encounter_menu_words(distance: u8, in_dungeon: bool) -> Vec<VmString> {
+        let fourth: &[u8] = if distance == 0 || !in_dungeon {
+            b"PARLAY"
+        } else {
+            b"ADVANCE"
+        };
+        vec![
+            VmString(b"COMBAT".to_vec()),
+            VmString(b"WAIT".to_vec()),
+            VmString(b"FLEE".to_vec()),
+            VmString(fourth.to_vec()),
+        ]
+    }
+
+    /// ★ ENCOUNTER MENU's outcome table (`ovr003.cs:1363-1531`), resolved.
+    ///
+    /// First, the **slot remap** (`:1363-1368`): with the monsters adjacent (or
+    /// outdoors) the fourth word is PARLAY, and selecting it resolves to slot
+    /// **4**, not 3 — so `var_6` really does have five entries for four words,
+    /// and slot 3 (ADVANCE) is simply unreachable at distance 0.
+    ///
+    /// Then `var_43A = var_6[selection]` picks one of five outcome classes, and
+    /// the class × slot pair decides:
+    ///
+    /// | class | COMBAT (0) | WAIT (1) | FLEE (2) | ADVANCE (3) | PARLAY (4) |
+    /// |---|---|---|---|---|---|
+    /// | 0 | write 1 | write 1 | flee check | write 1 | write 1 |
+    /// | 1 | write 1 | "Both sides wait." + loop | write 2 | step in (or wait) + loop | step in + loop, else write 3 |
+    /// | 2 | monster-flee check | monsters flee | monsters flee | monsters flee | monsters flee |
+    /// | 3 | write 1 | step in (or wait) + loop | write 2 | step in (or wait) + loop | step in + loop, else write 3 |
+    /// | 4 | write 1 | step in + loop, else write 3 | write 2 | same as WAIT | same as WAIT |
+    ///
+    /// The written values are the script's language: **0** = the monsters fled,
+    /// **1** = fight, **2** = the party got away, **3** = parlay/advance
+    /// exhausted. `ECL6#64 @0x8519` feeds its cell straight to an `ON GOTO`
+    /// with four targets; `ECL4#32 @0x98A9` compares it against 3.
+    ///
+    /// Two checks read `calc_group_movement`'s sampled pair. The party's flee
+    /// succeeds when its **slowest** member makes the operand-13 threshold
+    /// (`:1384`), and the monsters break off when operand 14 beats the party's
+    /// **fastest** (`:1442`) — slowest for running away, fastest for being run
+    /// away from.
+    ///
+    /// Every "step in" arm decrements the distance and re-dispatches the
+    /// encounter visual, exactly as APPROACH does; at distance 0 the same arms
+    /// print "Both sides wait." instead, except class 1/3/4's PARLAY slot,
+    /// which is where the write-3 parlay outcome comes from.
+    fn encounter_menu_reply(
+        &mut self,
+        activation: &mut Activation,
+        host: &mut dyn VmHost,
+        pc: u16,
+        state: EncounterMenuState,
+        selection: u8,
+    ) -> Result<VmStep, VmError> {
+        const WAIT_TEXT: &[u8] = b"Both sides wait.";
+        const MONSTERS_FLEE_TEXT: &[u8] = b"The monsters flee.";
+
+        let distance = host.encounter_distance();
+        let in_dungeon = self.in_dungeon(host, pc);
+
+        // `:1363-1368` — PARLAY resolves to slot 4, not slot 3.
+        let mut slot = selection as usize;
+        if (distance == 0 || !in_dungeon) && slot == 3 {
+            slot = 4;
+        }
+        let class = state.outcomes[slot.min(4)];
+
+        let mut effects = VecDeque::new();
+        // `Some(value)` = write and end; `None` = loop again.
+        let mut result: Option<u16> = None;
+        let mut loop_again = false;
+
+        // Every "the monsters walk a band closer" arm is this: decrement and
+        // re-dispatch, or say nothing happened.
+        let step_in = |host: &mut dyn VmHost, effects: &mut VecDeque<Effect>| {
+            if distance != 0 {
+                host.set_encounter_distance(distance - 1);
+                host.load_encounter_visual();
+                effects.push_back(Effect::EncounterVisual);
+            } else {
+                effects.push_back(Effect::Print {
+                    text: VmString(WAIT_TEXT.to_vec()),
+                    clear_first: true,
+                });
+            }
+        };
+
+        match (class, slot) {
+            // --- class 0 (`:1372-1394`) ---
+            (0, 2) => {
+                // `:1384` — the party's SLOWEST must make the threshold.
+                result = Some(if state.slowest >= state.party_flee_movement {
+                    2
+                } else {
+                    1
+                });
+            }
+            (0, _) => result = Some(1),
+
+            // --- class 1 (`:1396-1437`) ---
+            (1, 0) => result = Some(1),
+            (1, 1) => {
+                effects.push_back(Effect::Print {
+                    text: VmString(WAIT_TEXT.to_vec()),
+                    clear_first: true,
+                });
+                loop_again = true;
+            }
+            (1, 2) => result = Some(2),
+            (1, 3) => {
+                step_in(host, &mut effects);
+                loop_again = true;
+            }
+            (1, _) => {
+                if distance > 0 {
+                    step_in(host, &mut effects);
+                    loop_again = true;
+                } else {
+                    result = Some(3);
+                }
+            }
+
+            // --- class 2 (`:1439-1462`) ---
+            (2, 0) => {
+                // `:1442` — the monsters outrun the party's FASTEST.
+                if state.monster_flee_movement > state.fastest {
+                    result = Some(0);
+                    effects.push_back(Effect::Print {
+                        text: VmString(MONSTERS_FLEE_TEXT.to_vec()),
+                        clear_first: true,
+                    });
+                } else {
+                    result = Some(1);
+                }
+            }
+            (2, _) => {
+                result = Some(0);
+                effects.push_back(Effect::Print {
+                    text: VmString(MONSTERS_FLEE_TEXT.to_vec()),
+                    clear_first: true,
+                });
+            }
+
+            // --- class 3 (`:1464-1505`) ---
+            (3, 0) => result = Some(1),
+            (3, 1) | (3, 3) => {
+                step_in(host, &mut effects);
+                loop_again = true;
+            }
+            (3, 2) => result = Some(2),
+            (3, _) => {
+                if distance == 0 {
+                    result = Some(3);
+                } else {
+                    step_in(host, &mut effects);
+                    loop_again = true;
+                }
+            }
+
+            // --- class 4 (`:1507-1530`) ---
+            (4, 0) => result = Some(1),
+            (4, 2) => result = Some(2),
+            (4, _) => {
+                if distance == 0 {
+                    result = Some(3);
+                } else {
+                    step_in(host, &mut effects);
+                    loop_again = true;
+                }
+            }
+
+            // No `default` in the original's `switch` — an outcome class
+            // outside 0..=4 falls straight through, writes nothing, and (with
+            // `init_max` still 0) ends the instruction. Verbatim.
+            _ => {}
+        }
+
+        if loop_again {
+            let request = self.encounter_menu_iteration(host, pc, &state, &mut effects);
+            return Ok(Self::yield_effects(
+                activation,
+                pc,
+                effects,
+                Some(request),
+                Completion::EncounterMenu(Box::new(state)),
+            ));
+        }
+
+        // The write happens at execution time, where the original's
+        // `vm_SetMemoryValue` calls sit — ahead of the trailing
+        // "The monsters flee." (`:1444-1450`), which is why that print is
+        // queued behind it rather than folded into a completion.
+        if let Some(value) = result {
+            self.mem_write(state.dest, value, host, Origin { pc });
+        }
+        host.set_encounter_menu_active(false); // `:1536`
+        if effects.is_empty() {
+            // Nothing left to present (the common case: the outcome was just a
+            // write) — complete here rather than parking an empty drain.
+            activation.pc = state.next;
+            return Ok(VmStep::Continue);
+        }
+        Ok(Self::yield_effects(
+            activation,
+            pc,
+            effects,
+            None,
+            Completion::Advance(state.next),
+        ))
+    }
+
+    /// `gbl.area_ptr.inDungeon` — the RAW cell, the same address
+    /// [`Self::op_call`]'s `0xAE11` arm reads (`Classes/Area1.cs:495-496`,
+    /// DataOffset `0x1CC`). Read rather than serviced because the VM already
+    /// knows this address.
+    fn in_dungeon(&self, host: &mut dyn VmHost, pc: u16) -> bool {
+        const IN_DUNGEON_ADDR: u16 = 0x4BE6;
+        self.mem_read(IN_DUNGEON_ADDR, host, Origin { pc }) != 0
     }
 
     /// PARTYSTRENGTH (0x1D), `CMD_PartyStrength` ovr003.cs:772-810. One

@@ -1243,14 +1243,14 @@ impl gbx_vm::EngineServices for EngineVmHost<'_> {
     /// ray/clamp/dispatch that follow them are the VM's own sequence
     /// (`machine.rs`'s `op_setup_monster`), because the clamp is visible
     /// arithmetic over an operand.
-    fn setup_monster(&mut self, sprite_id: u8, max_distance: u8, pic_id: u8) {
+    fn setup_monster(&mut self, sprite_id: u8, max_distance: u16, pic_id: u8) {
         self.vm.calls.push(RecordedCall::SetupMonster {
             sprite_id,
             max_distance,
             pic_id,
         });
         self.state.sprite_block_id = sprite_id; // `:225`
-        self.state.max_encounter_distance = max_distance as u16; // `:226`
+        self.state.max_encounter_distance = max_distance; // `:226`
         self.state.pic_block_id = pic_id; // `:227`
     }
 
@@ -1346,6 +1346,13 @@ impl gbx_vm::EngineServices for EngineVmHost<'_> {
         self.vm.display_player_sprite = false; // `:1714`
         self.vm.sprite_changed = false; // `:1715`
         true
+    }
+
+    fn set_encounter_menu_active(&mut self, active: bool) {
+        self.vm
+            .calls
+            .push(RecordedCall::SetEncounterMenuActive { active });
+        self.vm.byte_1ee95 = active;
     }
 
     fn create_item(&mut self, item_type: u8) -> ItemHandle {

@@ -452,7 +452,7 @@ impl EngineServices for TestHost {
             .unwrap_or(Ok(MonsterHandle::default()))
     }
 
-    fn setup_monster(&mut self, sprite_id: u8, max_distance: u8, pic_id: u8) {
+    fn setup_monster(&mut self, sprite_id: u8, max_distance: u16, pic_id: u8) {
         self.calls.push(RecordedCall::SetupMonster {
             sprite_id,
             max_distance,
@@ -502,6 +502,11 @@ impl EngineServices for TestHost {
         let armed = self.display_player_sprite;
         self.display_player_sprite = false;
         armed
+    }
+
+    fn set_encounter_menu_active(&mut self, active: bool) {
+        self.calls
+            .push(RecordedCall::SetEncounterMenuActive { active });
     }
 
     fn create_item(&mut self, item_type: u8) -> ItemHandle {

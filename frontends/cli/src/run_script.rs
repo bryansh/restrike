@@ -512,7 +512,7 @@ impl EngineServices for CliHost {
         Ok(MonsterHandle(monster_id as u16))
     }
 
-    fn setup_monster(&mut self, sprite_id: u8, max_distance: u8, pic_id: u8) {
+    fn setup_monster(&mut self, sprite_id: u8, max_distance: u16, pic_id: u8) {
         eprintln!(
             "svc: setup_monster(sprite_id={sprite_id}, max_distance={max_distance}, \
              pic_id={pic_id})"
@@ -558,6 +558,10 @@ impl EngineServices for CliHost {
     fn sprite_off(&mut self) -> bool {
         eprintln!("svc: sprite_off()");
         false
+    }
+
+    fn set_encounter_menu_active(&mut self, active: bool) {
+        eprintln!("svc: set_encounter_menu_active(active={active})");
     }
 
     fn create_item(&mut self, item_type: u8) -> ItemHandle {

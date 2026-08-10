@@ -647,6 +647,367 @@ mod opcodes {
         assert!(h.calls.contains(&RecordedCall::PartyStrength));
     }
 
+    // --- ENCOUNTER MENU (0x29) ---------------------------------------------
+
+    /// `area_ptr.inDungeon`'s window address, which the opcode reads to pick
+    /// PARLAY-vs-ADVANCE and to decide whether the text region is cleared.
+    const IN_DUNGEON_ADDR: u16 = 0x4BE6;
+    const RESULT_CELL: u16 = 0x7F79;
+
+    /// A 14-operand ENCOUNTER MENU shaped like the shipped ones: sprite/max/pic
+    /// ids, the result cell, five outcome classes, three approach lines, and
+    /// the two movement thresholds.
+    fn encounter_menu_block(
+        max_distance: u8,
+        outcomes: [u8; 5],
+        texts: [&[u8]; 3],
+        party_flee: u8,
+        monster_flee: u8,
+    ) -> EclBuilder {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x29)
+            .imm_byte(0x22) // 1: sprite block
+            .imm_byte(max_distance) // 2: max encounter distance
+            .imm_byte(0x22) // 3: pic block
+            .mem(RESULT_CELL); // 4: result cell
+        for o in outcomes {
+            b.imm_byte(o); // 5..9
+        }
+        for t in texts {
+            b.inline_str(t); // 10..12
+        }
+        b.imm_byte(party_flee).imm_byte(monster_flee); // 13, 14
+        b.label("after");
+        b.op(0x00);
+        b
+    }
+
+    /// Drives the opcode to its first suspension, returning the effects it
+    /// emitted on the way and the request it parked on.
+    fn run_to_request(m: &mut EclMachine, h: &mut TestHost) -> (Vec<Effect>, Request) {
+        let mut effects = Vec::new();
+        for _ in 0..16 {
+            match m.step(h).expect("step should not error") {
+                VmStep::Effect(e) => effects.push(e),
+                VmStep::Request(r) => return (effects, r),
+                VmStep::Continue => continue,
+                other => panic!("expected Effect/Request, got {other:?}"),
+            }
+        }
+        panic!("the menu never opened");
+    }
+
+    fn words(request: &Request) -> Vec<String> {
+        let Request::HorizontalMenu { options } = request else {
+            panic!("expected a horizontal menu, got {request:?}")
+        };
+        options
+            .iter()
+            .map(|s| String::from_utf8_lossy(&s.0).into_owned())
+            .collect()
+    }
+
+    /// The preamble (`ovr003.cs:1245-1279`): the menu flag goes up first, the
+    /// movement pair is sampled once, the three ids are stashed, the ray is
+    /// clamped into `encounter_distance`, and one encounter visual is
+    /// dispatched — then the approach line prints and the menu opens.
+    #[test]
+    fn encounter_menu_preamble_arms_the_flag_clamps_the_ray_and_opens_the_menu() {
+        let b = encounter_menu_block(2, [2, 1, 2, 3, 4], [b"THEY APPROACH", b"", b""], 0x32, 0x32);
+        let entry = b.addr_of("entry");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+        h.set_word(IN_DUNGEON_ADDR, 1);
+        h.approach_distance_replies.push_back(2);
+        h.calc_group_movement_replies.push_back((9, 14));
+
+        let (effects, request) = run_to_request(&mut m, &mut h);
+
+        assert_eq!(
+            h.calls[0],
+            RecordedCall::SetEncounterMenuActive { active: true },
+            "`:1245` runs before anything else, so `sub_30580` sees it"
+        );
+        assert_eq!(h.calls[1], RecordedCall::CalcGroupMovement, "`:1250`");
+        assert!(h.calls.contains(&RecordedCall::SetupMonster {
+            sprite_id: 0x22,
+            max_distance: 2,
+            pic_id: 0x22,
+        }));
+        assert_eq!(h.encounter_distance, 2, "the ray, clamped by max");
+        assert_eq!(
+            effects,
+            vec![
+                Effect::EncounterVisual, // `:1279`
+                Effect::Print {
+                    text: VmString(b"THEY APPROACH".to_vec()),
+                    clear_first: true, // inDungeon != 0 (`:1294`)
+                },
+            ]
+        );
+        assert_eq!(words(&request), ["COMBAT", "WAIT", "FLEE", "ADVANCE"]);
+    }
+
+    /// `:1348-1355` — the fourth word is PARLAY once the monsters are adjacent,
+    /// and `:1363-1368` then resolves that word to slot **4**, not slot 3.
+    /// `ECL4#32 @0x98A9` is exactly this shape (`max_distance = 0`,
+    /// `var_6 = [0,3,0,0,3]`), and its slot-4 class 3 writes the parlay
+    /// outcome.
+    #[test]
+    fn at_distance_zero_the_fourth_word_is_parlay_and_resolves_to_slot_four() {
+        let b = encounter_menu_block(0, [0, 3, 0, 0, 3], [b"A VOICE CALLS", b"", b""], 0x0C, 0x0C);
+        let entry = b.addr_of("entry");
+        let after = b.addr_of("after");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+        h.set_word(IN_DUNGEON_ADDR, 1);
+        h.approach_distance_replies.push_back(2);
+        h.calc_group_movement_replies.push_back((12, 12));
+
+        let (_, request) = run_to_request(&mut m, &mut h);
+        assert_eq!(h.encounter_distance, 0, "max_distance 0 clamps the ray");
+        assert_eq!(words(&request), ["COMBAT", "WAIT", "FLEE", "PARLAY"]);
+
+        // Selecting the fourth word (index 3) resolves to slot 4 -> class 3,
+        // whose distance-0 arm writes 3.
+        assert_continue(m.resume(Reply::Selection(3), &mut h));
+        assert_eq!(m.current_pc(), Some(after));
+        assert_eq!(h.word(RESULT_CELL), Some(3));
+        assert_eq!(
+            *h.calls.last().unwrap(),
+            RecordedCall::SetEncounterMenuActive { active: false },
+            "`:1536`"
+        );
+    }
+
+    /// Class 0's FLEE arm (`:1382-1392`): the party's SLOWEST member is the one
+    /// that has to make the operand-13 threshold.
+    #[test]
+    fn class_zero_flee_gates_on_the_partys_slowest_member() {
+        for (slowest, want) in [(0x0Cu8, 2u16), (0x0B, 1)] {
+            let b = encounter_menu_block(0, [0, 3, 0, 0, 3], [b"HALT", b"", b""], 0x0C, 0x0C);
+            let entry = b.addr_of("entry");
+            let mut m = machine_from(&b, entry);
+            let mut h = TestHost::new();
+            h.set_word(IN_DUNGEON_ADDR, 1);
+            h.approach_distance_replies.push_back(0);
+            h.calc_group_movement_replies.push_back((slowest, 99));
+
+            run_to_request(&mut m, &mut h);
+            assert_continue(m.resume(Reply::Selection(2), &mut h)); // FLEE
+            assert_eq!(
+                h.word(RESULT_CELL),
+                Some(want),
+                "slowest {slowest:#04X} vs threshold 0x0C"
+            );
+        }
+    }
+
+    /// Class 2's COMBAT arm (`:1441-1454`): the monsters break off when their
+    /// operand-14 rating beats the party's FASTEST member — and say so.
+    #[test]
+    fn class_two_combat_lets_the_monsters_outrun_the_partys_fastest() {
+        let b = encounter_menu_block(0, [2, 2, 2, 2, 2], [b"GOBLINS", b"", b""], 0, 20);
+        let entry = b.addr_of("entry");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+        h.set_word(IN_DUNGEON_ADDR, 1);
+        h.approach_distance_replies.push_back(0);
+        h.calc_group_movement_replies.push_back((5, 19)); // fastest 19 < 20
+
+        run_to_request(&mut m, &mut h);
+        assert_eq!(
+            m.resume(Reply::Selection(0), &mut h),
+            Ok(VmStep::Effect(Effect::Print {
+                text: VmString(b"The monsters flee.".to_vec()),
+                clear_first: true,
+            }))
+        );
+        assert_eq!(h.word(RESULT_CELL), Some(0), "written before the print");
+        assert_continue(m.step(&mut h));
+
+        // …and stand their ground when the party is faster.
+        let b = encounter_menu_block(0, [2, 2, 2, 2, 2], [b"GOBLINS", b"", b""], 0, 20);
+        let entry = b.addr_of("entry");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+        h.set_word(IN_DUNGEON_ADDR, 1);
+        h.approach_distance_replies.push_back(0);
+        h.calc_group_movement_replies.push_back((5, 20)); // fastest 20, not < 20
+        run_to_request(&mut m, &mut h);
+        assert_continue(m.resume(Reply::Selection(0), &mut h));
+        assert_eq!(h.word(RESULT_CELL), Some(1), "fight");
+    }
+
+    /// Class 1's WAIT arm (`:1402-1406`): "Both sides wait." and the menu
+    /// re-opens — the `init_max = 1` loop, the thing that makes this opcode
+    /// structurally unlike every other menu.
+    #[test]
+    fn class_one_wait_reopens_the_menu_after_saying_so() {
+        let b = encounter_menu_block(2, [1, 1, 1, 1, 1], [b"ORCS", b"", b""], 0, 0);
+        let entry = b.addr_of("entry");
+        let after = b.addr_of("after");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+        h.set_word(IN_DUNGEON_ADDR, 1);
+        h.approach_distance_replies.push_back(2);
+        h.calc_group_movement_replies.push_back((9, 9));
+
+        run_to_request(&mut m, &mut h);
+        assert_eq!(
+            m.resume(Reply::Selection(1), &mut h),
+            Ok(VmStep::Effect(Effect::Print {
+                text: VmString(b"Both sides wait.".to_vec()),
+                clear_first: true,
+            }))
+        );
+        // The next iteration's own approach line, then the menu again.
+        assert_eq!(
+            m.step(&mut h),
+            Ok(VmStep::Effect(Effect::Print {
+                text: VmString(b"ORCS".to_vec()),
+                clear_first: true,
+            }))
+        );
+        let VmStep::Request(request) = m.step(&mut h).unwrap() else {
+            panic!("the menu must re-open")
+        };
+        assert_eq!(words(&request), ["COMBAT", "WAIT", "FLEE", "ADVANCE"]);
+        assert_eq!(h.encounter_distance, 2, "WAIT does not close the distance");
+
+        // COMBAT ends it.
+        assert_continue(m.resume(Reply::Selection(0), &mut h));
+        assert_eq!(m.current_pc(), Some(after));
+        assert_eq!(h.word(RESULT_CELL), Some(1));
+    }
+
+    /// Class 1's ADVANCE arm (`:1408-1423`): the monsters step one band closer
+    /// — the same decrement-and-re-dispatch APPROACH performs — and the menu
+    /// re-opens, now offering PARLAY because they are adjacent.
+    #[test]
+    fn advance_walks_the_monsters_in_and_the_menu_reopens_offering_parlay() {
+        let b = encounter_menu_block(1, [1, 1, 1, 1, 1], [b"KOBOLDS", b"", b""], 0, 0);
+        let entry = b.addr_of("entry");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+        h.set_word(IN_DUNGEON_ADDR, 1);
+        h.approach_distance_replies.push_back(2);
+        h.calc_group_movement_replies.push_back((9, 9));
+
+        let (_, request) = run_to_request(&mut m, &mut h);
+        assert_eq!(h.encounter_distance, 1, "max_distance 1 clamps the ray");
+        assert_eq!(words(&request), ["COMBAT", "WAIT", "FLEE", "ADVANCE"]);
+
+        assert_eq!(
+            m.resume(Reply::Selection(3), &mut h),
+            Ok(VmStep::Effect(Effect::EncounterVisual)),
+            "the step-in re-dispatches the visual, exactly as APPROACH does"
+        );
+        assert_eq!(h.encounter_distance, 0);
+        assert_eq!(
+            m.step(&mut h),
+            Ok(VmStep::Effect(Effect::Print {
+                text: VmString(b"KOBOLDS".to_vec()),
+                clear_first: true,
+            }))
+        );
+        let VmStep::Request(request) = m.step(&mut h).unwrap() else {
+            panic!("the menu must re-open")
+        };
+        assert_eq!(words(&request), ["COMBAT", "WAIT", "FLEE", "PARLAY"]);
+    }
+
+    /// The approach line is picked by a CYCLIC scan starting at the current
+    /// band (`:1298-1339`): band 2 reads `2,0,1`, so a script that fills only
+    /// slot 0 still has something to say at range.
+    #[test]
+    fn the_approach_line_scans_cyclically_from_the_current_band() {
+        // Only slot 0 filled, party at distance 2 -> scan 2,0,1 -> slot 0.
+        let b = encounter_menu_block(2, [1, 1, 1, 1, 1], [b"FAR OFF", b"", b""], 0, 0);
+        let entry = b.addr_of("entry");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+        h.set_word(IN_DUNGEON_ADDR, 1);
+        h.approach_distance_replies.push_back(2);
+        h.calc_group_movement_replies.push_back((9, 9));
+        let (effects, _) = run_to_request(&mut m, &mut h);
+        assert_eq!(
+            effects[1],
+            Effect::Print {
+                text: VmString(b"FAR OFF".to_vec()),
+                clear_first: true,
+            }
+        );
+
+        // All three filled: band 2 takes its own line.
+        let b = encounter_menu_block(2, [1, 1, 1, 1, 1], [b"NEAR", b"MID", b"FAR"], 0, 0);
+        let entry = b.addr_of("entry");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+        h.set_word(IN_DUNGEON_ADDR, 1);
+        h.approach_distance_replies.push_back(2);
+        h.calc_group_movement_replies.push_back((9, 9));
+        let (effects, _) = run_to_request(&mut m, &mut h);
+        assert_eq!(
+            effects[1],
+            Effect::Print {
+                text: VmString(b"FAR".to_vec()),
+                clear_first: true,
+            }
+        );
+    }
+
+    /// An empty approach line suppresses the region clear (`:1341-1344`) — and
+    /// outside a dungeon there is no clear to begin with (`:1294`), which is
+    /// also what puts PARLAY on the menu at any distance (`:1348`).
+    #[test]
+    fn outside_a_dungeon_the_menu_offers_parlay_and_never_clears_the_region() {
+        let b = encounter_menu_block(2, [1, 1, 1, 1, 1], [b"", b"", b""], 0, 0);
+        let entry = b.addr_of("entry");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new(); // inDungeon = 0
+        h.approach_distance_replies.push_back(2);
+        h.calc_group_movement_replies.push_back((9, 9));
+
+        let (effects, request) = run_to_request(&mut m, &mut h);
+        assert_eq!(
+            effects[1],
+            Effect::Print {
+                text: VmString(Vec::new()),
+                clear_first: false,
+            }
+        );
+        assert_eq!(words(&request), ["COMBAT", "WAIT", "FLEE", "PARLAY"]);
+    }
+
+    /// A suspended ENCOUNTER MENU round-trips through a snapshot with its whole
+    /// operand set intact — the loop state lives in the `Completion`, so a save
+    /// taken on the menu resumes into the same iteration.
+    #[test]
+    fn a_parked_encounter_menu_survives_a_snapshot_round_trip() {
+        let b = encounter_menu_block(0, [0, 3, 0, 0, 3], [b"A VOICE", b"", b""], 0x0C, 0x0C);
+        let entry = b.addr_of("entry");
+        let after = b.addr_of("after");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+        h.set_word(IN_DUNGEON_ADDR, 1);
+        h.approach_distance_replies.push_back(0);
+        h.calc_group_movement_replies.push_back((12, 12));
+        run_to_request(&mut m, &mut h);
+
+        let snap = m.snapshot();
+        let mut restored = EclMachine::restore(snap, &COTAB).expect("restore");
+        assert!(matches!(
+            restored.pending(),
+            Some(Request::HorizontalMenu { .. })
+        ));
+
+        assert_continue(restored.resume(Reply::Selection(3), &mut h));
+        assert_eq!(restored.current_pc(), Some(after));
+        assert_eq!(h.word(RESULT_CELL), Some(3), "the parlay outcome survived");
+    }
+
     /// PICTURE (0x0E), `CMD_Picture` ovr003.cs:312-358: a real block id
     /// yields `Effect::Picture`, then the instruction completes on the next
     /// `step()`.

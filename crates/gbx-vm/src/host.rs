@@ -145,9 +145,17 @@ pub trait EngineServices {
         num_copies: u8,
         icon_block_id: u8,
     ) -> Result<MonsterHandle, MissingData>;
-    /// SETUP MONSTER (0x0C)'s own operands; see the trait doc comment for why
-    /// this doesn't return the approach distance (that's `approach_distance`).
-    fn setup_monster(&mut self, sprite_id: u8, max_distance: u8, pic_id: u8);
+    /// The three encounter ids SETUP MONSTER (`ovr003.cs:225-227`) and
+    /// ENCOUNTER MENU (`:1253-1255`) both stash for `sub_30580` to re-read;
+    /// see the trait doc comment for why this doesn't return the approach
+    /// distance (that's `approach_distance`).
+    ///
+    /// `max_distance` is a `u16` because the two opcodes genuinely differ:
+    /// SETUP MONSTER byte-casts its operand (`byte max_distance =
+    /// (byte)vm_GetCmdValue(2)`, `:220`) and ENCOUNTER MENU does not
+    /// (`:1254`). Each caller applies its own cast; the cell itself is the
+    /// `ushort` `area2_ptr.max_encounter_distance`.
+    fn setup_monster(&mut self, sprite_id: u8, max_distance: u16, pic_id: u8);
     fn clear_monsters(&mut self);
     fn add_npc(&mut self, monster_id: u8, morale: u8);
     /// CALL (0x2D) cases `1`/`2` — `SetupDuel(bool)`.
@@ -201,6 +209,12 @@ pub trait EngineServices {
     /// emits the [`Effect::RedrawView`] that erases it. A no-op (and `false`)
     /// when no sprite is up.
     fn sprite_off(&mut self) -> bool;
+    /// `gbl.byte_1EE95` — ENCOUNTER MENU sets it at its head and clears it at
+    /// its tail (`ovr003.cs:1245`, `:1536`). Its only reader is `sub_30580`'s
+    /// close-up gate (`ovr008.cs:257`), which is what keeps the 3D approach
+    /// sprite on screen for the whole menu instead of cutting to the
+    /// encounter's face the moment the distance reaches 0.
+    fn set_encounter_menu_active(&mut self, active: bool);
 
     // --- Items / treasure ---
     fn create_item(&mut self, item_type: u8) -> ItemHandle;
@@ -454,7 +468,7 @@ pub enum RecordedCall {
     },
     SetupMonster {
         sprite_id: u8,
-        max_distance: u8,
+        max_distance: u16,
         pic_id: u8,
     },
     ClearMonsters,
@@ -473,6 +487,9 @@ pub enum RecordedCall {
     },
     LoadEncounterVisual,
     SpriteOff,
+    SetEncounterMenuActive {
+        active: bool,
+    },
 
     CreateItem {
         item_type: u8,

@@ -403,3 +403,110 @@ fn shell_round_trips_while_parked_on_a_real_request() {
     let restored: Shell = serde_json::from_str(&json).expect("Shell must deserialize while gated");
     assert!(matches!(restored, Shell::Boot(_)));
 }
+
+/// ★ ENCOUNTER MENU (0x29) live: the words the original builds reach the
+/// screen, the WAIT arm really re-opens the menu, and the outcome the table
+/// names lands in real `ScriptMemory`.
+///
+/// The fixture is `ECL6#64 @0x8519`'s shape — `var_6 = [2,1,2,3,4]`, thresholds
+/// `0x32` — with the party's fastest member well under the monsters' rating so
+/// class 2's COMBAT arm takes its "the monsters flee" branch. WAIT (class 1)
+/// loops first, which is what proves the `init_max` loop is real and not a
+/// one-shot.
+#[test]
+fn encounter_menu_loops_on_wait_then_writes_its_outcome() {
+    const DEST: u16 = 0x7F79;
+    let block = simple_block(|b| {
+        b.op(0x29)
+            .imm_byte(0x46) // sprite block
+            .imm_byte(2) // max encounter distance
+            .imm_byte(0x41) // pic block
+            .mem(DEST)
+            .imm_byte(2) // COMBAT  -> class 2
+            .imm_byte(1) // WAIT    -> class 1
+            .imm_byte(2) // FLEE    -> class 2
+            .imm_byte(3) // ADVANCE -> class 3
+            .imm_byte(4) // PARLAY  -> class 4
+            .inline_str(b"A PATROL BLOCKS THE WAY")
+            .inline_str(b"")
+            .inline_str(b"")
+            .imm_byte(0x32)
+            .imm_byte(0x32);
+        b.op(0x00); // EXIT
+    });
+    let mut e = engine_with(block, vec![]);
+    // A party with no members reports `calc_group_movement`'s degenerate
+    // (255, 0) — fastest 0, so the monsters (0x32) outrun them.
+
+    fn drive_to_menu(e: &mut Engine) {
+        for _ in 0..40 {
+            e.tick(&[]);
+            if e.shell.gate_open() {
+                return;
+            }
+        }
+        panic!("the encounter menu never parked");
+    }
+
+    drive_to_menu(&mut e);
+    let words: Vec<String> = e
+        .take_transcript()
+        .into_iter()
+        .filter_map(|entry| match entry {
+            crate::vmhost::TranscriptEntry::Request(label) => Some(label),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        words.iter().any(|w| w == "menu: COMBAT WAIT FLEE ADVANCE"),
+        "the far-band menu offers ADVANCE, not PARLAY: {words:?}"
+    );
+
+    // WAIT: "Both sides wait." and the menu comes back.
+    e.tick(&[InputEvent::Char(b'w')]);
+    drive_to_menu(&mut e);
+    let again: Vec<String> = e
+        .take_transcript()
+        .into_iter()
+        .map(|entry| match entry {
+            crate::vmhost::TranscriptEntry::Print { text, .. } => text,
+            crate::vmhost::TranscriptEntry::Request(label) => label,
+        })
+        .collect();
+    assert!(
+        again.iter().any(|w| w == "Both sides wait."),
+        "the WAIT arm says so: {again:?}"
+    );
+    assert!(
+        again.iter().any(|w| w == "menu: COMBAT WAIT FLEE ADVANCE"),
+        "and re-opens the same menu: {again:?}"
+    );
+    assert!(
+        !again.iter().any(|w| w == "The monsters flee."),
+        "the encounter has not resolved yet: {again:?}"
+    );
+
+    // COMBAT: class 2 with the party outrun -> the monsters flee, outcome 0.
+    e.tick(&[InputEvent::Char(b'c')]);
+    let mut resolved = Vec::new();
+    for _ in 0..40 {
+        if matches!(e.shell, Shell::WorldMenu { .. }) {
+            break;
+        }
+        e.tick(&[InputEvent::Enter]);
+        resolved.extend(e.take_transcript().into_iter().map(|entry| match entry {
+            crate::vmhost::TranscriptEntry::Print { text, .. } => text,
+            crate::vmhost::TranscriptEntry::Request(label) => label,
+        }));
+    }
+    assert!(
+        resolved.iter().any(|w| w == "The monsters flee."),
+        "class 2's COMBAT arm breaks the monsters off: {resolved:?}"
+    );
+    assert_eq!(
+        e.vm_memory().raw_word(DEST),
+        Some(0),
+        "…and writes 0 (the cell starts zeroed by vm_init_ecl's field_6F2 wipe, \
+         so the print above is what distinguishes the two)"
+    );
+}
