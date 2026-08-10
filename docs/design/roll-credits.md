@@ -7,7 +7,8 @@
 > same reviewer's re-review of the fold** (verdict: ratify with 8 amendments, all folded —
 > including its catch that v2 mis-folded one of its own findings: LOAD CHARACTER is a
 > party-slot selector, ADD NPC is the original's only join mechanism, and "how do the quest
-> NPCs join?" is now G5's named open research item). This is the
+> NPCs join?" is now G5's named open research item). **RATIFIED by Bryan 2026-08-09**
+> (D13, on the reviewer's ratify-with-amendments verdict with all amendments folded). This is the
 > working plan for PLAN.md's "M6 Roll credits" (shifted right by the working-ledger
 > renumbering): **finish Curse of the Azure Bonds start-to-end in our engine.** Decisions are
 > locked on Bryan's ratification; per-slice research items are named as such.
