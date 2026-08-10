@@ -49,6 +49,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use gbx_engine::debug_log;
 use gbx_engine::engine::Engine;
 use gbx_engine::framebuffer::{HEIGHT, WIDTH};
 use gbx_engine::input::{InputEvent, TICK_HZ};
@@ -293,36 +294,31 @@ impl App {
         }
     }
 
-    /// Fulfills one `SaveLoadRequest` against [`Self::saves_dir`], then puts
-    /// the host's two obligations back on the engine: a fresh slot directory
-    /// (a Save just created a slot; a Load replaced the whole engine, whose
-    /// injected directory starts empty) and a player-visible verdict.
+    /// Fulfills this tick's `SaveLoadRequest`, if there is one, and tells the
+    /// player what happened.
     ///
-    /// A Load/Import replaces `self.engine` wholesale, so everything the host
-    /// had configured on the old one is re-applied here — including the
-    /// post-restore recompose, which is the only thing that puts the 3D
-    /// viewport back under a shell restored mid-walk-loop.
-    fn fulfill_io(&mut self, request: gbx_engine::saveload::SaveLoadRequest) {
+    /// The fulfilment itself is `debug_log::fulfill_pending_io` — the same call
+    /// `restrike replay` and the forensics example make, deliberately, so a
+    /// replay of a recorded session performs the host's part exactly as the
+    /// desktop did. What belongs to *this* frontend is the two things a
+    /// headless replay has no use for: the game-speed env knob (a Load/Import
+    /// replaces the whole engine, and an import starts at the boot default),
+    /// and the on-screen verdict.
+    fn fulfill_io(&mut self) {
+        let Some((request, result)) =
+            debug_log::fulfill_pending_io(&mut self.engine, &self.saves_dir, self.seed)
+        else {
+            return;
+        };
         use gbx_engine::saveload::SaveLoadRequest as Req;
         let (verb, letter) = match request {
             Req::Save(l) => ("saved to", l),
             Req::Load(l) => ("loaded", l),
             Req::ImportOriginal(l) => ("imported", l),
         };
-        let replaced = !matches!(request, Req::Save(_));
-        let data = self.engine.game_data().clone();
-        let result =
-            saveload_fs::fulfill(&mut self.engine, request, &self.saves_dir, data, self.seed);
-        self.engine
-            .set_slot_directory(saveload_fs::scan_slot_directory(&self.saves_dir));
         apply_game_speed(&mut self.engine);
         let notice = match result {
-            Ok(()) => {
-                if replaced {
-                    self.engine.recompose_world_screen();
-                }
-                format!("Slot {letter} {verb}.")
-            }
+            Ok(()) => format!("Slot {letter} {verb}."),
             Err(err) => format!("Slot {letter}: {}", describe_slot_error(&err)),
         };
         eprintln!("restrike-desktop: {notice} ({})", self.saves_dir.display());
@@ -356,9 +352,7 @@ impl App {
             }
             // D8's other half: the tick core deposited a save/load request,
             // the host performs it. Between ticks, never during one.
-            if let Some(request) = self.engine.take_io_request() {
-                self.fulfill_io(request);
-            }
+            self.fulfill_io();
             self.debug_tick += 1;
             if let Some(log) = &mut self.debug_log {
                 let probe = self.engine.probe();

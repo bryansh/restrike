@@ -77,7 +77,7 @@ fn main() {
         {
             match outcome {
                 Ok(()) => println!("tick {tick} | io {request:?} ok"),
-                Err(err) => println!("tick {tick} | io {request:?} FAILED: {err}"),
+                Err(err) => println!("tick {tick} | io {request:?} FAILED: {err:?}"),
             }
         }
         let probe = engine.probe();

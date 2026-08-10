@@ -172,21 +172,26 @@ pub fn sandbox_path(tag: &str) -> PathBuf {
     std::env::temp_dir().join(format!("restrike-{tag}-saves-{}", std::process::id()))
 }
 
-/// The host's post-tick obligation (D8): take any pending [`SaveLoadRequest`],
-/// fulfill it against `saves_dir`, re-inject the slot directory, and repaint
-/// after a restore — the desktop's `fulfill_io`, minus the on-screen notice.
+/// ★ **The host's post-tick obligation** (D8), in one place: take any pending
+/// [`SaveLoadRequest`], fulfill it against `saves_dir`, re-inject the slot
+/// directory the screen renders from, and — after a Load or Import, which
+/// replace the engine wholesale — put the 3D viewport back.
+///
+/// Every host runs this: the desktop (which adds an on-screen notice for the
+/// player), `restrike replay`, and the forensics example. Sharing it is not
+/// tidiness — a replay whose host behaviour differs from the desktop's by one
+/// missing step is not the recorded run, and nothing would say so.
 ///
 /// Returns `None` when the tick asked for nothing.
 pub fn fulfill_pending_io(
     engine: &mut Engine,
     saves_dir: &Path,
     seed: u32,
-) -> Option<(SaveLoadRequest, Result<(), String>)> {
+) -> Option<(SaveLoadRequest, Result<(), crate::saveload_fs::SlotIoError>)> {
     let request = engine.take_io_request()?;
     let replaced = !matches!(request, SaveLoadRequest::Save(_));
     let data = engine.game_data().clone();
-    let result = crate::saveload_fs::fulfill(engine, request, saves_dir, data, seed)
-        .map_err(|e| format!("{e:?}"));
+    let result = crate::saveload_fs::fulfill(engine, request, saves_dir, data, seed);
     engine.set_slot_directory(crate::saveload_fs::scan_slot_directory(saves_dir));
     if result.is_ok() && replaced {
         engine.recompose_world_screen();
@@ -280,7 +285,7 @@ tick 11 | sent [Ext(Up), Char('b')] | step/gate(hotbar)
                 let _ = writeln!(log, "tick {tick} | sent {batch:?} | {}", engine.probe());
             }
             if let Some((request, outcome)) = fulfill_pending_io(&mut engine, saves_dir, SEED) {
-                outcome.unwrap_or_else(|e| panic!("recording: {request:?} failed: {e}"));
+                outcome.unwrap_or_else(|e| panic!("recording: {request:?} failed: {e:?}"));
             }
             if tick % CHECKPOINT_EVERY == 0 {
                 digests.push((tick, engine.state_digest()));

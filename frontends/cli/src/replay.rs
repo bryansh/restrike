@@ -141,7 +141,7 @@ pub fn cmd_replay(args: Vec<String>) -> ExitCode {
                 Ok(()) => eprintln!("   tick {tick}: {request:?} ok"),
                 // Loud, not fatal: the recorded session may itself have been a
                 // failed load, and the replay's job is to reproduce it.
-                Err(err) => eprintln!("   tick {tick}: {request:?} FAILED: {err}"),
+                Err(err) => eprintln!("   tick {tick}: {request:?} FAILED: {err:?}"),
             }
         }
         // The final tick is always a checkpoint: a run whose length is not a
