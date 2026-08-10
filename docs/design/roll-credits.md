@@ -230,6 +230,51 @@ correction (keying by `(area, block)`) is available later. Rationale: diverging 
 would "fix" behavior we have never observed in DOSBox; if the quirk proves ugly in play,
 the QoL toggle is a one-line key change behind a decision we will then make deliberately.
 
+**Status: LANDED 2026-08-10.** Implementation notes and the corrections the
+code forced on this door:
+
+- **D-S1a** — landed as written. The read side does return the live value
+  (`get_player_values`' own `arg_4 == 0x312` arm, `ovr008.cs:545-548`, sets its
+  found-flag so the Area2 struct shadow is never consulted). **Correction:**
+  `restore_game_area` *does* have a reached caller — `LoadPlayerCombatIcon`
+  brackets its work `set_game_area(1)` … `restore_game_area()`
+  (`ovr017.cs:88,120`), reached from `loadSaveGame` for every non-NPC party
+  member (`:1058`) and from `ovr018` throughout. It is nonetheless vestigial
+  for asset selection: everything it wraps takes `chead_cbody_comspr_icon`'s
+  `CHEAD`/`CBODY` branch (`ovr034.cs:57-66`), which never appends
+  `gbl.game_area`. Our own party-icon loader takes no area argument, so the
+  method exists without a caller here for a *reason*, not by omission.
+- **D-S1b** — landed, but `FlowCtx.game_area`/`EngineVmHost.game_area` became
+  **methods**, not fields. A `u8` snapshot taken at context construction is
+  stale by exactly the instruction that matters: the original interpolates
+  `gbl.game_area` at each load's own call time, which is what lets a `SAVE`
+  earlier in the same run redirect the `NEWECL` after it.
+- **D-S1c** — landed; `SAVE_FORMAT_VERSION` 3 → 4, one golden recompute. Two
+  additions the door did not name but the mechanism needs: `EngineState`
+  also gained `last_pos` (`area_ptr.lastXPos`/`lastYPos` — see FD-19) and
+  `can_cast_spells` (FD-37), so the slice takes exactly one save break. Both
+  load paths also picked up `loadSaveGame`'s own `inDungeon` gate on the
+  3D-map reload (`ovr017.cs:1076-1095`) — area 1 ships no `GEO1.DAX`, so an
+  unconditional load would make every wilderness save unrestorable.
+- **D-S1d** — FD-37 closed. Two findings: `compare_flags` needed **no**
+  `gbx-vm` seam (`EclMachine::load_block` starts `flags: [false; 6]` with an
+  empty call stack, and every `vm_init_ecl` site rebuilds the machine), and
+  `can_cast_spells` sits at an **odd** DataOffset (`0x1FF`), so no script can
+  address it at all. `:126`'s direct `inDungeon = 1` also forced the *read*
+  side to move to the raw cell (`Classes/Area1.cs:495-496`) — otherwise a
+  block entered from the overland refuses its own `LOAD FILES` map load.
+- **D-S1e** — replicated, with FD-43 documenting the quirk and its concrete
+  repeating ids (`PIC` block 1 exists in all six area files).
+- **Also required, and not in the door:** `load_3d_map` had to actually swap
+  the resident `GeoBlock` (`Load3DMap`, `ovr031.cs:690-705`) — it recorded an
+  id and nothing else from M2 until now — and three Area cells had to be named
+  (`lastXPos`/`lastYPos`/`LastEclBlockId`, `0x4BF0`/`0x4BF1`/`0x4BF2`) before
+  any destination block's arrival branch could work. **FD-19 is resolved and
+  its headline was wrong**: the (7,12)-North door is not an area transition,
+  it is a `lastXPos`/`lastYPos` bounce-back (the (0,0) landing was those two
+  unmaintained cells), with a guarded fight and a *same-area* `NEWECL 2` on
+  the other arm.
+
 **Acceptance.** (1) Synthetic: a two-area fixture (two ECL files, distinct GEO/wallsets)
 proving `SAVE → 0x7F12` + cross-file NEWECL end-to-end — assets swapped, block resident,
 `vm_init_ecl` resets applied. (2) Real data: the FD-19 door — the cross-area transition
