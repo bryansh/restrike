@@ -189,3 +189,54 @@ cross-area walk demo as the standing regression.
 
 The "it's real" moment, per PLAN D12: the repo has been public all along; whether to
 announce anywhere is decided at this gate, not presumed.
+
+## 5. Slice-1 door: area generalization (Fable, 2026-08-09)
+
+The mechanism is settled (D-RC1/G1); this section fixes the implementation shape.
+
+**D-S1a — the `0x7F12` hook.** `EngineVmHost::write`'s Party-window arm gains the named
+case: `set_game_area`'s exact semantics (`seg042.cs:124-128`) — `game_area_backup = game_area;
+game_area = value` — both cells on `EngineState` (`game_area: u8`, `game_area_backup: u8`).
+The read side returns the live value. `restore_game_area` (`seg042.cs:131-134`, backup →
+live) gets a method now and a caller when one is found in reached content — none is known;
+its writes at `seg001.cs:277,370` are the title-loop resets.
+
+**D-S1b — threading.** `GAME_AREA` the const survives only as the boot/import DEFAULT;
+every `format!("…{area}.DAX")` site reads the state: `vmhost.rs` (ECL `:74`, GEO `:97`,
+WALLDEF/8X8D `:126,:139`, `MON*` `:890`), `picture.rs` (PIC/BIGPIC/HEAD/BODY
+`:557,:570,:586,:593`), combat art (CPIC), and `FlowCtx.game_area` becomes a read of the
+state, not the const. (Line numbers are this week's; re-locate, don't trust.)
+
+**D-S1c — the save break (owned here, once).** `SaveState` gains `game_area` +
+`game_area_backup` → `SAVE_FORMAT_VERSION` bump + synthetic golden recompute in the same
+commit (the documented discipline); `rebuild_engine` reads the saved value;
+`import_original` honors `MasterSave.game_area` (already parsed, currently ignored) for
+file loading AND the resident-block resolve. Later slices batch their own serde additions
+per §3's churn rule — this is the bump they rebase onto.
+
+**D-S1d — FD-37 closes here** (begin_chain's `vm_init_ecl` engine-half completion), with
+the transcription details preserved: `inDungeon = 1` is a DIRECT struct write
+(`ovr008.cs:126`) that bypasses `vm_SetMemoryValue`'s `game_state` hook — ours writes the
+raw cell without touching `game_state`, exactly that asymmetry; `rest_incounter_*` and
+`can_cast_spells` reset at their confirmed cells; the `reload_ecl_and_pictures == false`
+arm's `RestField200Values`/`RestField6F2Values` (`ovr008.cs:128-131`) — read both bodies
+and transcribe (research item inside the slice, not guessed here).
+
+**D-S1e — caches: REPLICATE the original's area-unkeyed shape (D-RC8 resolved).**
+Faithful-first (D4/D11): the original serves the previous area's art when a block id
+repeats after a switch; ours keeps the same block-id keying and gains a docket entry
+documenting the quirk with a repeating-id example, plus a note that an opt-in QoL
+correction (keying by `(area, block)`) is available later. Rationale: diverging silently
+would "fix" behavior we have never observed in DOSBox; if the quirk proves ugly in play,
+the QoL toggle is a one-line key change behind a decision we will then make deliberately.
+
+**Acceptance.** (1) Synthetic: a two-area fixture (two ECL files, distinct GEO/wallsets)
+proving `SAVE → 0x7F12` + cross-file NEWECL end-to-end — assets swapped, block resident,
+`vm_init_ecl` resets applied. (2) Real data: the FD-19 door — the cross-area transition
+M2's circuit found and routed around — walked LIVE, arriving with the destination area's
+map and art on screen; plus a targeted vector-level drive of one of the two overland exits
+(`ECL5#48 @0x8092` or `ECL4#37 @0x8225`) reaching `ECL1#80`'s "YOU ARE AT THE EDGE OF…"
+menu (scripted replies; full wilderness PRESENTATION is slice 7 — arrival at the menu with
+the right resident block is the slice-1 bar). (3) The silent-failure regression: a
+cross-file NEWECL that CANNOT resolve still halts loudly — but one that can, never
+half-transitions.
