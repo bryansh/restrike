@@ -219,24 +219,42 @@ fn walk_tilverton_and_bash_a_real_door() {
     tick_until(&mut engine, 600, &[InputEvent::Char(b'b')], |e| {
         matches!(e.shell, Shell::WorldMenu { .. })
     });
-    // CORRECTION (M2 step 8, post-DIVIDE): this assertion originally
-    // expected the bash to land the party at (7,11), true only because the
-    // per-step script (vector 1) halted on DIVIDE before this door's real
-    // logic ever ran (the FIRST FIELD FINDING that opened step 8 — see
-    // `docs/fidelity-docket.md` FD-9). With DIVIDE/OR/ON GOSUB implemented,
-    // vector 1 runs to completion and this specific door turns out to be a
-    // real *area transition* trigger, not a plain GEO-door state flip: the
-    // service log shows `Load3dMap { block_id: 1 }` (a different resident
-    // area), zero halts. M2's engine deliberately doesn't wire cross-area
-    // GEO-block swapping (`engine.rs`'s doc comment: block *selection* is
-    // step 5+/M3+ scope) — position lands at the raw-store default (0,0)
-    // rather than a real new-area spawn point, a known consequence of that
-    // gap, not a new bug. Docketed as FD-19 rather than silently "fixed" by
-    // rewriting the assertion to whatever the engine happens to do.
+    // ★ FD-19 RESOLVED (roll-credits slice 1). Two earlier readings of this
+    // door were both wrong, and the disassembly settles it.
+    //
+    // M2 step 4 expected (7,11) — a plain bash-through. That was only ever
+    // true because vector 1 halted on DIVIDE before the door's real logic ran
+    // (FD-9). M2 step 8 then read the (0,0) landing as a half-implemented
+    // *area transition*, citing a `Load3dMap { block_id: 1 }` in the service
+    // log — but that call is the boot `LOAD FILES`, the only one in the whole
+    // run, and the door writes no `0x7F12` at all (the disassembly has exactly
+    // two `SAVE _, 0x7F12` sites in the shipped game, `ECL4#37 @0x8225` and
+    // `ECL5#48 @0x8092`, neither of them here).
+    //
+    // What the script actually does (`ECL2.DAX` block 1): the (7,12)-North
+    // event forks. The refusal arm — the one a party without the story flag
+    // takes — prints its in-fiction "wrong entrance" line and then copies
+    // `area_ptr.lastXPos`/`lastYPos` straight back into `mapPosX`/`mapPosY`
+    // (`@0x9444`/`@0x944B`) to put the party where it stood. Nothing
+    // maintained those two cells (`ovr003.cs:2371-2372`), so they read 0 and
+    // the party was teleported to the origin. THAT was the (0,0).
+    //
+    // The other arm is a guarded fight (`@0x945D`: CLEARMONSTERS, LOAD
+    // MONSTER 0×5, COMBAT) and, on a win, a real teleport to (9,3) facing
+    // south followed by `NEWECL 2` (`@0x987B`→`@0x9911`→`@0x9830`) — a
+    // same-area block change, not a cross-area one.
+    //
+    // So the correct outcome for this walk is: the party is turned away and
+    // put back on the square it stepped from.
     assert_eq!(
         engine.state.pos,
-        (0, 0),
-        "bashing this door triggers a real (unimplemented) area transition, not a simple move"
+        (7, 12),
+        "the refusal arm restores lastXPos/lastYPos — the party is turned away, not teleported"
+    );
+    assert_eq!(
+        engine.state.last_pos,
+        (7, 12),
+        "and those cells hold the position the walk loop recorded before the door"
     );
     let frame3_path = out_dir.join("restrike-walk-demo-3-through-door.ppm");
     dump(&mut engine, &frame3_path);

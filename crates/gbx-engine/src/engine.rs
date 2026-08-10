@@ -87,7 +87,11 @@ pub struct Engine {
     data: GameData,
     pub(crate) shell: Shell,
     pub(crate) state: EngineState,
-    machine: EclMachine,
+    /// `pub(crate)` for the same reason `shell`/`state` are: the crate's own
+    /// tests drive it. Slice 1's overland-exit acceptance parks the shell on a
+    /// chosen address inside the resident block
+    /// ([`crate::shell::boot_at_address`]).
+    pub(crate) machine: EclMachine,
     pub(crate) vm_memory: VmMemoryState,
     party_predicates: DefaultPartyPredicates,
     /// The party roster (D-SAVE11/task deliverable 2) — empty until
@@ -339,7 +343,8 @@ impl Engine {
         let mut machine =
             EclMachine::load_block(initial, &COTAB).unwrap_or_else(|never| match never {});
         state.ecl_block_id = INITIAL_ECL_BLOCK;
-        let shell = Shell::boot(&mut machine, &mut state);
+        let mut vm_memory = VmMemoryState::new();
+        let shell = Shell::boot(&mut machine, &mut state, &mut vm_memory);
 
         // D-RP4: runs immediately after asset loads, never blocks or fails
         // boot -- RuleSet::load() panics only on a malformed *embedded*
@@ -357,7 +362,7 @@ impl Engine {
             shell,
             state,
             machine,
-            vm_memory: VmMemoryState::new(),
+            vm_memory,
             party_predicates: DefaultPartyPredicates::default(),
             party: crate::party::Party::default(),
             rng: EngineRng::new(seed),
@@ -619,7 +624,7 @@ impl Engine {
             input: &mut self.input,
             dt_ticks: 1,
             state: &mut self.state,
-            geo: &self.geo,
+            geo: &mut self.geo,
             party: &mut self.party_predicates,
             roster: &mut self.party,
             rules: &self.rules,
@@ -766,7 +771,7 @@ impl Engine {
                 input: &mut self.input,
                 dt_ticks: 1,
                 state: &mut self.state,
-                geo: &self.geo,
+                geo: &mut self.geo,
                 party: &mut self.party_predicates,
                 roster: &mut self.party,
                 rules: &self.rules,

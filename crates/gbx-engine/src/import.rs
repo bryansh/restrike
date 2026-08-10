@@ -212,9 +212,9 @@ pub fn import_original(
         EclMachine::load_block(ecl_bytes, &COTAB).unwrap_or_else(|never| match never {});
 
     let mut state = master_to_engine_state(master, ecl_block_id);
-    let shell = Shell::boot(&mut machine, &mut state);
-
     let mut vm_memory = VmMemoryState::new();
+    let shell = Shell::boot(&mut machine, &mut state, &mut vm_memory);
+
     vm_memory.restore_windows(windows_from_master(master));
     // ★ THE ORDER IS LOAD-THEN-`vm_init_ecl` (`sub_29758`, `ovr003.cs:2262-
     // 2278`): the original restores `area_ptr`/`area2_ptr`/`stru_1B2CA` from
@@ -223,11 +223,16 @@ pub fn import_original(
     // `CALL 0xAE11` redraw gate for the entry vector that runs next
     // (`:2280`). `restore_windows` writes the snapshot's own flag bytes, and
     // the original save format carries none (so `windows_from_master`'s
-    // `..Default::default()` leaves them false) — arming any earlier
-    // (`VmMemoryState::new`, or `Shell::boot` on line 194, which runs before
-    // this restore) is silently undone. Every imported boot's first
-    // `CALL 0xAE11` must find the gate armed, exactly as a fresh boot does.
-    vm_memory.vm_init_ecl_redraw_flags();
+    // `..Default::default()` leaves them false) — running `vm_init_ecl` any
+    // earlier (`Shell::boot`, above) is silently undone. Every imported boot's
+    // first `CALL 0xAE11` must find the gate armed, exactly as a fresh boot
+    // does — and, since the slice that completed FD-37, the same call is what
+    // re-pokes `inDungeon` to 1 over the save's own byte (`ovr008.cs:126`) and
+    // — because `loadSaveGame` set `reload_ecl_and_pictures` (`ovr017.cs:983`,
+    // `master_to_engine_state`) — deliberately SKIPS the two table restores,
+    // which is how a loaded game's per-block script scratch survives its own
+    // reload.
+    crate::vmhost::vm_init_ecl(&mut state, &mut vm_memory);
 
     let geo_block_id = resolve_block(master.current_3d_map_block_id(), DEFAULT_GEO_BLOCK);
     // Gated exactly as `loadSaveGame` gates it (`ovr017.cs:1076-1095`): the

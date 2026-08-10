@@ -204,6 +204,54 @@ const PARTY_WINDOW: std::ops::RangeInclusive<u16> = 0x7C00..=0x7FFF;
 const CLOCK_BASE: u16 = 0x4BC6;
 /// `area_ptr.inDungeon` (`Classes/Area1.cs:65-66`, DataOffset `0x1CC`).
 const IN_DUNGEON_ADDR: u16 = 0x4BE6;
+/// ★ `area_ptr.lastXPos`/`lastYPos` (`Classes/Area1.cs:72-75`, DataOffsets
+/// `0x1E0`/`0x1E2`; plain get/set cases at `:245-250`/`:489-493`) — the walk
+/// loop's record of where the party stood when this step's per-step script
+/// finished, written immediately before `locked_door()` and compared against
+/// the live position immediately after (`ovr003.cs:2371-2381`).
+///
+/// **This is FD-19.** Tilverton's (7,12)-North event copies both cells
+/// straight back into `mapPosX`/`mapPosY` (`ECL2#1 @0x9444`/`@0x944B`) to
+/// bounce the party off the wrong entrance. Unnamed, they answered 0 from the
+/// raw store — which is where the docketed "party lands at (0,0)" came from.
+const LAST_XPOS_ADDR: u16 = 0x4BF0;
+const LAST_YPOS_ADDR: u16 = 0x4BF1;
+/// ★ `area_ptr.LastEclBlockId` (`Classes/Area1.cs:76-77`, DataOffset `0x1E4`;
+/// `:252-254`/`:498-499`) — "which block did we arrive from", the id
+/// `CMD_NewECL` commits before chaining (`ovr003.cs:488`).
+///
+/// Every multi-entrance block branches on it in its own entry vector:
+/// `ECL1#80 @0x8024` tests it against `0x51`, `0x30` (= `ECL5#48`, the
+/// overland exit this slice drives), `0x40` and `0x04` to decide which edge of
+/// the wilderness the party is standing on, and `ECL2#1 @0x8032`/`ECL2#2
+/// @0x8022` do the same against their own ids. `EngineState` has carried the
+/// value since M2; it was simply never wired to the address scripts read it
+/// at, so after the first chain every arrival branch took its default arm.
+const LAST_ECL_BLOCK_ID_ADDR: u16 = 0x4BF2;
+/// `area2_ptr.rest_incounter_period`/`rest_incounter_percentage`
+/// (`Classes/Area2.cs:56-59`, DataOffsets `0x5A4`/`0x5A6`) — Rest's random-
+/// encounter schedule, read by the camp loop (`ovr021.cs:586-594`) and zeroed
+/// at every block entry (`ovr008.cs:111-112`). Script-writable through the
+/// Party window (`field_800_Set`'s own `0x5a4`/`0x5a6` cases), and real
+/// content arms them per block: `ECL4#37 @0x822E`/`@0x8234` writes percentage
+/// `0x0A`, period `0x1E` immediately after its overland `NEWECL`.
+const REST_INCOUNTER_PERIOD_ADDR: u16 = 0x7ED2;
+const REST_INCOUNTER_PERCENTAGE_ADDR: u16 = 0x7ED3;
+/// `area_ptr.field_200` (`Classes/Area1.cs:92-93`) — a 33-word script scratch
+/// table at DataOffset `0x200`, i.e. 33 CONSECUTIVE window addresses under the
+/// halved Area mapping. `RestField200Values` zeroes all 33
+/// (`Classes/Area1.cs:658-663`: `loop_var <= 32` — the field's own "1-32"
+/// comment undercounts its own loop). Real content lives here: `ECL2#1`
+/// writes `@0x987B` and reads `@0x813B`/`@0x9747`.
+const FIELD_200_BASE: u16 = 0x4C00;
+const FIELD_200_LEN: u16 = 33;
+/// `area2_ptr.field_6F2 .. field_704` (`Classes/Area2.cs:89-108`) — ten words
+/// at DataOffsets `0x6F2..=0x704`, ten consecutive Party-window addresses.
+/// `RestField6F2Values` zeroes them one by one (`Classes/Area2.cs:320-332`).
+/// `ECL5#48` uses the first as its `LOAD CHARACTER` slot-scan counter
+/// (`@0x809B`) and the last as a `HORIZONTAL MENU` destination (`@0x821A`).
+const FIELD_6F2_BASE: u16 = 0x7F79;
+const FIELD_6F2_LEN: u16 = 10;
 /// Both addresses set the same `byte_1EE94` redraw-dirty flag on write
 /// (research §1.5) — and under the confirmed halved mapping (see
 /// `crate::picture::PICTURE_FADE_ADDR`'s derivation) they ARE
@@ -496,6 +544,84 @@ impl VmMemoryState {
         self.byte_1ee91 = true;
     }
 
+    /// Writes one Area/Party window word straight into the raw backing store,
+    /// **without** the `ScriptMemory` write hooks — the engine-side equivalent
+    /// of assigning an `area_ptr`/`area2_ptr` struct field directly, which is
+    /// what `vm_init_ecl` does throughout (and what makes its `inDungeon = 1`
+    /// the asymmetry FD-37 flagged).
+    fn poke_raw(&mut self, addr: u16, value: u16) {
+        self.raw_words.insert(addr, value);
+    }
+}
+
+/// ★ **`vm_init_ecl`** (`sub_301E8`, `ovr008.cs:89-132`) — the engine half,
+/// complete, in one place (roll-credits D-S1d; **closes FD-37**).
+///
+/// Every ECL initialization runs this: fresh boot and original-save import
+/// via `sub_29758`'s preamble (`ovr003.cs:2278`), and `CMD_NewECL`
+/// (`ovr003.cs:491-492`). A native `.rsav` restore is *not* one of them — it
+/// resumes a machine mid-execution, so it deliberately does not call this.
+///
+/// Cell by cell against the original's body, including what is deliberately
+/// absent and why:
+///
+/// | line | cell | here |
+/// |---|---|---|
+/// | `:91,94` | `spriteChanged=false`, `byte_1EE91=true` | [`VmMemoryState::vm_init_ecl_redraw_flags`] |
+/// | `:92-93` | `redrawPartySummary1/2=false` | no engine cell — our roster panel repaints every walk-loop tick unconditionally (`engine.rs`'s `tick`), so there is no dirty flag to clear |
+/// | `:96-97` | `encounter_flags[0..1]=false` | no engine cell yet — FD-34/roll-credits G4 territory |
+/// | `:98` | `monster_icon_id=8` | ✔ on `PendingCombat` |
+/// | `:99` | `ecl_offset=0x8000` | structural: `EclMachine` addresses its block from `ECL_BLOCK_BASE` |
+/// | `:100` | `byte_1DA70=false` | no engine cell, no reader found |
+/// | `:102` | `vmCallStack.Clear()` | structural: `EclMachine::load_block` starts with an empty call stack |
+/// | `:104-107` | `compare_flags[0..5]=false` | structural: `load_block` starts `flags: [false; 6]` — the `gbx-vm` seam FD-37 asked for turns out to be unnecessary, because every site that runs `vm_init_ecl` also rebuilds the machine |
+/// | `:109` | `HeadBlockId=0xFF` | ✔ |
+/// | `:111-112` | `rest_incounter_period/percentage=0` | ✔ raw Party cells |
+/// | `:113` | `can_cast_spells=false` | ✔ (a cell no script can address — see [`EngineState::can_cast_spells`]) |
+/// | `:115-124` | five `vm_LoadCmdSets` into the vector table | structural: `load_block`/`reinit` re-read the block header |
+/// | `:126` | `inDungeon=1`, **direct** | ✔ raw cell only, `game_state` untouched |
+/// | `:128-131` | the two table restores, `reload_ecl_and_pictures`-gated | ✔ |
+///
+/// **`:126` is the asymmetry, and it is load-bearing.** The original assigns
+/// `gbl.area_ptr.inDungeon = 1` on the struct, bypassing `vm_SetMemoryValue`'s
+/// Area hook (`ovr008.cs:700-708`) — the hook is the only thing that turns an
+/// `inDungeon` write into a `game_state`/`last_game_state` update. So after
+/// every block entry the *cell* says "dungeon" while `game_state` keeps
+/// whatever the load computed. That is exactly what lets a party walk out of
+/// the overland (`ECL1#80 @0x8014` sets the cell to 0, `game_state` becomes
+/// `WildernessMap`) and back into a dungeon block whose `LOAD FILES` gate
+/// (`ovr003.cs:519-521`, `area_ptr.inDungeon != 0`) then still loads the 3D
+/// map. Reading the cell from `game_state`, as this engine used to, would have
+/// refused that load.
+///
+/// **`:128-131`** restores two script scratch tables — `field_200` (33 words)
+/// and `field_6F2..704` (10 words) — but only when `reload_ecl_and_pictures`
+/// is false. `loadSaveGame` sets that flag (`ovr017.cs:983`) and the walk loop
+/// clears it after the first world-menu entry (`ovr003.cs:2313`), so the one
+/// initialization that *skips* the wipe is the one right after a save load:
+/// the mechanism by which a loaded game's per-block scratch survives, while
+/// every NEWECL in normal play starts its block with both tables zeroed.
+pub(crate) fn vm_init_ecl(state: &mut EngineState, vm: &mut VmMemoryState) {
+    vm.vm_init_ecl_redraw_flags(); // :91, :94
+    state.pending_combat.monster_icon_id = 8; // :98
+    state.head_block_id = 0xFF; // :109
+    vm.poke_raw(REST_INCOUNTER_PERIOD_ADDR, 0); // :111
+    vm.poke_raw(REST_INCOUNTER_PERCENTAGE_ADDR, 0); // :112
+    state.can_cast_spells = false; // :113
+    vm.poke_raw(IN_DUNGEON_ADDR, 1); // :126 — DIRECT, no `game_state` hook
+
+    // :128-131
+    if !state.reload_ecl_and_pictures {
+        for i in 0..FIELD_200_LEN {
+            vm.poke_raw(FIELD_200_BASE + i, 0);
+        }
+        for i in 0..FIELD_6F2_LEN {
+            vm.poke_raw(FIELD_6F2_BASE + i, 0);
+        }
+    }
+}
+
+impl VmMemoryState {
     /// The raw fallback word store's current value at `addr` (D-VM5's
     /// round-trip guarantee for any cell without a named cell above) — a
     /// read-only seam for tests and the eventual inspector (D-UI8), not
@@ -603,7 +729,7 @@ impl VmMemoryState {
 pub struct EngineVmHost<'a> {
     pub state: &'a mut EngineState,
     pub vm: &'a mut VmMemoryState,
-    pub geo: &'a GeoBlock,
+    pub geo: &'a mut GeoBlock,
     pub party: &'a mut dyn crate::movement::PartyPredicates,
     pub rng: &'a mut crate::rng::EngineRng,
     pub sounds: &'a mut Vec<crate::shell::SoundEvent>,
@@ -744,7 +870,24 @@ impl EngineVmHost<'_> {
             return self.state.clock.raw_clock_words()[idx];
         }
         if addr == IN_DUNGEON_ADDR {
-            return u16::from(self.state.game_state == GameState::DungeonMap);
+            // ★ The CELL, not `game_state` (FD-37): the original's read side is
+            // `field_6A00_Get`'s `case 0x1CC: return inDungeon`
+            // (`Classes/Area1.cs:495-496`), the raw struct field. `vm_init_ecl`
+            // writes that field directly at every block entry
+            // (`ovr008.cs:126`) without going through the hook that maintains
+            // `game_state`, so the two legitimately disagree — and `LOAD
+            // FILES`' 3D-map gate reads the cell, which is what lets a block
+            // entered from the wilderness still load its dungeon map.
+            return self.vm.raw_words.get(&addr).copied().unwrap_or(0);
+        }
+        if addr == LAST_XPOS_ADDR {
+            return self.state.last_pos.0 as u16;
+        }
+        if addr == LAST_YPOS_ADDR {
+            return self.state.last_pos.1 as u16;
+        }
+        if addr == LAST_ECL_BLOCK_ID_ADDR {
+            return self.state.last_ecl_block_id as u16;
         }
         self.vm.unknown_log.record(addr, AccessKind::Read, origin);
         self.vm.raw_words.get(&addr).copied().unwrap_or(0)
@@ -752,9 +895,12 @@ impl EngineVmHost<'_> {
 
     fn write_area(&mut self, addr: u16, value: u16, origin: Origin) {
         if addr == IN_DUNGEON_ADDR {
-            let new_in_dungeon = value != 0;
-            let cur_in_dungeon = self.state.game_state == GameState::DungeonMap;
-            if new_in_dungeon != cur_in_dungeon {
+            // The hook's own guard is `gbl.area_ptr.inDungeon != value`
+            // (`ovr008.cs:702`) — the CELL's previous value, not `game_state`.
+            // The two can differ (see the read arm above), and it is the cell
+            // the original compares.
+            let cur = self.vm.raw_words.get(&addr).copied().unwrap_or(0);
+            if cur != value {
                 self.state.last_game_state = self.state.game_state;
                 self.state.game_state = if value == 0 {
                     GameState::WildernessMap
@@ -763,6 +909,18 @@ impl EngineVmHost<'_> {
                 };
             }
             self.vm.raw_words.insert(addr, value);
+            return;
+        }
+        if addr == LAST_XPOS_ADDR {
+            self.state.last_pos.0 = value as u8;
+            return;
+        }
+        if addr == LAST_YPOS_ADDR {
+            self.state.last_pos.1 = value as u8;
+            return;
+        }
+        if addr == LAST_ECL_BLOCK_ID_ADDR {
+            self.state.last_ecl_block_id = value as u8;
             return;
         }
         if FORCE_REDRAW_ADDRS.contains(&addr) {
@@ -1057,9 +1215,41 @@ impl gbx_vm::EngineServices for EngineVmHost<'_> {
             .push(RecordedCall::ApplyDamage { player, damage });
     }
 
+    /// ★ `Load3DMap` (`ovr031.cs:690-705`) — **the resident map really
+    /// changes now** (roll-credits slice 1; this is FD-19's "settled by").
+    ///
+    /// The original decodes `GEO{game_area}.DAX` block `blockId` straight into
+    /// `gbl.geo_ptr` and records the id in `area_ptr.current_3DMap_block_id`.
+    /// Since M2 this host recorded the id and left the resident `GeoBlock`
+    /// alone (a documented step-5+ deferral), so every `LOAD FILES` naming a
+    /// different map left the party walking the old one's geometry — which is
+    /// what made a cross-block transition look like it half-worked.
+    ///
+    /// A failed load is a **hard stop** in the original
+    /// (`Logger.LogAndExit("Unable to load geo in Load3DMap.")`, `:699`,
+    /// including its `bytesRead != 0x402` size check). `EngineServices` has no
+    /// error channel here, so the failure lands in `vm_memory.halts` — loud,
+    /// counted, and visible to the same diagnostics as a VM halt — and the
+    /// resident block is left untouched rather than half-swapped.
     fn load_3d_map(&mut self, block_id: u8) {
         self.vm.calls.push(RecordedCall::Load3dMap { block_id });
-        self.vm.assets.map_3d_block = Some(block_id);
+        let area = self.game_area();
+        match load_geo_block(self.data, area, block_id) {
+            Ok(block) => {
+                *self.geo = block;
+                self.vm.assets.map_3d_block = Some(block_id);
+            }
+            Err(err) => {
+                self.vm.halts.push(HaltRecord {
+                    pc: 0,
+                    opcode: 0,
+                    description: format!(
+                        "Load3DMap: GEO{area}.DAX block {block_id} did not load ({err:?}) — \
+                         the resident map is unchanged"
+                    ),
+                });
+            }
+        }
     }
 
     /// `LoadWalldef` (`ovr031.cs:642-687`, step 5 task deliverable 1) — a
@@ -1241,7 +1431,7 @@ mod tests {
             EngineVmHost {
                 state: &mut self.state,
                 vm: &mut self.vm,
-                geo: &self.geo,
+                geo: &mut self.geo,
                 party: &mut self.party,
                 rng: &mut self.rng,
                 sounds: &mut self.sounds,
@@ -1314,6 +1504,7 @@ mod tests {
     fn in_dungeon_write_flips_game_state_only_on_actual_change() {
         let mut f = Fixture::new();
         f.state.game_state = GameState::DungeonMap;
+        vm_init_ecl(&mut f.state, &mut f.vm); // the cell starts at 1, as it does in play
         let mut host = f.host();
         host.write(IN_DUNGEON_ADDR, 0, origin()); // -> WildernessMap
         assert_eq!(host.state.game_state, GameState::WildernessMap);
@@ -1322,6 +1513,132 @@ mod tests {
         host.state.last_game_state = GameState::DungeonMap; // poke to detect a spurious re-save
         host.write(IN_DUNGEON_ADDR, 0, origin());
         assert_eq!(host.state.last_game_state, GameState::DungeonMap);
+    }
+
+    /// ★ FD-37's asymmetry, made observable: `vm_init_ecl` pokes
+    /// `area_ptr.inDungeon` to 1 **directly** (`ovr008.cs:126`), bypassing the
+    /// hook that maintains `game_state` — so a block entered from the overland
+    /// reads the cell as "dungeon" while `game_state` still says wilderness.
+    /// That is what lets the new block's `LOAD FILES` 3D-map gate
+    /// (`ovr003.cs:519-521`) fire on the way back indoors.
+    #[test]
+    fn vm_init_ecl_pokes_in_dungeon_without_touching_game_state() {
+        let mut f = Fixture::new();
+        // Block entry first: that is what makes the cell say 1 (`:126`).
+        vm_init_ecl(&mut f.state, &mut f.vm);
+        // Then walk out to the overland the way `ECL1#80 @0x8014` does.
+        {
+            let mut host = f.host();
+            host.write(IN_DUNGEON_ADDR, 0, origin());
+        }
+        assert_eq!(f.state.game_state, GameState::WildernessMap);
+
+        vm_init_ecl(&mut f.state, &mut f.vm);
+        assert_eq!(
+            f.state.game_state,
+            GameState::WildernessMap,
+            "the direct write must NOT run the game_state hook"
+        );
+        let mut host = f.host();
+        assert_eq!(
+            host.read(IN_DUNGEON_ADDR, origin()),
+            1,
+            "...but the cell a script (and LOAD FILES) reads says dungeon again"
+        );
+    }
+
+    /// The rest of `vm_init_ecl`'s engine half (`ovr008.cs:98,109,111-113`).
+    #[test]
+    fn vm_init_ecl_resets_the_head_rest_schedule_icon_id_and_spell_gate() {
+        let mut f = Fixture::new();
+        f.state.head_block_id = 0x0A;
+        f.state.can_cast_spells = true;
+        f.state.pending_combat.monster_icon_id = 12;
+        {
+            let mut host = f.host();
+            host.write(REST_INCOUNTER_PERIOD_ADDR, 0x1E, origin());
+            host.write(REST_INCOUNTER_PERCENTAGE_ADDR, 0x0A, origin());
+        }
+
+        vm_init_ecl(&mut f.state, &mut f.vm);
+
+        assert_eq!(f.state.head_block_id, 0xFF, ":109");
+        assert!(!f.state.can_cast_spells, ":113");
+        assert_eq!(f.state.pending_combat.monster_icon_id, 8, ":98");
+        let mut host = f.host();
+        assert_eq!(host.read(REST_INCOUNTER_PERIOD_ADDR, origin()), 0, ":111");
+        assert_eq!(
+            host.read(REST_INCOUNTER_PERCENTAGE_ADDR, origin()),
+            0,
+            ":112"
+        );
+    }
+
+    /// ★ The `reload_ecl_and_pictures` arm (`ovr008.cs:128-131`): normal block
+    /// entry wipes both script scratch tables; the one initialization that
+    /// follows a save load does not — which is exactly how a loaded game keeps
+    /// the per-block flags it was saved with.
+    #[test]
+    fn the_table_restores_are_skipped_only_when_reloading_from_a_save() {
+        let seed = |f: &mut Fixture| {
+            let mut host = f.host();
+            host.write(FIELD_200_BASE, 7, origin());
+            host.write(FIELD_200_BASE + FIELD_200_LEN - 1, 7, origin());
+            host.write(FIELD_6F2_BASE, 7, origin());
+            host.write(FIELD_6F2_BASE + FIELD_6F2_LEN - 1, 7, origin());
+        };
+        let read_all = |f: &mut Fixture| {
+            let mut host = f.host();
+            [
+                host.read(FIELD_200_BASE, origin()),
+                host.read(FIELD_200_BASE + FIELD_200_LEN - 1, origin()),
+                host.read(FIELD_6F2_BASE, origin()),
+                host.read(FIELD_6F2_BASE + FIELD_6F2_LEN - 1, origin()),
+            ]
+        };
+
+        let mut f = Fixture::new();
+        f.state.reload_ecl_and_pictures = false;
+        seed(&mut f);
+        vm_init_ecl(&mut f.state, &mut f.vm);
+        assert_eq!(read_all(&mut f), [0, 0, 0, 0], "a NEWECL wipes both tables");
+
+        let mut f = Fixture::new();
+        f.state.reload_ecl_and_pictures = true;
+        seed(&mut f);
+        vm_init_ecl(&mut f.state, &mut f.vm);
+        assert_eq!(
+            read_all(&mut f),
+            [7, 7, 7, 7],
+            "the initialization right after a save load leaves them alone"
+        );
+    }
+
+    /// The wipe covers the WHOLE of both tables — 33 words and 10, per
+    /// `RestField200Values`' own `loop_var <= 32` and `RestField6F2Values`'
+    /// ten assignments — and stops at their edges.
+    #[test]
+    fn the_table_restores_cover_exactly_their_documented_extents() {
+        let mut f = Fixture::new();
+        {
+            let mut host = f.host();
+            for i in 0..FIELD_200_LEN + 2 {
+                host.write(FIELD_200_BASE + i, 9, origin());
+            }
+            for i in 0..FIELD_6F2_LEN + 2 {
+                host.write(FIELD_6F2_BASE + i, 9, origin());
+            }
+        }
+        vm_init_ecl(&mut f.state, &mut f.vm);
+        let mut host = f.host();
+        for i in 0..FIELD_200_LEN {
+            assert_eq!(host.read(FIELD_200_BASE + i, origin()), 0, "field_200[{i}]");
+        }
+        assert_eq!(host.read(FIELD_200_BASE + FIELD_200_LEN, origin()), 9);
+        for i in 0..FIELD_6F2_LEN {
+            assert_eq!(host.read(FIELD_6F2_BASE + i, origin()), 0, "field_6F2[{i}]");
+        }
+        assert_eq!(host.read(FIELD_6F2_BASE + FIELD_6F2_LEN, origin()), 9);
     }
 
     #[test]
@@ -1414,6 +1731,32 @@ mod tests {
             host.load_monster(3, 1, 0).is_ok(),
             "after SAVE 5 -> 0x7F12 the same monster id resolves in MON5CHA.DAX"
         );
+    }
+
+    /// ★ FD-19's three cells, named at last. `lastXPos`/`lastYPos` are what
+    /// `ECL2#1 @0x9444`/`@0x944B` copy back into the position to refuse the
+    /// (7,12)-North entrance; `LastEclBlockId` is what every multi-entrance
+    /// block's own entry vector branches on (`ECL1#80 @0x8024`).
+    #[test]
+    fn the_arrival_cells_read_engine_state_rather_than_the_raw_store() {
+        let mut f = Fixture::new();
+        f.state.last_pos = (7, 12);
+        f.state.last_ecl_block_id = 0x30; // ECL5#48, the overland exit
+        let mut host = f.host();
+        assert_eq!(host.read(LAST_XPOS_ADDR, origin()), 7);
+        assert_eq!(host.read(LAST_YPOS_ADDR, origin()), 12);
+        assert_eq!(host.read(LAST_ECL_BLOCK_ID_ADDR, origin()), 0x30);
+        assert!(
+            host.vm.unknown_log.is_empty(),
+            "named cells are not unknown accesses"
+        );
+
+        // All three are plain read/write in the original's own switch
+        // (`Classes/Area1.cs:245-254`), so a script can move them.
+        host.write(LAST_XPOS_ADDR, 3, origin());
+        host.write(LAST_ECL_BLOCK_ID_ADDR, 2, origin());
+        assert_eq!(host.state.last_pos.0, 3);
+        assert_eq!(host.state.last_ecl_block_id, 2);
     }
 
     #[test]

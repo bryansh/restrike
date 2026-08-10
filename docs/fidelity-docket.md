@@ -443,8 +443,48 @@ source document (§5 "New docket candidates").
 
 ### FD-19: The (7,12)-North door is a real area transition, not a plain locked door
 
-- **Status:** narrowed (mechanism understood; cross-area GEO-block swapping
-  deferred to M3+)
+- **Status:** **resolved** 2026-08-10 (roll-credits slice 1) — and the
+  headline above is *wrong*, kept verbatim because the correction is the
+  finding. It is not an area transition at all.
+- **Resolution.** Two things were conflated, and the disassembly separates
+  them.
+  1. **The (0,0) landing was never about the map.** The refusal arm of the
+     (7,12)-North event ends `SAVE [0x4BF0], [0xC04B]` / `SAVE [0x4BF1],
+     [0xC04C]` (`ECL2#1 @0x9444`/`@0x944B`) — it copies
+     `area_ptr.lastXPos`/`lastYPos` back into the party position to put the
+     party where it stood, which is exactly what "you are turned away" means
+     mechanically. Nothing in this engine maintained those two cells
+     (`ovr003.cs:2371-2372` writes them once per step, right after the
+     per-step script and before `locked_door()`), and nothing named their
+     addresses, so both read 0 and the party was teleported to the origin.
+     Slice 1 adds `EngineState::last_pos`, writes it at the original's own
+     site, and names `0x4BF0`/`0x4BF1` — the demo now asserts the party lands
+     back on **(7,12)**, turned away.
+  2. **The `Load3dMap { block_id: 1 }` cited as evidence is the BOOT one.**
+     It is the only such call in the whole run (`ECL2#1 @0x8014`'s own
+     `LOAD FILES #0x01, #0x02, #0xFF`), and it names GEO2 block 1 — the map
+     already resident. The door writes no `0x7F12` at all: the shipped game
+     has exactly two `SAVE _, 0x7F12` sites, `ECL4#37 @0x8225` and
+     `ECL5#48 @0x8092`, and neither is here.
+- **What the door actually does.** The event forks. The refusal arm is (1)
+  above. The other arm (`@0x945D`) is a guarded fight — `SAVE 0x63, [0x7EC6]`,
+  `CLEARMONSTERS`, `LOAD MONSTER #0x00, #0x05, #0x00`, `COMBAT` — and on a win
+  (`COMPARE [0x7EC7], #0x80; IF >=; GOTO [0x987B]`) the script teleports the
+  party to (9,3) facing south and chains `NEWECL 0x02`
+  (`@0x9911`/`@0x9917`/`@0x991D` → `@0x9830`): a **same-area** block change to
+  `ECL2` block 2, whose own `LOAD FILES` names GEO2 block 1 again. So even the
+  through-path never changes area or map; it changes *wallset* (`LOAD PIECES
+  #0x01,#0x02,#0x03` in block 1 vs `#0x01,#0x02,#0x04` in block 2).
+- **The real gap the entry found** was nonetheless real and is now closed:
+  `load_3d_map` recorded a block id and never swapped the resident `GeoBlock`,
+  so any `LOAD FILES` naming a *different* map left the party on the old
+  geometry. `EngineVmHost::load_3d_map` now performs `Load3DMap`'s actual body
+  (`ovr031.cs:690-705`), with a loud `HaltRecord` where the original hard-exits.
+  Proven against real data by
+  `area_transition_tests::a_real_load_files_swaps_the_resident_geo_block`
+  (`ECL3` block 21's `LOAD FILES #0x15` seated over the wrong GEO3 block).
+- **Superseded status line (kept for provenance):** narrowed (mechanism
+  understood; cross-area GEO-block swapping deferred to M3+)
 - **Question:** Tilverton's per-step script (`ECL2.DAX` block 1 vector 1,
   the DIVIDE-unblocked logic FD-9 fixed) prints a short in-fiction refusal
   when the party approaches (7,12)'s North edge from most positions — the
@@ -469,13 +509,15 @@ source document (§5 "New docket candidates").
   outcome rather than the pre-DIVIDE-fix assumption it originally shipped
   with (bashing through to `(7,11)`), which turned out to be an artifact of
   vector 1 silently halting before this session (FD-9's finding).
-- **Settled by:** M3+/whenever cross-area GEO/ECL-block selection is wired
-  (the natural place to also decide what a mid-session `Load3dMap` should do
-  to party position — likely reading the new area's own boot-vector spawn,
-  the same way `INITIAL_ECL_BLOCK`'s spawn is read today). Not blocking M2's
-  exit gate: the circuit trace (`fixtures/tilverton-circuit.jsonl`) routes
-  around this door entirely, using a different, transition-free path to its
-  event squares.
+- **Settled by:** roll-credits slice 1 (area generalization). The "what should
+  a mid-session `Load3dMap` do to party position" question this entry left
+  open turns out to have no answer to invent: **the script sets the position
+  itself** (`@0x9911`-`@0x991D` here; every transition in the shipped content
+  does the same), which is the same "there is no transition choreography to
+  invent" finding D-RC1 recorded for the area switch.
+- **Cross-reference:** `crates/gbx-engine/src/area_transition_tests.rs`,
+  `crates/gbx-engine/src/demo.rs::walk_tilverton_and_bash_a_real_door`,
+  `crates/gbx-engine/src/vmhost.rs` (`LAST_XPOS_ADDR`, `load_3d_map`).
 
 ### FD-20: Turn-undead types 11-12 — does any shipped monster actually use them?
 
@@ -1061,7 +1103,49 @@ stays the one place showing the complete open-hypothesis picture.
 
 ### FD-37: `vm_init_ecl`'s engine-half reset is wider than the three cells we replay
 
-- **Status:** open (same review)
+- **Status:** **resolved** 2026-08-10 (roll-credits slice 1, D-S1d).
+  `crate::vmhost::vm_init_ecl` is now the one implementation, and all three
+  sites go through it: `Engine::build`/`import_original` via
+  `Shell::boot` → `BootFlow::start` (`sub_29758`'s preamble,
+  `ovr003.cs:2278`), and `begin_chain` (`CMD_NewECL`, `:491-492`). Its doc
+  comment carries the cell-by-cell table against `ovr008.cs:89-132`, including
+  every cell deliberately *not* modeled and why. Newly landed:
+  `monster_icon_id = 8` (`:98`), `rest_incounter_period`/`percentage = 0`
+  (`:111-112`, Party-window cells `0x7ED2`/`0x7ED3`), `can_cast_spells = false`
+  (`:113`), the direct `inDungeon = 1` (`:126`), and the
+  `reload_ecl_and_pictures`-gated `RestField200Values`/`RestField6F2Values`
+  (`:128-131`).
+- **Two findings from doing it.**
+  1. **`compare_flags` needs no `gbx-vm` seam.** This entry asked for one on
+     the belief that `gbx-vm` "does not clear them on `load_block`". It does:
+     `EclMachine::load_block` constructs `flags: [false; 6]` with an empty
+     call stack, and every site that runs `vm_init_ecl` also rebuilds the
+     machine — so `:102` and `:104-107` are satisfied structurally.
+     Same for `:99` (`ecl_offset = 0x8000`) and `:115-124` (the five
+     `vm_LoadCmdSets` into the vector table), which are `load_block`'s header
+     read.
+  2. **`can_cast_spells` is not script-addressable at all.** Its DataOffset is
+     `0x1FF` (`Classes/Area1.cs:89-90`) — *odd* — and the Area window's mapping
+     is `DataOffset = (addr - 0x4B00) * 2`, always even. So no `SAVE` can ever
+     reach it; its only consumers are engine-side spell gates
+     (`ovr009.cs:333`, `ovr010.cs:190`, `ovr016.cs:122`) belonging to
+     roll-credits G3/G7. It is modeled as an `EngineState` cell with the reset
+     real and no reader yet, deliberately.
+- **The asymmetry is now load-bearing, not just flagged.** `:126`'s direct
+  write is what lets a party leave the overland (`ECL1#80 @0x8014` writes 0 to
+  the cell through the hook, so `game_state` becomes `WildernessMap`) and then
+  enter a dungeon block whose `LOAD FILES` 3D-map gate
+  (`ovr003.cs:519-521`, `area_ptr.inDungeon != 0`) still fires. To make that
+  work the *read* side had to move too: `read_area(0x4BE6)` now answers from
+  the raw cell, as `field_6A00_Get`'s `case 0x1CC` does
+  (`Classes/Area1.cs:495-496`), instead of deriving from `game_state`; and the
+  write hook's guard compares the cell's previous value, as `ovr008.cs:702`
+  does, not `game_state`.
+- **Still unmodeled, with reasons:** `redrawPartySummary1/2` (`:92-93` — the
+  roster panel repaints unconditionally every walk-loop tick, so there is no
+  dirty flag), `encounter_flags[0..1]` (`:96-97` — no engine cell yet, FD-34 /
+  roll-credits G4), `byte_1DA70` (`:100` — no cell, no reader found).
+- **Superseded status line (kept for provenance):** open (same review)
 - **Question:** `vm_init_ecl` (`sub_301E8`, `ovr008.cs:89-132`) resets
   fourteen-odd cells at every ECL initialization. Our three
   `vm_init_ecl` analogues (`VmMemoryState::new`, `begin_chain`,
@@ -1086,11 +1170,9 @@ stays the one place showing the complete open-hypothesis picture.
   same cell would have flipped it. Our `write_area` models the hook; nothing
   models the direct write, so we are accidentally consistent, but for the
   wrong reason.
-- **Settled by:** a slice that gives `vm_init_ecl` one real implementation
-  (all three call sites through it), cell by cell, each with a
-  conformance/shell test. `compare_flags` needs a `gbx-vm` seam.
-- **Cross-reference:** `crates/gbx-engine/src/vmhost.rs`
-  `vm_init_ecl_redraw_flags`, `crates/gbx-engine/src/shell.rs` `begin_chain`,
+- **Settled by:** roll-credits slice 1 (area generalization), as above.
+- **Cross-reference:** `crates/gbx-engine/src/vmhost.rs` `vm_init_ecl`,
+  `crates/gbx-engine/src/shell.rs` `begin_chain`/`BootFlow::start`,
   `crates/gbx-engine/src/import.rs`.
 
 ### FD-38: menus have per-menu colour sets; our prompt painter has one
@@ -1216,6 +1298,47 @@ stays the one place showing the complete open-hypothesis picture.
   `block_area_view` cell is FD-41, separately.
 - **Cross-reference:** FD-41, `crates/gbx-engine/src/shell.rs`
   `world_menu_command`'s `'A'` arm.
+
+### FD-43: the picture caches are area-unkeyed — after an area switch a repeated block id serves the old area's art
+
+- **Status:** **deferred by decision** (roll-credits D-RC8 / D-S1e, resolved
+  2026-08-10): we **replicate** the quirk. Not a bug to fix; a documented
+  divergence-we-declined.
+- **The quirk.** All three of the original's picture caches key on block id
+  and nothing else:
+  - `load_pic_final` (`ovr030.cs:35-38`) guards on
+    `file_name != gbl.lastDaxFile || block_id != gbl.lastDaxBlockId`, where
+    `file_name` is the **bare family name** — `"PIC"` or `"FINAL"`. The area
+    digit is appended only at the actual load, `:58`
+    (`file_name + gbl.game_area.ToString() + ".dax"`), i.e. *after* the guard
+    has already decided not to reload.
+  - `head_body` (`ovr030.cs:168-195`) guards on `current_head_id` /
+    `current_body_id` alone; the area digit likewise appears only at `:170`.
+  - `load_bigpic` (`ovr030.cs:231-240`) guards on `bigpic_block_id` alone.
+
+  So after `SAVE <n>, 0x7F12` moves the area, a `PICTURE` naming an id the
+  previous area also had draws the **previous area's** art.
+- **A concrete repeating id (real data, v1.3).** `PIC` block **1** exists in
+  every one of the six area files — `PIC1`, `PIC2`, `PIC3`, `PIC4`, `PIC5`,
+  `PIC6` all carry it (as does block 29). `PIC` block 9 is in areas 2 and 4;
+  block 67 in areas 4 and 6. On the `HEAD` side: block 3 is in areas 2, 3 and
+  5; block 20 in 3 and 6; block 49 in 4 and 5; block 65 in 2 and 6; block 70
+  in 4 and 6. So the collision is not hypothetical — a party crossing from
+  area 2 to area 3 and meeting a `PICTURE 1` gets Tilverton's block 1 until
+  something else evicts the slot.
+- **Why replicate (D4/D11, faithful-first).** Diverging would "fix" behaviour
+  we have never observed in DOSBox: the original may well never *reach* a
+  repeated id across a switch (`BIGPIC` ids, notably, do not repeat at all —
+  `BIGPIC1` {121,123}, `BIGPIC2` {120}, `BIGPIC6` {122}), in which case a
+  divergence buys nothing and costs fidelity. Our `PictureCache` already had
+  the same shape by accident; slice 1 keeps it deliberately and says so.
+- **The QoL correction, if it ever proves ugly in play:** key the four cache
+  slots by `(area, block)` instead of `block` — a one-line change per slot in
+  `crate::picture::PictureCache`, behind a decision made then rather than now.
+  Watch for it in the playthrough (D-RC2's discovery loop): the symptom is a
+  stale portrait or scene picture immediately after crossing an area.
+- **Cross-reference:** `docs/design/roll-credits.md` D-RC8/D-S1e,
+  `crates/gbx-engine/src/picture.rs` `PictureCache`.
 
 ## 5. How new entries get added
 

@@ -281,7 +281,11 @@ pub struct FlowCtx<'a> {
     pub input: &'a mut InputQueue,
     pub dt_ticks: u32,
     pub state: &'a mut EngineState,
-    pub geo: &'a GeoBlock,
+    /// The resident 3D map (`gbl.geo_ptr`). **Mutable since the
+    /// area-generalization slice:** `LOAD FILES` → `Load3DMap` replaces the
+    /// whole block (`ovr031.cs:690-705`), which is how a party crosses from
+    /// one map to another — the gap FD-19 recorded.
+    pub geo: &'a mut GeoBlock,
     pub party: &'a mut dyn PartyPredicates,
     /// The real party roster (M3 step 6): the party-facing screens
     /// (character sheet, camp, training, shops) read and mutate it. Distinct
@@ -583,6 +587,36 @@ fn enter_vector(machine: &mut EclMachine, index: usize) -> Option<VectorRun> {
     })
 }
 
+/// ★ The **vector-level drive** seam (roll-credits §5 acceptance item 2).
+///
+/// Enters the resident block at an arbitrary address and returns a shell
+/// parked on it, so a test can exercise one script path against REAL data
+/// without first satisfying every gate upstream of it. The overland exits are
+/// the case that needs it: `ECL5#48`'s entry vector reaches its
+/// `SAVE 1, 0x7F12` + `NEWECL 0x50` only past a `FIND ITEM` and a
+/// `LOAD CHARACTER` scan, both of which belong to roll-credits slice 3 — so
+/// slice 1 drives the transition itself and leaves the approach to the slice
+/// that owns those opcodes.
+///
+/// Everything downstream is the ordinary machinery: the chain, the
+/// destination block's own entry vector, its `LOAD FILES`, its menus.
+#[cfg(test)]
+pub(crate) fn boot_at_address(machine: &mut EclMachine, addr: u16) -> Shell {
+    machine.enter(addr);
+    Shell::Boot(BootFlow {
+        stage: BootStage::EntryVector,
+        run: Some(VectorRun {
+            phase: VmPhase::Pump,
+            queue: VecDeque::new(),
+            current_job: None,
+            pending: None,
+            pending_reply: None,
+            anim_wait: 0,
+        }),
+        chain: None,
+    })
+}
+
 impl VectorRun {
     /// Advances by one tick — internally loops through phase transitions
     /// (Pump -> Present -> Gate -> Pump -> ...) making maximal progress,
@@ -647,7 +681,7 @@ impl VectorRun {
                 let mut host = EngineVmHost {
                     state: &mut *ctx.state,
                     vm: &mut *ctx.vm_memory,
-                    geo: ctx.geo,
+                    geo: &mut *ctx.geo,
                     party: &mut *ctx.party,
                     rng: &mut *ctx.rng,
                     sounds: &mut *ctx.sounds,
@@ -1036,14 +1070,16 @@ fn begin_chain(ctx: &mut FlowCtx, id: BlockId) -> Option<ChainRunner> {
         }
     };
     *ctx.machine = EclMachine::load_block(bytes, &COTAB).unwrap_or_else(|never| match never {});
-    // `CMD_NewECL` runs `vm_init_ecl` right after the load (`ovr003.cs:491-492`),
-    // whose engine-state half includes `HeadBlockId = 0xFF` (`ovr008.cs:109`) —
-    // the fresh block starts with no portrait head armed, whatever the last
-    // script (or an imported save) left in the cell — plus `spriteChanged =
-    // false` and `byte_1EE91 = true` (`ovr008.cs:91,94`): the redraw gate is
-    // armed, so the new block's first `CALL 0xAE11` repaints the world.
-    ctx.state.head_block_id = 0xFF;
-    ctx.vm_memory.vm_init_ecl_redraw_flags();
+    // `CMD_NewECL` runs `vm_init_ecl` right after the load
+    // (`ovr003.cs:491-492`) — the whole engine half, not just the redraw
+    // flags: the fresh block starts with no portrait head armed, an armed
+    // redraw gate, a zeroed rest schedule, `inDungeon` poked back to 1, and
+    // (in normal play) both script scratch tables wiped. See
+    // [`crate::vmhost::vm_init_ecl`] for the cell-by-cell derivation.
+    crate::vmhost::vm_init_ecl(ctx.state, ctx.vm_memory);
+    // `CMD_NewECL`'s own two extra clears, after the call (`ovr003.cs:496-497`)
+    // — `encounter_flags[0..1]` has no engine cell yet (FD-34/G4), so there is
+    // nothing to clear here beyond what `vm_init_ecl` already did.
 
     match enter_vector(ctx.machine, VECTOR_ENTRY_POINT) {
         Some(run) => Some(ChainRunner { run }),
@@ -1314,17 +1350,22 @@ pub struct BootFlow {
 }
 
 impl BootFlow {
-    pub fn start(machine: &mut EclMachine, state: &mut EngineState) -> Self {
+    pub fn start(
+        machine: &mut EclMachine,
+        state: &mut EngineState,
+        vm: &mut VmMemoryState,
+    ) -> Self {
         state.last_selected_player = state.selected_player; // `:2232`
                                                             // The block-entry preamble calls `vm_init_ecl` unconditionally before
-                                                            // running the entry vector (`ovr003.cs:2278`), and its engine-state
-                                                            // half includes `HeadBlockId = 0xFF` (`ovr008.cs:109`). Load-bearing
-                                                            // for an imported original save: the save's own Area2 bytes carry a
-                                                            // stale head id (the bundled GOG save says `0x00`), and without this
-                                                            // reset the intro's first `PICTURE 0x0a` takes the head/body arm
-                                                            // (HEAD2 block 0's face + a BODY2 block that does not exist) instead
-                                                            // of the plain-PIC sword arm — Bryan's 2026-08-08 playtest find.
-        state.head_block_id = 0xFF;
+                                                            // running the entry vector (`ovr003.cs:2278`). Its `HeadBlockId = 0xFF`
+                                                            // (`ovr008.cs:109`) is load-bearing for an imported original save: the
+                                                            // save's own Area2 bytes carry a stale head id (the bundled GOG save
+                                                            // says `0x00`), and without the reset the intro's first `PICTURE 0x0a`
+                                                            // takes the head/body arm (HEAD2 block 0's face + a BODY2 block that
+                                                            // does not exist) instead of the plain-PIC sword arm — Bryan's
+                                                            // 2026-08-08 playtest find. The rest of the reset is
+                                                            // [`crate::vmhost::vm_init_ecl`]'s table.
+        crate::vmhost::vm_init_ecl(state, vm);
         let run = enter_vector(machine, VECTOR_ENTRY_POINT);
         BootFlow {
             stage: BootStage::EntryVector,
@@ -1475,18 +1516,30 @@ pub struct StepFlow {
     /// this flow stage, no VM involved. `None` once resolved or if the
     /// door menu never opened (no options / solid / already open).
     door_widget: Option<Widget>,
-    last_pos: (u8, u8),
+}
+
+/// ★ `area_ptr.lastXPos`/`lastYPos = mapPosX`/`mapPosY` (`ovr003.cs:2371-2372`)
+/// — written at exactly one point in the walk loop: after the per-step script
+/// (`vm_run_addr_1`) has run, before `locked_door()`.
+///
+/// It reads like bookkeeping for the sound check three lines later, and that
+/// is one of its two jobs. The other is content: a script can copy these cells
+/// back into `mapPosX`/`mapPosY` to put the party where it was, which is how
+/// Tilverton refuses the (7,12)-North entrance (`ECL2#1 @0x9444`/`@0x944B`).
+/// With nothing maintaining them, that refusal read two zeroes and teleported
+/// the party to (0,0) — the symptom FD-19 recorded and blamed on the map swap.
+fn record_last_pos(ctx: &mut FlowCtx) {
+    ctx.state.last_pos = ctx.state.pos;
 }
 
 impl StepFlow {
-    pub fn start(machine: &mut EclMachine, state: &mut EngineState) -> Self {
+    pub fn start(machine: &mut EclMachine, _state: &mut EngineState) -> Self {
         let run = enter_vector(machine, VECTOR_RUN_ADDR_1);
         StepFlow {
             stage: StepStage::RunVector1,
             run,
             chain: None,
             door_widget: None,
-            last_pos: state.pos,
         }
     }
 
@@ -1510,7 +1563,7 @@ impl StepFlow {
         match self.stage {
             StepStage::RunVector1 => {
                 let Some(run) = self.run.as_mut() else {
-                    self.last_pos = ctx.state.pos;
+                    record_last_pos(ctx);
                     self.stage = StepStage::DoorInteraction;
                     return None;
                 };
@@ -1518,7 +1571,7 @@ impl StepFlow {
                     RunTick::Working => None,
                     RunTick::Done(Exit::Ended) => {
                         self.run = None;
-                        self.last_pos = ctx.state.pos;
+                        record_last_pos(ctx);
                         self.stage = StepStage::DoorInteraction;
                         None
                     }
@@ -1633,7 +1686,11 @@ impl StepFlow {
             ctx.state.field_592 = 0;
         }
 
-        if ctx.state.pos != self.last_pos {
+        // `:2377-2381`, the "you were moved" sound — compared against the same
+        // two cells `record_last_pos` just wrote, which is what makes a script
+        // that teleports the party (or bounces it back off a refused entrance)
+        // announce itself.
+        if ctx.state.pos != ctx.state.last_pos {
             ctx.sounds.push(SoundEvent(crate::movement::SOUND_A));
         }
         self.run = enter_vector(ctx.machine, VECTOR_SEARCH_LOCATION);
@@ -1899,8 +1956,8 @@ impl Shell {
 }
 
 impl Shell {
-    pub fn boot(machine: &mut EclMachine, state: &mut EngineState) -> Self {
-        Shell::Boot(BootFlow::start(machine, state))
+    pub fn boot(machine: &mut EclMachine, state: &mut EngineState, vm: &mut VmMemoryState) -> Self {
+        Shell::Boot(BootFlow::start(machine, state, vm))
     }
 
     /// ★ Leaving a full-screen [`Shell::Screen`] recomposes the exploration
@@ -2312,7 +2369,7 @@ mod tests {
                 input: &mut self.input,
                 dt_ticks: 1,
                 state: &mut self.state,
-                geo: &self.geo,
+                geo: &mut self.geo,
                 party: &mut self.party,
                 roster: &mut self.roster,
                 rules: &self.rules,
@@ -2473,7 +2530,7 @@ mod tests {
             b.op(0x00);
         });
         let mut h = Harness::with_blocks(vec![(1, menu)]);
-        let mut shell = Shell::boot(&mut h.machine, &mut h.state);
+        let mut shell = Shell::boot(&mut h.machine, &mut h.state, &mut h.vm_memory);
         for _ in 0..5 {
             let mut ctx = h.ctx();
             shell.tick(&mut ctx);
@@ -2542,7 +2599,7 @@ mod tests {
             b.op(0x00);
         });
         let mut h = Harness::with_blocks(vec![(1, block)]);
-        let mut shell = Shell::boot(&mut h.machine, &mut h.state);
+        let mut shell = Shell::boot(&mut h.machine, &mut h.state, &mut h.vm_memory);
 
         let selected_text = |shell: &Shell| -> String {
             let Some(Widget::Hotbar(hb)) = shell.parked_widget_for_tests() else {
@@ -2614,7 +2671,7 @@ mod tests {
     #[test]
     fn boot_reaches_world_menu_with_no_chain() {
         let mut h = Harness::new();
-        let mut shell = Shell::boot(&mut h.machine, &mut h.state);
+        let mut shell = Shell::boot(&mut h.machine, &mut h.state, &mut h.vm_memory);
         tick_until(&mut shell, &mut h, 10, |s| {
             matches!(s, Shell::WorldMenu { .. })
         });
@@ -2631,7 +2688,7 @@ mod tests {
     fn boot_resets_the_imported_head_block_id_to_none() {
         let mut h = Harness::new();
         h.state.head_block_id = 0x00; // what the bundled save's Area2 bytes say
-        let _shell = Shell::boot(&mut h.machine, &mut h.state);
+        let _shell = Shell::boot(&mut h.machine, &mut h.state, &mut h.vm_memory);
         assert_eq!(
             h.state.head_block_id, 0xFF,
             "the block-entry preamble must arm the no-portrait sentinel"
@@ -2647,7 +2704,7 @@ mod tests {
             b.op(0x20).imm_byte(2); // NEWECL block 2
         });
         let mut h = Harness::with_blocks(vec![(1, newecl), (2, exit_only_block())]);
-        let mut shell = Shell::boot(&mut h.machine, &mut h.state);
+        let mut shell = Shell::boot(&mut h.machine, &mut h.state, &mut h.vm_memory);
         // Poke stale values AFTER boot's own reset so the chain site is the
         // one under test. Assert right after the tick that fires the chain —
         // the world-menu entry's own recompose clears the redraw flags again
@@ -2681,7 +2738,7 @@ mod tests {
         });
         let mut h = Harness::with_blocks(vec![(1, newecl), (2, exit_only_block())]);
         h.state.reload_ecl_and_pictures = true;
-        let mut shell = Shell::boot(&mut h.machine, &mut h.state);
+        let mut shell = Shell::boot(&mut h.machine, &mut h.state, &mut h.vm_memory);
 
         {
             let mut ctx = h.ctx();
@@ -2707,7 +2764,7 @@ mod tests {
     #[test]
     fn world_menu_forward_into_open_square_moves_and_returns_to_world_menu() {
         let mut h = Harness::new();
-        let mut shell = Shell::boot(&mut h.machine, &mut h.state);
+        let mut shell = Shell::boot(&mut h.machine, &mut h.state, &mut h.vm_memory);
         tick_until(&mut shell, &mut h, 10, |s| {
             matches!(s, Shell::WorldMenu { .. })
         });
@@ -2729,7 +2786,7 @@ mod tests {
     #[test]
     fn party_killed_unwinds_to_game_over_and_resets_the_flag() {
         let mut h = Harness::new();
-        let mut shell = Shell::boot(&mut h.machine, &mut h.state);
+        let mut shell = Shell::boot(&mut h.machine, &mut h.state, &mut h.vm_memory);
         h.state.party_killed = true;
         let mut ctx = h.ctx();
         shell.tick(&mut ctx);
@@ -2771,7 +2828,7 @@ mod tests {
             b.op(0x00); // EXIT (after the reply resumes)
         });
         let mut h = Harness::with_blocks(vec![(1, combat)]);
-        let mut shell = Shell::boot(&mut h.machine, &mut h.state);
+        let mut shell = Shell::boot(&mut h.machine, &mut h.state, &mut h.vm_memory);
         for _ in 0..3 {
             let mut ctx = h.ctx();
             shell.tick(&mut ctx);
@@ -2793,7 +2850,7 @@ mod tests {
     #[test]
     fn shell_state_round_trips_through_serde_mid_boot() {
         let mut h = Harness::new();
-        let shell = Shell::boot(&mut h.machine, &mut h.state);
+        let shell = Shell::boot(&mut h.machine, &mut h.state, &mut h.vm_memory);
         let json = serde_json::to_string(&shell).expect("Shell must serialize");
         let restored: Shell = serde_json::from_str(&json).expect("Shell must deserialize");
         assert!(matches!(restored, Shell::Boot(_)));
@@ -2810,7 +2867,7 @@ mod tests {
     #[test]
     fn look_flow_restores_search_flags_after_resolving() {
         let mut h = Harness::new();
-        let mut shell = Shell::boot(&mut h.machine, &mut h.state);
+        let mut shell = Shell::boot(&mut h.machine, &mut h.state, &mut h.vm_memory);
         tick_until(&mut shell, &mut h, 10, |s| {
             matches!(s, Shell::WorldMenu { .. })
         });
@@ -2890,7 +2947,7 @@ mod tests {
         let look = Shell::Look(LookFlow::start(&mut h.machine, &mut h.state));
         assert!(matches!(round_trip_shell(&look), Shell::Look(_)));
 
-        let boot = Shell::boot(&mut h.machine, &mut h.state);
+        let boot = Shell::boot(&mut h.machine, &mut h.state, &mut h.vm_memory);
         assert!(matches!(round_trip_shell(&boot), Shell::Boot(_)));
     }
 
@@ -2918,7 +2975,7 @@ mod tests {
     #[test]
     fn forward_at_the_grid_edge_sets_tried_to_exit_map() {
         let mut h = Harness::new();
-        let mut shell = Shell::boot(&mut h.machine, &mut h.state);
+        let mut shell = Shell::boot(&mut h.machine, &mut h.state, &mut h.vm_memory);
         tick_until(&mut shell, &mut h, 10, |s| {
             matches!(s, Shell::WorldMenu { .. })
         });
@@ -3008,7 +3065,7 @@ mod tests {
         });
         let mut h = Harness::with_blocks(vec![(1, block1), (9, exit_only_block())]);
 
-        let mut shell = Shell::boot(&mut h.machine, &mut h.state);
+        let mut shell = Shell::boot(&mut h.machine, &mut h.state, &mut h.vm_memory);
         tick_until(&mut shell, &mut h, 10, |s| {
             matches!(s, Shell::WorldMenu { .. })
         });
@@ -3054,7 +3111,7 @@ mod tests {
     fn boot_with_party() -> (Shell, Harness) {
         let mut h = Harness::new();
         h.roster.members = vec![test_char("Aran"), test_char("Bink")];
-        let mut shell = Shell::boot(&mut h.machine, &mut h.state);
+        let mut shell = Shell::boot(&mut h.machine, &mut h.state, &mut h.vm_memory);
         tick_until(&mut shell, &mut h, 10, |s| {
             matches!(s, Shell::WorldMenu { .. })
         });
@@ -3338,7 +3395,7 @@ mod tests {
         fighter.hit_point_current = 20;
         h.roster.members = vec![fighter];
 
-        let mut shell = Shell::boot(&mut h.machine, &mut h.state);
+        let mut shell = Shell::boot(&mut h.machine, &mut h.state, &mut h.vm_memory);
         tick_until(&mut shell, &mut h, 10, |s| {
             matches!(s, Shell::WorldMenu { .. })
         });
@@ -3370,7 +3427,7 @@ mod tests {
         h.roster.members = vec![buyer];
         h.state.selected_player = 0;
 
-        let mut shell = Shell::boot(&mut h.machine, &mut h.state);
+        let mut shell = Shell::boot(&mut h.machine, &mut h.state, &mut h.vm_memory);
         tick_until(&mut shell, &mut h, 10, |s| {
             matches!(s, Shell::WorldMenu { .. })
         });
