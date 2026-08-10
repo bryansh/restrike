@@ -244,7 +244,7 @@ fn synthetic_save_set() -> OriginalSaveSet {
     gbx_formats::save_orig::load_from_lookup(&master_bytes, SAVE_SLOT, lookup).unwrap()
 }
 
-fn imported_engine() -> Engine {
+pub(crate) fn imported_engine() -> Engine {
     let set = synthetic_save_set();
     import_original(&set, synthetic_game_data(), 1234).expect("synthetic import must succeed")
 }

@@ -18,6 +18,13 @@ pub mod combat;
 pub mod combat_art;
 pub mod combat_host;
 pub mod corridor;
+/// The `RESTRIKE_DEBUG_LOG` replay pipeline (host-side: filesystem + save
+/// slots), shared by `examples/replay_debug_log` and `restrike replay`.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod debug_log;
+/// H5 state digests (roll-credits D-RC3) — the checkpoint definition, whose
+/// field order is append-only forever.
+pub mod digest;
 pub mod draw;
 pub mod engine;
 pub mod framebuffer;

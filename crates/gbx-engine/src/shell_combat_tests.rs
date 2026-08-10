@@ -640,7 +640,7 @@ fn the_shell_driven_fight_draws_exactly_what_the_headless_one_draws() {
                 if matches!(host.stage(), Stage::Fighting) {
                     // A boundary read: the first `Fighting` tick happens before
                     // any further `step()`, so this is a step boundary.
-                    fork = Some((host.state().clone(), e.rng_state(), draws.len()));
+                    fork = Some((host.state().clone(), e.prng_state(), draws.len()));
                 }
             }
         }

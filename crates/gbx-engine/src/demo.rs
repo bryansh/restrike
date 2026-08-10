@@ -2362,6 +2362,100 @@ impl BarBrawl {
     }
 }
 
+/// ★ **save → quit → relaunch → load → the same H5 digest** (roll-credits
+/// slice 0's end-to-end, local tier).
+///
+/// The multi-session property D-RC0 exists for, proved headlessly through the
+/// exact code paths `frontends/desktop` uses: the desktop's own boot posture
+/// (import slot A from `<data>/SAVE`), the real camp ▸ Save ▸ Save ▸ slot
+/// screens emitting a `SaveLoadRequest`, `saveload_fs::fulfill` performing it,
+/// then the engine **dropped entirely** — the process-exit stand-in — and a
+/// fresh one built by the same boot path and handed a `Load` request. The
+/// digest either matches or the session did not survive the round trip.
+///
+/// Saves land in a throwaway copy of the save directory, never the real one.
+///
+/// Run: `GBX_DATA_DIR=~/goldbox-data/cotab cargo test -p gbx-engine \
+///   -- --nocapture a_session_survives_a_save_quit_relaunch_load`
+#[test]
+fn a_session_survives_a_save_quit_relaunch_load() {
+    use crate::debug_log::{self, Boot};
+    use crate::saveload::SaveLoadRequest;
+    use crate::saveload_fs::{fulfill, scan_slot_directory};
+
+    let Some(dir) = std::env::var_os("GBX_DATA_DIR") else {
+        eprintln!("SKIPPED: needs GBX_DATA_DIR (a_session_survives_a_save_quit_relaunch_load)");
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let saves = debug_log::sandbox_path("session");
+    debug_log::sandbox_saves(&dir.join("SAVE"), &saves).expect("saves sandbox");
+
+    // --- session 1: boot, play, save from inside the game ---
+    let mut engine = debug_log::boot(&dir, Boot::default(), 1).expect("slot A boots");
+    engine.set_slot_directory(scan_slot_directory(&saves));
+    for tick in 1..=300u64 {
+        engine.tick(if tick % 30 == 0 {
+            &[InputEvent::Enter]
+        } else {
+            &[]
+        });
+    }
+    let before = engine.state_digest();
+
+    // camp ▸ Save ▸ Save ▸ slot J (an empty slot, so this is our own `.rsav`)
+    for key in *b"essJ" {
+        engine.tick(&[InputEvent::Char(key)]);
+        engine.tick(&[]);
+    }
+    let request = engine.take_io_request().expect("the screen emitted a Save");
+    assert_eq!(request, SaveLoadRequest::Save('J'));
+    let data = engine.game_data().clone();
+    fulfill(&mut engine, request, &saves, data, 1).expect("the host writes the slot");
+    assert_eq!(
+        engine.state_digest(),
+        before,
+        "saving does not itself change engine state"
+    );
+
+    // --- quit ---
+    drop(engine);
+
+    // --- session 2: relaunch, load ---
+    let mut engine = debug_log::boot(&dir, Boot::default(), 1).expect("slot A boots again");
+    engine.set_slot_directory(scan_slot_directory(&saves));
+    assert_eq!(
+        engine.slot_directory().status('J'),
+        crate::saveload::SlotStatus::RestrikeSave,
+        "the relaunched session sees the slot it wrote"
+    );
+    // A relaunch replays the intro before the walk loop is reachable — the
+    // same 300 ticks, and then the load has to overwrite all of it.
+    for tick in 1..=300u64 {
+        engine.tick(if tick % 30 == 0 {
+            &[InputEvent::Enter]
+        } else {
+            &[]
+        });
+    }
+    for key in *b"eslJ" {
+        engine.tick(&[InputEvent::Char(key)]);
+        engine.tick(&[]);
+    }
+    let request = engine.take_io_request().expect("the screen emitted a Load");
+    assert_eq!(request, SaveLoadRequest::Load('J'));
+    let data = engine.game_data().clone();
+    fulfill(&mut engine, request, &saves, data, 1).expect("the host restores the slot");
+    engine.recompose_world_screen();
+
+    let after = engine.state_digest();
+    eprintln!("  before quit: {before}");
+    eprintln!("  after load:  {after}");
+    assert_eq!(after, before, "the session did not survive save/quit/load");
+
+    let _ = std::fs::remove_dir_all(&saves);
+}
+
 /// ★ The **death screen**, for eyeballing (roll-credits slice 0, G0):
 /// `AfterCombatExpAndTreasure`'s wipe branch (`ovr006.cs:801-809`) — the outer
 /// frame, "The monsters rejoice for the party has been destroyed" printing into

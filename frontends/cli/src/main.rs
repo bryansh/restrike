@@ -5,6 +5,7 @@ mod compare;
 mod dump_image;
 mod extract_table;
 mod map;
+mod replay;
 mod run_script;
 mod trace_compare;
 mod verify;
@@ -28,6 +29,7 @@ fn main() -> ExitCode {
         Some("run-script") => run_script::cmd_run_script(args.collect()),
         Some("dump-image") => dump_image::cmd_dump_image(args.collect()),
         Some("walk") => walk::cmd_walk(args.collect()),
+        Some("replay") => replay::cmd_replay(args.collect()),
         Some("compare") => compare::cmd_compare(args.collect()),
         Some("trace-compare") => trace_compare::cmd_trace_compare(args.collect()),
         Some("verify") => verify::cmd_verify(args.collect()),
@@ -62,6 +64,10 @@ fn print_usage() {
         "       restrike walk [DIR] --trace <FILE> [--dump-at TICK]... [--out-dir DIR] \
          [--seed N] [--transcript <PATH>]"
     );
+    eprintln!(
+        "       restrike replay <session.log> [DIR] [--slot X|--bare] [--checkpoint-every N] \
+         [--digests-out FILE] [--verify FILE]"
+    );
     eprintln!("       restrike compare <ours.ppm> <capture.png|capture.ppm> [--diff-out <path>]");
     eprintln!("       restrike trace-compare <A.gbxtrace> [B.gbxtrace] [--chain]");
     eprintln!("       restrike verify [DIR]");
@@ -74,6 +80,14 @@ fn print_usage() {
         "census scans DIR for ECL*.DAX, extracts every block, and disassembles from each \
          block's header vectors, aggregating opcode/hazard statistics. CSV goes to --out (or \
          stdout by default); the human-readable report always goes to stderr."
+    );
+    eprintln!();
+    eprintln!(
+        "replay is the H5 capture vehicle (roll-credits D-RC3): it replays a desktop \
+         RESTRIKE_DEBUG_LOG from an imported-save boot and emits engine-STATE digest \
+         checkpoints, which --verify diffs against a previous run. Distinct from walk, whose \
+         hand-authored traces, frame hashes and bare boot are the H2-era shape and stay as \
+         they are."
     );
     eprintln!();
     eprintln!(

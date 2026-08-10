@@ -80,14 +80,14 @@ pub struct Engine {
     pub(crate) shell: Shell,
     pub(crate) state: EngineState,
     machine: EclMachine,
-    vm_memory: VmMemoryState,
+    pub(crate) vm_memory: VmMemoryState,
     party_predicates: DefaultPartyPredicates,
     /// The party roster (D-SAVE11/task deliverable 2) — empty until
     /// original-save import (D-SAVE5) or (a later session's) new-game
     /// character creation populates it; carried verbatim by `.rsav`
     /// save/restore (D-SAVE3).
     pub(crate) party: crate::party::Party,
-    rng: EngineRng,
+    pub(crate) rng: EngineRng,
     input: crate::input::InputQueue,
     cursor: TextCursor,
     pacer: TextPacer,
@@ -648,19 +648,32 @@ impl Engine {
     }
 
     /// The live PRNG state (`DS:0x47F0`) — a synchronization point for the
-    /// oracle rig (D-OR1) and for the shell-path draw-parity test, which forks
-    /// a headless fight from exactly this value.
+    /// oracle rig (D-OR1), for the shell-path draw-parity test (which forks a
+    /// headless fight from exactly this value), and for the H5 state digest.
+    pub fn prng_state(&self) -> u32 {
+        self.rng.state()
+    }
+
+    /// ★ The **H5 checkpoint** (roll-credits D-RC3): a deterministic hash of
+    /// the engine state a playthrough cares about — position/area/block/clock/
+    /// party/PRNG/`search_flags` **plus the ScriptMemory windows**, where the
+    /// quest flags live.
+    ///
+    /// Read [`crate::digest`]'s module doc before touching anything it hashes:
+    /// **the field order is append-only forever**, because a digest is a bare
+    /// hash in a trace file and a reshaped one silently invalidates every
+    /// recorded run. Deliberately not a frame hash — the M6 arc showed those
+    /// die to the renderer's own progress.
+    pub fn state_digest(&self) -> String {
+        crate::digest::state_digest(self)
+    }
+
     /// The engine-owned framebuffer — a demo/test seam for dumping a frame
     /// outside the tick loop (`Frame` borrows it, so a caller that already
     /// dropped its `Frame` needs this).
     #[cfg(test)]
     pub(crate) fn framebuffer_for_demo(&self) -> &Framebuffer {
         &self.fb
-    }
-
-    #[cfg(test)]
-    pub(crate) fn rng_state(&self) -> u32 {
-        self.rng.state()
     }
 
     /// The UI shell state machine's current node (`Boot`/`WorldMenu`/`Look`/

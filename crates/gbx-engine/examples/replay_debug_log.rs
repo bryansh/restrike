@@ -10,61 +10,12 @@
 //! Prints the same probe/transcript stream the desktop logger wrote, so the
 //! two can be diffed directly.
 //!
-//! **Save/load replays too** (roll-credits slice 0): the desktop is the host
-//! that fulfills the save/load screen's `SaveLoadRequest`, so a replay that
-//! didn't do the same would diverge the moment a recorded session saved. It
-//! fulfills against a **throwaway copy** of the desktop's saves directory
-//! (`<data>/SAVE`) made per run — every slot the live session could see is
-//! there, the writes land in the copy, and the player's own saves are never
-//! touched by a forensics replay.
+//! The machinery itself lives in `gbx_engine::debug_log` and is shared with
+//! `restrike replay` (roll-credits D-RC3) — this example is the frame-dumping
+//! debugging front for it. Reach for `restrike replay` when you want digests.
 
-use gbx_engine::engine::Engine;
-use gbx_engine::input::{ExtKey, InputEvent};
-use gbx_formats::game_data::load_dir;
-
-fn parse_event(s: &str) -> Option<InputEvent> {
-    let s = s.trim();
-    Some(match s {
-        "Enter" => InputEvent::Enter,
-        "Escape" => InputEvent::Escape,
-        "Backspace" => InputEvent::Backspace,
-        "Ext(Up)" => InputEvent::Ext(ExtKey::Up),
-        "Ext(Down)" => InputEvent::Ext(ExtKey::Down),
-        "Ext(Left)" => InputEvent::Ext(ExtKey::Left),
-        "Ext(Right)" => InputEvent::Ext(ExtKey::Right),
-        "Ext(Home)" => InputEvent::Ext(ExtKey::Home),
-        "Ext(End)" => InputEvent::Ext(ExtKey::End),
-        _ => {
-            if let Some(rest) = s.strip_prefix("Char(") {
-                let byte = rest.trim_end_matches(')');
-                // Debug prints `Char(98)` (a u8) — accept both that and 'b'.
-                if let Ok(n) = byte.parse::<u8>() {
-                    return Some(InputEvent::Char(n));
-                }
-                let ch = byte.trim_matches('\'');
-                return ch.bytes().next().map(InputEvent::Char);
-            }
-            eprintln!("replay: unrecognized event {s:?} — skipped");
-            return None;
-        }
-    })
-}
-
-/// Copies every regular file in `from` into a fresh `to` (no recursion — a
-/// save directory is flat). A missing source is fine: the replay just has no
-/// slots, exactly like a first launch.
-fn copy_dir_shallow(from: &std::path::Path, to: &std::path::Path) {
-    let _ = std::fs::remove_dir_all(to);
-    std::fs::create_dir_all(to).expect("replay: saves sandbox must be creatable");
-    let Ok(entries) = std::fs::read_dir(from) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        if entry.path().is_file() {
-            let _ = std::fs::copy(entry.path(), to.join(entry.file_name()));
-        }
-    }
-}
+use gbx_engine::debug_log::{self, Boot, Session};
+use gbx_engine::input::InputEvent;
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -72,55 +23,34 @@ fn main() {
     let extra: u64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(120);
 
     let text = std::fs::read_to_string(&log_path).expect("log readable");
-    let mut schedule: Vec<(u64, Vec<InputEvent>)> = Vec::new();
-    for line in text.lines() {
-        let Some(rest) = line.strip_prefix("tick ") else {
-            continue;
-        };
-        let Some((tick, sent)) = rest.split_once(" | sent [") else {
-            continue;
-        };
-        let Some((events, _)) = sent.split_once(']') else {
-            continue;
-        };
-        if events.is_empty() {
-            continue;
-        }
-        let tick: u64 = tick.trim().parse().expect("tick number");
-        let events: Vec<InputEvent> = events.split(',').filter_map(parse_event).collect();
-        if !events.is_empty() {
-            schedule.push((tick, events));
-        }
+    let session = Session::parse(&text);
+    for unknown in &session.unrecognized {
+        eprintln!("replay: unrecognized event {unknown:?} — skipped");
     }
-    let last_tick = schedule.last().map(|(t, _)| *t).unwrap_or(0) + extra;
+    let last_tick = session.last_input_tick() + extra;
     eprintln!(
-        "replay: {} input batches over {} ticks (+{extra} tail)",
-        schedule.len(),
-        last_tick
+        "replay: {} input batches over {last_tick} ticks (+{extra} tail)",
+        session.schedule.len()
     );
 
     let dir = std::path::PathBuf::from(
         std::env::var_os("GBX_DATA_DIR").expect("GBX_DATA_DIR must be set"),
     );
-    let data = load_dir(&dir).expect("data dir readable");
     // The replay must boot the way the desktop that WROTE the log booted:
     // slot-A import is the desktop default; RESTRIKE_REPLAY_BARE=1 replays
     // logs from a `--slot none` (or pre-import-era) desktop.
-    let mut engine = if std::env::var_os("RESTRIKE_REPLAY_BARE").is_some() {
-        Engine::new(data, 1).expect("bare boot") // the desktop's DEFAULT_SEED
+    let posture = if std::env::var_os("RESTRIKE_REPLAY_BARE").is_some() {
+        Boot::Bare
     } else {
-        let saves = load_dir(&dir.join("SAVE")).expect("SAVE dir readable");
-        let master = saves.raw_file("SAVGAMA.DAT").expect("slot A present");
-        let set = gbx_formats::save_orig::load_from_lookup(master, 'A', |n| saves.raw_file(n))
-            .expect("slot A parses");
-        gbx_engine::import::import_original(&set, data, 1).expect("slot A imports")
+        Boot::default()
     };
+    let seed = 1; // the desktop's DEFAULT_SEED
+    let mut engine = debug_log::boot(&dir, posture, seed).unwrap_or_else(|e| panic!("replay: {e}"));
 
-    // The saves directory the desktop would have used, copied somewhere
-    // disposable so a replay can save/load without mutating the real one.
-    let saves_dir =
-        std::env::temp_dir().join(format!("restrike-replay-saves-{}", std::process::id()));
-    copy_dir_shallow(&dir.join("SAVE"), &saves_dir);
+    // The desktop's saves directory, copied somewhere disposable: a recorded
+    // session that saved must save here too, and never over the real thing.
+    let saves_dir = debug_log::sandbox_path("replay");
+    debug_log::sandbox_saves(&dir.join("SAVE"), &saves_dir).expect("saves sandbox");
     engine.set_slot_directory(gbx_engine::saveload_fs::scan_slot_directory(&saves_dir));
     eprintln!("replay: saves sandbox at {}", saves_dir.display());
 
@@ -129,16 +59,10 @@ fn main() {
         .map(|s| s.split(',').filter_map(|n| n.trim().parse().ok()).collect())
         .unwrap_or_default();
 
-    let mut cursor = 0usize;
     let mut last_probe = String::new();
     for tick in 1..=last_tick {
-        let batch: &[InputEvent] = if cursor < schedule.len() && schedule[cursor].0 == tick {
-            cursor += 1;
-            &schedule[cursor - 1].1
-        } else {
-            &[]
-        };
-        let frame = engine.tick(batch);
+        let batch: Vec<InputEvent> = session.inputs_at(tick).to_vec();
+        let frame = engine.tick(&batch);
         if dump_at.contains(&tick) {
             let path = std::env::temp_dir().join(format!("restrike-replay-{tick:05}.ppm"));
             let mut out = format!("P6\n{} {}\n255\n", 320, 200).into_bytes();
@@ -148,22 +72,12 @@ fn main() {
             std::fs::write(&path, &out).expect("dump writable");
             eprintln!("frame {tick} -> {}", path.display());
         }
-        if let Some(request) = engine.take_io_request() {
-            let data = engine.game_data().clone();
-            let outcome = gbx_engine::saveload_fs::fulfill(
-                &mut engine,
-                request,
-                &saves_dir,
-                data,
-                1, // the desktop's DEFAULT_SEED, as above
-            );
-            engine.set_slot_directory(gbx_engine::saveload_fs::scan_slot_directory(&saves_dir));
+        if let Some((request, outcome)) =
+            debug_log::fulfill_pending_io(&mut engine, &saves_dir, seed)
+        {
             match outcome {
-                Ok(()) => {
-                    engine.recompose_world_screen();
-                    println!("tick {tick} | io {request:?} ok");
-                }
-                Err(err) => println!("tick {tick} | io {request:?} FAILED: {err:?}"),
+                Ok(()) => println!("tick {tick} | io {request:?} ok"),
+                Err(err) => println!("tick {tick} | io {request:?} FAILED: {err}"),
             }
         }
         let probe = engine.probe();
