@@ -1019,6 +1019,431 @@ pub fn cancel_spells(party: &mut crate::party::Party, scrolls: &ScrollLookup) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The list presentation — `BuildSpellList` and its two row builders (D-S4d)
+// ---------------------------------------------------------------------------
+
+/// `SpellLoc` (`ovr020.cs:6-15`) — which set of spells a list shows, and the
+/// heading `spell_menu2` writes next to the character's name (`:1375-1410`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SpellLoc {
+    /// What is memorized right now — the Cast picker.
+    Memory,
+    /// The grimoire: everything known and learnable — the Memorize picker.
+    Grimoire,
+    /// One scroll's spells.
+    Scroll,
+    /// Every scroll's un-staged spells — the Scribe picker.
+    Scrolls,
+    /// Learnable-but-unknown spells (the training "choose a new spell" flow).
+    Choose,
+    /// What is staged for memorization — Memorize's review pass.
+    Memorize,
+    /// What is staged for scribing — Scribe's review pass.
+    Scribe,
+}
+
+impl SpellLoc {
+    /// `spell_menu2`'s heading suffix (`ovr020.cs:1375-1410`), shown as
+    /// `"Spells <text>"` beside the character's name.
+    pub fn heading(self) -> &'static str {
+        match self {
+            SpellLoc::Memory => "in Memory",
+            SpellLoc::Grimoire => "in Grimoire",
+            SpellLoc::Scroll => "on Scroll",
+            SpellLoc::Scrolls => "on Scrolls",
+            SpellLoc::Choose => "to Choose",
+            SpellLoc::Memorize => "to Memorize",
+            SpellLoc::Scribe => "to Scribe",
+        }
+    }
+
+    /// `BuildSpellList`'s `buildSpellList` flag (`ovr023.cs:395-472`): the
+    /// scroll locations build their own headings inline and skip the
+    /// level-heading post-pass.
+    fn groups_by_level(self) -> bool {
+        !matches!(
+            self,
+            SpellLoc::Scroll | SpellLoc::Scrolls | SpellLoc::Scribe
+        )
+    }
+}
+
+/// `SpellSource` (`Classes/Spells.cs:31-35`) — the verb in the list's prompt
+/// (`spell_menu`, `ovr023.cs:177-198`) and the one that shrinks the Memorize
+/// list's box (`:202`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SpellSource {
+    None,
+    Cast,
+    Memorize,
+    Scribe,
+    Learn,
+}
+
+impl SpellSource {
+    /// `spell_menu`'s `text` (`ovr023.cs:177-198`).
+    pub fn verb(self) -> &'static str {
+        match self {
+            SpellSource::None => "",
+            SpellSource::Cast => "Cast",
+            SpellSource::Memorize => "Memorize",
+            SpellSource::Scribe => "Scribe",
+            SpellSource::Learn => "Learn",
+        }
+    }
+
+    /// `spell_menu`'s `prompt_text` (`:200`) — present only when there is a
+    /// verb.
+    pub fn prompt(self) -> &'static str {
+        if self.verb().is_empty() {
+            ""
+        } else {
+            "Choose Spell: "
+        }
+    }
+
+    /// `spell_menu`'s `end_y` (`ovr023.cs:202`): the Memorize picker's box
+    /// stops at row `0x0F` so `BuildMemorizeSpellText`'s capacity table has
+    /// room underneath; every other list runs to `0x16`.
+    pub fn list_end_row(self) -> usize {
+        if matches!(self, SpellSource::Memorize) {
+            0x0F
+        } else {
+            0x16
+        }
+    }
+}
+
+/// `sl_select_item`'s box for every spell list (`ovr023.cs:223-224`:
+/// `startY = 5`, `startX = 1`, `endX = 0x26`).
+pub fn spell_list_layout(source: SpellSource) -> crate::widgets::ListLayout {
+    crate::widgets::ListLayout {
+        start_row: 5,
+        start_col: 1,
+        end_row: source.list_end_row(),
+        end_col: 0x26,
+    }
+}
+
+/// A built spell list: the rows `sl_select_item` shows, plus the parallel
+/// `gbl.memorize_spell_id` / `gbl.scribeScrolls` arrays that turn a chosen row
+/// back into a spell (and, for a scroll list, into the item it came from).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SpellListing {
+    pub items: Vec<crate::widgets::ListItem>,
+    /// One id per **non-heading** row, in row order (`gbl.memorize_spell_id`).
+    pub ids: Vec<u8>,
+    /// One item index per non-heading row for scroll lists
+    /// (`gbl.scribeScrolls`); empty for the others.
+    pub scroll_items: Vec<usize>,
+}
+
+impl SpellListing {
+    /// `spell_menu`'s row→id resolution (`ovr023.cs:236-237`): count the
+    /// non-heading rows before the chosen one and index the parallel array.
+    pub fn id_at_row(&self, row: usize) -> Option<u8> {
+        let entry = self.entry_index(row)?;
+        self.ids.get(entry).copied()
+    }
+
+    /// The scroll this row's spell is written on (`gbl.currentScroll`,
+    /// `ovr023.cs:239-242`).
+    pub fn scroll_at_row(&self, row: usize) -> Option<usize> {
+        let entry = self.entry_index(row)?;
+        self.scroll_items.get(entry).copied()
+    }
+
+    fn entry_index(&self, row: usize) -> Option<usize> {
+        if row >= self.items.len() || self.items[row].is_heading_row() {
+            return None;
+        }
+        Some(
+            self.items[..row]
+                .iter()
+                .filter(|i| !i.is_heading_row())
+                .count(),
+        )
+    }
+
+    /// `BuildSpellList`'s return value (`ovr023.cs:474-511`): whether the list
+    /// has anything in it. An empty list is what makes `spell_menu2` return 0
+    /// without drawing, which every caller reads as "nothing here".
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+}
+
+/// `add_spell_to_learning_list` / `sub_5C5B9` (`ovr023.cs:275-346`) — the
+/// level-sorted, duplicate-collapsing insert the memory/memorize/grimoire/
+/// choose lists are built with.
+///
+/// The scan (`:295-306`) walks the rows already placed and stops at the first
+/// one whose spell level is **higher** than the incoming spell's, or at an
+/// entry with the **same id**. So a new id lands at the end of its own level
+/// run, and a repeat collapses onto the existing row, whose text grows a
+/// ` (N)` multiplicity suffix (`:325-328`).
+fn add_spell_to_learning_list(listing: &mut SpellListing, counts: &mut Vec<u32>, spell_id: u8) {
+    let masked = spell_id & 0x7F;
+    let level = spell_level(masked);
+    let mut at = listing.ids.len();
+    for (i, &existing) in listing.ids.iter().enumerate() {
+        if spell_level(existing) > level || existing == masked {
+            at = i;
+            break;
+        }
+    }
+    let collapsing = listing.ids.get(at) == Some(&masked);
+    if collapsing {
+        listing.items.remove(at);
+        counts[at] += 1;
+    } else {
+        listing.ids.insert(at, masked);
+        counts.insert(at, 1);
+    }
+    let suffix = if counts[at] > 1 {
+        format!(" ({})", counts[at])
+    } else {
+        String::new()
+    };
+    let star = if spell_id > 0x7F { '*' } else { ' ' };
+    listing.items.insert(
+        at,
+        crate::widgets::ListItem::Entry(format!(" {star}{}{suffix}", spell_name(masked))),
+    );
+}
+
+/// `add_spell_to_list` / `sub_5C3ED` (`ovr023.cs:250-272`) — the scroll lists'
+/// simpler builder: rows in the order the scrolls are carried, with a level
+/// heading emitted whenever the level differs from the previous row's, and no
+/// duplicate collapsing. The `*` marks a spell already staged for scribing.
+fn add_spell_to_scroll_list(listing: &mut SpellListing, spell_id: u8, item_index: usize) {
+    let masked = spell_id & 0x7F;
+    let last_level = listing.ids.last().copied().map_or(0, spell_level);
+    let level = spell_level(masked);
+    if level != last_level {
+        listing.items.push(crate::widgets::ListItem::Heading(
+            level_string(level).into(),
+        ));
+    }
+    let star = if spell_id > 0x7F { '*' } else { ' ' };
+    listing.items.push(crate::widgets::ListItem::Entry(format!(
+        " {star}{}",
+        spell_name(masked)
+    )));
+    listing.ids.push(masked);
+    listing.scroll_items.push(item_index);
+}
+
+/// ★ `BuildSpellList` / `sub_5CA74` (`ovr023.cs:395-512`) — every spell list
+/// the camp magic menu shows, from one switch on [`SpellLoc`].
+///
+/// The level headings for the grouped locations are inserted in a **post-pass**
+/// (`:474-509`) once the rows are placed, which is why they can be emitted in
+/// list order without disturbing the sorted insert above.
+pub fn build_spell_list(
+    loc: SpellLoc,
+    ch: &Character,
+    scrolls: &ScrollLookup,
+    current_scroll: Option<usize>,
+) -> SpellListing {
+    let mut listing = SpellListing::default();
+    let mut counts: Vec<u32> = Vec::new();
+
+    match loc {
+        SpellLoc::Memory => {
+            for e in learnt(&ch.magic.spell_list) {
+                if can_learn_spell_in_camp(ch, e.id) {
+                    add_spell_to_learning_list(&mut listing, &mut counts, e.id);
+                }
+            }
+        }
+        SpellLoc::Memorize => {
+            for e in learning(&ch.magic.spell_list) {
+                if can_learn_spell_in_camp(ch, e.id) {
+                    add_spell_to_learning_list(&mut listing, &mut counts, e.id);
+                }
+            }
+        }
+        SpellLoc::Grimoire => {
+            for id in known_spells(ch) {
+                if can_learn_spell_in_camp(ch, id) {
+                    add_spell_to_learning_list(&mut listing, &mut counts, id);
+                }
+            }
+        }
+        SpellLoc::Choose => {
+            for (id, row) in SPELL_TABLE.iter().enumerate().skip(1) {
+                let id = id as u8;
+                if row.level > 5
+                    || row.class_ == SpellClass::Monster
+                    || row.class_ == SpellClass::Unknown10
+                {
+                    continue; // `:460-463`
+                }
+                if cast_count_at(&ch.magic, row.class_, row.level) > 0
+                    && can_learn_spell_in_camp(ch, id)
+                    && !knows_spell(ch, id)
+                {
+                    add_spell_to_learning_list(&mut listing, &mut counts, id);
+                }
+            }
+        }
+        SpellLoc::Scroll => {
+            if let Some(idx) = current_scroll {
+                add_scroll(&mut listing, ch, scrolls, idx, false);
+            }
+        }
+        SpellLoc::Scrolls => build_scroll_lists(&mut listing, ch, scrolls, false),
+        SpellLoc::Scribe => build_scroll_lists(&mut listing, ch, scrolls, true),
+    }
+
+    if loc.groups_by_level() && !listing.items.is_empty() {
+        insert_level_headings(&mut listing);
+    }
+    listing
+}
+
+/// `BuildSpellList`'s heading post-pass (`ovr023.cs:478-506`).
+fn insert_level_headings(listing: &mut SpellListing) {
+    let mut inserts: Vec<(usize, u8)> = Vec::new();
+    let mut level = 0;
+    let mut insert = 0;
+    for (idx, _) in listing.items.iter().enumerate() {
+        let last = level;
+        if let Some(&id) = listing.ids.get(idx) {
+            if id != 0 {
+                level = spell_level(id);
+            }
+        }
+        if level > last {
+            inserts.push((insert, level));
+            insert += 1;
+        }
+        insert += 1;
+    }
+    for (pos, lvl) in inserts {
+        listing.items.insert(
+            pos,
+            crate::widgets::ListItem::Heading(level_string(lvl).into()),
+        );
+    }
+}
+
+/// `scroll_5C912` / `sub_5C912` (`ovr023.cs:349-371`): one scroll's rows.
+/// `learning == true` shows only the spells already staged for scribing
+/// (`> 0x80`), `false` shows every spell on it.
+///
+/// The `hidden_names_flag` gate (`:358`) is the original's read-magic
+/// requirement: a scroll whose names are still hidden lists nothing. Its
+/// unhiding conditions (`:351-356` — a `read_magic` affect, or a cleric
+/// holding a cleric scroll) need the out-of-combat affect system, so this
+/// reads the stored flag and does not clear it. Named, not silently dropped.
+fn add_scroll(
+    listing: &mut SpellListing,
+    ch: &Character,
+    scrolls: &ScrollLookup,
+    item_index: usize,
+    learning_only: bool,
+) {
+    let Some(item) = ch.items.get(item_index) else {
+        return;
+    };
+    if !scrolls.is_scroll(item) {
+        return;
+    }
+    if gbx_formats::save_orig::item_hidden_names_flag(item) != 0 {
+        return;
+    }
+    for i in 1..=3 {
+        let raw = gbx_formats::save_orig::item_affect(item, i);
+        let show = if learning_only { raw > 0x80 } else { raw > 0 };
+        if show {
+            add_spell_to_scroll_list(listing, raw, item_index);
+        }
+    }
+}
+
+/// `BuildScrollSpellLists` / `sub_5C9F4` (`ovr023.cs:374-392`).
+fn build_scroll_lists(
+    listing: &mut SpellListing,
+    ch: &Character,
+    scrolls: &ScrollLookup,
+    learning_only: bool,
+) {
+    for idx in 0..ch.items.len() {
+        add_scroll(listing, ch, scrolls, idx, learning_only);
+    }
+}
+
+/// `player.KnowsSpell(spell)` (`Player.cs:363`): `spellBook[id - 1] != 0`.
+pub fn knows_spell(ch: &Character, id: u8) -> bool {
+    id >= 1
+        && ch
+            .magic
+            .spell_book
+            .get(id as usize - 1)
+            .is_some_and(|&b| b != 0)
+}
+
+/// `player.LearnSpell(spell)` (`Player.cs:364`).
+pub fn learn_spell(ch: &mut Character, id: u8) {
+    if id < 1 {
+        return;
+    }
+    let slot = id as usize - 1;
+    if ch.magic.spell_book.len() <= slot {
+        ch.magic.spell_book.resize(slot + 1, 0);
+    }
+    ch.magic.spell_book[slot] = 1;
+}
+
+/// Every id in the grimoire, ascending — `System.Enum.GetValues(typeof(Spells))`
+/// order (`ovr023.cs:429`), which is ascending id.
+fn known_spells(ch: &Character) -> Vec<u8> {
+    (1..SPELL_TABLE.len() as u16)
+        .map(|id| id as u8)
+        .filter(|&id| knows_spell(ch, id))
+        .collect()
+}
+
+/// ★ `BuildMemorizeSpellText` / `sub_445D4` (`ovr016.cs:203-271`) — the
+/// capacity table under the Memorize picker: one row per class the character
+/// has any slots in, five columns of "how many more at this level".
+///
+/// A level with **zero total slots** shows a blank rather than a number
+/// (`:221-224`), so a level-3 cleric's row reads `2 1     ` and not `2 1 0 0 0`.
+/// `found` is false — and the caller reports "cannot memorize any spells"
+/// (`ovr016.cs:334-338`) — when the character has no slots at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemorizeCapacityRow {
+    pub class_: SpellClass,
+    /// Five cells, level 1..=5, already rendered (`" "` for an unusable level).
+    pub cells: [String; 5],
+}
+
+/// The capacity table, or an empty vec when the character has no slots at all.
+pub fn memorize_capacity_table(ch: &Character) -> Vec<MemorizeCapacityRow> {
+    let mut rows = Vec::new();
+    for class_ in [SpellClass::Cleric, SpellClass::Druid, SpellClass::MagicUser] {
+        let mut cells: [String; 5] = Default::default();
+        let mut any = false;
+        for level in 1..=5u8 {
+            if cast_count_at(&ch.magic, class_, level) == 0 {
+                cells[level as usize - 1] = " ".into();
+            } else {
+                any = true;
+                cells[level as usize - 1] =
+                    how_many_spells_player_can_learn(&ch.magic, class_, level).to_string();
+            }
+        }
+        if any {
+            rows.push(MemorizeCapacityRow { class_, cells });
+        }
+    }
+    rows
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1249,6 +1674,153 @@ mod tests {
         rgr.class_level[crate::party::SKILL_RANGER] = 7;
         assert!(can_learn_spell_in_camp(&rgr, 0x4D));
         assert!(!can_learn_spell_in_camp(&rgr, 0x39), "0x39 is Monster 6");
+    }
+
+    fn scroll_table() -> ScrollLookup {
+        let mut bytes = vec![0u8; gbx_formats::items::ITEMS_HEADER_SIZE];
+        bytes.extend_from_slice(&[0u8; gbx_formats::items::ITEM_ENTRY_SIZE]); // type 0
+        let mut scroll = [0u8; gbx_formats::items::ITEM_ENTRY_SIZE];
+        scroll[0] = 11;
+        bytes.extend_from_slice(&scroll);
+        let data = gbx_formats::game_data::GameData::from_files(vec![(
+            crate::combat_host::ITEMS_FILE.to_string(),
+            bytes,
+        )]);
+        ScrollLookup::load(&data)
+    }
+
+    /// Rows as the original writes them: `" {*|space}{name}"`
+    /// (`ovr023.cs:269`/`:325-328`), so an unstaged row starts with two
+    /// spaces and a staged one with a space then `*`. Headings are bracketed
+    /// here purely to make the assertions readable.
+    fn entry_texts(l: &SpellListing) -> Vec<String> {
+        l.items
+            .iter()
+            .map(|i| match i {
+                crate::widgets::ListItem::Heading(t) => format!("[{t}]"),
+                crate::widgets::ListItem::Entry(t) => t.clone(),
+            })
+            .collect()
+    }
+
+    /// ★ `add_spell_to_learning_list` sorts by level, appends within a level,
+    /// and collapses repeats into a ` (N)` row (`ovr023.cs:275-346`); the
+    /// level headings arrive in `BuildSpellList`'s post-pass (`:478-506`).
+    #[test]
+    fn the_grimoire_list_is_level_sorted_with_headings_and_collapsed_repeats() {
+        let mut ch = caster();
+        ch.class_level[crate::party::SKILL_MAGIC_USER] = 5;
+        for id in [0x0F, 0x15, 0x1E, 0x22] {
+            learn_spell(&mut ch, id); // MM, Sleep (MU1); Invisibility, Stinking Cloud (MU2)
+        }
+        let l = build_spell_list(SpellLoc::Grimoire, &ch, &ScrollLookup::default(), None);
+        assert_eq!(
+            entry_texts(&l),
+            vec![
+                "[1st Level]",
+                "  Magic Missile",
+                "  Sleep",
+                "[2nd Level]",
+                "  Invisibility",
+                "  Stinking Cloud",
+            ]
+        );
+        assert_eq!(l.ids, vec![0x0F, 0x15, 0x1E, 0x22]);
+        // Rows map back through the headings.
+        assert_eq!(l.id_at_row(1), Some(0x0F));
+        assert_eq!(l.id_at_row(4), Some(0x1E));
+        assert_eq!(l.id_at_row(0), None, "a heading is not selectable");
+    }
+
+    /// The memorize review list collapses duplicates — two staged Magic
+    /// Missiles are one row reading ` Magic Missile (2)`.
+    #[test]
+    fn the_memorize_review_list_collapses_duplicates() {
+        let mut ch = caster();
+        ch.class_level[crate::party::SKILL_MAGIC_USER] = 5;
+        add_learn(&mut ch.magic.spell_list, 0x0F);
+        add_learn(&mut ch.magic.spell_list, 0x0F);
+        add_learn(&mut ch.magic.spell_list, 0x15);
+        let l = build_spell_list(SpellLoc::Memorize, &ch, &ScrollLookup::default(), None);
+        assert_eq!(
+            entry_texts(&l),
+            vec!["[1st Level]", "  Sleep", "  Magic Missile (2)"]
+        );
+        assert_eq!(l.ids, vec![0x15, 0x0F]);
+    }
+
+    /// The scroll lists build headings inline, keep carry order, do not
+    /// collapse, and mark a staged scribe with `*`
+    /// (`add_spell_to_list`, `ovr023.cs:250-272`; `scroll_5C912`, `:349-371`).
+    #[test]
+    fn the_scroll_lists_mark_staged_spells_with_a_star() {
+        let scrolls = scroll_table();
+        let mut ch = caster();
+        let mut item = vec![0u8; gbx_formats::save_orig::ITEM_RECORD_SIZE];
+        item[0x2E] = 1;
+        gbx_formats::save_orig::set_item_affect(&mut item, 1, 0x0F); // not staged
+        gbx_formats::save_orig::set_item_affect(&mut item, 2, 0x1E | 0x80); // staged
+        ch.items.push(item);
+
+        // `Scrolls` — everything on every scroll.
+        let all = build_spell_list(SpellLoc::Scrolls, &ch, &scrolls, None);
+        assert_eq!(
+            entry_texts(&all),
+            vec![
+                "[1st Level]",
+                "  Magic Missile",
+                "[2nd Level]",
+                " *Invisibility"
+            ]
+        );
+        assert_eq!(all.scroll_at_row(1), Some(0));
+
+        // `Scribe` — only the staged ones.
+        let staged = build_spell_list(SpellLoc::Scribe, &ch, &scrolls, None);
+        assert_eq!(entry_texts(&staged), vec!["[2nd Level]", " *Invisibility"]);
+    }
+
+    /// A scroll whose names are still hidden lists nothing (`ovr023.cs:358`).
+    #[test]
+    fn a_hidden_name_scroll_lists_nothing() {
+        let scrolls = scroll_table();
+        let mut ch = caster();
+        let mut item = vec![0u8; gbx_formats::save_orig::ITEM_RECORD_SIZE];
+        item[0x2E] = 1;
+        item[0x35] = 1; // hidden_names_flag
+        gbx_formats::save_orig::set_item_affect(&mut item, 1, 0x0F);
+        ch.items.push(item);
+        assert!(build_spell_list(SpellLoc::Scrolls, &ch, &scrolls, None).is_empty());
+    }
+
+    /// ★ `BuildMemorizeSpellText`: an unusable level is a blank, not a zero,
+    /// and a character with no slots at all produces no table
+    /// (`ovr016.cs:203-271`).
+    #[test]
+    fn the_capacity_table_blanks_levels_with_no_slots() {
+        let mut ch = caster();
+        assert!(memorize_capacity_table(&ch).is_empty());
+
+        // SHARA's real cleric row: 5/5/2 at levels 1-3.
+        ch.magic.cast_count[0] = [5, 5, 2, 0, 0];
+        add_learnt(&mut ch.magic.spell_list, 0x03); // one level-1 already held
+        let rows = memorize_capacity_table(&ch);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].class_, SpellClass::Cleric);
+        assert_eq!(rows[0].cells, ["4", "5", "2", " ", " "]);
+        assert_eq!(rows[0].class_.memorize_heading(), "    Cleric Spells:");
+    }
+
+    /// `spell_menu`'s box: the Memorize picker stops eight rows short so the
+    /// capacity table fits underneath (`ovr023.cs:202`).
+    #[test]
+    fn the_memorize_picker_gets_the_short_box() {
+        assert_eq!(spell_list_layout(SpellSource::Memorize).end_row, 0x0F);
+        assert_eq!(spell_list_layout(SpellSource::Scribe).end_row, 0x16);
+        assert_eq!(spell_list_layout(SpellSource::Memorize).start_row, 5);
+        assert_eq!(SpellLoc::Memorize.heading(), "to Memorize");
+        assert_eq!(SpellSource::Memorize.prompt(), "Choose Spell: ");
+        assert_eq!(SpellSource::None.prompt(), "");
     }
 
     /// The bytes a staged spell leaves behind are exactly what the binary's

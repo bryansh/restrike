@@ -325,6 +325,14 @@ impl ListItem {
     fn is_heading(&self) -> bool {
         matches!(self, ListItem::Heading(_))
     }
+
+    /// [`ListItem::is_heading`] for callers outside this module — list
+    /// *builders* need it to map a chosen row back to its entry index
+    /// (`spell_menu`'s own `FindAll(mi => mi.Heading == false).Count`,
+    /// `ovr023.cs:236`).
+    pub fn is_heading_row(&self) -> bool {
+        self.is_heading()
+    }
 }
 
 /// A [`ListMenu`]'s on-screen box — `sl_select_item`'s `startY`/`startX`/
