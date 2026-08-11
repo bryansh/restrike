@@ -550,3 +550,51 @@ list (Take moves the first pooled item), `TakePoolMoney`'s per-coin dialog,
 the Detect-Magic word, encumbrance in `share_pooled`, and PROGRAM's cases
 0/8/9 (start menu, end-game, `TryEncamp` — G9 and G3 own those). Each reports
 itself in the transcript rather than failing silently.
+
+## 8. Slice-4 door: Vancian camp magic (Fable, 2026-08-10)
+
+G3/D-RC5's implementation shape. FD-25 closes here; FD-44 (the rest-encounter wiring)
+lands here too.
+
+**D-S4a — the record model.** `MagicState.spell_list`'s raw bytes decode to the original's
+`SpellList` (`Classes/SpellList.cs:19-110`): up to 84 entries of `(id, learning)`, whose
+on-wire byte is `id | 0x80` while learning (`AddLearnt`: `id & 0x7F`, `Learning = id >
+0x7F`). Model staged-vs-memorized exactly that way on `Character` (decoded form + the
+byte round-trip); if `Character`'s serde shape changes, this slice owns ONE
+`SAVE_FORMAT_VERSION` bump with the golden discipline.
+
+**D-S4b — capacity.** `HowManySpellsPlayerCanLearn(spellClass, spellLevel)` — transcribe
+its exact formula (the slot table minus memorized-plus-staged at that level; the rules
+pack already carries the slot tables the training path uses). `gbl.spellCastingTable`'s
+`spellClass`/`spellLevel` rows are the same table our combat casting reads.
+
+**D-S4c — the four flows**, each from its coab site, words-per-presentation /
+commands-per-core as always:
+- **Memorize** (`ovr016.cs:301-375`): the staged-review pass (`SpellLoc.memorize`) with
+  the "Memorize These Spells?" confirm and `cancel_memorize` on N; the grimoire picker
+  loop (`SpellLoc.grimoire`, `spell_menu2`) gated per-pick by capacity; `AddLearn` stages.
+- **Scribe** (`ovr016.cs:377+`): scroll → grimoire, with its level/knowability gates —
+  read the full handler; the scroll item consumption is part of it.
+- **Rest** (`ovr016.cs:274+` `rest_menu` + `ovr021.cs:516+` `resting`): the required-time
+  computation from the staged list, the interactive countdown, and the commit —
+  `MarkLearnt` per spell as its time elapses (`ovr021.cs:390-410`). ★ FD-44 wires here:
+  `resting`'s loop calls the slice-2 `crate::rest` encounter schedule; an interruption
+  runs `CampInterruptedAddr` (the ECL header's vector 3) via the real VM. `cast_count` is
+  NEVER reset by rest (FD-25's core finding — re-pin it in a test).
+- **Fix** (`FixTeam`, `ovr016.cs`): the cure-spell auto-heal loop over the party, which
+  becomes real once clerics can memorize cures (slice 5 provides the cast; Fix's loop and
+  its arithmetic land now against the existing Cure Light effect).
+- `cancel_spells` at `MakeCamp`'s entry and exit (`ovr016.cs:1117,1150-region` — verify
+  both sites): staged-but-uncommitted spells do not survive leaving camp.
+
+**D-S4d — UI.** The camp Magic submenu's leaves stop reporting deferrals: Memorize/
+Scribe/Display drive `spell_menu2`'s list presentation through the existing list-widget
+machinery (the vertical-menu slice's `ListMenu`/painter — check `spell_menu2`'s own
+layout before assuming which); Display renders the grimoire + memorized sets.
+
+**D-S4e — acceptance.** On the real slot-A party: stage spells on a caster → Rest → the
+staged list commits at the right elapsed time and casting capacity reflects it; a
+mid-staging save round-trips (staging is record state); the rest interruption fires the
+schedule and runs vector 3 (synthetic fixture; ECL5#48's own vector 3 if reachable);
+`cast_count` untouched by rest, pinned; camp-exit cancels staging, pinned. Frame dumps of
+the Memorize list and the Rest countdown, eyeballed.
