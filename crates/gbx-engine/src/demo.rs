@@ -3143,3 +3143,63 @@ fn slice4_the_cleric_memorizes_and_sleeps_on_it() {
         "…and the memorized spells survived it"
     );
 }
+
+// --- Roll-credits slice 5: the spell must-haves ----------------------------
+
+/// ★ **Slice 5's Task-0 evidence (roll-credits §9.1)**: the two spell books the
+/// bundled slot-A party actually carries, which is what sizes G7's must-have
+/// set. Prints class levels, `spellCastCount`, the decoded grimoire
+/// (`spellBook[id - 1]`, `Player.cs:363`) and the live affect chain.
+///
+/// Run: `GBX_DATA_DIR=~/goldbox-data/cotab cargo test -p gbx-engine \
+///   -- --nocapture --ignored slice5_the_spell_books_that_size_the_set`
+#[test]
+#[ignore = "local-only evidence dump; run explicitly"]
+fn slice5_the_spell_books_that_size_the_set() {
+    let Some(root) = std::env::var_os("GBX_DATA_DIR") else {
+        eprintln!("SKIPPED: needs GBX_DATA_DIR (slice5 spell books)");
+        return;
+    };
+    let root = std::path::Path::new(&root);
+    let data = load_dir(root).expect("GBX_DATA_DIR must be readable");
+    let saves = load_dir(&root.join("SAVE")).expect("GBX_DATA_DIR/SAVE must be readable");
+    let master = saves.raw_file("SAVGAMA.DAT").expect("slot A must exist");
+    let set = gbx_formats::save_orig::load_from_lookup(master, 'A', |n| saves.raw_file(n))
+        .expect("slot A must parse");
+    let engine = crate::import::import_original(&set, data, 1).expect("slot A must import");
+    let mut casters = 0;
+    for m in &engine.party().members {
+        eprintln!(
+            "--- {} class_id={} levels={:?} race={} align={} hp={}/{}",
+            m.name,
+            m.class_id,
+            m.class_level,
+            m.race,
+            m.alignment,
+            m.hit_point_current,
+            m.hit_point_max
+        );
+        eprintln!("    cast_count={:?}", m.magic.cast_count);
+        // `spellBook[id - 1]` — the off-by-one §9.1 pins.
+        let book: Vec<(u8, &str)> = (1u8..=0x64)
+            .filter(|&id| crate::magic::knows_spell(m, id))
+            .map(|id| (id, crate::magic::spell_name(id)))
+            .collect();
+        if !book.is_empty() {
+            casters += 1;
+        }
+        eprintln!("    grimoire ({}) = {book:?}", book.len());
+        eprintln!(
+            "    affects={:?}",
+            m.affects
+                .iter()
+                .filter_map(|r| gbx_formats::affects::AffectRecord::decode(r))
+                .map(|a| (a.kind, a.minutes))
+                .collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(
+        casters, 3,
+        "SHARA, LEDERA and PHILIPPE are the only casters"
+    );
+}

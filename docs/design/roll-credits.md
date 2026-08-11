@@ -720,3 +720,91 @@ conditions and `CheckAffectsTimingOut` both need the out-of-combat affect system
 (G7's tail) and are named at their sites; `FixTeam` never removes the memorized
 cures it rolls, so coab's Fix can bank the same ones again — read as written,
 flagged for the listing.
+
+## 9. Slice 5: the spell must-haves (G7)
+
+### 9.1 ★ Task 0 answered: the party's own two spell books size the set
+
+D-RC7 asked for the must-have set to be **enumerated from evidence before
+implementation** rather than discovered one tripwire at a time. The evidence is
+the slot-A party itself, read straight off the bundled GOG save
+(`demo::slice5_the_spell_books_that_size_the_set` prints it):
+
+| member | class(es) | `spellCastCount` | grimoire (`spellBook[id-1]`) |
+|---|---|---|---|
+| MATHEW | Paladin 5 | — | — |
+| MARK | Paladin 5 | — | — |
+| TRAVIS | Fighter 4 / Thief 5 | — | — |
+| LEDERA | Fighter 4 / **Magic-User 4** | MU `3 2 0 0 0` | Charm Person, Detect Magic, Enlarge, **Magic Missile**, Read Magic, **Sleep**, Knock, Stinking Cloud |
+| SHARA | **Cleric 5** | CL `5 5 2 0 0` | **every** cleric spell at levels 1-3 (8 + 7 + 8 = 23) |
+| PHILIPPE | **Magic-User 5** | MU `4 2 1 0 0` | LEDERA's eight, plus **Fireball** |
+
+Three findings fall straight out of that table and they are what bound the set:
+
+1. **`spellBook` is indexed `id − 1`** (`Player.cs:363`, `KnowsSpell`) — our
+   `magic::knows_spell` already had it right, but reading the array by id gives
+   a plausible-looking off-by-one list (SHARA appears to know `sleep` and
+   `animate_dead`, and not `resist_cold`), so it is pinned here.
+2. **The cleric's book is not a choice.** `calc_cleric_spells` + its caller
+   (`ovr026.cs:83-98`, `ovr018.cs:781-793`) grant **every** cleric-class row at
+   a level the character now has slots for, `animate_dead` excepted. So SHARA's
+   L4 and L5 lists arrive automatically at cleric 7 and 9 — the cleric side of
+   the set must be sized for the *whole run*, not for today's book.
+3. **The magic-user's book is scarce and fixed** until Scribe adds to it, and
+   `scroll_5C912`'s scribe gate needs a **`read_magic` affect** to unhide an
+   unknown scroll (`ovr023.cs:351-356`) — slice 4 named that as G7's. Read Magic
+   is therefore a *play-loop dependency*, not a nicety.
+
+**The threat profile** (D-RC6) contributes the recovery path: save-or-die poison
+(giant/phase spiders, wyvern), petrification (hooded medusa), death rays
+(beholder), and **no level drain**. Of these, **only poison has a spell answer**
+— *Stone to Flesh does not exist in CotAB*: the `Spells` enum runs `0x01..0x65`
+and carries no such row (`Classes/Spells.cs:47-151`), so the medusa answer is a
+temple service and belongs to G8, not here. Raise Dead (`0x4B`) is the one
+clerical row G8 consumes, so its **effect** lands in this slice.
+
+#### The must-have table
+
+23 implemented, 77 left counted behind D-RC7's tripwires (the casting table has
+100 real rows, `0x01..0x64`; `0x65` is the `Unknown10` terminator).
+
+| id | spell | class/lvl | why it earns its place | coab handler |
+|---|---|---|---|---|
+| `0x01` | Bless | C1 | the party-buff staple; SHARA's book; affect `0x01`'s handler is already live (§47.7) | `cleric_bless` → `CastTeamSpell` `ovr023.cs:990-1006` |
+| `0x02` | Curse | C1 | the same function with the opposite team — free once Bless lands | `cleric_curse` `:1008` |
+| `0x03` | Cure Light Wounds | C1 | **exists**; this slice adds the out-of-combat path | `SpellCureLight` `:1014` |
+| `0x06` | Protection from Evil | C1 | buff staple; affect `0x08`'s handler is live; both paladins already carry it permanently | `SpellProtectionFromX` `:1036` |
+| `0x07` | Protection from Good | C1 | the pair, same handler, one mirrored alignment gate | `SpellProtectionFromX` |
+| `0x0F` | Magic Missile | MU1 | **exists** | `SpellMagicMissile` `:1166` |
+| `0x12` | Read Magic | MU1 | ★ the Scribe gate — without it an unknown scroll lists nothing | `is_affected` `:1030` |
+| `0x15` | Sleep | MU1 | the MU staple; both magic-users know it | `SpellSleep` `:1187` |
+| `0x16` | Find Traps | C2 | SHARA's book, a dungeon crawl's utility spell | `is_affected` |
+| `0x17` | Hold Person | C2 | **exists** | `SpellHoldX` `:1247` |
+| `0x1A` | Slow Poison | C2 | ★ the poison arc, part 1 — the field answer to a spider bite | `is_affected2` `:1291` |
+| `0x25` | Cure Blindness | C3 | recovery path | `SpellCureBlindness` `:1587` |
+| `0x27` | Cure Disease | C3 | recovery path (and the `weaken`/`cause_disease_2` cascade) | `SpellCureDisease` `:1633` → `sub_5F037` `:1602` |
+| `0x29` | Dispel Magic (cleric) | C3 | G7 names it | `SpellDispelMagic` `:1667` |
+| `0x2A` | Prayer | C3 | the party-wide combat buff, via the radius-carrier scan | `SpellPrayer` `:1823` |
+| `0x2B` | Remove Curse | C3 | G7 names it — the cursed-item release | `SpellRemoveCurse` `:1831` |
+| `0x2E` | Dispel Magic (MU) | MU3 | one table row onto an implemented handler | `SpellDispelMagic` |
+| `0x2F` | Fireball | MU3 | PHILIPPE's book; the MU damage staple | `sub_5F782` `:1878` |
+| `0x3A` | Cure Serious Wounds | C4 | recovery; arrives with SHARA's cleric 7 | `SpellCureSeriousWounds` `:2177` |
+| `0x43` | Neutralize Poison | C4 | ★ G7 names it — the poison arc, part 2 | `SpellNeutralizePoison` `:2242` |
+| `0x45` | Protection from Evil, 10' Radius | C4 | the party-wide version, same handler + the carrier scan | `SpellProtectionFromX` |
+| `0x47` | Cure Critical Wounds | C5 | recovery | `SpellCureCriticalWounds` `:2312` |
+| `0x4B` | Raise Dead | C5 | ★ G8's critical path; the effect lands here, the temple service there | `SpellRaiseDead` `:2341` |
+
+**Pruned, with the reason** (each stays a loud `spell-entry` tripwire): the
+`cause_*` mirrors of every cure (a cleric who wants damage swings a mace);
+`resist_cold` / `resist_fire` (a `PreDamage` damage-scaling hook nothing else
+needs yet); `silence_15_radius`, `snake_charm`, `spiritual_hammer`,
+`stinking_cloud`, `cloud_kill` (gas-cloud and summoned-item subsystems);
+`charm_person` / `charm_monsters` / `confusion` / `fear` (runtime team flips);
+`enlarge` / `strength` (`CalcStatBonuses` re-entry); `detect_magic` /
+`detect_invisibility` (their payoff is the item-identify UI, G6); every Druid and
+every Monster row (nobody in the party is a druid, and monster casts arrive with
+their own captures). ★ **`Knock` (`0x1F`) is pruned because it is uncastable**:
+its row is `targetType = Combat` *and* `whenCast = Camp`, so the camp path takes
+`sub_5D2E1`'s "can't be cast here…" arm (`ovr023.cs:672`) and the combat path
+takes `spell_menu3`'s "Camp Only Spell" arm (`ovr014.cs:1386`) — the original
+ships it unreachable from either side.
