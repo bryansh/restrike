@@ -347,23 +347,7 @@ impl Camp {
     /// which that slice owns. This is the smallest thing that puts the right
     /// pixels on the camp screen; the audit reconciles the two at merge.
     fn draw_campfire(&mut self, ctx: &mut FlowCtx) {
-        if self.picture.is_none() {
-            self.picture = decode_camp_picture(ctx);
-        }
-        let Some(pic) = &self.picture else {
-            return;
-        };
-        crate::draw::blit_image(
-            ctx.fb,
-            &pic.pixels,
-            pic.width,
-            pic.height,
-            3,
-            3,
-            crate::draw::Clip::OVERLAY,
-            None,
-            None,
-        );
+        draw_camp_picture(ctx, &mut self.picture);
     }
 
     /// The highlighted word's span into [`CAMP_MENU`] — a test/introspection
@@ -472,6 +456,30 @@ pub(crate) fn scroll_team_list(ctx: &mut FlowCtx, code: u8) {
 /// [`gbx_formats::anim::decode`]'s `xor_delta`). `None` — no campfire, the rest
 /// of the layout unaffected — whenever the archive isn't there, which is every
 /// synthetic-fixture engine (D10).
+/// The campfire, decoded once into `cache` and blitted — shared by [`Camp`] and
+/// the rest screen, because `resting` never repaints the viewport at all
+/// (`ovr021.cs:533-534` clears only the bottom text region): it inherits
+/// whatever `MakeCamp`'s own `LoadPic` left there, campfire included.
+pub(crate) fn draw_camp_picture(ctx: &mut FlowCtx, cache: &mut Option<CampPicture>) {
+    if cache.is_none() {
+        *cache = decode_camp_picture(ctx);
+    }
+    let Some(pic) = cache else {
+        return;
+    };
+    crate::draw::blit_image(
+        ctx.fb,
+        &pic.pixels,
+        pic.width,
+        pic.height,
+        3,
+        3,
+        crate::draw::Clip::OVERLAY,
+        None,
+        None,
+    );
+}
+
 fn decode_camp_picture(ctx: &FlowCtx) -> Option<CampPicture> {
     let file = format!("PIC{}.DAX", ctx.game_area());
     let bytes = ctx.data.block(&file, CAMP_PIC_BLOCK).ok()?;

@@ -2921,3 +2921,225 @@ fn slice2_the_encounter_menu_at_its_shipped_site() {
         );
     }
 }
+
+// --- Roll-credits slice 4: Vancian camp magic on the real party ------------
+
+/// ★ **Slice 4's acceptance drive (D-S4e), on the bundled slot-A party.**
+///
+/// The party the GOG save ships is exactly the right fixture: SHARA is a
+/// cleric with `spellCastCount[0] = [5, 5, 2, 0, 0]` and twenty-three spells in
+/// her grimoire, and **every** member's `spell_list` is empty — nothing is
+/// memorized, so the very first thing a real playthrough has to do is stage
+/// spells and sleep on them.
+///
+/// The drive: boot the save, camp, open Magic ▸ Memorize on SHARA, stage from
+/// the grimoire (frame dumped), then Rest (countdown frame dumped) and watch
+/// the staged spells commit at the elapsed time `sub_44032` priced them at.
+///
+/// Run: `GBX_DATA_DIR=~/goldbox-data/cotab cargo test -p gbx-engine --release \
+///   -- --nocapture --ignored slice4_the_cleric_memorizes_and_sleeps_on_it`
+#[test]
+#[ignore = "local-only demo (writes frames); run explicitly"]
+fn slice4_the_cleric_memorizes_and_sleeps_on_it() {
+    use crate::engine::Engine;
+    use crate::input::InputEvent;
+    use crate::screens::Screen;
+    use crate::shell::Shell;
+
+    let Some(root) = std::env::var_os("GBX_DATA_DIR") else {
+        eprintln!("SKIPPED: needs GBX_DATA_DIR (slice4 camp magic)");
+        return;
+    };
+    let root = std::path::Path::new(&root);
+    let data = load_dir(root).expect("GBX_DATA_DIR must be readable");
+    let saves = load_dir(&root.join("SAVE")).expect("GBX_DATA_DIR/SAVE must be readable");
+    let master = saves.raw_file("SAVGAMA.DAT").expect("slot A must exist");
+    let set = gbx_formats::save_orig::load_from_lookup(master, 'A', |n| saves.raw_file(n))
+        .expect("slot A must parse");
+    let mut engine = crate::import::import_original(&set, data, 1).expect("slot A must import");
+
+    let out_dir = std::env::temp_dir();
+    let dump = |engine: &mut Engine, name: &str| {
+        let f = engine.tick(&[]);
+        let mut fb = Framebuffer::new();
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                fb.set_pixel(x, y, f.pixels[y * WIDTH + x]);
+            }
+        }
+        let path = out_dir.join(format!("restrike-{name}.ppm"));
+        write_ppm(&fb, &path);
+        eprintln!("  {name} -> {}", path.display());
+    };
+
+    // Boot out to the walk loop.
+    for _ in 0..300 {
+        engine.tick(&[]);
+        if matches!(engine.shell(), Shell::WorldMenu { .. }) {
+            break;
+        }
+        if engine.shell().gate_open() {
+            engine.tick(&[InputEvent::Enter]);
+        }
+    }
+    assert!(matches!(engine.shell(), Shell::WorldMenu { .. }));
+
+    // SHARA is slot 4 (0-based) in the shipped roster; select her, then camp.
+    let shara = engine
+        .party()
+        .members
+        .iter()
+        .position(|m| m.name == "SHARA")
+        .expect("the bundled party carries SHARA");
+    engine.state.selected_player = shara as u8;
+    let before = engine.party().members[shara].magic.clone();
+    assert!(
+        before.spell_list.iter().all(|&b| b == 0),
+        "the shipped save memorizes nothing at all"
+    );
+    assert_eq!(
+        before.cast_count[0],
+        [5, 5, 2, 0, 0],
+        "SHARA's cleric slots: 5/5/2 at levels 1-3"
+    );
+
+    let feed = |engine: &mut Engine, key: u8, budget: usize| {
+        engine.tick(&[InputEvent::Char(key)]);
+        for _ in 0..budget {
+            engine.tick(&[]);
+        }
+    };
+
+    feed(&mut engine, b'E', 4); // Encamp
+    assert!(matches!(engine.shell(), Shell::Screen(Screen::Camp(_))));
+    feed(&mut engine, b'M', 4); // Magic
+    assert!(matches!(engine.shell(), Shell::Screen(Screen::Magic(_))));
+    feed(&mut engine, b'M', 4); // Memorize — nothing staged, straight to the picker
+    assert!(
+        matches!(engine.shell(), Shell::Screen(Screen::Memorize(_))),
+        "Memorize opened: {}",
+        engine.probe()
+    );
+    dump(&mut engine, "slice4-1-memorize-grimoire");
+
+    // Stage the highlighted spell three times — the picker rebuilds its list
+    // and its capacity table after every pick, so the same key stages three.
+    for _ in 0..3 {
+        engine.tick(&[InputEvent::Enter]);
+        for _ in 0..2 {
+            engine.tick(&[]);
+        }
+    }
+    dump(&mut engine, "slice4-2-memorize-after-staging");
+    let staged: Vec<u8> = crate::magic::learning(&engine.party().members[shara].magic.spell_list)
+        .map(|e| e.id)
+        .collect();
+    assert_eq!(staged.len(), 3, "three spells staged: {staged:?}");
+    eprintln!(
+        "  staged: {:?}",
+        staged
+            .iter()
+            .map(|&id| crate::magic::spell_name(id))
+            .collect::<Vec<_>>()
+    );
+
+    // ★ A mid-staging save round-trips: staging is record state, so it rides
+    // the `.rsav` with no format change at all.
+    let bytes = engine.save();
+    let reload_data = load_dir(root).expect("GBX_DATA_DIR must be readable");
+    let restored = Engine::restore(&bytes, reload_data).expect("a mid-staging save reloads");
+    let restored_staged: Vec<u8> =
+        crate::magic::learning(&restored.party().members[shara].magic.spell_list)
+            .map(|e| e.id)
+            .collect();
+    assert_eq!(restored_staged, staged, "staging survives save/load");
+
+    // Exit the picker; the closing review + its confirm come up.
+    feed(&mut engine, b'E', 2);
+    dump(&mut engine, "slice4-3-memorize-closing-review");
+    feed(&mut engine, b'Y', 4); // "Memorize these spells? " — keep them
+    assert!(matches!(engine.shell(), Shell::Screen(Screen::Magic(_))));
+
+    // ★ Rest. `sub_44032` priced the three staged spells; `rest_menu` split it
+    // into the countdown this screen shows.
+    feed(&mut engine, b'R', 4);
+    let Shell::Screen(Screen::Rest(_)) = engine.shell() else {
+        panic!("Rest opened: {}", engine.probe());
+    };
+    dump(&mut engine, "slice4-4-rest-countdown");
+
+    let clock_before = engine.state.clock;
+    engine.tick(&[InputEvent::Char(b'R')]); // commit the countdown
+                                            // Rest was opened from the MAGIC bar, so it returns there (`magic_menu`'s
+                                            // own re-display loop, `ovr016.cs:636`) rather than to camp.
+    for _ in 0..4000 {
+        engine.tick(&[]);
+        if matches!(engine.shell(), Shell::Screen(Screen::Magic(_))) {
+            break;
+        }
+    }
+    dump(&mut engine, "slice4-5-after-the-rest");
+    assert!(matches!(engine.shell(), Shell::Screen(Screen::Magic(_))));
+
+    let after = &engine.party().members[shara].magic;
+    assert_eq!(
+        crate::magic::learning(&after.spell_list).count(),
+        0,
+        "everything staged committed"
+    );
+    let memorized: Vec<u8> = crate::magic::learnt(&after.spell_list)
+        .map(|e| e.id)
+        .collect();
+    assert_eq!(memorized.len(), 3, "…and is in memory: {memorized:?}");
+    // ★ FD-25: rest is not a slot restoration.
+    assert_eq!(
+        after.cast_count, before.cast_count,
+        "cast_count is capacity, untouched by rest"
+    );
+    // ★ Capacity reflects what is now held. The list's initial highlight is
+    // not row 1: `sl_select_item` runs `index_ptr++` then
+    // `menu_scroll_in_page(false, …)` before its first draw
+    // (`ovr027.cs:572-573`), and `skipHeadings` walking *backwards* off the
+    // leading "1st Level" heading wraps to the bottom of the visible page
+    // (`:443-455`). With SHARA's 11-row Memorize box that is row 10 — the
+    // first SECOND-level spell. Our `ListMenu` reproduces the arithmetic
+    // exactly, so the drive stages whatever the original would have.
+    let level = crate::magic::spell_level(staged[0]);
+    let class_ = crate::magic::spell_class(staged[0]);
+    let ch = &engine.party().members[shara];
+    let left = crate::magic::how_many_spells_player_can_learn(&ch.magic, class_, level);
+    let capacity = crate::magic::cast_count_at(&ch.magic, class_, level);
+    eprintln!("  level-{level} slots: {left} free of {capacity}");
+    assert_eq!(
+        i32::from(capacity) - left,
+        3,
+        "the three memorized spells hold three slots at their own level"
+    );
+    assert!(
+        engine.state.clock != clock_before,
+        "the world clock advanced across the rest"
+    );
+
+    // ★ Camp exit cancels staging. Stage one more, then walk out.
+    feed(&mut engine, b'M', 4); // Magic ▸ Memorize
+    engine.tick(&[InputEvent::Enter]);
+    for _ in 0..3 {
+        engine.tick(&[]);
+    }
+    feed(&mut engine, b'E', 2); // out of the picker
+    feed(&mut engine, b'Y', 4); // keep it staged
+    feed(&mut engine, b'E', 4); // out of Magic, back to camp
+    let staged_now =
+        crate::magic::learning(&engine.party().members[shara].magic.spell_list).count();
+    feed(&mut engine, b'E', 4); // out of camp
+    assert_eq!(
+        crate::magic::learning(&engine.party().members[shara].magic.spell_list).count(),
+        0,
+        "camp exit ran cancel_spells (staged before exit: {staged_now})"
+    );
+    assert_eq!(
+        crate::magic::learnt(&engine.party().members[shara].magic.spell_list).count(),
+        3,
+        "…and the memorized spells survived it"
+    );
+}

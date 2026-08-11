@@ -3558,16 +3558,214 @@ mod tests {
         assert_eq!(h.state.selected_player, 0, "Down is not a scroll key");
     }
 
-    /// `MakeCamp` loops one `displayInput` (`ovr016.cs:1099-1103`), so the
-    /// highlighted word survives a sub-action rather than snapping back to the
-    /// first — the menu is not rebuilt between iterations.
+    /// ★ **FD-44's acceptance** (roll-credits §8, D-S4e): a rest interruption
+    /// runs the resident block's header **vector 3**, `CampInterruptedAddr`.
+    ///
+    /// Proved the way the Look-vector test proves its own site: vector 3 is the
+    /// only vector that `NEWECL`s to block 9, so reaching block 9 can only have
+    /// come from the camp-ambush path. The schedule is armed to fire on the
+    /// first rest iteration (period 1 / percentage 100) through the same
+    /// Party-window cells `ECL4#37 @0x822E` writes.
     #[test]
+    fn an_interrupted_rest_runs_the_blocks_camp_ambush_vector() {
+        // vectors: [run_addr_1, search, pre_camp, CAMP INTERRUPTED, entry]
+        let block1 = labeled_block(["entry", "entry", "entry", "ambush", "entry"], |b| {
+            b.label("entry");
+            b.op(0x00); // EXIT
+            b.label("ambush");
+            b.op(0x20).imm_byte(9); // NEWECL block 9
+        });
+        let mut h = Harness::with_blocks(vec![(1, block1), (9, exit_only_block())]);
+        h.roster.members = vec![test_char("Aran"), test_char("Bink")];
+        let mut shell = Shell::boot(&mut h.machine, &mut h.state, &mut h.vm_memory);
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::WorldMenu { .. })
+        });
+
+        // Arm the schedule: every iteration fires, and always interrupts.
+        h.vm_memory
+            .poke_raw(crate::rest::REST_INCOUNTER_PERIOD_ADDR, 1);
+        h.vm_memory
+            .poke_raw(crate::rest::REST_INCOUNTER_PERCENTAGE_ADDR, 100);
+
+        h.input.push_all(&[char_key(b'e')]); // Encamp
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::Camp(_)))
+        });
+        h.input.push_all(&[char_key(b'r')]); // Rest
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::Rest(_)))
+        });
+        // Nothing is staged, so the countdown is zero — add eight hours so the
+        // loop has something to be interrupted during.
+        h.input.push_all(&[char_key(b'h')]);
+        for _ in 0..8 {
+            h.input.push_all(&[char_key(b'a')]);
+        }
+        h.input.push_all(&[char_key(b'r')]); // commit
+
+        let mut saw_interrupt = false;
+        for _ in 0..80 {
+            if matches!(shell, Shell::CampInterrupt(_)) {
+                saw_interrupt = true;
+            }
+            if saw_interrupt && matches!(shell, Shell::WorldMenu { .. }) {
+                break;
+            }
+            let mut ctx = h.ctx();
+            shell.tick(&mut ctx);
+        }
+        assert!(
+            saw_interrupt,
+            "the fired schedule ended camp into the vector-3 run: {}",
+            shell.probe()
+        );
+        assert_eq!(
+            h.state.ecl_block_id, 9,
+            "vector 3 — and only vector 3 — chains to block 9"
+        );
+        assert!(matches!(shell, Shell::WorldMenu { .. }), "and it resumed");
+    }
+
+    /// The rest that is *not* interrupted goes back to camp, never through the
+    /// ambush vector — the same fixture, schedule disarmed.
+    #[test]
+    fn an_uninterrupted_rest_never_touches_the_ambush_vector() {
+        let block1 = labeled_block(["entry", "entry", "entry", "ambush", "entry"], |b| {
+            b.label("entry");
+            b.op(0x00);
+            b.label("ambush");
+            b.op(0x20).imm_byte(9);
+        });
+        let mut h = Harness::with_blocks(vec![(1, block1), (9, exit_only_block())]);
+        h.roster.members = vec![test_char("Aran")];
+        let mut shell = Shell::boot(&mut h.machine, &mut h.state, &mut h.vm_memory);
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::WorldMenu { .. })
+        });
+        h.input.push_all(&[char_key(b'e')]);
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::Camp(_)))
+        });
+        h.input.push_all(&[char_key(b'r')]);
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::Rest(_)))
+        });
+        h.input
+            .push_all(&[char_key(b'h'), char_key(b'a'), char_key(b'r')]);
+        tick_until(&mut shell, &mut h, 200, |s| {
+            matches!(s, Shell::Screen(Screen::Camp(_)))
+        });
+        assert_eq!(h.state.ecl_block_id, 1, "the ambush vector never ran");
+    }
+
+    /// ★ Camp exit runs `cancel_spells` (`ovr016.cs:1154`): staged spells do
+    /// not survive walking out, memorized ones do.
+    #[test]
+    fn leaving_camp_cancels_staged_spells_but_keeps_memorized_ones() {
+        let (mut shell, mut h) = boot_with_party();
+        h.roster.members[0].magic.spell_list = vec![0u8; crate::magic::SPELL_LIST_SIZE];
+        crate::magic::add_learnt(&mut h.roster.members[0].magic.spell_list, 0x03);
+        crate::magic::add_learn(&mut h.roster.members[0].magic.spell_list, 0x0F);
+        h.roster.members[0].magic.spell_to_learn_count = 4;
+
+        h.input.push_all(&[char_key(b'e')]); // Encamp
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::Camp(_)))
+        });
+        h.input.push_all(&[char_key(b'e')]); // Exit camp
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::WorldMenu { .. })
+        });
+
+        let list = &h.roster.members[0].magic.spell_list;
+        assert_eq!(crate::magic::learning(list).count(), 0, "staging is gone");
+        let left: Vec<u8> = crate::magic::learnt(list).map(|e| e.id).collect();
+        assert_eq!(left, vec![0x03], "memory survives");
+        assert_eq!(h.roster.members[0].magic.spell_to_learn_count, 0);
+    }
+
+    /// ★ The Magic submenu's leaves reach their screens (D-S4d): Memorize and
+    /// Scribe open, Display lists the party's effects, and each returns.
+    #[test]
+    fn the_magic_menu_leaves_open_their_screens() {
+        let (mut shell, mut h) = boot_with_party();
+        h.roster.members[0].magic.spell_list = vec![0u8; crate::magic::SPELL_LIST_SIZE];
+        h.roster.members[0].magic.spell_book = vec![0u8; 100];
+        h.roster.members[0].magic.spell_book[0x0F - 1] = 1; // knows Magic Missile
+        h.roster.members[0].magic.cast_count[2][0] = 2; // …and has MU level-1 slots
+        h.roster.members[0].stats.int.original = 16;
+        h.roster.members[0].class_level[crate::party::SKILL_MAGIC_USER] = 3;
+        h.roster.members[0].status.in_combat = true;
+
+        h.input.push_all(&[char_key(b'e')]);
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::Camp(_)))
+        });
+        h.input.push_all(&[char_key(b'm')]);
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::Magic(_)))
+        });
+
+        // Display: `DisplayMagicEffects` — every member listed, no effects.
+        h.input.push_all(&[char_key(b'd')]);
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::SpellEffects(_)))
+        });
+        h.input.push_all(&[char_key(b'e')]);
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::Magic(_)))
+        });
+
+        // Memorize: nothing staged, so it opens straight on the grimoire
+        // picker; Enter stages the highlighted spell.
+        h.input.push_all(&[char_key(b'm')]);
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::Memorize(_)))
+        });
+        h.input.push_all(&[crate::input::InputEvent::Enter]);
+        for _ in 0..4 {
+            let mut ctx = h.ctx();
+            shell.tick(&mut ctx);
+        }
+        assert_eq!(
+            crate::magic::learning(&h.roster.members[0].magic.spell_list)
+                .map(|e| e.id)
+                .collect::<Vec<_>>(),
+            vec![0x0F],
+            "the picker staged Magic Missile"
+        );
+
+        // Scribe with no scrolls refuses and bounces back with its line.
+        h.input.push_all(&[char_key(b'e')]); // out of the picker
+        for _ in 0..4 {
+            let mut ctx = h.ctx();
+            shell.tick(&mut ctx);
+        }
+        h.input.push_all(&[char_key(b'y')]); // keep the staging
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::Magic(_)))
+        });
+        h.input.push_all(&[char_key(b's')]);
+        for _ in 0..6 {
+            let mut ctx = h.ctx();
+            shell.tick(&mut ctx);
+        }
+        assert!(
+            matches!(shell, Shell::Screen(Screen::Magic(_)))
+                || matches!(shell, Shell::Screen(Screen::Scribe(_))),
+            "Scribe resolved one way or the other: {}",
+            shell.probe()
+        );
+    }
+
     /// ★ `MakeCamp`'s View/Magic/Rest/Alter arms each set
     /// `gbl.menuSelectedWord = 1` **before** dispatching
     /// (`ovr016.cs:1123`/`:1128`/`:1133`/`:1142`), so the camp bar comes back
     /// from a sub-action with its FIRST word highlighted — not the word that
     /// was pressed. (This corrects the pre-slice-4 expectation, which came from
     /// Rest being a no-op that never left the bar.)
+    #[test]
     fn camp_resets_its_highlight_when_a_sub_action_returns() {
         let (mut shell, mut h) = boot_with_party();
         h.input.push_all(&[char_key(b'e')]); // Encamp

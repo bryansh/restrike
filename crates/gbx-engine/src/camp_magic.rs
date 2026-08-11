@@ -702,6 +702,10 @@ pub struct RestScreen {
     /// The camp Fix plan this rest is serving, if any (`FixTeam`, `:1055-1067`).
     fix: Option<rest::FixPlan>,
     messages: Vec<String>,
+    /// The campfire `MakeCamp` left in the viewport — `resting` never repaints
+    /// it, so the rest screen inherits it. Transient, never serialized.
+    #[serde(skip)]
+    picture: Option<crate::screens::CampPicture>,
 }
 
 /// `resting_time_menu`'s command bar (`ovr021.cs:264`).
@@ -746,6 +750,7 @@ impl RestScreen {
             from_magic,
             fix,
             messages: Vec::new(),
+            picture: None,
         }))
     }
 
@@ -759,9 +764,13 @@ impl RestScreen {
 
     /// `display_resting_time` (`ovr021.cs:220-247`): `"Rest Time:"` then
     /// `DD:HH:MM`, the highlighted field in colour 15 and the rest in 10.
-    fn paint(&self, ctx: &mut FlowCtx) {
+    fn paint(&mut self, ctx: &mut FlowCtx) {
         ctx.fb.clear(0);
         let _ = crate::frames::draw8x8_03(ctx.fb, ctx.symbols);
+        // `resting` inherits `MakeCamp`'s composition; the campfire stays up.
+        let mut picture = self.picture.take();
+        crate::screens::draw_camp_picture(ctx, &mut picture);
+        self.picture = picture;
         let rows: Vec<_> = ctx
             .roster
             .members
