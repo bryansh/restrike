@@ -718,6 +718,54 @@ pub fn item_type(record: &[u8]) -> u8 {
     record.get(0x2E).copied().unwrap_or(0)
 }
 
+/// One item record's three spell "affect" bytes (`Item.cs:129-131`:
+/// `affect_1`/`affect_2`/`affect_3` at offsets `0x3C`/`0x3D`/`0x3E`), indexed
+/// the way `Item.getAffect(i)` indexes them — **1-based** (`Item.cs:55-66`).
+///
+/// On a scroll these hold spell ids, and the high bit means "being scribed
+/// this camp" (`ScrollLearning`, `Item.cs:45-48`: `> 0x7F` plus an `& 0x7F`
+/// id compare) — the same `id | 0x80` staging encoding the character record's
+/// own spell list uses. `0` for an out-of-range index or a short record.
+pub fn item_affect(record: &[u8], index: usize) -> u8 {
+    match index {
+        1..=3 => record.get(0x3B + index).copied().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// Writes one of the three affect bytes (`Item.setAffect`, `Item.cs:68-80`).
+/// Out-of-range indices and short records are ignored, matching every other
+/// accessor here.
+pub fn set_item_affect(record: &mut [u8], index: usize, value: u8) {
+    if let 1..=3 = index {
+        if let Some(slot) = record.get_mut(0x3B + index) {
+            *slot = value;
+        }
+    }
+}
+
+/// One item record's `hidden_names_flag` (`Item.cs:31`, offset `0x35`) — the
+/// scroll-list builder skips a scroll whose names are still hidden
+/// (`scroll_5C912`, `ovr023.cs:358`).
+pub fn item_hidden_names_flag(record: &[u8]) -> u8 {
+    record.get(0x35).copied().unwrap_or(0)
+}
+
+/// One item record's `namenum2` (`Item.cs:127`, offset `0x30`) — the
+/// per-charge counter `remove_spell_from_scroll` decrements when a spell is
+/// scribed off a scroll, dropping the item once it falls below `0xD2`
+/// (`ovr023.cs:3105-3110`).
+pub fn item_namenum2(record: &[u8]) -> u8 {
+    record.get(0x30).copied().unwrap_or(0)
+}
+
+/// Writes `namenum2` (see [`item_namenum2`]).
+pub fn set_item_namenum2(record: &mut [u8], value: u8) {
+    if let Some(slot) = record.get_mut(0x30) {
+        *slot = value;
+    }
+}
+
 /// One item record's `plus` (`Item.cs:122`: `plus = (sbyte)data[0x32]`) — the
 /// magical enchantment level. `calc_battle_exp` pays **400 experience per
 /// plus** for every item in the treasure pool (`ovr006.cs:56-59`).

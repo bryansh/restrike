@@ -923,6 +923,102 @@ pub fn can_learn_spell_in_camp(ch: &Character, id: u8) -> bool {
     can_learn_spell(ch, id, false, false)
 }
 
+// ---------------------------------------------------------------------------
+// Scrolls — the Scribe path's half of the same `id | 0x80` staging encoding
+// ---------------------------------------------------------------------------
+
+/// `Item.IsScroll()` (`Classes/Item.cs:50-53`): the item's `ITEMS`-table entry
+/// has `item_slot` in `11..=13` (`ItemSlot.slot_11`..`slot_13`, with `Quarrel`
+/// = 12 sitting between them — the enum names are coab's guesses, the range is
+/// the test).
+///
+/// The table is game data, so a fixture set without an `ITEMS` file simply has
+/// no scrolls — the same D10 posture `combat_host::load_item_data` already
+/// takes, and the honest answer rather than a guess from the record alone.
+#[derive(Debug, Clone, Default)]
+pub struct ScrollLookup {
+    table: Option<gbx_formats::items::ItemDataTable>,
+}
+
+impl ScrollLookup {
+    /// Parses the resident `ITEMS` file out of the data set, if it is there.
+    pub fn load(data: &gbx_formats::game_data::GameData) -> Self {
+        ScrollLookup {
+            table: data
+                .raw_file(crate::combat_host::ITEMS_FILE)
+                .and_then(|b| gbx_formats::items::ItemDataTable::parse(b).ok()),
+        }
+    }
+
+    /// True when the table is absent — every `is_scroll` answer is then `false`
+    /// and the Scribe flows report having nothing to copy, which is what they
+    /// would say for a party carrying no scrolls.
+    pub fn is_empty(&self) -> bool {
+        self.table.is_none()
+    }
+
+    /// `Item.IsScroll()` over one raw `.swg` record.
+    pub fn is_scroll(&self, record: &[u8]) -> bool {
+        let Some(t) = &self.table else { return false };
+        let slot = t.get(gbx_formats::save_orig::item_type(record)).item_slot;
+        (11..=13).contains(&slot)
+    }
+}
+
+/// One spell written on a scroll: which of the three affect bytes holds it,
+/// its masked id, and whether it is currently staged for scribing (the high
+/// bit — `Item.ScrollLearning`, `Classes/Item.cs:45-48`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScrollSpell {
+    /// 1-based, the way `Item.getAffect(i)` indexes (`Item.cs:55-66`).
+    pub affect_index: usize,
+    pub id: u8,
+    pub scribing: bool,
+}
+
+/// The three affect bytes of one scroll record, decoded. Non-zero entries only.
+pub fn scroll_spells(record: &[u8]) -> impl Iterator<Item = ScrollSpell> + '_ {
+    (1..=3).filter_map(move |i| {
+        let raw = gbx_formats::save_orig::item_affect(record, i);
+        (raw & 0x7F != 0).then_some(ScrollSpell {
+            affect_index: i,
+            id: raw & 0x7F,
+            scribing: raw > 0x7F,
+        })
+    })
+}
+
+/// `cancel_scribes` (`ovr016.cs:75-86`): clears the staging high bit from every
+/// affect byte of every scroll the character carries. Camp entry and camp exit
+/// both run it (via `cancel_spells`), so a scribe left un-rested is discarded.
+pub fn cancel_scribes(items: &mut [Vec<u8>], scrolls: &ScrollLookup) {
+    for item in items.iter_mut() {
+        if scrolls.is_scroll(item) {
+            for i in 1..=3 {
+                let v = gbx_formats::save_orig::item_affect(item, i);
+                gbx_formats::save_orig::set_item_affect(item, i, v & 0x7F);
+            }
+        }
+    }
+}
+
+/// ★ `cancel_spells` (`ovr016.cs:89-96`) — `cancel_memorize` + `cancel_scribes`
+/// for **every** party member. `MakeCamp` runs it twice: once on entry
+/// (`ovr016.cs:1095`, right after "The party makes camp...") and once on exit
+/// (`ovr016.cs:1154`, after the picture restore).
+///
+/// (The door cited `:1117`/`:1150-region` for the pair; the re-verified lines
+/// are `1095` and `1154`.)
+///
+/// Staged-but-uncommitted spells therefore do not survive leaving camp — and,
+/// because entry runs it too, they do not survive *re-entering* camp either.
+pub fn cancel_spells(party: &mut crate::party::Party, scrolls: &ScrollLookup) {
+    for member in &mut party.members {
+        cancel_memorize(&mut member.magic);
+        cancel_scribes(&mut member.items, scrolls);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
