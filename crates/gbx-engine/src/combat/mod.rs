@@ -1727,6 +1727,18 @@ impl CombatState {
         &self.fighters
     }
 
+    /// ★ Roll-credits slice 5: fire one cast directly, for the demo that
+    /// renders a casting beat over the real art (`crate::demo`).
+    ///
+    /// `sub_5d2e1` is `pub(in crate::combat)` because every production caller
+    /// reaches it through the selection AI or the manual menu; the demo is
+    /// neither, and steering the AI by seed into casting a specific spell would
+    /// make the drive a puzzle rather than a picture. Test-only.
+    #[cfg(test)]
+    pub fn sub_5d2e1_demo(&mut self, rng: &mut EngineRng, actor: usize, spell_id: u8) {
+        self.sub_5d2e1(rng, actor, spell_id);
+    }
+
     /// ★ **D-CV5**: is a human driving this fight? Turns the two suspensions on
     /// ([`CombatStep::AwaitPlayerTurn`], [`CombatStep::AwaitContinueBattle`]).
     ///

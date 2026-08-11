@@ -3373,3 +3373,170 @@ fn slice5_the_cleric_casts_in_camp() {
     feed(&mut engine, b'D', 4);
     dump(&mut engine, "slice5-6-display-magic-effects");
 }
+
+/// ★ **Slice 5's in-combat casting beat** (roll-credits §9.2's acceptance),
+/// rendered over the real art through the M6a scene.
+///
+/// A cleric blesses the line and a magic-user drops a fireball into a room full
+/// of monsters, and every tick of the resulting message cascade is dumped. What
+/// the frames have to show, which no test can:
+///
+/// - the "Casts a Spell" / spell-name pair the D-CV2 `Cast` event opens with;
+/// - one `SpellTarget` highlight per combatant the blast caught — an area spell
+///   lights up the *whole* list, not one icon;
+/// - `AffectApplied`'s new line — "is Blessed" for each team-mate the bless
+///   kept, "is affected" for the rest;
+/// - the damage cascade and any deaths it causes, in the order §1.5 shows them.
+///
+/// Run: `GBX_DATA_DIR=~/goldbox-data/cotab cargo test -p gbx-engine \
+///   -- --nocapture --ignored slice5_a_bless_and_a_fireball_on_screen`
+/// then e.g. `ffmpeg -framerate 60 -i /tmp/restrike-slice5cast-%04d.ppm out.mp4`.
+#[test]
+#[ignore = "local-only demo (writes frames); run explicitly"]
+fn slice5_a_bless_and_a_fireball_on_screen() {
+    use crate::combat::scene::{CombatScene, CombatantIdentity, EntrySnapshot, SceneArt};
+    use crate::combat::{
+        ActionEvent, ActionSink, CombatMap, CombatState, Combatant, GridPos, Team,
+    };
+    use crate::combat_art;
+    use crate::party::IconInfo;
+    use crate::rng::EngineRng;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let Some(dir) = std::env::var_os("GBX_DATA_DIR") else {
+        eprintln!("SKIPPED: needs GBX_DATA_DIR (slice5 in-combat cast)");
+        return;
+    };
+    let data = load_dir(std::path::Path::new(&dir)).expect("GBX_DATA_DIR must be readable");
+    let assets = boot(&data).expect("boot must succeed against real CotAB data");
+    let out_dir = std::env::temp_dir();
+
+    // The art, exactly as the M6a reel loads it.
+    let mut icons = assets.combat_icons.clone();
+    let colours: [u8; 6] = [0x91, 0xA2, 0xB3, 0xC4, 0xE6, 0xF7];
+    for (slot, (head, weapon)) in [(0u8, 0u8), (3, 5)].into_iter().enumerate() {
+        let info = IconInfo {
+            head_icon: head,
+            weapon_icon: weapon,
+            icon_id: slot as u8,
+            icon_size: 1,
+            colours,
+        };
+        icons.set(
+            slot,
+            combat_art::load_party_icon(&data, &info, true).expect("party icon"),
+        );
+    }
+    icons.set(
+        8,
+        combat_art::load_monster_icon(&data, 2, 0).expect("monster icon"),
+    );
+    let tiles = combat_art::load_ground_tiles(&data, true).expect("dungeon ground tiles");
+
+    // A walled room: two casters on the west wall, four monsters packed east.
+    let mut map = CombatMap::uniform(0x17);
+    for x in 17..31 {
+        map.set_tile(GridPos::new(x, 8), 1);
+        map.set_tile(GridPos::new(x, 17), 1);
+    }
+    for y in 8..18 {
+        map.set_tile(GridPos::new(17, y), 1);
+        map.set_tile(GridPos::new(30, y), 1);
+    }
+    let names = ["SHARA", "PHILIPPE", "THIEF", "THIEF", "THIEF", "THIEF"];
+    let mut fighters: Vec<Combatant> = Vec::new();
+    for (i, (team, x, y, hp)) in [
+        (Team::Party, 19, 12, 29),
+        (Team::Party, 19, 13, 27),
+        (Team::Monster, 26, 12, 24),
+        (Team::Monster, 27, 12, 24),
+        (Team::Monster, 26, 13, 24),
+        (Team::Monster, 27, 13, 24),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        fighters.push(Combatant::new_melee(
+            i,
+            team,
+            team == Team::Monster,
+            GridPos::new(x, y),
+            hp,
+            5,
+            16,
+            12,
+            (1, 6, 0),
+            5,
+            1,
+        ));
+    }
+    let mut state = CombatState::new(map, fighters);
+    state.fighters[0].memorized_list = vec![0x01];
+    state.fighters[0].skill_level_cleric = 5;
+    state.fighters[1].memorized_list = vec![0x2F];
+    state.fighters[1].skill_level_magic_user = 5;
+
+    #[derive(Clone, Default)]
+    struct Batch(Rc<RefCell<Vec<ActionEvent>>>);
+    struct BatchSink(Rc<RefCell<Vec<ActionEvent>>>);
+    impl ActionSink for BatchSink {
+        fn on_action(&mut self, event: ActionEvent) {
+            self.0.borrow_mut().push(event);
+        }
+    }
+    let batch = Batch::default();
+    state.attach_action_sink(Box::new(BatchSink(Rc::clone(&batch.0))));
+
+    let identities: Vec<CombatantIdentity> = (0..state.roster().len())
+        .map(|i| CombatantIdentity::new(names[i], if i < 2 { i } else { 8 }))
+        .collect();
+    let mut scene = CombatScene::new(
+        EntrySnapshot::from_state(&state, &identities),
+        SceneArt::new(tiles, icons),
+    );
+    scene.refresh_panels(&state);
+    scene.reconcile(&state).expect("the entry snapshot matches");
+
+    let mut rng = EngineRng::new(0x0C0F_FEE0);
+    let mut frames = 0usize;
+    // Two casts, back to back, each played out to the last beat.
+    for (actor, spell_id, label) in [(0usize, 0x01u8, "bless"), (1, 0x2F, "fireball")] {
+        state.sub_5d2e1_demo(&mut rng, actor, spell_id);
+        let events = std::mem::take(&mut *batch.0.borrow_mut());
+        eprintln!("  {label}: {} events", events.len());
+        scene.begin_step(&events);
+        while scene.is_playing() {
+            scene.tick(1);
+            let mut fb = Framebuffer::new();
+            scene
+                .render_frame(&mut fb, &assets.symbol_sets, &assets.font)
+                .expect("the cast beat must render");
+            write_ppm(
+                &fb,
+                &out_dir.join(format!("restrike-slice5cast-{frames:04}.ppm")),
+            );
+            frames += 1;
+        }
+        scene.reconcile(&state).expect("the board reconciles");
+        scene.refresh_panels(&state);
+    }
+
+    eprintln!(
+        "slice5 cast beat: {frames} frames -> {}/restrike-slice5cast-*.ppm",
+        out_dir.display()
+    );
+    eprintln!(
+        "  blessed: {:?}",
+        (0..2)
+            .map(|i| state.roster()[i].has_affect(crate::spells::AFF_BLESS))
+            .collect::<Vec<_>>()
+    );
+    eprintln!(
+        "  monster hp after the fireball: {:?}",
+        (2..6)
+            .map(|i| state.roster()[i].hp_current)
+            .collect::<Vec<_>>()
+    );
+    assert!(frames > 30, "the cascade played out");
+}

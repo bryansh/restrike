@@ -710,12 +710,7 @@ impl CombatState {
                 continue;
             }
             if damage > 0 {
-                self.emit(ActionEvent::SpellDamage {
-                    caster_id: actor,
-                    target_id: target,
-                    amount: damage,
-                });
-                self.damage_person(rng, target, saved, entry.damage_on_save, damage);
+                self.damage_person(rng, actor, target, saved, entry.damage_on_save, damage);
             }
             if entry.affect_id > 0 {
                 self.apply_attack_spell_affect(
@@ -743,9 +738,21 @@ impl CombatState {
     ///   `TryLooseSpell` (`:1244`) — the disruption that costs a caster its
     ///   queued spell and its `can_cast` for the round (`ovr024.cs:1288-1300`),
     ///   the same tail the melee swing already runs (§45).
+    ///
+    /// ★ **`SpellDamage` is emitted from here, after the scaling** — a bug the
+    /// M6a reel's own board reconcile caught the moment a `DamageOnSave::Half`
+    /// row existed to catch it. The event used to ride at the `DoSpellCastingWork`
+    /// call site with the *unscaled* number, which was invisible while Magic
+    /// Missile (`Normal`, never scaled) was the only damage spell and drifted
+    /// the presented board by half a fireball the instant one landed. The
+    /// original prints the same number this event now carries: `damage_person`'s
+    /// "takes N points of damage" reads `gbl.damage` **after** the halving
+    /// (`ovr024.cs:1204-1208`). Draw-neutral — no draw moves, and Magic
+    /// Missile's event is byte-identical because its damage is never scaled.
     fn damage_person(
         &mut self,
         rng: &mut EngineRng,
+        caster: usize,
         target: usize,
         saved: bool,
         on_save: DamageOnSave,
@@ -765,6 +772,14 @@ impl CombatState {
         if dealt <= 0 {
             return;
         }
+        // D-CV2 `SpellDamage`, before the cascade its `Removed` comes out of —
+        // the same head-of-branch placement `SlayHelpless` uses, and the order
+        // the original displays: the effect, then the fall.
+        self.emit(ActionEvent::SpellDamage {
+            caster_id: caster,
+            target_id: target,
+            amount: dealt,
+        });
         self.apply_damage(rng, target, dealt);
         // `TryLooseSpell` (`ovr024.cs:1244` → `:1288-1300`): any real damage
         // kills this round's casting, and a queued cast is lost outright —
