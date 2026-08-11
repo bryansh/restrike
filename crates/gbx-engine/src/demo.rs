@@ -3711,3 +3711,144 @@ fn slice6_a_visit_to_the_temple() {
     dump(&mut engine, "slice6-6-back-outside");
     assert!(resumed, "the script resumed after the temple closed");
 }
+
+/// ★ **Roll-credits slice 7's acceptance drive** (`roll-credits.md` §11): the
+/// overland, live, from the edge of HAP to a fight with black dragons on a
+/// wilderness floor.
+///
+/// Every beat is the shipped script's — the drive presses letters and Enter
+/// and nothing else. `ECL5#48`'s overland exit hands the party to `ECL1#80`,
+/// whose entry vector puts BIGPIC1 block `0x79` (the Dalelands) on screen and
+/// falls into its own travel menu.
+///
+/// Dumps:
+/// 1. the edge menu over the map, with the `MapCursor` DARK (the first 300 ms
+///    of `displayInput`'s blink);
+/// 2. the same frame with the cursor LIT at HAP — cell `(0x1F, 0x0F)`;
+/// 3. the JOURNEY destination list (a VERTICAL MENU, which by the original's
+///    own asymmetry does NOT blink the cursor);
+/// 4. the travel-mode prompt;
+/// 5. the encounter's text as it pages;
+/// 6. the fight itself, on `SetupWildernessFloor`'s terrain and WILDCOM's art.
+///
+/// Run: `GBX_DATA_DIR=~/goldbox-data/cotab cargo test -p gbx-engine --release \
+///   -- --nocapture --ignored slice7_the_overland_and_a_wilderness_fight`
+#[test]
+#[ignore = "local-only demo (writes frames); run explicitly"]
+fn slice7_the_overland_and_a_wilderness_fight() {
+    use crate::engine::Engine;
+
+    let Some(mut engine) = crate::area_transition_tests::real_data_engine(5, 48, 50, true) else {
+        eprintln!("SKIPPED: needs GBX_DATA_DIR (slice7 overland)");
+        return;
+    };
+    let out_dir = std::env::temp_dir();
+    let dump = |engine: &mut Engine, name: &str| {
+        let f = engine.tick(&[]);
+        let path = out_dir.join(format!("restrike-{name}.ppm"));
+        write_ppm_pixels(f.pixels, &path);
+        eprintln!("  {name} -> {}", path.display());
+    };
+    let line = |engine: &Engine| {
+        engine
+            .shell()
+            .parked_widget_for_tests()
+            .and_then(|w| w.display_line())
+            .unwrap_or_default()
+    };
+
+    engine.shell = crate::shell::boot_at_address(&mut engine.machine, 0x8086);
+    let mut reached = false;
+    for _ in 0..4000 {
+        engine.tick(&[]);
+        if line(&engine).to_ascii_uppercase().contains("JOURNEY ON") {
+            reached = true;
+            break;
+        }
+    }
+    assert!(reached, "the edge menu never parked: {:?}", engine.probe());
+    eprintln!(
+        "  at the edge of city {} — menu: {:?}",
+        engine.vm_memory().current_city(),
+        line(&engine)
+    );
+
+    // (1) The blink's dark lead-in, then (2) the cursor lit. 300 ms is 18
+    // ticks; the `+ 6` lands well inside the 500 ms lit window.
+    dump(&mut engine, "slice7-1-the-dalelands-cursor-dark");
+    for _ in 0..(18 + 6) {
+        engine.tick(&[]);
+    }
+    dump(&mut engine, "slice7-2-the-dalelands-cursor-lit");
+    let (cx, cy) = crate::mapcursor::position(engine.vm_memory().current_city()).unwrap();
+    eprintln!("  cursor cell: ({cx:#04X}, {cy:#04X})");
+
+    // (3) JOURNEY ON -> the destination list.
+    engine.tick(&[InputEvent::Char(b'J')]);
+    for _ in 0..200 {
+        engine.tick(&[]);
+        if engine.shell().gate_open() {
+            break;
+        }
+    }
+    dump(&mut engine, "slice7-3-the-destination-list");
+
+    // (4) Commit the destination, then the travel-mode prompt.
+    engine.tick(&[InputEvent::Enter]);
+    for _ in 0..200 {
+        engine.tick(&[]);
+        if line(&engine).to_ascii_uppercase().contains("WILDERNESS") {
+            break;
+        }
+    }
+    eprintln!("  travel modes: {:?}", line(&engine));
+    dump(&mut engine, "slice7-4-how-will-you-get-there");
+
+    // (5)-(6) Answer everything until the fight is on screen.
+    let mut in_fight = false;
+    let mut dumped_text = false;
+    for _ in 0..20_000 {
+        engine.tick(&[InputEvent::Enter]);
+        if !dumped_text && engine.shell().gate_open() && engine.shell().combat_host().is_none() {
+            dumped_text = true;
+            dump(&mut engine, "slice7-5-the-encounter");
+        }
+        if engine.shell().combat_host().is_some() {
+            in_fight = true;
+            break;
+        }
+    }
+    assert!(
+        in_fight,
+        "the journey never reached its fight: {:?}",
+        engine.probe()
+    );
+    for _ in 0..30 {
+        engine.tick(&[]);
+    }
+    dump(&mut engine, "slice7-6-a-wilderness-fight");
+    // The bundled save ships `quick_fight = 0`, so the first PC's turn parks on
+    // the manual combat menu. `Q` (Quick) hands the fight to the AI, which is
+    // what makes the later frames show anything moving.
+    for _ in 0..400 {
+        engine.tick(&[InputEvent::Char(b'Q')]);
+    }
+    dump(&mut engine, "slice7-7-the-fight-runs");
+    for _ in 0..1500 {
+        engine.tick(&[InputEvent::Char(b'Q')]);
+    }
+    // ★ And out the other side: the journey finishes, `ECL1#80`'s vector 1
+    // runs again, and the edge menu comes back — at ESSEMBRA now, with the
+    // cursor on ITS cell. Getting here needed `LoadPic`'s `WildernessMap` arm
+    // (`ovr025.cs:1443-1448`): the combat restore used to paint the dungeon
+    // frame over the map and never re-arm `can_draw_bigpic`, so the overland
+    // came back as an empty box.
+    dump(&mut engine, "slice7-8-back-on-the-map-at-essembra");
+
+    assert_eq!(
+        engine.state().game_state,
+        crate::shell::GameState::WildernessMap
+    );
+    assert!(!engine.vm_memory().in_dungeon());
+    eprintln!("  halts: {:?}", engine.vm_memory().halts);
+}

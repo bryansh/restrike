@@ -2523,8 +2523,19 @@ impl Shell {
     /// refreshes — worse than the honest blank. Wiring `PartySummary` into
     /// [`Shell::enter_world_menu`] (where it belongs) moves the committed walk
     /// goldens; docketed as its own change.
+    /// ★ Outdoors the arm is a different one: `LoadPic`'s `WildernessMap`
+    /// case (`ovr025.cs:1443-1448`) is `RedrawView()` alone. `draw8x8_03`
+    /// would paint the dungeon's 88×88 viewport box and its col-16 panel
+    /// divider straight over the full-width Dalelands map — the map's own
+    /// frame is `DrawFrame_WildernessMap`, which `draw_bigpic` draws itself.
+    /// `can_draw_bigpic` is armed here because `LoadPic` arms it first thing
+    /// (`:1400`); the caller's `enter_world_menu` spends it.
     fn rebuild_exploration_screen(ctx: &mut FlowCtx) {
         ctx.fb.clear(0);
+        ctx.vm_memory.can_draw_bigpic = true; // `ovr025.cs:1400`
+        if ctx.state.game_state == GameState::WildernessMap {
+            return;
+        }
         // A fixture engine with no symbol set 4 simply gets no border, exactly
         // as the screens' own `draw_frame_outer` calls already tolerate.
         let _ = crate::frames::draw8x8_03(ctx.fb, ctx.symbols);

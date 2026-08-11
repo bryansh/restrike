@@ -229,3 +229,132 @@ fn journey_on_prices_the_route_and_spends_the_clock() {
         engine.vm_memory().halts
     );
 }
+
+/// ★ **A wilderness COMBAT on a real WildCom floor** — the door's fourth and
+/// last acceptance item, reached by playing the game rather than by poking
+/// state.
+///
+/// The route the previous test priced is the one that carries it. Route 36's
+/// encounter id is `2` (`@0x9116 GETTABLE 0x9CAA,[0x4C9D],[0x7F7A]`, table
+/// byte `0x9CAA + 36`), and `@0x9120`'s `ON GOTO` sends `2` to `@0x9364`:
+/// "SAILING ACROSS THE SKY ARE GREAT BLACK SHAPES… REVEALED AS FEARSOME BLACK
+/// DRAGONS", then `SETUP MONSTER 4,2,4` / `CLEARMONSTERS` /
+/// `LOAD MONSTER 0x35,3,0x35` / `COMBAT`.
+///
+/// What makes it a *wilderness* fight and not just a fight: `inDungeon` is 0,
+/// so `SetupGroundTiles` takes `SetupWildernessFloor` (terrain from
+/// `current_city`, no GEO) and `load_ground_tiles` takes `WILDCOM.DAX`.
+#[test]
+fn a_journey_encounter_starts_a_fight_on_a_wilderness_floor() {
+    let Some(mut engine) = at_the_edge_menu("a_journey_encounter_starts_a_fight...") else {
+        return;
+    };
+
+    press(&mut engine, "JOURNEY ON");
+    // `Stage::Entry` builds the host a tick before `begin_fight` assembles it,
+    // so wait for the assembled roster, not merely for a host to exist.
+    let fighting = run_until(&mut engine, 20_000, |e| {
+        e.shell()
+            .combat_host()
+            .is_some_and(|h| !h.state().fighters.is_empty())
+    });
+    assert!(
+        fighting,
+        "the journey never reached its encounter's COMBAT; probe={} line={:?} halts={:?}",
+        engine.shell().probe(),
+        menu_line(&engine),
+        engine.vm_memory().halts
+    );
+
+    assert_eq!(
+        engine.state().game_state,
+        GameState::WildernessMap,
+        "still outdoors — this is not a dungeon fight"
+    );
+    assert!(
+        !engine.vm_memory().in_dungeon(),
+        "and the RAW inDungeon cell agrees, which is what the floor fork reads"
+    );
+
+    // The floor: `SetField_7(23)` floods it, so no cell is the dungeon's void
+    // — and the three scatter passes left something on it.
+    let state = engine.shell().combat_host().expect("just checked").state();
+    let tiles: Vec<u8> = (0..crate::combat::MAP_W * crate::combat::MAP_H)
+        .map(|i| {
+            state.map.ground_tile(crate::combat::GridPos::new(
+                i % crate::combat::MAP_W,
+                i / crate::combat::MAP_W,
+            ))
+        })
+        .collect();
+    assert!(
+        tiles.iter().all(|&t| t != 0),
+        "a wilderness floor has no void cells"
+    );
+    assert!(
+        tiles.iter().any(|&t| t != 23),
+        "and the scatter passes put something on it"
+    );
+    // Both sides are on it: the imported party and `LOAD MONSTER 0x35,3,0x35`.
+    let monsters = state
+        .fighters
+        .iter()
+        .filter(|f| f.team == crate::combat::Team::Monster)
+        .count();
+    let party = state.fighters.len() - monsters;
+    assert!(party > 0 && monsters > 0, "{party} vs {monsters}");
+
+    assert!(
+        engine.vm_memory().halts.is_empty(),
+        "halts: {:?}",
+        engine.vm_memory().halts
+    );
+}
+
+/// ★ `LoadPic`'s `WildernessMap` arm (`ovr025.cs:1443-1448`) on the way OUT of
+/// that fight: `RedrawView()` and nothing else, so the Dalelands map comes
+/// back whole.
+///
+/// The combat restore used to run the `DungeonMap` arm unconditionally —
+/// `draw8x8_03` painted the 88×88 viewport box and the col-16 panel divider
+/// over the full-width map, and nothing re-armed `can_draw_bigpic`, so the
+/// overland returned as an empty frame. Found by watching the demo's frames.
+#[test]
+fn the_overland_map_comes_back_after_a_wilderness_fight() {
+    let Some(mut engine) = at_the_edge_menu("the_overland_map_comes_back...") else {
+        return;
+    };
+
+    press(&mut engine, "JOURNEY ON");
+    assert!(
+        run_until(&mut engine, 20_000, |e| e.shell().combat_host().is_some()),
+        "no fight: {:?}",
+        engine.shell().probe()
+    );
+    // `Q` (Quick) hands each turn to the AI — the bundled save ships
+    // `quick_fight = 0`, so the fight parks on the manual menu otherwise.
+    let mut back = false;
+    for _ in 0..20_000 {
+        engine.tick(&[InputEvent::Char(b'Q')]);
+        if engine.shell().combat_host().is_none()
+            && menu_line(&engine).contains("JOURNEY ON")
+            && engine.state().picture.shown == crate::picture::Shown::BigPic
+        {
+            back = true;
+            break;
+        }
+    }
+    assert!(
+        back,
+        "the overland never came back; probe={} line={:?} shown={:?}",
+        engine.shell().probe(),
+        menu_line(&engine),
+        engine.state().picture.shown
+    );
+    assert_eq!(engine.state().picture.bigpic_block, Some(0x79));
+    assert_eq!(
+        engine.vm_memory().current_city(),
+        8,
+        "and the party is at ESSEMBRA now, so the cursor moved with it"
+    );
+}

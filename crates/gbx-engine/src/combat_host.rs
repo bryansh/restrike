@@ -557,13 +557,31 @@ impl CombatHost {
                 // three steps for a fresh screen.
                 crate::combat::scene::render::palette_normal(ctx.fb);
                 ctx.fb.clear(0);
-                crate::frames::draw8x8_03(ctx.fb, ctx.symbols)
-                    .expect("symbol set 4 is resident whenever a fight can start");
-                // `LoadPic`'s `DungeonMap` arm (`ovr025.cs:1435-1441`) is
-                // `draw8x8_03` + `RedrawView` + party summary + status line —
-                // it never puts a pre-combat picture back, and `redraw_view`
-                // clears the picture layer for exactly that reason.
-                crate::corridor::redraw_view(ctx);
+                // `LoadPic` opens by arming the bigpic permission
+                // (`ovr025.cs:1400`) and then forks on `game_state`.
+                ctx.vm_memory.can_draw_bigpic = true;
+                if ctx.state.game_state == crate::shell::GameState::WildernessMap {
+                    // ★ The `WildernessMap` arm (`ovr025.cs:1443-1448`) is
+                    // `RedrawView()` and NOTHING else — no `draw8x8_03`, no
+                    // party summary, no status line. Drawing the dungeon frame
+                    // out here painted its viewport box and its col-16 divider
+                    // over the Dalelands map; the map's own frame is
+                    // `DrawFrame_WildernessMap`, which `draw_bigpic` draws.
+                    // The `lastDaxBlockId != 0x50` guard is the city-scene
+                    // one (`crate::picture::CITY_SCENE_PIC_BLOCK`).
+                    if ctx.state.picture.last_dax_block != crate::picture::CITY_SCENE_PIC_BLOCK {
+                        crate::corridor::redraw_view(ctx);
+                    }
+                } else {
+                    crate::frames::draw8x8_03(ctx.fb, ctx.symbols)
+                        .expect("symbol set 4 is resident whenever a fight can start");
+                    // `LoadPic`'s `DungeonMap` arm (`ovr025.cs:1435-1441`) is
+                    // `draw8x8_03` + `RedrawView` + party summary + status line
+                    // — it never puts a pre-combat picture back, and
+                    // `redraw_view` clears the picture layer for exactly that
+                    // reason.
+                    crate::corridor::redraw_view(ctx);
+                }
                 HostTick::Finished {
                     outcome: self.outcome.unwrap_or(CombatOutcome::Stalemate),
                     rounds: self.rounds,
