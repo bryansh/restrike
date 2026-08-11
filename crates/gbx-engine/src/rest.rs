@@ -473,6 +473,11 @@ pub enum RestEvent {
     PartyHealed,
     /// The rest-encounter check fired (`ovr021.cs:594-602`).
     Interrupted,
+    /// ★ `CheckAffectsTimingOut` expired this many affects on this iteration
+    /// (roll-credits slice 5). The original shows nothing for it — an expiring
+    /// buff is silent — so this carries no text; it exists so the camp screen
+    /// can repaint the Display list and so tests can watch the clock run.
+    AffectsExpired(usize),
 }
 
 /// `spellLaernTimeout` (`seg600:758D`, `ovr021.cs:452`) plus `resting`'s own
@@ -745,6 +750,15 @@ pub struct RestSession {
     pub interrupted: bool,
     /// `stop_resting` (`:518`).
     pub stopped: bool,
+    /// ★ `gbl.affects_timed_out[]` (`ovr021.cs:523-526`) — the per-member "may
+    /// still carry a timed affect" flags `CheckAffectsTimingOut` uses as its
+    /// early-out. `resting`'s preamble sets them all true, and so does
+    /// [`RestSession::start`]; roll-credits slice 5 gave them their consumer.
+    ///
+    /// Serde-defaulted so a `.rsav` written mid-rest before slice 5 restores
+    /// to the same all-dirty state `resting` opens with — no format bump.
+    #[serde(default)]
+    pub affects_timed_out: Vec<bool>,
 }
 
 /// `rest_heal`'s threshold (`ovr021.cs:362`): `8 * 36` iterations. At five
@@ -760,10 +774,11 @@ impl RestSession {
     /// timeouts for the party, zero the counters, and take the countdown the
     /// caller computed.
     ///
-    /// `gbl.affects_timed_out[0..0x48] = true` (`:523-526`) has no counterpart
-    /// here: `CheckAffectsTimingOut` is the out-of-combat affect ticker
-    /// (`ovr021.cs:11-107`), and this engine has no out-of-combat affect
-    /// system yet (G7's tail). Named, not silently dropped.
+    /// ★ `gbl.affects_timed_out[0..0x48] = true` (`:523-526`) now lands too:
+    /// roll-credits slice 5 built the out-of-combat affect ticker
+    /// ([`crate::affects::check_affects_timing_out`]), and [`RestSession::step`]
+    /// is its only caller. Every flag opens dirty, exactly as the preamble
+    /// sets them.
     pub fn start(time_to_rest: RestTime, party_count: usize) -> Self {
         let mut learning = SpellLearning::default();
         learning.reset(party_count);
@@ -775,6 +790,7 @@ impl RestSession {
             display_counter: 0,
             interrupted: false,
             stopped: false,
+            affects_timed_out: vec![true; party_count],
         }
     }
 
@@ -833,6 +849,23 @@ impl RestSession {
         // a documented placeholder predating this slice; the arguments here are
         // the original's exactly.
         clock.step(1, 5);
+        // ★ 3b. `step_game_time`'s tail is `CheckAffectsTimingOut(time_slot,
+        // amount)` (`ovr021.cs:171`) — the ONLY place an affect's minutes ever
+        // fall. It is inside the clock call in the original; it is spelled out
+        // here because this engine's clock is a shared type with no party
+        // handle. `camping = true`: `resting` runs with
+        // `game_state == Camping`, which is precisely the branch that ticks
+        // (`:13-19` freezes everything otherwise). Draw-free.
+        let expired = crate::affects::check_affects_timing_out(
+            party,
+            &mut self.affects_timed_out,
+            true,
+            1,
+            5,
+        );
+        if expired > 0 {
+            events.push(RestEvent::AffectsExpired(expired));
+        }
         // 4
         self.rest_10_seconds += 1;
         if self.rest_10_seconds >= REST_HEAL_PERIOD {

@@ -893,6 +893,9 @@ impl RestScreen {
                 magic::spell_name(*spell_id)
             ),
             ScrollConsumed { .. } => return None,
+            // An expiring buff is silent in the original (`CheckAffectsTimingOut`
+            // prints nothing at all) — the Display list is where it shows.
+            AffectsExpired(_) => return None,
             PartyHealed => rest::PARTY_HEALED_TEXT.to_string(),
             Interrupted => rest::INTERRUPTED_TEXT.to_string(),
         })

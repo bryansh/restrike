@@ -12,6 +12,7 @@
 //! CotAB scripts run inside `Engine::tick` end to end. 3D corridor/wallset
 //! rendering is step 5 (the viewport stays black), frontends are step 6.
 
+pub mod affects;
 pub mod award;
 pub mod boot;
 /// ★ The camp Magic submenu's leaves (roll-credits §8): Memorize, Scribe,

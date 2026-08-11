@@ -65,6 +65,29 @@ impl AffectRecord {
             call_affect_table: bytes[0x04] != 0,
         })
     }
+
+    /// The inverse of [`decode`](Self::decode): a full
+    /// [`AFFECT_RECORD_SIZE`](crate::save_orig::AFFECT_RECORD_SIZE)-byte record
+    /// with the four state fields written and the trailing heap `next` pointer
+    /// **zero-filled**.
+    ///
+    /// Zeroing the tail is what coab does on write, and it is the only honest
+    /// value: bytes 0x05-0x08 were a live `seg:off` far pointer into the DOS
+    /// heap, so an affect this engine creates has no meaningful linkage to
+    /// record. [`decode`](Self::decode) ignores them either way, which the
+    /// round-trip test below pins.
+    ///
+    /// Added for roll-credits slice 5 — the first code path that *creates* an
+    /// affect outside combat (`add_affect`, `ovr024.cs:609`), where the store
+    /// is the character's raw `.fx` chain rather than a live list.
+    pub fn encode(&self) -> [u8; crate::save_orig::AFFECT_RECORD_SIZE] {
+        let mut out = [0u8; crate::save_orig::AFFECT_RECORD_SIZE];
+        out[0x00] = self.kind;
+        out[0x01..0x03].copy_from_slice(&self.minutes.to_le_bytes());
+        out[0x03] = self.data;
+        out[0x04] = u8::from(self.call_affect_table);
+        out
+    }
 }
 
 #[cfg(test)]
@@ -125,6 +148,29 @@ mod tests {
         bytes[0x01] = 0xFF;
         bytes[0x02] = 0xFF;
         assert_eq!(AffectRecord::decode(&bytes).unwrap().minutes, 0xFFFF);
+    }
+
+    #[test]
+    fn encode_round_trips_and_zeroes_the_heap_tail() {
+        let rec = AffectRecord::decode(&synthetic_record([0xDE, 0xAD, 0xBE, 0xEF])).unwrap();
+        let bytes = rec.encode();
+        assert_eq!(bytes.len(), AFFECT_RECORD_SIZE);
+        assert_eq!(
+            &bytes[0x05..],
+            &[0, 0, 0, 0],
+            "the heap tail is zero-filled"
+        );
+        assert_eq!(AffectRecord::decode(&bytes).unwrap(), rec);
+        // `call_affect_table` writes back as the canonical 0/1, and any
+        // non-zero byte still decodes to `true` (the `!= 0` rule above).
+        let plain = AffectRecord {
+            kind: 0x01,
+            minutes: 6,
+            data: 5,
+            call_affect_table: false,
+        };
+        assert_eq!(plain.encode()[0x04], 0);
+        assert_eq!(AffectRecord::decode(&plain.encode()).unwrap(), plain);
     }
 
     #[test]

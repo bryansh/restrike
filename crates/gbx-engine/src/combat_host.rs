@@ -842,6 +842,7 @@ impl CombatHost {
     /// Every call here is draw-free (`crate::award`'s module doc has the
     /// proof), so this runs with the fight's RNG untouched.
     fn settle_and_award(&mut self, ctx: &mut FlowCtx) {
+        self.carry_affects_home(ctx);
         let animated = crate::award::animated_count(ctx.roster);
         let party_size = if ctx.state.party_size == 0 {
             ctx.roster.members.len() as u8
@@ -1141,6 +1142,46 @@ impl CombatHost {
                 crate::combat::scene::render::palette_combat(ctx.fb);
                 self.issue(ctx, TurnCmd::ViewSheet);
                 return;
+            }
+        }
+    }
+
+    /// ★ **Roll-credits slice 5**: the fight's final affect chains go back onto
+    /// the roster.
+    ///
+    /// In the original there is nothing to do here — combat mutates the same
+    /// `Player.affects` list camp reads, so a bless cast in round 1 is simply
+    /// still on the character when the results screen closes. Our split model
+    /// has to copy it, and the copy is the *whole* list rather than a merge:
+    /// the fight is the authority on what a party member is carrying by the
+    /// time it ends, having already run `RemoveCombatAffects`'s strip table on
+    /// anybody who died or fled (`ovr024.cs:48`, `:1270`).
+    ///
+    /// So the surviving set is exactly the original's: combat-scoped affects
+    /// (`paralyze`, `sleep`, `stinking_cloud`, …) are in that strip table and
+    /// are gone; `bless`, `prayer`, `protection_from_evil` and the racial
+    /// affects are **not**, and walk out of the fight still running — until
+    /// the next camp ticks them down ([`crate::affects`]).
+    ///
+    /// Draw-free, and unreachable from a replay (no capture runs the host).
+    fn carry_affects_home(&mut self, ctx: &mut FlowCtx) {
+        let carried: Vec<(usize, Vec<Vec<u8>>)> = self
+            .state
+            .roster()
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.team == Team::Party && !f.non_team_member)
+            .map(|(actor, f)| {
+                (
+                    actor,
+                    f.affects.iter().map(|a| a.encode().to_vec()).collect(),
+                )
+            })
+            .collect();
+        for (actor, chain) in carried {
+            let member = self.party_member_of(ctx, actor);
+            if let Some(ch) = ctx.roster.members.get_mut(member) {
+                ch.affects = chain;
             }
         }
     }

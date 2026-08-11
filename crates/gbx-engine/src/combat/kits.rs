@@ -401,6 +401,21 @@ pub fn party_kits(
             // record image cannot carry the inventory (items are a heap list),
             // so the live party is the only place this predicate exists.
             combatant.has_items = !c.items.is_empty();
+            // ★ **Roll-credits slice 5**: the live affect chain walks INTO the
+            // fight. In the original there is one `Player` object and one
+            // `affects` list — combat does not copy anything, so a bless cast
+            // in camp is simply still there when the fight starts, and the
+            // paladins' permanent `protection_from_evil` has always been. Our
+            // split roster/fighter model has to say it out loud. The chain is
+            // 9-byte `.fx` records on the roster and decoded records in the
+            // fight; order is preserved, because `FindAffect` is find-first
+            // (doc §39.2).
+            //
+            // Draw-neutral for every capture: a replayed fight builds its
+            // combatants from the capture's own entry snapshot
+            // (`reel::build_state`), never from a `Character`, so this line is
+            // unreachable from any pinned stream.
+            combatant.affects = crate::affects::decoded(c).collect();
             PartyKit {
                 combatant,
                 loadout: items.and_then(|t| loadout_for(c, t, flavor)),
