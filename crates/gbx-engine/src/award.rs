@@ -327,18 +327,6 @@ pub fn take_item(party: &mut Party, member: usize, items: &mut Vec<Vec<u8>>, ind
     true
 }
 
-/// `CleanupPlayersStateAfterCombat`'s `partyAnimatedCount` (`ovr006.cs:240-244`):
-/// members who ended the fight not `in_combat`, or `animated`. They are the
-/// share divisor's subtrahend — a party that finished with three members down
-/// splits the experience three ways, not six.
-pub fn animated_count(party: &Party) -> u8 {
-    party
-        .members
-        .iter()
-        .filter(|m| !m.status.in_combat || m.status.health_status == STATUS_ANIMATED)
-        .count() as u8
-}
-
 /// ★ `ovr006.affects_array` (`ovr006.cs:147-167`) — the nineteen affects
 /// `CleanupPlayersStateAfterCombat` strips from **every** party member as the
 /// fight closes, whatever happened to them.
@@ -385,7 +373,11 @@ pub struct CleanupVerdict {
     /// party member came out `okey` or `animated`", and it is what gates the
     /// experience award (`:249-253`).
     pub battle_won: bool,
-    /// `gbl.partyAnimatedCount` — the experience share divisor's subtrahend.
+    /// `gbl.partyAnimatedCount` (`ovr006.cs:234-237`) — members who ended the
+    /// fight not `in_combat`, or `animated`. The experience share divisor's
+    /// subtrahend: a party that finished with three members down splits the
+    /// experience three ways, not six. Counted **inside** this scan's own loop,
+    /// which is what puts it before [`settle_survivors`] wakes anybody up.
     pub animated_count: u8,
 }
 
