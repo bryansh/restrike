@@ -230,7 +230,7 @@ pub fn apply(index: usize, ch: &mut Character, rng: &mut EngineRng, rules: &Rule
         // remove-side handlers know it is a cure rather than an expiry.
         1 => {
             for a in DISEASE_TYPES {
-                affects::remove_affect(ch, a);
+                affects::cure_remove(ch, a); // `gbl.cureSpell = true`, `:97-103`
             }
             "is cured.".into()
         }
@@ -275,9 +275,11 @@ pub fn apply(index: usize, ch: &mut Character, rng: &mut EngineRng, rules: &Rule
         // `SpellNeutralizePoison` makes, but WITHOUT its `health_status = okey`
         // / `hit_point_current = 1` revival: the temple only unpoisons.
         6 => {
-            affects::remove_affect(ch, aff::POISONED);
-            affects::remove_affect(ch, aff::SLOW_POISON);
-            affects::remove_affect(ch, aff::POISON_DAMAGE);
+            // `gbl.cureSpell = true` (`:253-259`), and `poisoned` first —
+            // see [`crate::affects::affect_slow_poison`].
+            affects::cure_remove(ch, aff::POISONED);
+            affects::cure_remove(ch, aff::SLOW_POISON);
+            affects::cure_remove(ch, aff::POISON_DAMAGE);
             "is cured.".into()
         }
         // `raise_dead` (`:160-236`).
@@ -357,8 +359,9 @@ pub fn requires_the_condition(index: usize) -> bool {
 /// the spell reaches the same place by ordering, calling `CalcStatBonuses`
 /// first and assigning `hit_point_current = 1` after it (`ovr023.cs:2358-2359`).
 pub fn raise_dead(ch: &mut Character, rules: &RuleSet) {
-    affects::remove_affect(ch, aff::ANIMATE_DEAD);
-    affects::remove_affect(ch, aff::POISONED);
+    // `gbl.cureSpell = true` (`:178-183`).
+    affects::cure_remove(ch, aff::ANIMATE_DEAD);
+    affects::cure_remove(ch, aff::POISONED);
     ch.status.health_status = status::OKEY;
     ch.status.in_combat = true;
     if ch.stats.con.current > 0 {

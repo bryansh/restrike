@@ -1068,6 +1068,7 @@ impl VectorRun {
             outcome,
             rounds,
             dropped_keys,
+            verdict,
         } = host.tick(ctx)
         else {
             return false;
@@ -1088,8 +1089,15 @@ impl VectorRun {
             .push(crate::vmhost::TranscriptEntry::Request(format!(
                 "combat: {label} ({rounds} round(s){dropped})"
             )));
-        if outcome == crate::combat::CombatOutcome::MonstersWin {
+        // ★ Slice 6 deliverable E: the game-over trigger is
+        // `CleanupPlayersStateAfterCombat`'s `gbl.party_killed`
+        // (`ovr006.cs:216-226`) computed over the roster, not the fight's own
+        // `CountCombatTeamMembers` verdict. A party that FLED comes out
+        // `running` — alive by the original's liveness set, and a rout is not
+        // a game over.
+        if verdict.party_killed {
             ctx.state.party_killed = true;
+            ctx.state.wipe_cause = crate::shell::WipeCause::Combat;
         }
         // ★ `CMD_Combat`'s own tail (`ovr003.cs:1024-1026`): the encounter is
         // over, so the two-flag visual state machine resets and the sprite-dirty
@@ -2756,7 +2764,9 @@ impl Shell {
     /// draws nothing but the message and the prompt (`ovr006.cs:801-809`) —
     /// there is no map position to report when there is no party.
     pub fn draws_engine_status_line(&self) -> bool {
-        self.combat_host().is_none() && !matches!(self, Shell::Screen(_) | Shell::GameOver(_))
+        self.combat_host().is_none()
+            && self.temple_host().is_none()
+            && !matches!(self, Shell::Screen(_) | Shell::GameOver(_))
     }
 }
 

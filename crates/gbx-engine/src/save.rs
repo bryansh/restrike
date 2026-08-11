@@ -93,7 +93,7 @@ pub const CONTAINER_VERSION: u16 = 1;
 /// the award payload a dead monster pays out. New postcard fields in the
 /// middle of the payload: reject-not-migrate, hard version bump. The
 /// committed golden was recomputed in the same commit.
-pub const SAVE_FORMAT_VERSION: u32 = 6;
+pub const SAVE_FORMAT_VERSION: u32 = 7;
 
 /// This engine's one shipped flavor (M3's slice — `xxvc` is M7). An 8-byte
 /// ASCII tag rather than a numeric id, matching the header's own

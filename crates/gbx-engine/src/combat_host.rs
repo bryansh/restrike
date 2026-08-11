@@ -193,6 +193,11 @@ pub struct CombatHost {
     /// `distributeNpcTreasure`'s message lines, if a joined NPC took a cut.
     #[serde(default)]
     npc_share: Vec<String>,
+    /// ★ Slice 6: what `CleanupPlayersStateAfterCombat`'s scan concluded over
+    /// the roster once the writeback landed — `party_killed`/`party_fled`/
+    /// `battleWon`. Computed once at the FinalBeats boundary.
+    #[serde(default)]
+    verdict: crate::award::CleanupVerdict,
     /// Presentation, rebuilt on load (D-CV7).
     #[serde(skip)]
     scene: Option<CombatScene>,
@@ -222,6 +227,7 @@ impl Clone for CombatHost {
             dropped_keys: self.dropped_keys.clone(),
             award: self.award,
             npc_share: self.npc_share.clone(),
+            verdict: self.verdict,
             scene: None,
             batch: Rc::new(RefCell::new(Vec::new())),
         }
@@ -239,6 +245,10 @@ pub enum HostTick {
         rounds: u16,
         /// SPACE presses this slice queued and dropped (slice 7's TurnCmd).
         dropped_keys: usize,
+        /// ★ Slice 6: `CleanupPlayersStateAfterCombat`'s own conclusion over
+        /// the roster — the `gbl.party_killed` the game-over flow keys on,
+        /// which is NOT the same predicate as `outcome == MonstersWin`.
+        verdict: crate::award::CleanupVerdict,
     },
 }
 
@@ -471,6 +481,7 @@ impl CombatHost {
             dropped_keys: Vec::new(),
             award: None,
             npc_share: Vec::new(),
+            verdict: crate::award::CleanupVerdict::default(),
             scene: None,
             batch: Rc::new(RefCell::new(Vec::new())),
         }
@@ -563,6 +574,7 @@ impl CombatHost {
                     outcome: self.outcome.unwrap_or(CombatOutcome::Stalemate),
                     rounds: self.rounds,
                     dropped_keys: self.dropped_keys.len(),
+                    verdict: self.verdict,
                 }
             }
         }
@@ -843,7 +855,16 @@ impl CombatHost {
     /// proof), so this runs with the fight's RNG untouched.
     fn settle_and_award(&mut self, ctx: &mut FlowCtx) {
         self.carry_state_home(ctx);
-        let animated = crate::award::animated_count(ctx.roster);
+        // ★ Slice 6 deliverable E: the verdict comes from the ROSTER's own
+        // liveness set now (`ovr006.cs:216-232`), not from the fight's
+        // `CountCombatTeamMembers` outcome. Three cases separate them, and all
+        // three are real: a party that FLED is `running` — alive, not wiped; a
+        // surviving joined NPC is `control_morale >= NPC_Base` and does NOT
+        // save the party; and a **petrified** member is neither, which is why
+        // deliverable B's decode fix had to land first.
+        let verdict = crate::award::cleanup_players_state(ctx.roster);
+        self.verdict = verdict;
+        let animated = verdict.animated_count;
         let party_size = if ctx.state.party_size == 0 {
             ctx.roster.members.len() as u8
         } else {
@@ -857,8 +878,9 @@ impl CombatHost {
             animated,
             false,
         );
-        // `:249-253` — only a won battle pays.
-        if self.outcome == Some(CombatOutcome::PartyWins) {
+        // `:249-253` — only a won battle pays, and `battleWon` is the scan's
+        // own "somebody came out okey or animated", not "the monsters died".
+        if verdict.battle_won {
             crate::award::add_exp(ctx.roster, outcome.exp_each);
             ctx.state.exp_to_add = outcome.exp_each;
         } else {
@@ -886,9 +908,11 @@ impl CombatHost {
         ctx.fb.clear(0);
         let _ = crate::frames::draw_frame_outer(ctx.fb, ctx.symbols);
         let award = self.award.unwrap_or_default();
-        let won = self.outcome == Some(CombatOutcome::PartyWins);
-        let fled = self.outcome == Some(CombatOutcome::Stalemate) && !won;
-        let headline = crate::award::results_headline(&award, fled, won);
+        let headline = crate::award::results_headline(
+            &award,
+            self.verdict.party_fled,
+            self.verdict.battle_won,
+        );
         crate::text::draw_string(ctx.fb, ctx.font, headline, 3, 1, 0, 10); // `:390`
         let [line_a, line_b] = crate::award::results_exp_lines(ctx.state.exp_to_add);
         crate::text::draw_string(ctx.fb, ctx.font, &line_a, 5, 1, 0, 10); // `:436`

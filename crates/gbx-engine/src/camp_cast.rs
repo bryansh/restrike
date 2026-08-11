@@ -405,9 +405,13 @@ fn neutralize_poison(ch: &mut Character) -> &'static str {
     if ch.hit_point_current == 0 {
         ch.hit_point_current = 1;
     }
-    affects::remove_affect(ch, spells::AFF_POISONED);
-    affects::remove_affect(ch, spells::AFF_SLOW_POISON);
-    affects::remove_affect(ch, spells::AFF_POISON_DAMAGE);
+    // ★ `gbl.cureSpell = true` around all three (`ovr023.cs:2257-2263`), and
+    // the ORDER is load-bearing: `poisoned` leaves the chain BEFORE
+    // `slow_poison`, so `AffectSlowPoison`'s remove handler finds no poison
+    // and does not kill the patient it was just paid to save.
+    affects::cure_remove(ch, spells::AFF_POISONED);
+    affects::cure_remove(ch, spells::AFF_SLOW_POISON);
+    affects::cure_remove(ch, spells::AFF_POISON_DAMAGE);
     ch.status.in_combat = true;
     ch.status.health_status = crate::rest::status::OKEY;
     "is unpoisoned"
@@ -437,8 +441,9 @@ fn raise_dead(ch: &mut Character, rules: &gbx_rules::pack::RuleSet) -> bool {
     if !raisable || ch.stats.con.current == 0 || ch.race == crate::temple::RACE_ELF {
         return false;
     }
-    affects::remove_affect(ch, spells::AFF_ANIMATE_DEAD);
-    affects::remove_affect(ch, spells::AFF_POISONED);
+    // `gbl.cureSpell = true` (`ovr023.cs:2349-2353`).
+    affects::cure_remove(ch, spells::AFF_ANIMATE_DEAD);
+    affects::cure_remove(ch, spells::AFF_POISONED);
     ch.status.health_status = crate::rest::status::OKEY;
     ch.status.in_combat = true;
     ch.stats.con.current -= 1;

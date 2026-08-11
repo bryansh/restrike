@@ -3540,3 +3540,174 @@ fn slice5_a_bless_and_a_fireball_on_screen() {
     );
     assert!(frames > 30, "the cascade played out");
 }
+
+/// ★ **Roll-credits slice 6 (G8): the temple, on screen, with the real party.**
+///
+/// The `COMBAT` opcode's non-monster branch is driven by the shipped idiom
+/// verbatim — `SAVE 0xFF → 0x7EE1; SAVE 1 → 0x7EE2; CLEARMONSTERS; COMBAT`, the
+/// four instructions at `ECL2#1 @0x91DF` (Tilverton). The block those bytes
+/// live in is authored here rather than reached through the intro, so the run
+/// is short; everything else is real — the bundled slot-A party, the real font
+/// and symbol sets, the real money.
+///
+/// Dumps: the temple's own menu, the Heal service list, the price line, and the
+/// result after a member has been raised from the dead.
+///
+/// Run: `GBX_DATA_DIR=~/goldbox-data/cotab cargo test -p gbx-engine --release \
+///   -- --nocapture --ignored slice6_a_visit_to_the_temple`
+#[test]
+#[ignore = "local-only demo (writes frames); run explicitly"]
+fn slice6_a_visit_to_the_temple() {
+    use crate::engine::Engine;
+    use gbx_formats::game_data::GameData;
+
+    let Some(root) = std::env::var_os("GBX_DATA_DIR") else {
+        eprintln!("SKIPPED: needs GBX_DATA_DIR (slice6 temple)");
+        return;
+    };
+    let root = std::path::Path::new(&root);
+    let real = load_dir(root).expect("GBX_DATA_DIR must be readable");
+
+    // The shipped temple idiom, in a block of its own. `simple_block` puts it
+    // behind every vector, so boot's entry vector runs it.
+    let program = crate::test_support::simple_block(|b| {
+        b.op(0x09).imm_byte(0xFF).mem(0x7EE1); // SAVE 0xFF -> HeadBlockId
+        b.op(0x09).imm_byte(1).mem(0x7EE2); // SAVE 1 -> EnterTemple
+        b.op(0x1C); // CLEARMONSTERS
+        b.op(0x24); // COMBAT
+        b.op(0x11).inline_str(b"THE TEMPLE DOOR CLOSES."); // PRINT
+        b.op(0x00); // EXIT
+    });
+    let ecl = crate::test_support::build_dax_file(&[(
+        1u8,
+        crate::test_support::ecl_dax_block(&program.build_bytes()),
+    )]);
+    let files: Vec<(String, Vec<u8>)> = real
+        .file_names()
+        .map(|n| {
+            let bytes = if n.eq_ignore_ascii_case("ECL2.DAX") {
+                ecl.clone()
+            } else {
+                real.raw_file(n).expect("just listed").to_vec()
+            };
+            (n.to_string(), bytes)
+        })
+        .collect();
+    let data = GameData::from_files(files);
+
+    let saves = load_dir(&root.join("SAVE")).expect("GBX_DATA_DIR/SAVE must be readable");
+    let master = saves.raw_file("SAVGAMA.DAT").expect("slot A must exist");
+    let set = gbx_formats::save_orig::load_from_lookup(master, 'A', |n| saves.raw_file(n))
+        .expect("slot A must parse");
+    let mut engine = crate::import::import_original(&set, data, 1).expect("slot A must import");
+
+    // Kill MATHEW and empty everyone's purse but SHARA's, so the visit has
+    // something to do and one clear payer. `kill_player` is the original's own
+    // (`ovr024.cs:36-64`), so the record ends exactly as a fight would leave it.
+    let shara = engine
+        .party()
+        .members
+        .iter()
+        .position(|m| m.name == "SHARA")
+        .expect("the bundled party carries SHARA");
+    crate::affects::kill_player(&mut engine.party.members[0], crate::rest::status::DEAD);
+    engine.state.selected_player = 0; // MATHEW — the patient AND the payer
+    engine.party.members[shara].money.gold = 9000;
+    let mathew_before = (
+        engine.party().members[0].hit_point_max,
+        engine.party().members[0].stats.con.current,
+    );
+
+    let out_dir = std::env::temp_dir();
+    let dump = |engine: &mut Engine, name: &str| {
+        let f = engine.tick(&[]);
+        let mut fb = Framebuffer::new();
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                fb.set_pixel(x, y, f.pixels[y * WIDTH + x]);
+            }
+        }
+        let path = out_dir.join(format!("restrike-{name}.ppm"));
+        write_ppm(&fb, &path);
+        eprintln!("  {name} -> {}", path.display());
+    };
+
+    // Boot until the temple parks.
+    let mut opened = false;
+    for _ in 0..2000 {
+        engine.tick(&[]);
+        if engine.shell().temple_host().is_some() {
+            opened = true;
+            break;
+        }
+    }
+    assert!(opened, "the temple opened: {}", engine.probe());
+    dump(&mut engine, "slice6-1-temple-menu");
+
+    let feed = |engine: &mut Engine, key: InputEvent| {
+        engine.tick(&[key]);
+        for _ in 0..2 {
+            engine.tick(&[]);
+        }
+    };
+
+    // ★ MATHEW is dead and broke, so his own purse cannot pay. `poolMoney`
+    // ('P') empties every PC's coins into `gbl.pooled_money`, which is
+    // `buy_cure`'s second source (`ovr005.cs:43-46`) — the fallback the whole
+    // party-purse model exists for.
+    feed(&mut engine, InputEvent::Char(b'P'));
+    feed(&mut engine, InputEvent::Char(b'H')); // Heal
+    dump(&mut engine, "slice6-2-heal-services");
+
+    // Walk to Raise Dead (row 7) with the original's own in-page step key.
+    for _ in 0..7 {
+        feed(&mut engine, InputEvent::Ext(ExtKey::End));
+    }
+    feed(&mut engine, InputEvent::Enter); // commit the row
+    dump(&mut engine, "slice6-3-raise-dead-price");
+    feed(&mut engine, InputEvent::Enter); // acknowledge the price
+    feed(&mut engine, InputEvent::Char(b'Y')); // pay for cure
+    dump(&mut engine, "slice6-4-raised");
+
+    let m = &engine.party().members[0];
+    eprintln!(
+        "  {}: status={} hp={}/{} con={} (was hp_max {} con {})",
+        m.name,
+        m.status.health_status,
+        m.hit_point_current,
+        m.hit_point_max,
+        m.stats.con.current,
+        mathew_before.0,
+        mathew_before.1
+    );
+    eprintln!(
+        "  SHARA's purse after pooling: {} gp",
+        engine.party().members[shara].money.gold
+    );
+    assert_eq!(m.status.health_status, crate::rest::status::OKEY);
+    assert_eq!(m.hit_point_current, 1);
+    assert_eq!(m.stats.con.current, mathew_before.1 - 1, "a point of CON");
+    let pooled = engine.state().pooled_money.gold_worth();
+    eprintln!("  pool left: {pooled} gp worth");
+
+    // Leave, and prove the script resumed on the instruction after COMBAT.
+    feed(&mut engine, InputEvent::Char(b'E')); // out of the Heal list
+    feed(&mut engine, InputEvent::Char(b'E')); // out of the temple
+                                               // ★ There is still money in the pool, so the priest stops them on the way
+                                               // out (`ovr005.cs:449-467`). No, keep the change.
+    dump(&mut engine, "slice6-5-the-priest-notices-the-money");
+    feed(&mut engine, InputEvent::Char(b'N'));
+    let mut resumed = false;
+    for _ in 0..2000 {
+        engine.tick(&[]);
+        if engine.take_transcript().iter().any(|e| {
+            matches!(e, crate::vmhost::TranscriptEntry::Print { text, .. }
+                if text.contains("THE TEMPLE DOOR CLOSES"))
+        }) {
+            resumed = true;
+            break;
+        }
+    }
+    dump(&mut engine, "slice6-6-back-outside");
+    assert!(resumed, "the script resumed after the temple closed");
+}

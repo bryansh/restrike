@@ -149,6 +149,10 @@ impl TempleHost {
             b'P' => crate::award::pool_money(ctx.roster, &mut ctx.state.pooled_money),
             b'S' => crate::award::share_pooled(ctx.roster, &mut ctx.state.pooled_money),
             b'T' => crate::award::share_pooled(ctx.roster, &mut ctx.state.pooled_money),
+            // ★ `scroll_team_list` (`ovr005.cs:483-489`) — the temple's
+            // patient IS `gbl.SelectedPlayer`, and these two keys are how the
+            // original picks them. Both the payer and the person cured.
+            b'G' | b'O' => crate::screens::scroll_team_list(ctx, key.to_ascii_uppercase()),
             // View is `viewPlayer` and Appraise is `appraiseGemsJewels` — both
             // are their own screens elsewhere; the temple reports rather than
             // pretending (§9's loud-refusal rule).
@@ -345,38 +349,25 @@ impl TempleHost {
                     Stage::Heal => self.draw_prompt(ctx, "Heal Exit"),
                     Stage::CastAnyway { .. } => self.draw_prompt(ctx, "cast cure anyway: Yes No"),
                     Stage::Price { service } => {
-                        crate::text::draw_string(
-                            ctx.fb,
-                            ctx.font,
-                            &temple::price_line(*service),
-                            0x11,
-                            1,
-                            0,
-                            10,
-                        );
+                        // `press_any_key(text, true, 10, TextRegion.NormalBottom)`
+                        // (`ovr005.cs:30`) — the bottom text region, which
+                        // WRAPS: "Raise Dead will only cost 5500 gold pieces."
+                        // is 43 characters and the region is 38 wide.
+                        Self::draw_wrapped(ctx, &temple::price_line(*service));
                         self.draw_prompt(ctx, "press <enter>/<return> to continue");
                     }
                     _ => self.draw_prompt(ctx, "pay for cure Yes No"),
                 }
             }
             Stage::LeavingWithMoney => {
-                crate::text::draw_string(
-                    ctx.fb,
-                    ctx.font,
-                    "As you leave a priest says, \"Excuse me but you",
-                    3,
-                    1,
-                    0,
-                    10,
-                );
-                crate::text::draw_string(
-                    ctx.fb,
-                    ctx.font,
-                    "have left some money here\"",
-                    4,
-                    1,
-                    0,
-                    10,
+                crate::text::draw_string(ctx.fb, ctx.font, "Temple", 1, 1, 0, 0x0F);
+                // Both `press_any_key`s land in `TextRegion.NormalBottom`
+                // (`ovr005.cs:456-458`), under the roster panel rather than
+                // through it.
+                Self::draw_wrapped(
+                    ctx,
+                    "As you leave a priest says, \"Excuse me but you have left \
+                     some money here\" Do you want to go back and retrieve it?",
                 );
                 self.draw_prompt(ctx, "retrieve your money: Yes No");
             }
@@ -385,13 +376,44 @@ impl TempleHost {
         if let Some(s) = &self.status {
             crate::text::draw_string(ctx.fb, ctx.font, s, 0x16, 1, 0, 0x0E);
         }
-        let rows: Vec<crate::charsheet::SheetView> = ctx
-            .roster
-            .members
-            .iter()
-            .map(crate::charsheet::sheet_view)
-            .collect();
-        crate::charsheet::render_party_summary(ctx.fb, ctx.font, &rows, Some(member));
+        // ★ The roster panel belongs to `temple_shop`'s loop only
+        // (`PartySummary(gbl.SelectedPlayer)`, `ovr005.cs:504`). `temple_heal`
+        // draws its list across the WHOLE width (`sl_select_item(..., 15,
+        // 0x26, 4, 2, ...)`, columns 2..=38) and repaints the panel only on
+        // its way out (`:369`) — so painting it under the list would be a
+        // divergence, and a visibly ugly one.
+        if matches!(self.stage, Stage::Shop | Stage::LeavingWithMoney) {
+            let rows: Vec<crate::charsheet::SheetView> = ctx
+                .roster
+                .members
+                .iter()
+                .map(crate::charsheet::sheet_view)
+                .collect();
+            crate::charsheet::render_party_summary(ctx.fb, ctx.font, &rows, Some(member));
+        }
+    }
+
+    /// `press_any_key(..., TextRegion.NormalBottom)`'s wrap: rows `0x11..=0x16`,
+    /// columns 1..=0x26 (`crate::text::NORMAL_BOTTOM`), broken on spaces.
+    fn draw_wrapped(ctx: &mut FlowCtx, text: &str) {
+        let region = crate::text::NORMAL_BOTTOM;
+        let width = region.x_end + 1 - region.x_start;
+        let mut row = region.y_start;
+        let mut line = String::new();
+        for word in text.split_whitespace() {
+            if !line.is_empty() && line.len() + 1 + word.len() > width {
+                crate::text::draw_string(ctx.fb, ctx.font, &line, row, region.x_start, 0, 10);
+                row += 1;
+                line.clear();
+            }
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(word);
+        }
+        if !line.is_empty() {
+            crate::text::draw_string(ctx.fb, ctx.font, &line, row, region.x_start, 0, 10);
+        }
     }
 
     fn draw_prompt(&self, ctx: &mut FlowCtx, text: &str) {

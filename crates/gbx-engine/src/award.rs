@@ -339,6 +339,117 @@ pub fn animated_count(party: &Party) -> u8 {
         .count() as u8
 }
 
+/// ★ `ovr006.affects_array` (`ovr006.cs:147-167`) — the nineteen affects
+/// `CleanupPlayersStateAfterCombat` strips from **every** party member as the
+/// fight closes, whatever happened to them.
+///
+/// It is *not* the same list `RemoveCombatAffects` strips from a casualty
+/// (`crate::affects::remove_combat_affects`): the two overlap on the obvious
+/// crowd-control rows but this one also carries `charm_person` (0x0B),
+/// `confuse` (0x23), `fumbling` (0x1B), `fear` (0x8E) and `spiritual_hammer`
+/// (0x17), while the other carries `animate_dead`, `regenerate` and the
+/// faerie-fire family. Two tables, two jobs.
+pub const CLEANUP_STRIP_KINDS: [u8; 19] = [
+    0x03, // sticks_to_snakes
+    0x0B, // charm_person
+    0x0D, // reduce
+    0x15, // silence_15_radius
+    0x17, // spiritual_hammer
+    0x1B, // fumbling
+    0x23, // confuse
+    0x28, // affect_in_stinking_cloud
+    0x33, // snake_charm
+    0x34, // paralyze
+    0x35, // sleep
+    0x3A, // clear_movement
+    0x5B, // affect_in_cloud_kill
+    0x88, // entangle
+    0x89, // affect_89
+    0x8B, // affect_8b
+    0x8E, // fear
+    0x90, // owlbear_hug_round_attack
+    0x1F, // helpless
+];
+
+/// ★ What `CleanupPlayersStateAfterCombat`'s scan concluded
+/// (`ovr006.cs:169-247`) — the three globals the whole post-fight flow forks
+/// on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct CleanupVerdict {
+    /// `gbl.party_killed` — the game-over trigger.
+    pub party_killed: bool,
+    /// `gbl.party_fled` — the results screen's "The party has fled." headline,
+    /// and the arm that dissolves the party.
+    pub party_fled: bool,
+    /// `gbl.battleWon` — **not** "the monsters are dead": it is "at least one
+    /// party member came out `okey` or `animated`", and it is what gates the
+    /// experience award (`:249-253`).
+    pub battle_won: bool,
+    /// `gbl.partyAnimatedCount` — the experience share divisor's subtrahend.
+    pub animated_count: u8,
+}
+
+/// ★ **`CleanupPlayersStateAfterCombat`'s liveness scan** (`ovr006.cs:169-247`),
+/// transcribed — roll-credits slice 6 deliverable E.
+///
+/// Run over the roster **after** the post-fight writeback
+/// (`combat_host::carry_state_home`), because it reads exactly the cells the
+/// writeback lands: `health_status`, `in_combat`, `combat_team`,
+/// `control_morale`.
+///
+/// The three conclusions, each with its own predicate:
+///
+/// - **`party_fled`** — any member came out `running` (`:183-186`). Cleared
+///   again by the `battleWon` arm below, so a party where somebody is still
+///   standing did not "flee" even if others ran.
+/// - **`party_killed`** — starts **true** and is falsified by any member whose
+///   status is in the liveness set `{running, animated, okey}` **and** who is
+///   on our own team **and** who is a PC (`control_morale < Control.NPC_Base`,
+///   `:216-226`). So: a joined NPC standing alone does **not** save the party,
+///   and neither does a member who is merely `unconscious` or `dying`. ★ And
+///   neither does a **`stoned`** or **`gone`** one — the reason deliverable B's
+///   decode fix had to come first, because a petrified party used to read back
+///   as a healthy one.
+/// - **`battle_won`** — any member `animated` or `okey` (`:228-232`).
+///
+/// Draw-free. The affect strip (`:236`) is [`CLEANUP_STRIP_KINDS`].
+pub fn cleanup_players_state(party: &mut Party) -> CleanupVerdict {
+    use crate::rest::status;
+    let mut v = CleanupVerdict {
+        party_killed: true,
+        ..Default::default()
+    };
+    for member in party.members.iter() {
+        if member.status.health_status == status::RUNNING {
+            v.party_fled = true; // `:185`
+        }
+    }
+    for member in party.members.iter_mut() {
+        let health = member.status.health_status;
+        // `:216-226` — the liveness set, our team, and a PC.
+        if status::counts_as_alive(health)
+            && member.status.combat_team == 0
+            && member.control_morale < NPC_BASE
+        {
+            v.party_killed = false;
+        }
+        // `:228-232`.
+        if matches!(health, status::ANIMATED | status::OKEY) {
+            v.battle_won = true;
+            v.party_fled = false;
+        }
+        // `:234-237` — counted BEFORE the survivor ladder wakes anybody.
+        if !member.status.in_combat || health == status::ANIMATED {
+            v.animated_count += 1;
+        }
+        // `:239` — `System.Array.ForEach(affects_array, …remove_affect…)`.
+        for kind in CLEANUP_STRIP_KINDS {
+            crate::affects::remove_affect(member, kind);
+        }
+    }
+    v
+}
+
 /// `CleanupPlayersStateAfterCombat`'s post-fight status ladder
 /// (`ovr006.cs:267-302`), for the non-fled, non-wiped case: a member who was
 /// `running` comes back to `okey`, a `dying` one settles at `unconscious`, and
@@ -687,6 +798,120 @@ mod tests {
             results_headline(&won, false, false),
             "You have lost the fight."
         );
+    }
+
+    // --- roll-credits slice 6 deliverable E: the liveness scan --------------
+
+    /// ★ `CleanupPlayersStateAfterCombat`'s liveness set (`ovr006.cs:216-226`),
+    /// rung by rung. `unconscious`, `dying`, **`stoned`** and **`gone`** are all
+    /// outside it — a party of statues has lost.
+    #[test]
+    fn only_running_animated_and_okey_keep_the_party_alive() {
+        use crate::rest::status;
+        for (health, alive) in [
+            (status::OKEY, true),
+            (status::ANIMATED, true),
+            (status::RUNNING, true),
+            (status::TEMPGONE, false),
+            (status::UNCONSCIOUS, false),
+            (status::DYING, false),
+            (status::DEAD, false),
+            (status::STONED, false),
+            (status::GONE, false),
+        ] {
+            let mut m = pc("ONLY", 2);
+            m.status.health_status = health;
+            let mut party = Party { members: vec![m] };
+            let v = cleanup_players_state(&mut party);
+            assert_eq!(
+                v.party_killed, !alive,
+                "status {health}: party_killed should be {}",
+                !alive
+            );
+        }
+    }
+
+    /// ★ A **petrified** party with nobody standing is a wipe — the case D-RC6
+    /// named, and the one the old `decode_health_status` fold hid by reading a
+    /// statue back as "Okay".
+    #[test]
+    fn a_party_of_one_statue_is_a_wipe() {
+        let mut statue = pc("STATUE", 2);
+        statue.status.health_status = crate::rest::status::STONED;
+        statue.status.in_combat = false;
+        let mut party = Party {
+            members: vec![statue],
+        };
+        let v = cleanup_players_state(&mut party);
+        assert!(v.party_killed, "a statue is not a survivor");
+        assert!(!v.battle_won);
+        assert_eq!(v.animated_count, 1);
+    }
+
+    /// ★ A party that **fled** is not a wiped party (`running` is in the
+    /// liveness set) — which is exactly the case the fight's own
+    /// `CountCombatTeamMembers` verdict got wrong, because a runner is
+    /// `in_combat == false`.
+    #[test]
+    fn a_party_that_fled_is_not_a_wiped_party() {
+        let mut runner = pc("RUNNER", 2);
+        runner.status.health_status = crate::rest::status::RUNNING;
+        runner.status.in_combat = false;
+        let mut party = Party {
+            members: vec![runner],
+        };
+        let v = cleanup_players_state(&mut party);
+        assert!(!v.party_killed, "they got away");
+        assert!(v.party_fled);
+        assert!(!v.battle_won, "and won nothing");
+    }
+
+    /// ★ A surviving **joined NPC** does not save the party: the falsifying
+    /// predicate is `control_morale < Control.NPC_Base` (`:222`).
+    #[test]
+    fn a_surviving_npc_does_not_save_the_party() {
+        let mut dead_pc = pc("PC", 2);
+        dead_pc.status.health_status = crate::rest::status::DEAD;
+        dead_pc.status.in_combat = false;
+        let mut npc = pc("ALIAS", 2);
+        npc.control_morale = 0xB2;
+        let mut party = Party {
+            members: vec![dead_pc, npc],
+        };
+        let v = cleanup_players_state(&mut party);
+        assert!(v.party_killed, "the NPC is not a shareholder in survival");
+        assert!(v.battle_won, "but somebody IS okey, so the fight paid");
+    }
+
+    /// `battleWon` clears `party_fled` (`:231`): a party where one member ran
+    /// and another is standing has not fled.
+    #[test]
+    fn a_standing_member_cancels_the_fled_headline() {
+        let mut runner = pc("RUNNER", 2);
+        runner.status.health_status = crate::rest::status::RUNNING;
+        let mut party = Party {
+            members: vec![runner, pc("STANDING", 2)],
+        };
+        let v = cleanup_players_state(&mut party);
+        assert!(!v.party_fled);
+        assert!(v.battle_won);
+        assert!(!v.party_killed);
+    }
+
+    /// The scan strips `affects_array` from every member (`:239`), and that
+    /// table is NOT `RemoveCombatAffects`' — `charm_person` is on this one and
+    /// not on that one.
+    #[test]
+    fn the_scan_strips_its_own_nineteen_affects() {
+        let mut m = pc("CHARMED", 2);
+        crate::affects::add_affect(&mut m, 0x0B, 30, 0xFF, false); // charm_person
+        crate::affects::add_affect(&mut m, 0x8E, 30, 0xFF, false); // fear
+        crate::affects::add_affect(&mut m, 0x01, 30, 5, false); // bless — not on it
+        let mut party = Party { members: vec![m] };
+        cleanup_players_state(&mut party);
+        assert!(!party.members[0].has_affect(0x0B));
+        assert!(!party.members[0].has_affect(0x8E));
+        assert!(party.members[0].has_affect(0x01), "a bless walks home");
     }
 
     #[test]
