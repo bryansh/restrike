@@ -1355,6 +1355,11 @@ reads the same cell the same way (`ovr025.cs:1414`). Modeled once as
 `PictureLayer::last_dax_block` /
 `crate::picture::CITY_SCENE_PIC_BLOCK`.
 
+Settled visually as well as structurally: `PIC1.DAX` holds exactly three
+blocks — `0x01` (`LoadPic`'s AfterCombat arm), `0x1D` (its Camping arm) and
+**`0x50`**, which decodes to an 88×88 **village scene** (thatched cottages, a
+fence, geese). Not a title card.
+
 **FD-41 closed here**, as the door asked: `EngineState::area_view_allowed`
 (a hardcoded `true` nothing wrote) is gone and both consumers read
 `0x4BFB` live.
