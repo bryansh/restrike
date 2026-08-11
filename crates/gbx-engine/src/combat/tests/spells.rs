@@ -34,16 +34,19 @@ fn damage_on_save_normal_is_zero() {
     assert_eq!(DamageOnSave::Zero as u8, 1);
 }
 
-/// The lazy-transcription rule: Magic Missile, Cure Light Wounds, and Hold
-/// Person (doc §48) are transcribed. Every other id — a neighbouring row
-/// (Shield 0x13, Sleep 0x15) or an out-of-range id — returns `None`, so the
-/// selection AI trips `spell-entry` and rejects it (doc §41.2).
+/// The lazy-transcription rule, now sized up front by roll-credits §9.1: the
+/// 23 must-have rows are transcribed and every other id returns `None`, so the
+/// selection AI trips `spell-entry` and rejects it (doc §41.2). The set itself
+/// is pinned in `crate::spells`; this pins the three rows the pinned captures
+/// reach, and a sample of neighbouring ids §9.1 deliberately pruned — Shield
+/// `0x13`, Enlarge `0x0C`, Snake Charm `0x1B`, Animate Dead `0x24`, and Knock
+/// `0x1F` (which the original ships uncastable from either entry point).
 #[test]
-fn only_the_capture_proven_rows_are_transcribed() {
+fn only_the_must_have_rows_are_transcribed() {
     assert!(spell_entry(0x03).is_some());
     assert!(spell_entry(0x0F).is_some());
     assert!(spell_entry(0x17).is_some());
-    for id in [0u8, 1, 0x0E, 0x10, 0x13, 0x15, 0x24, 0xFF] {
+    for id in [0u8, 0x0C, 0x0E, 0x13, 0x1B, 0x1F, 0x24, 0xFF] {
         assert!(
             spell_entry(id).is_none(),
             "id {id:#x} must be untranscribed (spell-entry trip)"

@@ -54,6 +54,7 @@ pub mod saveload_fs;
 pub mod screens;
 pub mod shell;
 pub mod shop;
+pub mod spells;
 pub mod symbols;
 pub mod text;
 pub mod training;
