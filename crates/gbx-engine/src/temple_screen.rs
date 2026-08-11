@@ -148,7 +148,11 @@ impl TempleHost {
             // already transcribed for the fight's treasure screen.
             b'P' => crate::award::pool_money(ctx.roster, &mut ctx.state.pooled_money),
             b'S' => crate::award::share_pooled(ctx.roster, &mut ctx.state.pooled_money),
-            b'T' => crate::award::share_pooled(ctx.roster, &mut ctx.state.pooled_money),
+            // `TakePoolMoney` (`ovr022.cs:350-400`) is a sub-screen of its own —
+            // a coin-type `sl_select_item` plus an `AskNumberValue` prompt per
+            // denomination. Reported rather than aliased onto Share, which
+            // would move different coins (§9's loud-refusal rule).
+            b'T' => self.status = Some("Take: the coin-type picker is not wired".into()),
             // ★ `scroll_team_list` (`ovr005.cs:483-489`) — the temple's
             // patient IS `gbl.SelectedPlayer`, and these two keys are how the
             // original picks them. Both the payer and the person cured.

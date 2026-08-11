@@ -1264,8 +1264,10 @@ neither moved an encoding on its own.
 - **The temple's View and Appraise words** report rather than act (`viewPlayer`
   and `appraiseGemsJewels` are their own screens; the latter is the only
   draw-bearing thing in `ovr022` the award path deliberately avoids).
-- **`Take` on the temple's menu** runs `share_pooled`, not `TakePoolMoney`'s own
-  per-member selector.
+- **`Take` on the temple's menu** reports rather than acting: `TakePoolMoney`
+  (`ovr022.cs:350-400`) is a sub-screen of its own — a coin-type
+  `sl_select_item` plus an `AskNumberValue` prompt per denomination — and
+  aliasing it onto Share would move different coins.
 - **The stoned state has no script route in yet.** `alter_character`'s
   `switch_var == 0x100` arm (`ovr008.cs:622-628`: `set_value >= 0x80` clears
   `in_combat`, `0x87` sets `Status.stoned`) is the cell a script writes; the
