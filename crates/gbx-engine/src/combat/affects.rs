@@ -1,4 +1,5 @@
 use super::*;
+use crate::spells::AFF_PRAYER;
 use gbx_formats::affects::AffectRecord;
 
 impl Combatant {
@@ -58,25 +59,49 @@ impl CombatState {
     /// radius-cast affects [`RADIUS_CARRIER_KINDS`] {silence_15_radius 0x15,
     /// prot_from_evil_10_radius 0x2D, prot_from_good_10_radius 0x2E, prayer 0x31}
     /// (`unk_6325A` bitmask @`ovr024:025A`, decoded), scan the team lists for a
-    /// **carrier** holding `kind`. A carrier found in combat gates on range in the
-    /// binary (≤6 for prayer, else ≤1, via the near-list builder @`ovr024:031C-0388`)
-    /// — the range gate + the effect handler (`CallAffectTable(Add)`) are the
-    /// spell slice's; here we model the scan and **TRIP** on any found affect (on
-    /// the actor, or a carrier for a radius kind). Draw-free.
+    /// **carrier** holding `kind`.
+    ///
+    /// ★ **Roll-credits slice 5 landed the range gate** the M5 peel could only
+    /// cite (`ovr024.cs:119-126`): a carrier found in combat counts only if the
+    /// dispatched combatant is inside `Rebuild_SortedCombatantList(team_member,
+    /// max_range, p => p == player)` — **6 for prayer, 1 for the three
+    /// radius-blessings**. Out of combat there is no map, and the original
+    /// simply takes the carrier (`:129`). That gate is what gives Prayer its
+    /// radius: `SpellPrayer`'s own targeting is `field_6 = 0` (the caster
+    /// alone), and everything else in the party is reached from here.
+    ///
+    /// The handler that runs is [`run_affect_handler`](Self::run_affect_handler),
+    /// which is passed the **found** record — for a radius kind that is the
+    /// *carrier's*, because `AffectPrayer` reads its `affect_data` for the team
+    /// bit (`ovr024.cs:132` hands `affect` straight to `CallAffectTable`).
+    /// Draw-free.
     pub(super) fn calc_affect_effect(&mut self, ci: usize, kind: u8) {
         // Found on the actor → run the effect handler (§47.7 — the first REAL
         // `CallAffectTable` handlers; unknown kinds still trip, §39.4).
-        if self.fighters[ci].find_affect(kind).is_some() {
-            self.run_affect_handler(ci, kind);
+        if let Some(found) = self.fighters[ci].find_affect(kind).copied() {
+            self.run_affect_handler(ci, kind, found);
             return;
         }
-        // Radius-cast affects can be sourced from a team-mate carrier (the
-        // 10-/15-foot-radius blessings). Scan first (immutable), then trip
-        // (none of the four radius kinds has a landed handler yet).
-        if RADIUS_CARRIER_KINDS.contains(&kind)
-            && self.fighters.iter().any(|f| f.find_affect(kind).is_some())
-        {
-            self.trip_affect_effect(ci);
+        if !RADIUS_CARRIER_KINDS.contains(&kind) {
+            return;
+        }
+        // The carrier scan (`:112-128`), in team-list order — first carrier in
+        // range wins, and `foreach` breaks on the first `found`.
+        let max_range = if kind == AFF_PRAYER { 6 } else { 1 };
+        let carriers: Vec<(usize, gbx_formats::affects::AffectRecord)> = self
+            .fighters
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| f.find_affect(kind).map(|a| (i, *a)))
+            .collect();
+        for (carrier, record) in carriers {
+            let in_range = self
+                .build_sorted_at(self.fighters[carrier].pos, max_range)
+                .contains(&ci);
+            if in_range {
+                self.run_affect_handler(ci, kind, record);
+                return;
+            }
         }
     }
 
@@ -87,7 +112,12 @@ impl CombatState {
     /// draw-bearing handler (`troll_fire_or_acid` 0x64, 3d6) lives on the
     /// Death dispatch path ([`CombatState::affect_death_check`]), the only
     /// site that carries an RNG.
-    fn run_affect_handler(&mut self, ci: usize, kind: u8) {
+    fn run_affect_handler(
+        &mut self,
+        ci: usize,
+        kind: u8,
+        found: gbx_formats::affects::AffectRecord,
+    ) {
         match kind {
             // `bless` 0x01 (`sub_3A096` @`ovr013:0096-00A3`, thunk `sub_BDA4`;
             // coab ovr013.cs:45 `Bless`): UNCONDITIONAL `monster_morale += 5`
@@ -104,6 +134,20 @@ impl CombatState {
             0x01 => {
                 self.monster_morale += 5;
                 self.attack_roll += 1;
+            }
+            // ★ Roll-credits slice 5 — `cursed` 0x02 (`Curse`, `ovr013.cs:52-63`):
+            // Bless's exact mirror, with a **saturating** morale subtract
+            // (`if (monster_morale < 5) monster_morale = 0; else -= 5`, `:54-61`
+            // — the original clamps rather than wrapping the byte) and
+            // `attack_roll--`. Same liveness rules as Bless: the `attack_roll`
+            // write is live at Type_10, the morale write at Morale.
+            0x02 => {
+                self.monster_morale = if self.monster_morale < 5 {
+                    0
+                } else {
+                    self.monster_morale - 5
+                };
+                self.attack_roll -= 1;
             }
             // `protection_from_evil` 0x08 (`sub_3A224` @`ovr013:0224-0256`,
             // thunk `sub_BDC2`; coab ovr013.cs:151): gate on the ACTING
@@ -128,6 +172,82 @@ impl CombatState {
                     self.attack_roll -= 2;
                 }
             }
+            // ★ Roll-credits slice 5 — `protection_from_good` 0x09
+            // (`affect_protect_good` sub_3A259, `ovr013.cs:163-172`) and the two
+            // 10-foot-radius twins `prot_from_evil_10_radius` 0x2D /
+            // `prot_from_good_10_radius` 0x2E, which share the same two
+            // handlers (`affect_table.Add(prot_from_evil_10_radius,
+            // affect_protect_evil)`, `:1834-1835`).
+            //
+            // 0x09/0x2E gate on the **GOOD** alignment column {0, 3, 6}
+            // (LG/NG/CG) where 0x08/0x2D gate on the evil one {2, 5, 8}; both
+            // then do `saving_throw += 2` + `attack_roll -= 2` against the same
+            // `selected_attacker` global. A good party's own Protection from
+            // Good is therefore inert, which is exactly as useless as it is in
+            // the original — the row exists because the pair does.
+            0x09 | 0x2E => {
+                let al = self.fighters[self.selected_attacker].alignment;
+                if al == 0 || al == 3 || al == 6 {
+                    self.saving_throw += 2;
+                    self.attack_roll -= 2;
+                }
+            }
+            0x2D => {
+                let al = self.fighters[self.selected_attacker].alignment;
+                if al == 2 || al == 5 || al == 8 {
+                    self.saving_throw += 2;
+                    self.attack_roll -= 2;
+                }
+            }
+            // ★ Roll-credits slice 5 — `prayer` 0x31 (`AffectPrayer` sub_3B1C9,
+            // `ovr013.cs:712-729`): the affect's **own `data` byte** carries the
+            // casting team in bit 4 (`(affect_data & 0x10) >> 4`), and the
+            // dispatched combatant gets `+1` to both the live save accumulator
+            // and the live attack roll when its team matches — **and `−1` to
+            // both when it does not**. One cast helps your side and hinders
+            // theirs, which is why its radius is 6 where every other blessing's
+            // is 1. `found` is the record `calc_affect_effect` located, which
+            // for a radius kind is the *carrier's* — the original hands the same
+            // object down (`ovr024.cs:132`).
+            0x31 => {
+                let team = if (found.data & 0x10) >> 4 == 0 {
+                    Team::Party
+                } else {
+                    Team::Monster
+                };
+                if self.fighters[ci].team == team {
+                    self.saving_throw += 1;
+                    self.attack_roll += 1;
+                } else {
+                    self.saving_throw -= 1;
+                    self.attack_roll -= 1;
+                }
+            }
+            // ★ Roll-credits slice 5 — `blinded` 0x21 (`AffectBlinded`
+            // sub_3A951, `ovr013.cs:453-461`): a flat −4 to the attack roll and
+            // the save accumulator, **and a permanent −4 to both armour classes**
+            // (`player.ac -= 4; player.ac_behind -= 4`). The AC writes are the
+            // reason Cure Blindness matters: they are cumulative on the record,
+            // so the handler firing on repeated dispatches walks the AC down.
+            // Replicated as written; that is what the original does, and it is
+            // why `blinded` is one of the affects a party must clear rather than
+            // wait out.
+            0x21 => {
+                self.attack_roll -= 4;
+                self.saving_throw -= 4;
+                self.fighters[ci].ac = self.fighters[ci].ac.saturating_sub(4);
+                self.fighters[ci].ac_behind = self.fighters[ci].ac_behind.saturating_sub(4);
+            }
+            // ★ Roll-credits slice 5 — the affects §9.1's rows plant that have
+            // **no** check-time handler at all in the original's table:
+            // `read_magic` 0x10 and `find_traps` 0x13 are `ovr013.empty`
+            // (`:1805`, `:1808`), and `slow_poison` 0x16's handler
+            // (`AffectSlowPoison`, `:305-317`) is a *timeout* action, not a
+            // check-time one — it kills a still-poisoned character when the
+            // affect lapses, which needs the out-of-combat `CallAffectTable`
+            // dispatch this engine does not have yet (named in §9.2). All three
+            // are no-ops here rather than trips: reaching them is normal.
+            0x10 | 0x13 | 0x16 => {}
             // `dwarf_vs_orc` 0x1A (`AffectDwarfVsOrc` sub_3A7E8, ovr013.cs:357;
             // Type_10, attacker-side, LIVE inside `PC_CanHitTarget`): the
             // attacker's CURRENT target (actions.target — written by

@@ -177,20 +177,131 @@ fn dispatch_on_empty_lists_is_a_total_no_op() {
     assert!(stubs(&log).is_empty(), "no affects → no trips, no draws");
 }
 
+/// ★ Roll-credits slice 5: the radius-carrier scan now has its **range gate**
+/// (`ovr024.cs:119-126`) and its handler, where the M5 peel could only cite
+/// them. Prayer's radius is 6, every other radius blessing's is 1.
 #[test]
 fn calc_affect_effect_radius_carrier_scan() {
-    // The actor (0) lacks prayer; a team-mate carrier (1) holds it → the
-    // radius scan finds it and trips. Prayer (0x31) is a RADIUS kind.
+    // The actor (0) lacks prayer; a team-mate carrier (1) holds it and stands
+    // four squares off — inside prayer's radius 6, so the handler runs. `data`
+    // bit 4 clear means the carrier's team is `Party`, and the actor is on it,
+    // so both accumulators go UP.
     let (mut state, log) = affect_world();
+    state.fighters[0].pos = GridPos::new(10, 10);
+    state.fighters[1].pos = GridPos::new(14, 10);
+    state.rebuild_occupancy();
     state.fighters[1].affects = vec![aff(0x31, false)];
+    state.attack_roll = 0;
+    state.saving_throw = 0;
     state.calc_affect_effect(0, 0x31);
-    assert_eq!(stubs(&log), vec!["affect-effect"]);
+    assert!(
+        stubs(&log).is_empty(),
+        "the handler landed, so nothing trips"
+    );
+    assert_eq!((state.attack_roll, state.saving_throw), (1, 1));
+
+    // Seven squares off is outside the radius — the carrier is found and then
+    // discarded by the gate, so nothing at all happens.
+    let (mut state, log) = affect_world();
+    state.fighters[0].pos = GridPos::new(10, 10);
+    state.fighters[1].pos = GridPos::new(18, 10);
+    state.rebuild_occupancy();
+    state.fighters[1].affects = vec![aff(0x31, false)];
+    state.attack_roll = 0;
+    state.calc_affect_effect(0, 0x31);
+    assert_eq!(state.attack_roll, 0, "out of range");
+    assert!(stubs(&log).is_empty());
+
+    // The other side of the prayer: a combatant on the WRONG team takes −1 to
+    // both, which is what makes one cast worth two effects.
+    let (mut state, _log) = affect_world();
+    state.fighters[0].pos = GridPos::new(10, 10);
+    state.fighters[1].pos = GridPos::new(11, 10);
+    state.rebuild_occupancy();
+    // The carrier is the monster [1], so `data` bit 4 is SET.
+    state.fighters[1].affects = vec![AffectRecord {
+        kind: 0x31,
+        minutes: 5,
+        data: 0x10 | 5,
+        call_affect_table: false,
+    }];
+    state.attack_roll = 0;
+    state.saving_throw = 0;
+    state.calc_affect_effect(0, 0x31);
+    assert_eq!((state.attack_roll, state.saving_throw), (-1, -1));
 
     // A non-radius kind not on the actor is NOT sourced from a carrier.
     let (mut state, log) = affect_world();
     state.fighters[1].affects = vec![aff(0x01, false)]; // bless — not a radius kind
+    state.attack_roll = 0;
     state.calc_affect_effect(0, 0x01);
+    assert_eq!(state.attack_roll, 0);
     assert!(stubs(&log).is_empty());
+}
+
+/// ★ **Curse** (0x02) is Bless's mirror with a saturating morale subtract
+/// (`ovr013.cs:52-63`).
+#[test]
+fn curse_is_bless_mirrored_with_a_clamped_morale() {
+    let (mut state, _log) = affect_world();
+    state.fighters[0].affects = vec![aff(0x02, false)];
+    state.monster_morale = 12;
+    state.attack_roll = 0;
+    state.calc_affect_effect(0, 0x02);
+    assert_eq!((state.monster_morale, state.attack_roll), (7, -1));
+    // Below 5 it clamps to zero rather than wrapping.
+    state.monster_morale = 3;
+    state.calc_affect_effect(0, 0x02);
+    assert_eq!(state.monster_morale, 0);
+}
+
+/// ★ **Protection from Good** (0x09) is Protection from Evil's alignment
+/// mirror: the GOOD column {0, 3, 6} where 0x08 tests the evil one.
+#[test]
+fn protection_from_good_gates_on_the_good_alignment_column() {
+    for (alignment, want) in [(0u8, true), (3, true), (6, true), (2, false), (5, false)] {
+        let (mut state, _log) = affect_world();
+        state.fighters[0].affects = vec![aff(0x09, false)];
+        state.fighters[1].alignment = alignment;
+        state.selected_attacker = 1;
+        state.attack_roll = 0;
+        state.saving_throw = 0;
+        state.calc_affect_effect(0, 0x09);
+        let fired = state.attack_roll == -2 && state.saving_throw == 2;
+        assert_eq!(fired, want, "alignment {alignment}");
+    }
+}
+
+/// ★ **Blinded** (0x21) is −4 to hit, −4 to saves and −4 to **both** armour
+/// classes (`ovr013.cs:453-461`) — the AC writes are cumulative on the record,
+/// which is why Cure Blindness is worth a third-level slot.
+#[test]
+fn blinded_walks_the_armour_class_down() {
+    let (mut state, _log) = affect_world();
+    state.fighters[0].affects = vec![aff(0x21, false)];
+    state.fighters[0].ac = 10;
+    state.fighters[0].ac_behind = 10;
+    state.attack_roll = 0;
+    state.saving_throw = 0;
+    state.calc_affect_effect(0, 0x21);
+    assert_eq!((state.attack_roll, state.saving_throw), (-4, -4));
+    assert_eq!((state.fighters[0].ac, state.fighters[0].ac_behind), (6, 6));
+}
+
+/// ★ The three affects §9.1's rows plant that the original's table maps to
+/// `ovr013.empty` (or to a timeout-only handler) are **no-ops**, not trips —
+/// reaching them is normal, and a tripwire there would fire on every dispatch
+/// after a Read Magic.
+#[test]
+fn the_handlerless_affects_are_silent() {
+    for kind in [0x10u8, 0x13, 0x16] {
+        let (mut state, log) = affect_world();
+        state.fighters[0].affects = vec![aff(kind, false)];
+        state.attack_roll = 0;
+        state.calc_affect_effect(0, kind);
+        assert!(stubs(&log).is_empty(), "{kind:#04x} must not trip");
+        assert_eq!(state.attack_roll, 0);
+    }
 }
 
 #[test]

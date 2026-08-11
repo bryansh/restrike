@@ -131,7 +131,10 @@ mechanism; must exist before the deep dungeons.
 imported-affect handlers with no casting path. Slice = enumerate the must-have set for a
 CotAB run (the party-buff staples + Dispel Magic, Remove Curse, Neutralize Poison, Stone to
 Flesh, and G8's clerical services), implement those, and leave the exotic remainder to
-D-RC7's tripwires with the count stated.
+D-RC7's tripwires with the count stated. **LANDED 2026-08-11 — see §9.**
+**23 implemented, 77 tripwired**; the set was sized from the slot-A party's own two
+spell books (§9.1), and *Stone to Flesh does not exist in CotAB* — the medusa
+answer is a temple service and belongs to G8.
 
 **G8 — Death recovery (D-RC6, review M4).** Temple raise-dead (the non-monster COMBAT
 branch's temple dispatch), the `stoned`/`gone` health-status decode fix, and whatever the
@@ -168,7 +171,7 @@ owns the version-bump churn**; later slices rebase onto it and batch their enum 
 | 2 | Encounter cluster (G4) — **landed, §6** | Opus @ high | No | 1 |
 | 3 | Items/roster/mechanics tail + TREASURE/XP + PARLAY (G5) | Opus @ high | No | 1 (rebases on 2's enum batch) |
 | 4 | Vancian camp magic (G3) | Opus @ high | **Yes — short** (the SpellList staging model on the character record) | 1 |
-| 5 | Spell tail must-haves (G7) | Opus @ high | No — G7's enumeration IS the spec | 4 |
+| 5 | Spell tail must-haves (G7) — **landed, §9** | Opus @ high | No — G7's enumeration IS the spec | 4 |
 | 6 | Death recovery + temple services (G8) | Opus @ high | No | 4 (shares the record), 5 (clerical spells) |
 | 7 | Wilderness/overworld (G2) | Opus @ high–xhigh | **Yes — full door** | 1 |
 | 8 | Out-of-combat item use (G6) | Opus @ high | No | 1 |
@@ -808,3 +811,171 @@ its row is `targetType = Combat` *and* `whenCast = Camp`, so the camp path takes
 `sub_5D2E1`'s "can't be cast here…" arm (`ovr023.cs:672`) and the combat path
 takes `spell_menu3`'s "Camp Only Spell" arm (`ovr014.cs:1386`) — the original
 ships it unreachable from either side.
+
+### 9.2 What landed, and the corrections the code forced
+
+**No save break.** The door budgeted one for the affect-record shape; the slice
+needed none. `Character::affects` was already `Vec<Vec<u8>>` — the raw `.fx`
+chain — so `crate::affects` operates on it in place, exactly as slice 4's
+`crate::magic` does with `spell_list`. `AffectRecord` gained an `encode()` to
+match its `decode()`, and that is the whole format change.
+`SAVE_FORMAT_VERSION` stays at **6**. The one new `Screen` variant (`Cast`) and
+the one new `RestSession` field (`affects_timed_out`, `#[serde(default)]`) are
+both append-only, and postcard encodes a variant as its index, so no committed
+golden moved.
+
+**One table, two worlds.** The casting rows moved out of
+`crate::combat::spells` into a new public `crate::spells`, because the original
+casts from **one** `gbl.spellCastingTable` through **two** entry points —
+`sub_5D2E1` with `gbl.SpellCastFunction` swapped (`ovr014.target` in combat,
+`ovr023.NonCombatSpellCast` out of it). Combat keeps the combat half of the
+machinery; `crate::camp_cast` is the other arm.
+
+**Counts, restated for the §4 gate:** **23 implemented, 77 tripwired** of the
+100 real rows (`0x01..0x64`). Of the 23, **18 are combat-castable** and **12 are
+camp-castable** (seven overlap; five rows are `SpellTargets::Combat` and are
+refused in camp, and five are `whenCast = Camp` and are refused in combat).
+
+**Draw-neutrality, argued once.** A new row can only be reached two ways: an id
+pulled from a combatant's `memorized_list` (decoded from that fight's own
+character records) or a cast the player issues. No replay issues casts, and
+**every pinned capture memorizes exactly `{0x03, 0x0F, 0x17}`** — the three rows
+that already existed. That is not a claim in prose: `gbx-oracle`'s
+`spell_rows.rs` re-reads all sixteen capture files and asserts it, printing the
+ids it found. Guard 16/16 and reel 16/16 (62,108 draws checked live) then
+confirm it end to end.
+
+**Eight things the code forced.**
+
+- ★ **The `SpellDamage` event was carrying the *unscaled* damage.** It rode at
+  the `DoSpellCastingWork` call site, before `damage_person`'s save halving —
+  invisible while Magic Missile (`DamageOnSave::Normal`, never scaled) was the
+  only damage spell, and it drifted the presented board by half a fireball the
+  instant one landed. The M6a scene's own `reconcile` caught it on the very
+  first render of the new demo (`BoardDrift { hp_current, presented: -2, actual:
+  11 }`). The event now comes from inside `damage_person` after the scaling,
+  which is also the number the original prints (`ovr024.cs:1204-1208` reads
+  `gbl.damage` *after* the halve). Draw-neutral, and Magic Missile's event is
+  byte-identical.
+- ★ **`spellBook` is indexed `id − 1`** (`Player.cs:363`). Reading it by id
+  yields a plausible-looking but wrong grimoire (SHARA appears to know `sleep`
+  and `animate_dead`, and not `resist_cold`). `magic::knows_spell` already had
+  it right; §9.1 pins it so the next reader does not re-derive it.
+- ★ **Buff durations only tick in camp.** `CheckAffectsTimingOut`'s first branch
+  (`ovr021.cs:13-19`) fires when `game_state != Camping` and marks every
+  `affects_timed_out` slot dirty *without decrementing anything*. So a Bless cast
+  in camp survives an arbitrary amount of walking and expires during the **next**
+  rest. Replicated, dirty flags and all, and pinned by
+  `walking_never_ages_a_buff`.
+- ★ **`NonCombatSpellCast`'s `WholeParty` arm puts the caster in the list
+  twice** (`ovr023.cs:647-650`): `spellTargets` opens as `[SelectedPlayer]` at
+  `:625` and the `WholeParty` case calls `AddRange` **without clearing** where
+  every other case clears. Kept as written; the second pass finds the affect the
+  first just planted, removes it and re-adds it, so the observable result is
+  unchanged — but the message prints twice, which is the original's.
+- ★ **Hold Person cannot be cast in camp** even though its `whenCast` is
+  `Combat`: what refuses it is `targetType == SpellTargets::Combat`, so it takes
+  the "can't be cast here… Lose it?" arm. A cleric who wakes with one and finds
+  no fight can only burn the slot. Five of §9.1's rows behave this way
+  (`0x02`, `0x0F`, `0x15`, `0x17`, `0x2F`).
+- ★ **`Knock` is uncastable from either side** (§9.1's pruning note) — a shipped
+  row the original can never fire.
+- ★ **Dispel Magic in combat strips the *enemy's* buffs, not an ally's.** Its row
+  pairs `targetType = PartyMember` with `field_E = 1`, and `field_E` is what
+  `sub_4001C` reads: `find_target`'s list is the enemy near-list. The
+  `targetType` only steers the out-of-combat cast. The `affect_data == 0xFF`
+  marker every racial and item affect carries is what makes a dwarf's
+  `dwarf_vs_orc` undispellable — the loop never rolls for it.
+- ★ **`TryLooseSpell` now runs on the spell-damage path too.** `damage_person`'s
+  tail (`ovr024.cs:1244` → `:1288-1300`) clears the target's `can_cast` and
+  loses any queued cast, exactly as the melee swing already did (§45). Our Magic
+  Missile used to call `apply_damage` directly and skip it, along with the
+  `PreDamage` and `FireShield` affect dispatches; routing it through the real
+  `damage_person` closed all three at once, and the guard held.
+
+**What each half implements.** In combat: the `field_6` low-nibble targeting
+shapes `0` (self) and `8..=0xE` (area, radius `field_6 & 7`, via a new
+`build_sorted_from` anchored on a map point rather than a combatant) joined the
+tail loop that was already there; `5` and `0xF` stay tripwired because no
+must-have row uses them. `DoSpellCastingWork`, `ApplyAttackSpellAffect`,
+`damage_person` and `GetSpellAffectTimeout` are transcribed; the
+`fixedRange == -1` touch-attack arm and Dispel Magic's nine-cell ground sweep
+are cited and tripwired, both unreachable from §9.1's set. Out of combat,
+`crate::camp_cast` is `sub_5D2E1`'s non-combat arm: the "can't be cast here"
+gate, `NonCombatSpellCast`'s three-way `targetType` switch (including
+`selectAPlayer`'s "Cast Spell on whom"), and twelve effects — of which
+**Remove Curse's item arm is one combat structurally cannot have**, because a
+combatant carries no inventory.
+
+**Two named residuals closed.** Slice 4 left `scroll_5C912`'s read-magic
+unhiding and `CheckAffectsTimingOut` both waiting on "the out-of-combat affect
+system (G7's tail)". Both land here: **Read Magic** (`0x12`) plants the affect
+the scribe gate reads, and the timing-out runs at `RestSession::step`'s clock
+call with the original's own `(slot 1, 5)` arguments.
+
+**The radius-carrier range gate landed too.** M5's §39 modelled
+`calc_affect_effect`'s carrier scan but **tripped** on any carrier it found,
+because the range test and the handlers were "the spell slice's". They are
+here: a carrier counts only when the dispatched combatant is inside
+`Rebuild_SortedCombatantList(carrier, max_range, p => p == player)` — **6 for
+prayer, 1 for the three radius blessings** (`ovr024.cs:119-126`). That gate is
+the whole of Prayer's radius: `SpellPrayer`'s own targeting is `field_6 = 0`,
+the caster alone, and everyone else is reached from here. The handler is passed
+the **found** record, which for a radius kind is the *carrier's* — `AffectPrayer`
+reads its `affect_data` for the team bit, and the original hands the same object
+down (`:132`).
+
+**Affects now cross the combat boundary.** `kits::party_kits` carries each
+member's decoded chain into the fight and `combat_host::carry_affects_home`
+carries the final one back. The surviving set is the original's by
+construction: `RemoveCombatAffects`'s strip table already ran per-combatant on
+anyone who died or fled, so `paralyze`/`sleep`/`stinking_cloud` are gone while
+`bless`, `prayer` and `protection_from_evil` walk out of the fight still
+running. `DisplayMagicEffects` (slice 4's Magic ▸ D) consequently shows
+something real for the first time.
+
+**Acceptance.** (1) Real data, live: `slice5_the_spell_books_that_size_the_set`
+prints the two grimoires §9.1 is built from. (2)
+`slice5_the_cleric_casts_in_camp` boots the bundled slot-A party, camps, and
+casts three spells covering all three shapes — Bless lands on all six, Cure
+Light Wounds opens "Cast Spell on whom" and heals the member the cursor walked
+to, Hold Person is refused with "HOLD PERSON CAN'T BE CAST HERE…" + "LOSE IT?".
+Five frames dumped and eyeballed, plus a sixth of Magic ▸ Display listing
+"PROTECTION FROM EVIL / BLESS" per member. (3)
+`slice5_a_bless_and_a_fireball_on_screen` plays both casts through the M6a scene
+over the real art — 124 frames, eyeballed: "SHARA / CASTS A SPELL",
+"SPELL:BLESS" on the prompt row, "PHILIPPE / IS BLESSED" from the new
+`AffectApplied` event, then "SPELL:FIREBALL" with the missile mid-flight. (4)
+`a_bless_and_a_fireball_in_one_scripted_fight` asserts the whole draw sequence
+against the arithmetic: bless spends nothing, fireball spends one
+`find_target` pick + five d6s + one d20 per target, and every survivor's loss is
+the volley or exactly half of it.
+
+**Residuals, named.**
+
+- ★ **The fight's HP and status never reach the roster.** `combat_host` writes
+  back experience, treasure and (as of this slice) affects, but nothing syncs
+  `hit_point_current` or `health_status` — so wounds do not persist past a
+  fight. This is pre-existing and outside G7, but it is on the playthrough's
+  critical path and should be its own small slice before D-RC2's loop starts.
+- `gbl.damage_flags` (fire/cold/electricity/acid/magic) is not carried into
+  `damage_person`. It is read only by the `resist_*` affect handlers, every one
+  of which §9.1 pruned, so the visible consequence is "our fireball does not
+  respect a resist-fire ring" — and it lands with whichever slice implements the
+  first resist row.
+- Fireball's `inDungeon == 0` re-target (a radius-**2** blast outdoors,
+  `ovr023.cs:1894-1902`) is cited but not wired: `CombatState` carries no
+  dungeon/wilderness flag yet. It belongs to G2.
+- `AffectSlowPoison`'s kill-on-timeout (`ovr013.cs:305-317`) is transcribed in
+  the citation but not fired: the out-of-combat `remove_affect` does not run
+  `CallAffectTable(Remove)` handlers. Slow Poison therefore buys its five hours
+  and then simply lapses. The handler wants the same dispatch table combat has,
+  which is a G8-sized job alongside the poison arc itself.
+- The affect-effect handlers for the 77 tripwired rows remain tripwired. The
+  ones **this slice's own rows plant** are all landed, because a spell whose
+  affect trips `affect-effect` on every dispatch is not implemented: `cursed`
+  0x02, `protection_from_good` 0x09, `prot_from_evil_10_radius` 0x2D /
+  `prot_from_good_10_radius` 0x2E, `prayer` 0x31 and `blinded` 0x21 joined
+  Bless's and Protection from Evil's, and `read_magic` 0x10 / `find_traps` 0x13
+  / `slow_poison` 0x16 are explicit **no-ops** (the original's table maps the
+  first two to `ovr013.empty` and the third to a timeout-only handler).
