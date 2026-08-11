@@ -24,7 +24,7 @@ use crate::shell::FlowCtx;
 use crate::widgets::{Hotbar, ListMenu, Widget, WidgetOutcome};
 
 /// `yes_no`'s two words (`ovr027.cs`), the established idiom in this codebase.
-fn yes_no(prompt: &str) -> ConfirmWidget {
+pub(crate) fn yes_no(prompt: &str) -> ConfirmWidget {
     ConfirmWidget {
         prompt: prompt.to_string(),
         menu: Widget::Hotbar(Hotbar::new("Yes No")),
@@ -105,7 +105,7 @@ impl SpellListUi {
 /// Those two `draw8x8_*` variants are frame layouts this engine does not
 /// separate yet, so every camp list gets the outer frame; noted rather than
 /// guessed.
-fn paint_list(ctx: &mut FlowCtx, ui: &SpellListUi, name: &str, status: Option<&str>) {
+pub(crate) fn paint_list(ctx: &mut FlowCtx, ui: &SpellListUi, name: &str, status: Option<&str>) {
     ctx.fb.clear(0);
     let _ = crate::frames::draw_frame_outer(ctx.fb, ctx.symbols);
     crate::text::draw_string(ctx.fb, ctx.font, name, 1, 1, 0, 0x0F);
@@ -121,7 +121,7 @@ fn paint_list(ctx: &mut FlowCtx, ui: &SpellListUi, name: &str, status: Option<&s
     }
 }
 
-fn paint_confirm(ctx: &mut FlowCtx, confirm: &ConfirmWidget) {
+pub(crate) fn paint_confirm(ctx: &mut FlowCtx, confirm: &ConfirmWidget) {
     crate::text::draw_string(ctx.fb, ctx.font, &confirm.prompt, 0x18, 0, 0, 13);
     crate::combat::scene::render::draw_menu_line_at(
         ctx.fb,
@@ -134,11 +134,11 @@ fn paint_confirm(ctx: &mut FlowCtx, confirm: &ConfirmWidget) {
 
 /// The refusal line every gate shows: `DisplayPlayerStatusString(true, 10,
 /// text, player)` renders as `"<name> <text>"`.
-fn player_status(name: &str, text: &str) -> String {
+pub(crate) fn player_status(name: &str, text: &str) -> String {
     format!("{name} {text}")
 }
 
-fn member_name(ctx: &FlowCtx, member: usize) -> String {
+pub(crate) fn member_name(ctx: &FlowCtx, member: usize) -> String {
     ctx.roster
         .members
         .get(member)
@@ -1000,7 +1000,7 @@ impl RestScreen {
 const REST_ITERATIONS_PER_TICK: usize = 8;
 
 /// `gbl.SelectedPlayer`'s roster index, clamped.
-fn selected_member(ctx: &FlowCtx) -> usize {
+pub(crate) fn selected_member(ctx: &FlowCtx) -> usize {
     let count = ctx.roster.members.len();
     if count == 0 {
         0

@@ -439,3 +439,365 @@ fn queued_hold_draws_three_picks_and_saves_per_unique_target() {
         let _ = saved_all; // outcome depends on the seed's rolls; both legal
     }
 }
+
+// ===========================================================================
+// ★ Roll-credits slice 5 — the twenty new rows, in combat
+// ===========================================================================
+
+use crate::spells::{AFF_BLESS, AFF_BLINDED, AFF_CURSED, AFF_PRAYER, AFF_PROT_EVIL, AFF_SLEEP};
+
+/// The cleric fixture with one spell memorized and PC magic switched on.
+fn buff_world(spell_id: u8) -> CombatWorld {
+    let mut w = cleric_world();
+    w.fighters[0].memorized_list = vec![spell_id];
+    w.auto_pcs_cast_magic = true;
+    w
+}
+
+/// ★ **Bless** (`cleric_bless` → `CastTeamSpell`, `ovr023.cs:990-1006`).
+///
+/// `field_6 = 10` is the area shape, radius `10 & 7 = 2` around the caster, so
+/// the pre-filter list is everyone within two squares; `CastTeamSpell` then
+/// keeps only the caster's own team **and** drops anybody with an enemy
+/// adjacent. Duration is the row's flat `fixedDuration = 6` minutes, and the
+/// affect's `data` is the casting level.
+#[test]
+fn bless_lands_on_the_casters_team_only() {
+    let mut w = buff_world(0x01);
+    let mut rng = EngineRng::new(SEED);
+    // castingDelay 10 → 10/3 = 3 → the cast QUEUES rather than firing now.
+    assert!(w.spell_menu3(&mut rng, 0, 0x01));
+    assert_eq!(w.fighters[0].pending_spell, Some(0x01));
+    // Resolve it directly, the way the next pick would.
+    w.fighters[0].pending_spell = None;
+    w.sub_5d2e1(&mut rng, 0, 0x01);
+    assert!(
+        w.fighters[0].has_affect(AFF_BLESS),
+        "the caster blesses himself"
+    );
+    assert!(w.fighters[1].has_affect(AFF_BLESS), "and his ally");
+    for m in 2..6 {
+        assert!(
+            !w.fighters[m].has_affect(AFF_BLESS),
+            "monsters are the other team"
+        );
+    }
+    let a = w.fighters[0].find_affect(AFF_BLESS).expect("bless");
+    assert_eq!(a.minutes, 6, "fixedDuration 6, perLvlDuration 0");
+    assert_eq!(a.data, 5, "data = spellMaxTargetCount = cleric level 5");
+}
+
+/// The melee filter (`:994`): a team-mate who already has an enemy adjacent is
+/// dropped from a **Bless** — and only from a Bless (the `spell_id ==
+/// Spells.bless` conjunct). Curse, which shares the function, has no such gate.
+#[test]
+fn bless_skips_anyone_already_engaged() {
+    let mut w = buff_world(0x01);
+    // Park a monster right next to the ally at (11,10).
+    w.fighters[2].pos = GridPos::new(12, 10);
+    w.rebuild_occupancy();
+    let mut rng = EngineRng::new(SEED);
+    w.sub_5d2e1(&mut rng, 0, 0x01);
+    assert!(w.fighters[0].has_affect(AFF_BLESS));
+    assert!(
+        !w.fighters[1].has_affect(AFF_BLESS),
+        "engaged in melee — no bless"
+    );
+}
+
+/// **Curse** is the same function with `OppositeTeam()`, landing `cursed` on
+/// the monsters instead. Its area is still centred on the caster, so the
+/// monsters have to be inside radius 2 to be caught.
+#[test]
+fn curse_lands_on_the_other_team() {
+    let mut w = buff_world(0x02);
+    for (i, m) in (2..6).enumerate() {
+        w.fighters[m].pos = GridPos::new(10 + i as i32, 11);
+    }
+    w.rebuild_occupancy();
+    let mut rng = EngineRng::new(SEED);
+    w.sub_5d2e1(&mut rng, 0, 0x02);
+    assert!(!w.fighters[0].has_affect(AFF_CURSED));
+    let cursed = (2..6)
+        .filter(|&m| w.fighters[m].has_affect(AFF_CURSED))
+        .count();
+    assert!(cursed > 0, "the monsters in range are cursed");
+}
+
+/// ★ **Protection from Evil** (`SpellProtectionFromX`): `field_6 = 4` with
+/// `field_E = 0`, so `sub_4001C` returns the CASTER and nobody else — in
+/// combat the cleric protects himself. Duration `0 + 3 × castingLvl`.
+#[test]
+fn protection_from_evil_lands_on_the_caster_for_three_minutes_a_level() {
+    let mut w = buff_world(0x06);
+    let mut rng = EngineRng::new(SEED);
+    w.sub_5d2e1(&mut rng, 0, 0x06);
+    let a = w.fighters[0].find_affect(AFF_PROT_EVIL).expect("prot evil");
+    assert_eq!(a.minutes, 15, "0 + 3 × 5");
+    assert!(!w.fighters[1].has_affect(AFF_PROT_EVIL));
+}
+
+/// ★ **Prayer** (`SpellPrayer`, `ovr023.cs:1823-1829`): `field_6 = 0` is the
+/// self shape, so only the caster carries the affect — its **radius** comes
+/// from `calc_affect_effect`'s carrier scan, not from the targeting. The
+/// `data` byte packs the caster's team in bit 4 and the casting level below it.
+#[test]
+fn prayer_lands_on_the_caster_with_the_team_encoded_in_its_data() {
+    let mut w = buff_world(0x2A);
+    let mut rng = EngineRng::new(SEED);
+    w.sub_5d2e1(&mut rng, 0, 0x2A);
+    let a = w.fighters[0].find_affect(AFF_PRAYER).expect("prayer");
+    // Team::Party = 0 → `0 * 16 + 5`.
+    assert_eq!(a.data, 5);
+    assert_eq!(a.minutes, 5, "0 + 1 × castingLvl");
+    for m in 1..6 {
+        assert!(!w.fighters[m].has_affect(AFF_PRAYER));
+    }
+}
+
+/// ★ **Sleep** (`SpellSleep`, `ovr023.cs:1187-1245`): one 4d4 power roll, then
+/// the area list is spent in order against each target's hit-dice cost. No
+/// saving throw at all — `damageOnSave` is `Normal`.
+#[test]
+fn sleep_spends_a_4d4_pool_against_hit_dice() {
+    let mut w = buff_world(0x15);
+    w.fighters[0].skill_level_magic_user = 5;
+    // Cluster the monsters around the caster so the radius-1 area catches them.
+    for (i, m) in (2..6).enumerate() {
+        w.fighters[m].pos = GridPos::new(9 + (i as i32 % 2), 9 + (i as i32 / 2));
+        w.fighters[m].hit_dice = 1; // cost 1 each
+    }
+    w.rebuild_occupancy();
+    let log = DrawLog::default();
+    let mut rng = EngineRng::new(SEED);
+    rng.attach_sink(log.sink());
+    w.sub_5d2e1(&mut rng, 0, 0x15);
+    let ns = log.ns();
+    assert_eq!(
+        ns.iter().filter(|&&n| n == 4).count(),
+        5,
+        "one find_target d(count) for the centre + four d4s for the pool: {ns:?}"
+    );
+    assert!(
+        ns.iter().all(|&n| n != 20),
+        "damageOnSave Normal ⇒ no saving throw: {ns:?}"
+    );
+    let asleep = (0..6)
+        .filter(|&i| w.fighters[i].has_affect(AFF_SLEEP))
+        .count();
+    assert!(asleep > 0, "a 4d4 pool covers several 1-HD targets");
+}
+
+/// The cost ladder (`CalcSleepCost`, `:1211-1245`), including the 5-HD rung's
+/// race split — a 5-HD monster costs 10, a 5-HD anything-else costs 20.
+#[test]
+fn sleep_cost_ladder_matches_the_original() {
+    let mut w = buff_world(0x15);
+    for (hd, race, want) in [
+        (0u8, 0u8, 1i32),
+        (1, 0, 1),
+        (2, 0, 2),
+        (3, 0, 4),
+        (4, 0, 6),
+        (5, 8, 10), // Race.monster
+        (5, 7, 20), // human
+        (9, 8, 20),
+    ] {
+        w.fighters[2].hit_dice = hd;
+        w.fighters[2].race = race;
+        assert_eq!(w.calc_sleep_cost(2), want, "hd {hd} race {race}");
+    }
+}
+
+/// ★ **Fireball** (`sub_5F782`, `ovr023.cs:1878-1907`): `castingLvl` d6s rolled
+/// **once**, then `DoSpellCastingWork` spreads that number over the radius-3
+/// area with `DamageOnSave::Half` — one d20 per target, and a made save halves.
+#[test]
+fn fireball_rolls_one_volley_and_halves_it_on_a_save() {
+    let mut w = buff_world(0x2F);
+    w.fighters[0].skill_level_magic_user = 5;
+    for (i, m) in (2..6).enumerate() {
+        w.fighters[m].pos = GridPos::new(11 + (i as i32 % 2), 11 + (i as i32 / 2));
+        w.fighters[m].hp_current = 40;
+        w.fighters[m].hp_max = 40;
+    }
+    w.rebuild_occupancy();
+    let log = DrawLog::default();
+    let mut rng = EngineRng::new(SEED);
+    rng.attach_sink(log.sink());
+    w.sub_5d2e1(&mut rng, 0, 0x2F);
+    let ns = log.ns();
+    assert_eq!(
+        ns.iter().filter(|&&n| n == 6).count(),
+        5,
+        "five d6s — the caster's magic-user level: {ns:?}"
+    );
+    let saves = ns.iter().filter(|&&n| n == 20).count();
+    assert!(
+        saves >= 4,
+        "one save per target caught in the blast: {ns:?}"
+    );
+    assert!(
+        (2..6).any(|m| w.fighters[m].hp_current < 40),
+        "the blast hurt somebody"
+    );
+}
+
+/// ★ **Cure Serious / Cure Critical** — `SpellCureLight` with a bigger roll
+/// (`2d8+1` at `:2179`, `3d8+3` at `:2314`), capped at `hp_max`.
+#[test]
+fn the_bigger_cures_roll_their_own_dice() {
+    for (id, count, bonus) in [(0x3Au8, 2usize, 1i32), (0x47, 3, 3)] {
+        let mut w = buff_world(id);
+        w.fighters[0].hp_current = 10;
+        w.fighters[0].hp_max = 55;
+        let log = DrawLog::default();
+        let mut rng = EngineRng::new(SEED);
+        rng.attach_sink(log.sink());
+        w.sub_5d2e1(&mut rng, 0, id);
+        let ns = log.ns();
+        assert_eq!(
+            ns.iter().filter(|&&n| n == 8).count(),
+            count,
+            "{id:#04x}: {count} d8s, got {ns:?}"
+        );
+        let mut replay = Replay::new(SEED);
+        let rolled: i32 = (0..count).map(|_| replay.roll(8) as i32).sum();
+        assert_eq!(w.fighters[0].hp_current, 10 + rolled + bonus);
+    }
+}
+
+/// ★ **Cure Blindness** (`can_see`, `:1587`) — `cure_affect` on `blinded`, and
+/// nothing at all when the target is not blind. Draw-free.
+#[test]
+fn cure_blindness_strips_only_the_blinded_affect() {
+    let mut w = buff_world(0x25);
+    w.fighters[0].add_affect(AFF_BLINDED, 0, 0xFF, false);
+    w.fighters[0].add_affect(AFF_BLESS, 6, 5, false);
+    let log = DrawLog::default();
+    let mut rng = EngineRng::new(SEED);
+    rng.attach_sink(log.sink());
+    w.sub_5d2e1(&mut rng, 0, 0x25);
+    assert_eq!(log.len(), 0, "a cure is draw-free");
+    assert!(!w.fighters[0].has_affect(AFF_BLINDED));
+    assert!(
+        w.fighters[0].has_affect(AFF_BLESS),
+        "and leaves everything else alone"
+    );
+}
+
+/// ★ **Dispel Magic** (`is_affected3`, `:1667-1716`): one d100 per affect whose
+/// `affect_data < 0xFF`, against the caster-level ladder. `0xFF` is the
+/// "not from a spell" marker every racial affect carries — a dwarf's
+/// `dwarf_vs_orc` is undispellable, and that is the point of the check.
+///
+/// Note **who** gets dispelled: the row pairs `targetType = PartyMember` with
+/// `field_E = 1`, so `sub_4001C` runs `find_target`, whose list is the
+/// **enemy** near-list. In combat the AI's Dispel Magic therefore strips a
+/// monster's buffs, not an ally's — the row's `targetType` only steers the
+/// *out-of-combat* cast. Every monster here carries the same three affects so
+/// the assertion does not depend on which one the d4 pick lands on.
+#[test]
+fn dispel_magic_rolls_only_against_spell_affects() {
+    let mut w = buff_world(0x29);
+    for m in 2..6 {
+        w.fighters[m].add_affect(AFF_BLESS, 6, 5, false);
+        w.fighters[m].add_affect(AFF_PROT_EVIL, 15, 5, false);
+        w.fighters[m].add_affect(0x1A, 0, 0xFF, false); // dwarf_vs_orc
+    }
+    let log = DrawLog::default();
+    let mut rng = EngineRng::new(SEED);
+    rng.attach_sink(log.sink());
+    w.sub_5d2e1(&mut rng, 0, 0x29);
+    let ns = log.ns();
+    let d100s = ns.iter().filter(|&&n| n == 100).count();
+    assert_eq!(d100s, 2, "one roll per spell-planted affect, got {ns:?}");
+    for m in 2..6 {
+        assert!(
+            w.fighters[m].has_affect(0x1A),
+            "the racial affect is never rolled for, so it never goes"
+        );
+    }
+}
+
+/// The ladder (`:1690-1704`): equal levels is 50%, each level of caster
+/// advantage adds 5, each level of deficit subtracts 2. A level-1 caster
+/// against affects stored at level 15 needs a 22 or better on every one of
+/// eight rolls, which no seed delivers.
+#[test]
+fn dispel_magics_ladder_favours_the_stronger_caster() {
+    let mut low = buff_world(0x29);
+    low.fighters[0].skill_level_cleric = 1;
+    for m in 2..6 {
+        for _ in 0..8 {
+            low.fighters[m].add_affect(AFF_BLESS, 6, 15, false);
+        }
+    }
+    let mut rng = EngineRng::new(SEED);
+    low.sub_5d2e1(&mut rng, 0, 0x29);
+    let left: usize = (2..6)
+        .map(|m| {
+            low.fighters[m]
+                .affects
+                .iter()
+                .filter(|a| a.kind == AFF_BLESS)
+                .count()
+        })
+        .sum();
+    assert!(
+        left >= 8 * 3,
+        "a level-1 caster cannot strip a whole level-15 affect set (left {left})"
+    );
+}
+
+/// ★ **`DoSpellCastingWork`'s save gate** (`ovr023.cs:585-591`): a `Normal` row
+/// rolls nothing. Magic Missile is the case the captures pin.
+#[test]
+fn only_a_non_normal_row_spends_a_saving_throw() {
+    let mut w = caster_world();
+    let log = DrawLog::default();
+    let mut rng = EngineRng::new(SEED);
+    rng.attach_sink(log.sink());
+    w.sub_5d2e1(&mut rng, 0, 0x0F);
+    assert!(
+        log.ns().iter().all(|&n| n != 20),
+        "Magic Missile is DamageOnSave::Normal — no save: {:?}",
+        log.ns()
+    );
+}
+
+/// ★ **`TryLooseSpell`** (`ovr024.cs:1288-1300`) now runs on the spell damage
+/// path too: a caster who takes a Magic Missile loses `can_cast` for the round
+/// **and** any queued cast, exactly as a melee hit already did (§45).
+#[test]
+fn spell_damage_disrupts_the_targets_casting() {
+    let mut w = caster_world();
+    w.fighters[1].can_cast = true;
+    w.fighters[1].pending_spell = Some(0x03);
+    w.fighters[1].memorized_list = vec![0x03, 0x03];
+    let mut rng = EngineRng::new(SEED);
+    w.sub_5d2e1(&mut rng, 0, 0x0F);
+    assert!(!w.fighters[1].can_cast, "damage kills this round's casting");
+    assert_eq!(w.fighters[1].pending_spell, None, "the queued cast is lost");
+    assert_eq!(
+        w.fighters[1].memorized_list,
+        vec![0x03],
+        "…and ClearSpell takes the slot with it"
+    );
+}
+
+/// The area shape's list is the **unfiltered** sorted one — both teams and the
+/// aim point's own occupant — which is why Fireball hurts the party and Bless
+/// needs its own team filter afterwards.
+#[test]
+fn the_area_shape_returns_both_teams() {
+    let mut w = buff_world(0x01);
+    for (i, m) in (2..6).enumerate() {
+        w.fighters[m].pos = GridPos::new(10 + (i as i32 % 2), 11 + (i as i32 / 2));
+    }
+    w.rebuild_occupancy();
+    let list = w.build_sorted_at(GridPos::new(10, 10), 2);
+    assert!(list.contains(&0), "the caster is in his own blast");
+    assert!(list.contains(&1), "so is his ally");
+    assert!(list.iter().any(|&i| i >= 2), "and the monsters");
+}

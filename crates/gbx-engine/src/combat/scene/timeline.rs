@@ -483,6 +483,23 @@ impl Composer<'_> {
                 self.status_beat(target_id, text);
             }
 
+            // ★ Roll-credits slice 5: the affect a spell just planted or
+            // stripped. `MagicAttackDisplay(text, …)` prints the *caster's*
+            // text, so the verb belongs to the spell — `strings::affect_landed`
+            // maps the affect id back to the line the caster's row would have
+            // supplied ("is Blessed", "is protected", "falls asleep", …).
+            ActionEvent::AffectApplied {
+                target_id,
+                affect_id,
+            } => {
+                let text = strings::affect_landed(affect_id).to_string();
+                self.status_beat(target_id, text);
+            }
+            ActionEvent::AffectCured { target_id, .. } => {
+                // `cure_affect`'s own line (`ovr024.cs:710`).
+                self.status_beat(target_id, strings::IS_CURED.to_string());
+            }
+
             // --- leaving the board ----------------------------------------
             ActionEvent::Removed {
                 combatant_id,

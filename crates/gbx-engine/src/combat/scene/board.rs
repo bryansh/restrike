@@ -333,6 +333,13 @@ impl PresentedBoard {
                 }
             }
 
+            // ★ Roll-credits slice 5: an affect landed or came off. Neither
+            // touches the four D-CV2 board scopes (position, hp, health status,
+            // in-combat) — the shadow board does not model affect chains at
+            // all, and the engine's own reconcile is what carries them. Explicit
+            // no-op arms, per this match's exhaustive-on-purpose rule.
+            ActionEvent::AffectApplied { .. } | ActionEvent::AffectCured { .. } => {}
+
             ActionEvent::Removed {
                 combatant_id,
                 reason,

@@ -1108,6 +1108,29 @@ pub enum ActionEvent {
         to_x: i32,
         to_y: i32,
     },
+    // ★ Roll-credits slice 5's two affect events. Before it, the only spell
+    // that landed an affect in combat was Hold Person, whose message the
+    // §49 peel routed through `MultiTargetedSpell`'s own path; the twenty new
+    // rows plant and strip affects all over the board and the presented screen
+    // has to say so. Both are engine-local presentation, like every event
+    // below `Move` — the `.gbxtrace` `action` profile stays FROZEN, and each
+    // gets its own drop arm in the oracle collector.
+    /// `ApplyAttackSpellAffect`'s landing (`is_unaffected`'s else arm,
+    /// `ovr024.cs:1316-1331`) — the affect went on. The message is
+    /// `MagicAttackDisplay(text, …)` with the *caster's* text, so the verb
+    /// belongs to the spell rather than the affect ("is Blessed", "is
+    /// protected", "falls asleep"); [`crate::combat::scene`] maps the affect id
+    /// back to it.
+    AffectApplied { target_id: usize, affect_id: u8 },
+    /// `cure_affect` (`is_cured`, `ovr024.cs:705-718`) and Dispel Magic's
+    /// per-affect strip (`ovr023.cs:1707-1716`) — an affect came off. The
+    /// original's line is "is Cured" for the cure spells and "is affected" for
+    /// a dispel, which is why the caster rides along.
+    AffectCured {
+        caster_id: usize,
+        target_id: usize,
+        affect_id: u8,
+    },
 }
 
 /// `DisplayAttackMessage`'s `AttackType` (`ovr014.cs:104-110`) minus `Slay`,
@@ -3930,7 +3953,39 @@ pub fn build_sorted_combatants(
     ignore_walls: bool,
 ) -> Vec<NearTarget> {
     let attacker = combatants[attacker_idx];
-    let attacker_map = size_footprint(attacker.size, attacker.pos);
+    build_sorted_from(
+        map,
+        combatants,
+        attacker.pos,
+        attacker.size,
+        max_range,
+        ignore_walls,
+    )
+}
+
+/// [`build_sorted_combatants`] anchored on a **map point** rather than on a
+/// combatant — the `Rebuild_SortedCombatantList(size, max_range, pos, filter)`
+/// overload the spell area shapes call (`ovr014.cs:1286`, `:1298`;
+/// `sub_5F782`'s outdoor fireball, `ovr023.cs:1895`; and
+/// `calc_affect_effect`'s radius-carrier range gate, `ovr024.cs:121`).
+///
+/// The original passes `size = 1` at every one of those sites, so the anchor
+/// footprint is a single cell; the parameter is kept because the signature has
+/// it. Draw-free, like the whole builder.
+///
+/// ★ Roll-credits slice 5 split this out of [`build_sorted_combatants`]; the
+/// combatant-anchored path is now literally this function with the combatant's
+/// own `(pos, size)`, so nothing about the sorted-list machinery — including
+/// the §20/§15 exchange-sort quirks documented above — changed.
+pub fn build_sorted_from(
+    map: &CombatMap,
+    combatants: &[RangeCombatant],
+    anchor_pos: GridPos,
+    anchor_size: u8,
+    max_range: i32,
+    ignore_walls: bool,
+) -> Vec<NearTarget> {
+    let attacker_map = size_footprint(anchor_size, anchor_pos);
 
     let mut out: Vec<(NearTarget, u8)> = Vec::new();
 

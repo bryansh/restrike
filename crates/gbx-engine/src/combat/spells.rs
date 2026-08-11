@@ -48,6 +48,16 @@ pub(super) use crate::spells::{
 /// (`ovr023.cs:714`) draws a d2 only when the caster `HasAffect(0x4A)`.
 const AFF_4A: u8 = 0x4A;
 
+/// What `ovr014.target` leaves behind: `gbl.spellTargets` **and**
+/// `gbl.targetPos`. They are separate globals and they genuinely differ for an
+/// area spell — the list is whoever the blast caught, the position is where it
+/// was aimed — so the caller's missile camera must read the second, not the
+/// last entry of the first.
+struct SpellAim {
+    targets: Vec<usize>,
+    target_pos: GridPos,
+}
+
 /// `unk_18ADB[1..=4]` (`ovr014.cs:1093`, `seg600:27CB`; index 0 = `bless` filler)
 /// == `held_affects` (`Player.cs:845`): snake_charm 0x33, paralyze 0x34, sleep
 /// 0x35, helpless 0x1F. `sub_4001C`'s held-target filter rejects a pick whose
@@ -270,7 +280,8 @@ impl CombatState {
         // SpellCastFunction = target(quick_fight, spell_id) (@0733) — fills
         // gbl.spellTargets (the multi-target loop draws its find_target picks
         // here, doc §48).
-        let targets = self.spell_target_with(rng, actor, spell_id, targeting);
+        let aim = self.spell_target_with(rng, actor, spell_id, targeting);
+        let targets = aim.targets;
         // D-CV2 `Cast` + one `SpellTarget` per pick, emitted once the targeting
         // pass has run (its `find_target` d10s are already drawn) and before the
         // missile camera below — message, then the targets it highlights, then
@@ -290,17 +301,18 @@ impl CombatState {
             self.clear_spell(actor, spell_id);
             return;
         }
-        // gbl.targetPos after ovr014.target = the LAST added target's pos.
-        let target = *targets.last().expect("nonempty");
 
         // The missile camera (@0741-0768, doc §41.3 step 4). Draw-free — only the
-        // persistent mapScreenTopLeft/direction effects are ported.
+        // persistent mapScreenTopLeft/direction effects are ported. ★ It flies
+        // to `gbl.targetPos`, not to `spellTargets.Last()`: for an area spell
+        // those differ (the aim point vs whoever the sorted list ended on), and
+        // the original always uses the aim point.
         let caster_pos = self.fighters[actor].pos;
-        let target_pos = self.fighters[target].pos;
+        let target_pos = aim.target_pos;
         let direction = find_combatant_direction(target_pos, caster_pos);
         self.focus = true; // focusCombatAreaOnPlayer = true (@0746)
         self.draw_74b3f(actor, direction); // draw_74B3F(false, Attack, dir, caster)
-        self.draw_missile_camera(actor, target); // draw_missile_attack(0x1E, 4, ...)
+        self.draw_missile_camera_between(caster_pos, target_pos);
         if self.on_screen(actor) {
             // The on-screen attack-icon pair (@0764-0768): direction re-stores
             // (no-ops, same value) + recenter checks (caster on-screen → no-op).
@@ -316,72 +328,218 @@ impl CombatState {
         self.clear_spell(actor, spell_id);
 
         // gbl.spellTable[spell_id] (@0780-0781) — the per-spell function.
+        self.spell_table(rng, actor, spell_id, &targets, target_pos);
+    }
+
+    /// `gbl.spellTable[spell_id]` (`ovr023.cs:3146-3253`) — the per-spell
+    /// function, for §9.1's must-have set.
+    ///
+    /// Camp-only rows (`0x12` Read Magic, `0x16` Find Traps, `0x27` Cure
+    /// Disease, `0x43` Neutralize Poison, `0x4B` Raise Dead) are unreachable
+    /// from here: `spell_menu3` refuses them before the cast starts, which is
+    /// where the "Camp Only Spell" line comes from (`ovr014.cs:1386`). They
+    /// reach the roster instead, through [`crate::camp_cast`].
+    fn spell_table(
+        &mut self,
+        rng: &mut EngineRng,
+        actor: usize,
+        spell_id: u8,
+        targets: &[usize],
+        target_pos: GridPos,
+    ) {
         match spell_id {
-            0x03 => self.spell_cure_light(rng, actor, &targets),
-            0x0F => self.spell_magic_missile(rng, actor, spell_id, target),
-            0x17 => self.spell_hold_x(rng, actor, spell_id, &targets),
-            _ => unreachable!("spell_entry gated"),
+            // `cleric_bless` / `cleric_curse` — one function, two teams
+            // (`CastTeamSpell`, `ovr023.cs:990-1011`).
+            0x01 => {
+                let team = self.fighters[actor].team;
+                self.cast_team_spell(rng, actor, spell_id, targets, team);
+            }
+            0x02 => {
+                let team = match self.fighters[actor].team {
+                    Team::Party => Team::Monster,
+                    Team::Monster => Team::Party,
+                }; // `OppositeTeam()` (`Player.cs`)
+                self.cast_team_spell(rng, actor, spell_id, targets, team);
+            }
+            0x03 => self.spell_cure_light(rng, actor, targets),
+            // `SpellProtectionFromX` / `is_affected` — `DoSpellCastingWork`
+            // with no damage: the row's `affect_id` is the whole effect
+            // (`ovr023.cs:1030`, `:1036`).
+            0x06 | 0x07 | 0x45 => {
+                self.do_spell_casting_work(rng, actor, spell_id, targets, 0, false, 0)
+            }
+            0x0F => self.spell_magic_missile(rng, actor, spell_id, targets),
+            0x15 => self.spell_sleep(rng, actor, spell_id, targets),
+            0x17 => self.spell_hold_x(rng, actor, spell_id, targets),
+            // `is_affected2` — Slow Poison (`ovr023.cs:1291-1311`).
+            0x1A => self.spell_slow_poison(rng, actor, spell_id, targets),
+            // `SpellCureBlindness` (`:1587`).
+            0x25 => self.spell_cure_blindness(actor, targets),
+            0x29 | 0x2E => self.spell_dispel_magic(rng, actor, spell_id, targets, target_pos),
+            // `SpellPrayer` (`:1823`): the affect's `data` byte encodes the
+            // caster's team in bit 4 and the casting level in the low nibble.
+            0x2A => {
+                let team_bit = (self.fighters[actor].team as i32) * 16;
+                let lvl = self.spell_max_target_count(actor, SpellClass::Cleric);
+                self.do_spell_casting_work(rng, actor, spell_id, targets, 0, false, team_bit + lvl)
+            }
+            // `SpellRemoveCurse` (`:1831`).
+            0x2B => self.spell_remove_curse(actor, targets),
+            0x2F => self.spell_fireball(rng, actor, spell_id, targets, target_pos),
+            // `SpellCureSeriousWounds` (`:2177`) / `SpellCureCriticalWounds`
+            // (`:2312`) — `heal_player` with a bigger roll, same shape as CLW.
+            0x3A => {
+                let heal = i32::from(roll_dice(rng, 8, 2)) + 1;
+                self.heal_first_target(actor, targets, heal);
+            }
+            0x47 => {
+                let heal = i32::from(roll_dice(rng, 8, 3)) + 3;
+                self.heal_first_target(actor, targets, heal);
+            }
+            _ => {
+                // A transcribed row with no combat handler — the camp-only set.
+                // `spell_menu3` should already have refused it; reaching here
+                // means the refusal was bypassed, which is a real surprise.
+                let id = self.fighters[actor].id;
+                self.emit(ActionEvent::StubTripped {
+                    combatant_id: id,
+                    stub: "spell-camp-only",
+                });
+            }
         }
     }
 
-    /// `ovr014.target(quick_fight, spell_id)` (`ovr014.cs:1164`) for the
-    /// TAIL targeting branch (doc §41.3 step 2/§48): a nibble NOT in
-    /// {0, 5, 8..=0xF} runs the `max_targets = (field_6 & 3) + 1` loop
-    /// (`ovr014.cs:1322-1358`) — Magic Missile (4) makes 1
-    /// [`sub_4001c`](Self::sub_4001c) pick, hold person (6) makes 3. Each
-    /// successful pick draws its own `find_target` d(count); a DUPLICATE pick
-    /// still decrements `max_targets` in QuickFight (`:1345-1352`) but adds no
-    /// entry; a failed pick zeroes the loop. Every other shape nibble is
-    /// cited + tripped (`spell-target-shape`): `0` self, `5` budgeted-multi
-    /// (a 2d4 draw), `8..=E` area, `0xF` held/area. Returns `gbl.spellTargets`
-    /// (empty = no cast).
+    /// `ovr014.target(quick_fight, spell_id)` (`ovr014.cs:1164-1362`) — the
+    /// four targeting shapes the low nibble of `field_6` selects, plus
+    /// `gbl.targetPos`, which is a separate output the caller's missile camera
+    /// reads (doc §41.3 step 2/§48).
+    ///
+    /// | nibble | shape | must-have rows |
+    /// |---|---|---|
+    /// | `0` | **self** — clear, add the caster, no pick at all (`:1176-1180`) | Prayer `0x2A`; the camp-only rows |
+    /// | `5` | budgeted-multi: a `2d4` power pool spent against each pick's hit dice (`:1182-1268`) | none — **tripwired** |
+    /// | `8..=0xE` | **area**: one pick (empty ground allowed), then everyone within `field_6 & 7` of it (`:1294-1312`) | Sleep `0x15`, Dispel Magic `0x29`/`0x2E`, Fireball `0x2F` |
+    /// | `0xF` | the held/area hybrid (`:1270-1292`) | none — **tripwired** |
+    /// | else | the `max_targets = (field_6 & 3) + 1` loop (`:1314-1358`) | MM `0x0F` (1 pick), CLW `0x03` (1), Hold `0x17` (3), the buffs/cures (1) |
+    ///
+    /// ★ Roll-credits slice 5 landed the `0` and `8..=0xE` arms; before it,
+    /// every non-tail nibble tripped `spell-target-shape`. The tail arm is
+    /// byte-for-byte the one the captures ride.
     fn spell_target_with(
         &mut self,
         rng: &mut EngineRng,
         actor: usize,
         spell_id: u8,
         targeting: Targeting<'_>,
-    ) -> Vec<usize> {
+    ) -> SpellAim {
         let entry = spell_entry(spell_id).expect("caller guarantees a transcribed id");
         let nibble = entry.field_6 & 0x0F;
-        let tail_branch = !(nibble == 0 || nibble == 5 || (8..=0x0F).contains(&nibble));
-        if !tail_branch {
-            let id = self.fighters[actor].id;
-            self.emit(ActionEvent::StubTripped {
-                combatant_id: id,
-                stub: "spell-target-shape",
-            });
-            return Vec::new();
-        }
-        // ★ M6c: the manual arm. Each of the loop's `sub_4001C` calls opened
-        // the **aim menu** (`ovr014.cs:1098-1103`) instead of drawing a
-        // `find_target` pick, so the picks are already made and this whole loop
-        // is draw-free. Its rules — at most `(field_6 & 3) + 1` distinct
-        // targets, an aborted aim ending the loop, an empty list meaning no
-        // cast — are enforced where the picks are collected
-        // ([`CombatState::issue`]'s `CastSpell` arm).
-        if let Targeting::Manual(picked) = targeting {
-            return picked.to_vec();
-        }
-        // The max_targets loop (@1327-1358): MM 1 pick, hold person 3.
-        let mut max_targets = (entry.field_6 & 3) as i32 + 1;
-        let mut targets: Vec<usize> = Vec::new();
-        while max_targets > 0 {
-            match self.sub_4001c(rng, actor, spell_id) {
-                Some(t) => {
-                    if !targets.contains(&t) {
-                        targets.push(t);
-                        max_targets -= 1;
-                    } else {
-                        // "Already been targeted" — QuickFight decrements
-                        // anyway (`:1345-1352`), no duplicate entry.
-                        max_targets -= 1;
+        // `gbl.targetPos = PlayerMapPos(SelectedPlayer)` (@1172) — the default
+        // every arm may overwrite.
+        let mut aim = SpellAim {
+            targets: Vec::new(),
+            target_pos: self.fighters[actor].pos,
+        };
+        match nibble {
+            // The self arm (@1176-1180): no pick, no draw, no aim menu.
+            0 => {
+                aim.targets.push(actor);
+                aim
+            }
+            // The two shapes no must-have row uses, cited and tripped.
+            5 | 0x0F => {
+                let id = self.fighters[actor].id;
+                self.emit(ActionEvent::StubTripped {
+                    combatant_id: id,
+                    stub: "spell-target-shape",
+                });
+                aim.targets.clear();
+                aim
+            }
+            // The area arm (@1294-1312): `sub_4001C(canTargetEmptyGround =
+            // true)` picks the centre — in QuickFight that is still
+            // `find_target`'s d(count), because the AI has no cursor — and then
+            // `Rebuild_SortedCombatantList(1, field_6 & 7, targetPos, all)`
+            // replaces the list with **everyone** in the blast, both teams and
+            // the caster included. A failed pick means no cast.
+            8..=0x0E => {
+                let Some(centre) = self.pick_one(rng, actor, spell_id, targeting, 0) else {
+                    aim.targets.clear();
+                    return aim;
+                };
+                aim.target_pos = self.fighters[centre].pos;
+                let radius = (entry.field_6 & 7) as i32;
+                aim.targets = self.build_sorted_at(aim.target_pos, radius);
+                aim
+            }
+            // The tail arm (@1314-1358): MM 1 pick, hold person 3.
+            _ => {
+                let mut max_targets = (entry.field_6 & 3) as i32 + 1;
+                let mut index = 0usize;
+                while max_targets > 0 {
+                    match self.pick_one(rng, actor, spell_id, targeting, index) {
+                        Some(t) => {
+                            index += 1;
+                            if !aim.targets.contains(&t) {
+                                aim.targets.push(t);
+                                aim.target_pos = self.fighters[t].pos; // @1349
+                                max_targets -= 1;
+                            } else {
+                                // "Already been targeted" — QuickFight
+                                // decrements anyway (`:1345-1352`), no
+                                // duplicate entry.
+                                max_targets -= 1;
+                            }
+                        }
+                        None => max_targets = 0,
                     }
                 }
-                None => max_targets = 0,
+                if aim.targets.is_empty() {
+                    // `castSpell = false; gbl.targetPos = new Point()` (@1360).
+                    aim.target_pos = GridPos::new(0, 0);
+                }
+                aim
             }
         }
-        targets
+    }
+
+    /// One `sub_4001C` pick, from whichever side of the `quick_fight` fork this
+    /// cast is on.
+    ///
+    /// ★ **M6c**: with `QuickFight.False` the call opened the **aim menu**
+    /// (`ovr014.cs:1098-1103`) rather than drawing, so the picks are already
+    /// made and this whole path is draw-free. `index` is which of them this
+    /// call consumes — running off the end is the aborted-aim case, which ends
+    /// the loop exactly as a failed `find_target` does.
+    fn pick_one(
+        &mut self,
+        rng: &mut EngineRng,
+        actor: usize,
+        spell_id: u8,
+        targeting: Targeting<'_>,
+        index: usize,
+    ) -> Option<usize> {
+        match targeting {
+            Targeting::Auto => self.sub_4001c(rng, actor, spell_id),
+            Targeting::Manual(picked) => picked.get(index).copied(),
+        }
+    }
+
+    /// `Rebuild_SortedCombatantList(1, max_range, pos, sc => true)` over the
+    /// live roster — the unfiltered sorted list anchored on a **map point**,
+    /// which is what every spell area shape asks for. Draw-free.
+    pub(super) fn build_sorted_at(&self, pos: GridPos, max_range: i32) -> Vec<usize> {
+        build_sorted_from(
+            &self.map,
+            &self.range_combatants(),
+            pos,
+            1,
+            max_range,
+            false,
+        )
+        .into_iter()
+        .map(|nt| nt.idx)
+        .collect()
     }
 
     /// `sub_4001C(arg_0, canTargetEmptyGround, quick_fight, spellId)`
@@ -472,7 +630,7 @@ impl CombatState {
         rng: &mut EngineRng,
         actor: usize,
         spell_id: u8,
-        target: usize,
+        targets: &[usize],
     ) {
         let entry = spell_entry(spell_id).expect("caller guarantees a transcribed id");
         let n = self.spell_max_target_count(actor, entry.spell_class) + 1; // var_1
@@ -483,17 +641,210 @@ impl CombatState {
         // DoSpellCastingWork (@sub_5CF7F): damageOnSave Normal → saved = false, NO
         // save draw; damage > 0 → damage_person → damage_player == apply_damage.
         // affect_id 0 → no ApplyAttackSpellAffect.
-        if damage > 0 {
-            // D-CV2 `SpellDamage`, before the cascade its `Removed` comes out
-            // of — the same head-of-branch placement `SlayHelpless` uses, and
-            // the order the original displays: the effect, then the fall.
-            self.emit(ActionEvent::SpellDamage {
-                caster_id: actor,
-                target_id: target,
-                amount: damage,
-            });
-            self.apply_damage(rng, target, damage);
+        self.do_spell_casting_work(rng, actor, spell_id, targets, damage, false, 0);
+    }
+
+    /// `DoSpellCastingWork(text, damageFlags, damage, call_affect_table,
+    /// TargetCount, spell_id)` (`sub_5CF7F`, `ovr023.cs:573-620`) — the shared
+    /// per-target loop almost every spell function ends in.
+    ///
+    /// Per `gbl.spellTargets` entry, in the original's order:
+    /// 1. `saved`: **no draw at all** when `damageOnSave == Normal` (`:587`);
+    ///    otherwise one `RollSavingThrow(0, saveVerse, target)` — a d20;
+    /// 2. the `fixedRange == -1` to-hit arm (`:594-604`) — a spell that has to
+    ///    beat AC (the `cause_*` touch spells). **No must-have row carries
+    ///    `-1`**, so it is cited and tripwired rather than guessed at;
+    /// 3. `damage > 0` → [`damage_person`](Self::damage_person);
+    /// 4. `affect_id > 0` → [`apply_attack_spell_affect`](Self::apply_attack_spell_affect)
+    ///    with `GetSpellAffectTimeout`'s minutes.
+    ///
+    /// `target_count` is the `data` byte the affect record carries — `0` means
+    /// "use `spellMaxTargetCount`" (`:580`), which is what every row but Prayer
+    /// wants.
+    ///
+    /// `gbl.damage_flags` (fire/cold/electricity/acid/magic) is set at `:575`
+    /// and read by the resist-* affect handlers, none of which is implemented
+    /// (§9.1 pruned them all); the flags would only ever scale damage down, so
+    /// omitting them is visible as "our fireball does not respect a resist-fire
+    /// ring" and is named in §9.2 rather than silently dropped.
+    ///
+    /// The argument list is the original's own, one for one — collapsing it
+    /// into a struct would hide which call site passes what.
+    #[allow(clippy::too_many_arguments)]
+    fn do_spell_casting_work(
+        &mut self,
+        rng: &mut EngineRng,
+        actor: usize,
+        spell_id: u8,
+        targets: &[usize],
+        damage: i32,
+        call_affect_table: bool,
+        target_count: i32,
+    ) {
+        let entry = spell_entry(spell_id).expect("caller guarantees a transcribed id");
+        if targets.is_empty() {
+            return; // `:577` — the whole body is inside `Count > 0`.
         }
+        let data = if target_count > 0 {
+            target_count
+        } else {
+            self.spell_max_target_count(actor, entry.spell_class)
+        };
+        let casting_lvl = self.spell_max_target_count(actor, entry.spell_class);
+        let timeout = spell_affect_timeout(&entry, casting_lvl);
+        for &target in targets {
+            let saved = if entry.damage_on_save == DamageOnSave::Normal {
+                false // `:587` — Normal never rolls
+            } else {
+                self.do_saving_throw(rng, 0, entry.save_verse, target)
+            };
+            if entry.fixed_range == -1 {
+                // The to-hit arm (`:594-604`): `reclac_player_values` +
+                // `CheckAffectsEffect(Type_11)` + `PC_CanHitTarget`. Reached by
+                // no §9.1 row (every one has `fixedRange >= 0`).
+                let id = self.fighters[actor].id;
+                self.emit(ActionEvent::StubTripped {
+                    combatant_id: id,
+                    stub: "spell-touch-attack",
+                });
+                continue;
+            }
+            if damage > 0 {
+                self.emit(ActionEvent::SpellDamage {
+                    caster_id: actor,
+                    target_id: target,
+                    amount: damage,
+                });
+                self.damage_person(rng, target, saved, entry.damage_on_save, damage);
+            }
+            if entry.affect_id > 0 {
+                self.apply_attack_spell_affect(
+                    target,
+                    saved,
+                    entry.damage_on_save,
+                    call_affect_table,
+                    data,
+                    timeout,
+                    entry.affect_id,
+                );
+            }
+        }
+    }
+
+    /// `damage_person(change_damage, arg_2, damage, player)`
+    /// (`ovr024.cs:1180-1288`): the save scaling, then the damage.
+    ///
+    /// - `CheckAffectsEffect(PreDamage)` first (`:1186`) — draw-free, and every
+    ///   handler on that list is still tripwired;
+    /// - a made save scales: `Zero` → 0, `Half` → `damage / 2` (`:1188-1198`);
+    ///   a **failed** save runs `CheckAffectsEffect(FireShield)` instead
+    ///   (`:1201`) — the retaliation hook, also tripwired;
+    /// - then `damage_player` (our [`apply_damage`](Self::apply_damage)) and
+    ///   `TryLooseSpell` (`:1244`) — the disruption that costs a caster its
+    ///   queued spell and its `can_cast` for the round (`ovr024.cs:1288-1300`),
+    ///   the same tail the melee swing already runs (§45).
+    fn damage_person(
+        &mut self,
+        rng: &mut EngineRng,
+        target: usize,
+        saved: bool,
+        on_save: DamageOnSave,
+        damage: i32,
+    ) {
+        self.check_affects_effect(target, CheckType::PreDamage);
+        let mut dealt = damage;
+        if saved {
+            match on_save {
+                DamageOnSave::Zero => dealt = 0,
+                DamageOnSave::Half => dealt /= 2,
+                _ => {}
+            }
+        } else {
+            self.check_affects_effect(target, CheckType::FireShield);
+        }
+        if dealt <= 0 {
+            return;
+        }
+        self.apply_damage(rng, target, dealt);
+        // `TryLooseSpell` (`ovr024.cs:1244` → `:1288-1300`): any real damage
+        // kills this round's casting, and a queued cast is lost outright —
+        // "lost a spell", with `ClearSpell` taking the memorized entry with it.
+        // The same tail the melee swing already runs (§45).
+        self.fighters[target].can_cast = false;
+        if let Some(queued) = self.fighters[target].pending_spell.take() {
+            self.clear_spell(target, queued);
+        }
+    }
+
+    /// `ApplyAttackSpellAffect(text, saved, can_save, call_affect_table, data,
+    /// time, affect_id, target)` (`is_unaffected`, `ovr024.cs:1303-1332`).
+    ///
+    /// The `MagicResistance` hook runs first and can zero `gbl.current_affect`
+    /// (`:1307`) — draw-free, and every handler on that list is tripwired, so
+    /// today it never does. Then: a made save on a `DamageOnSave::Zero` row is
+    /// "is Unaffected" and nothing happens; otherwise an existing instance with
+    /// `minutes > 0` is removed and a fresh one added.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_attack_spell_affect(
+        &mut self,
+        target: usize,
+        saved: bool,
+        on_save: DamageOnSave,
+        call_affect_table: bool,
+        data: i32,
+        minutes: u16,
+        affect_id: u8,
+    ) {
+        self.check_affects_effect(target, CheckType::MagicResistance);
+        if saved && on_save == DamageOnSave::Zero {
+            return; // "is Unaffected" — display only.
+        }
+        if self.fighters[target]
+            .affects
+            .iter()
+            .any(|a| a.kind == affect_id && a.minutes > 0)
+        {
+            self.remove_affect(target, affect_id);
+        }
+        self.fighters[target].add_affect(affect_id, minutes, data as u8, call_affect_table);
+        self.emit(ActionEvent::AffectApplied {
+            target_id: target,
+            affect_id,
+        });
+    }
+
+    /// `CastTeamSpell(text, team)` (`sub_5DCA0`, `ovr023.cs:989-997`) — Bless
+    /// and Curse, one function.
+    ///
+    /// The area shape has already put **everyone** within two squares of the
+    /// caster into `spellTargets`; this filter keeps the named team and then —
+    /// for Bless in combat only — drops anybody who already has an enemy
+    /// adjacent (`BuildNearTargets(1, target).Count > 0`, `:994`). That is the
+    /// AD&D rule that Bless cannot be cast on troops already engaged in melee,
+    /// and it is why a bless is worth casting *before* the lines meet.
+    /// Draw-free (the near-list builder does not roll).
+    fn cast_team_spell(
+        &mut self,
+        rng: &mut EngineRng,
+        actor: usize,
+        spell_id: u8,
+        targets: &[usize],
+        team: Team,
+    ) {
+        let kept: Vec<usize> = targets
+            .iter()
+            .copied()
+            .filter(|&t| {
+                if self.fighters[t].team != team {
+                    return false;
+                }
+                if spell_id == 0x01 && !self.build_near(t, 1, false).is_empty() {
+                    return false; // engaged in melee — Bless only (`:994`)
+                }
+                true
+            })
+            .collect();
+        self.do_spell_casting_work(rng, actor, spell_id, &kept, 0, false, 0);
     }
 
     /// `SpellCureLight` (`sub_5DDBC` @`ovr023:1DBC`, listing-verified doc §48):
@@ -603,6 +954,253 @@ impl CombatState {
                 (entry.fixed_duration + entry.per_lvl_duration * casting_lvl).max(0) as u16;
             self.fighters[target].add_affect(entry.affect_id, timeout, casting_lvl as u8, false);
         }
+    }
+
+    // === roll-credits slice 5: the rest of §9.1's combat-castable set =======
+
+    /// `SpellSleep` (`falls_asleep`, `ovr023.cs:1187-1209`) — the area list the
+    /// `field_6 = 9` shape built, spent against a **4d4 power pool**.
+    ///
+    /// One `roll_dice(4, 4)` (four d4s) up front, then the list is filtered in
+    /// order: a target that is not `animated`, does not already carry `sleep`,
+    /// and whose hit-dice cost fits the remaining pool is **kept** and pays its
+    /// cost; everybody else is dropped. The cost ladder is
+    /// [`Self::calc_sleep_cost`]. The survivors then go through
+    /// `DoSpellCastingWork`, whose `damageOnSave == Normal` means **no saving
+    /// throw at all** — Sleep in this engine is a resource contest, not a save.
+    ///
+    /// The pool is spent in `spellTargets` order, which the area shape sorted
+    /// nearest-first, so a big monster standing closest can eat the whole
+    /// spell.
+    fn spell_sleep(&mut self, rng: &mut EngineRng, actor: usize, spell_id: u8, targets: &[usize]) {
+        let mut power = i32::from(roll_dice(rng, 4, 4)); // `:1190`
+        let mut kept = Vec::with_capacity(targets.len());
+        for &t in targets {
+            let cost = self.calc_sleep_cost(t);
+            let f = &self.fighters[t];
+            if f.health_status != HealthStatus::Animated
+                && !f.has_affect(crate::spells::AFF_SLEEP)
+                && power >= cost
+            {
+                power -= cost;
+                kept.push(t);
+            }
+        }
+        self.do_spell_casting_work(rng, actor, spell_id, &kept, 0, false, 0);
+    }
+
+    /// `CalcSleepCost(target)` (`ovr023.cs:1211-1245`): 0-1 HD → 1, 2 → 2,
+    /// 3 → 4, 4 → 6, 5 → **10 for a monster, 20 for anything else**, 6+ → 20.
+    /// The race check on the 5-HD rung is the original's own (`race ==
+    /// Race.monster`, id 8 in `Classes/Enums.cs`).
+    pub(super) fn calc_sleep_cost(&self, target: usize) -> i32 {
+        const RACE_MONSTER: u8 = 8;
+        let f = &self.fighters[target];
+        match f.hit_dice {
+            0 | 1 => 1,
+            2 => 2,
+            3 => 4,
+            4 => 6,
+            5 if f.race == RACE_MONSTER => 10,
+            _ => 20, // 5 HD non-monster, and everything above 5
+        }
+    }
+
+    /// `is_affected2` — Slow Poison (`ovr023.cs:1291-1311`).
+    ///
+    /// Three arms, and the middle one is the point of the spell: an `animated`
+    /// target clears the list and nothing happens; a target carrying `poisoned`
+    /// is **pulled off the floor at 1 hit point** if it was at 0, gets the
+    /// `slow_poison` affect through `DoSpellCastingWork` (with
+    /// `call_affect_table = true` and `data = 0xFF`), loses `affect_4e`, and
+    /// is re-armed with a fresh 10-minute `poison_damage` countdown; a target
+    /// that is not poisoned at all gets nothing.
+    ///
+    /// So Slow Poison does not cure — it buys ten minutes and a heartbeat, and
+    /// when `slow_poison` finally times out its own handler
+    /// (`AffectSlowPoison`, `ovr013.cs:305-317`) kills anybody still poisoned.
+    /// That timeout only runs in camp ([`crate::affects`]), which is where the
+    /// spell is worth casting.
+    fn spell_slow_poison(
+        &mut self,
+        rng: &mut EngineRng,
+        actor: usize,
+        spell_id: u8,
+        targets: &[usize],
+    ) {
+        let Some(&target) = targets.first() else {
+            return;
+        };
+        if self.fighters[target].health_status == HealthStatus::Animated {
+            return; // `:1296` — spellTargets.Clear()
+        }
+        if !self.fighters[target].has_affect(crate::spells::AFF_POISONED) {
+            return;
+        }
+        if self.fighters[target].hp_current == 0 {
+            self.fighters[target].hp_current = 1; // `:1301`
+        }
+        self.do_spell_casting_work(rng, actor, spell_id, targets, 0, true, 0xFF);
+        self.remove_affect(target, crate::spells::AFF_4E);
+        self.fighters[target].add_affect(crate::spells::AFF_POISON_DAMAGE, 10, 0xFF, true);
+    }
+
+    /// `SpellCureBlindness` (`can_see`, `ovr023.cs:1587-1593`): `cure_affect`
+    /// on `blinded`, and the "can see" line only when something was cured.
+    /// Draw-free.
+    fn spell_cure_blindness(&mut self, actor: usize, targets: &[usize]) {
+        let Some(&target) = targets.first() else {
+            return;
+        };
+        if self.fighters[target].has_affect(crate::spells::AFF_BLINDED) {
+            self.remove_affect(target, crate::spells::AFF_BLINDED);
+            self.emit(ActionEvent::AffectCured {
+                caster_id: actor,
+                target_id: target,
+                affect_id: crate::spells::AFF_BLINDED,
+            });
+        }
+    }
+
+    /// `SpellRemoveCurse` (`uncurse`, `ovr023.cs:1831-1864`): cure
+    /// `bestow_curse` if it is there; **otherwise** find the first cursed item
+    /// and un-ready it.
+    ///
+    /// The item arm needs the inventory, which a combatant does not carry (the
+    /// record image cannot hold a heap list — the same reason `has_items` is a
+    /// bool). In combat it is therefore cited and tripped; the real one lives
+    /// on the roster side, in [`crate::camp_cast`], where the items are.
+    fn spell_remove_curse(&mut self, actor: usize, targets: &[usize]) {
+        let Some(&target) = targets.first() else {
+            return;
+        };
+        if self.fighters[target].has_affect(crate::spells::AFF_BESTOW_CURSE) {
+            self.remove_affect(target, crate::spells::AFF_BESTOW_CURSE);
+            self.emit(ActionEvent::AffectCured {
+                caster_id: actor,
+                target_id: target,
+                affect_id: crate::spells::AFF_BESTOW_CURSE,
+            });
+            return;
+        }
+        let id = self.fighters[actor].id;
+        self.emit(ActionEvent::StubTripped {
+            combatant_id: id,
+            stub: "uncurse-item",
+        });
+    }
+
+    /// `SpellDispelMagic` (`is_affected3`, `ovr023.cs:1667-1822`).
+    ///
+    /// Per affect on the first target whose `affect_data < 0xFF`, a **d100**
+    /// against a level-difference ladder (`:1690-1704`): the caster's casting
+    /// level versus the affect's own stored level (`affect_data & 0x0F`) —
+    /// equal is 50%, each level above adds 5, each level below subtracts 2.
+    /// Every affect that beats its roll is removed. `affect_data == 0xFF` is
+    /// the "not from a spell" marker every racial and item affect carries, and
+    /// it is what makes a dwarf's `dwarf_vs_orc` undispellable.
+    ///
+    /// The tail (`:1719-1822`) sweeps the nine cells around `targetPos` for gas
+    /// clouds and summoned tiles to dispel as well. No gas-cloud subsystem
+    /// exists (§9.1 pruned every cloud spell), so that half is cited and
+    /// tripped rather than half-built.
+    ///
+    /// ★ **Draw-bearing**, one d100 per dispellable affect — reachable only by
+    /// casting Dispel Magic, which no capture does.
+    fn spell_dispel_magic(
+        &mut self,
+        rng: &mut EngineRng,
+        actor: usize,
+        spell_id: u8,
+        targets: &[usize],
+        _target_pos: GridPos,
+    ) {
+        let entry = spell_entry(spell_id).expect("caller guarantees a transcribed id");
+        let max_target_count = self.spell_max_target_count(actor, entry.spell_class);
+        if let Some(&target) = targets.first() {
+            let candidates: Vec<(u8, i32)> = self.fighters[target]
+                .affects
+                .iter()
+                .filter(|a| a.data < 0xFF)
+                .map(|a| (a.kind, i32::from(a.data & 0x0F)))
+                .collect();
+            for (kind, level) in candidates {
+                let needed = if max_target_count > level {
+                    50 + (max_target_count - level) * 5
+                } else if max_target_count < level {
+                    50 - (level - max_target_count) * 2
+                } else {
+                    50
+                };
+                // `roll_dice(100, 1)` — `Random(100) + 1`, compared with `<=`.
+                if i32::from(roll_dice(rng, 100, 1)) <= needed {
+                    self.remove_affect(target, kind);
+                    self.emit(ActionEvent::AffectCured {
+                        caster_id: actor,
+                        target_id: target,
+                        affect_id: kind,
+                    });
+                }
+            }
+        }
+        // The nine-cell cloud/summon sweep (`:1719-1822`).
+        let id = self.fighters[actor].id;
+        self.emit(ActionEvent::StubTripped {
+            combatant_id: id,
+            stub: "dispel-ground-sweep",
+        });
+    }
+
+    /// `sub_5F782` — Fireball (`ovr023.cs:1878-1907`).
+    ///
+    /// `dice_count = spellMaxTargetCount` (the caster's magic-user level), then
+    /// **one `roll_dice_save(6, dice_count)`** — `dice_count` separate d6s,
+    /// byte-summed — and `DoSpellCastingWork` spreads that single number over
+    /// every target with `DamageOnSave::Half`, i.e. one save each.
+    ///
+    /// The `inDungeon == 0` re-target (`:1894-1902`) rebuilds `spellTargets`
+    /// from a **radius-2** list around `targetPos` instead of the row's own
+    /// radius 3 — the outdoor blast is smaller. `CombatState` carries no
+    /// dungeon/wilderness flag (every floor it can build today is the dungeon
+    /// path; the wilderness generator is G2's `WildernessFloorDeferred`), so
+    /// the branch is cited here and lands with G2 rather than being guessed at
+    /// from a flag that does not exist yet.
+    ///
+    /// ★ **Draw-bearing** (the d6 volley plus a d20 per target) and reachable
+    /// only by casting Fireball, which no capture does.
+    fn spell_fireball(
+        &mut self,
+        rng: &mut EngineRng,
+        actor: usize,
+        spell_id: u8,
+        targets: &[usize],
+        _target_pos: GridPos,
+    ) {
+        let entry = spell_entry(spell_id).expect("caller guarantees a transcribed id");
+        let dice_count = self.spell_max_target_count(actor, entry.spell_class);
+        let damage = i32::from(roll_dice(rng, 6, dice_count.max(0) as u16));
+        self.do_spell_casting_work(rng, actor, spell_id, targets, damage, false, 0);
+    }
+
+    /// `heal_player(0, roll, spellTargets[0])` (`ovr024.cs:1335-1370`) — the
+    /// shared tail of Cure Serious (`2d8+1`) and Cure Critical (`3d8+3`), which
+    /// are `SpellCureLight` with a bigger roll. The caller does the rolling so
+    /// the draw sits at the original's own site.
+    fn heal_first_target(&mut self, actor: usize, targets: &[usize], heal: i32) {
+        let Some(&target) = targets.first() else {
+            return;
+        };
+        if self.fighters[target].health_status == HealthStatus::Dead {
+            return;
+        }
+        let f = &mut self.fighters[target];
+        f.hp_current = (f.hp_current + heal).min(f.hp_max);
+        self.emit(ActionEvent::Healed {
+            healer_id: actor,
+            target_id: target,
+            amount: heal,
+            kind: HealKind::Cure,
+        });
     }
 
     /// `RollSavingThrow(saveBonus, saveType, player)` (`do_saving_throw`

@@ -100,6 +100,38 @@ pub const IS_FULLY_HEALED: &str = "is fully healed";
 pub const IS_PARTIALLY_HEALED: &str = "is partially healed";
 /// Turn-undead's `MagicAttackDisplay` text (`ovr014.cs:655`).
 pub const IS_TURNED: &str = "is turned";
+/// `cure_affect`'s line (`is_cured`, `ovr024.cs:710`).
+pub const IS_CURED: &str = "is Cured";
+
+/// ★ Roll-credits slice 5: the `MagicAttackDisplay` text each landing spell
+/// hands `ApplyAttackSpellAffect`. The verb belongs to the **caster's** row,
+/// not to the affect, so this maps the affect id back to the line the spell
+/// that plants it passes (`ovr023.cs` — `cleric_bless` "is Blessed" `:1004`,
+/// `cleric_curse` "is Cursed" `:1010`, `SpellProtectionFromX` "is protected"
+/// `:1038`, `SpellSleep` "falls asleep" `:1207`, `is_affected`/`is_affected2`
+/// "is affected" `:1032`/`:1303`, `SpellPrayer` "is praying" `:1827`,
+/// `SpellHoldX` "is held" via `MultiTargetedSpell`).
+///
+/// One affect id is planted by exactly one §9.1 row, except
+/// `protection_from_evil` (cleric `0x06` and magic-user `0x10` — both "is
+/// protected") and `prot_from_evil_10_radius` (`0x34`/`0x45`, same text), so
+/// the mapping is unambiguous for the implemented set. An id with no row here
+/// falls back to the generic line rather than inventing one.
+pub fn affect_landed(affect_id: u8) -> &'static str {
+    match affect_id {
+        0x01 => "is Blessed",
+        0x02 => "is Cursed",
+        0x08 | 0x09 | 0x2D | 0x2E => "is protected",
+        0x31 => "is praying",
+        0x35 => "falls asleep",
+        0x33 | 0x34 => "is held",
+        _ => IS_AFFECTED,
+    }
+}
+
+/// `is_affected`'s text (`ovr023.cs:1032`) — the default `DoSpellCastingWork`
+/// line, and Dispel Magic's own.
+pub const IS_AFFECTED: &str = "is affected";
 
 // --- round boundaries and the manual surface ------------------------------
 

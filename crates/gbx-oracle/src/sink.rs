@@ -245,6 +245,13 @@ impl ActionSink for CollectorActionSink {
             // event: the `.gbxtrace` `action` profile stays FROZEN.
             ActionEvent::SpellDamage { .. } => return,
             ActionEvent::Regenerated { .. } => return,
+            // Roll-credits slice 5's affect events. Presentation only: the
+            // affect chain is engine state the `.gbxtrace` `action` profile has
+            // never carried, and no capture casts a spell that plants one — the
+            // one landing any capture reaches (Hold Person's `paralyze`) comes
+            // through `MultiTargetedSpell`, which does not emit these.
+            ActionEvent::AffectApplied { .. } => return,
+            ActionEvent::AffectCured { .. } => return,
             // M6 slice 7's abort event (doc §9.3): a manual movement loop was
             // ESCed and the presented board must rewind. A capture *can* carry
             // this moment — a staged manual turn where the operator pressed ESC

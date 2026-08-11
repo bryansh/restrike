@@ -1108,15 +1108,28 @@ impl CombatState {
             });
         };
         let nibble = entry.field_6 & 0x0F;
-        if nibble == 0 || nibble == 5 || (8..=0x0F).contains(&nibble) {
-            // Self / budgeted-multi / area shapes: the manual arm needs the
-            // same shape machinery the AI arm stubs (doc §41.3).
-            self.trip(actor, "spell-target-shape");
-            return Err(TurnRefusal::Unmodeled {
-                stub: "spell-target-shape",
-            });
-        }
-        let max = (entry.field_6 & 3) as usize + 1;
+        // ★ Roll-credits slice 5: the shapes the manual arm now handles, and
+        // how many aim picks each one consumes (`ovr014.cs:1174-1362`).
+        //
+        // - `0` (self) takes **no** pick at all — `target()` clears the list and
+        //   adds the caster before any menu opens, so a Prayer aimed at
+        //   somebody is a Prayer on the caster either way;
+        // - `8..=0xE` (area) takes exactly **one**: `sub_4001C` opens the aim
+        //   menu with `canTargetEmptyGround`, and the blast list is rebuilt
+        //   around wherever it landed;
+        // - `5` and `0xF` are still shapes nothing in §9.1 uses (the 2d4
+        //   power-pool multi and the held/area hybrid) and stay tripwired.
+        let max = match nibble {
+            0 => 0,
+            5 | 0x0F => {
+                self.trip(actor, "spell-target-shape");
+                return Err(TurnRefusal::Unmodeled {
+                    stub: "spell-target-shape",
+                });
+            }
+            8..=0x0E => 1,
+            _ => (entry.field_6 & 3) as usize + 1,
+        };
         if targets.len() > max {
             return Err(TurnRefusal::TooManyTargets { max });
         }
