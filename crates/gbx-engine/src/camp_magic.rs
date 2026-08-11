@@ -41,7 +41,7 @@ pub struct ConfirmWidget {
 impl ConfirmWidget {
     /// `'Y'`, `'N'`, or still waiting. Escape reads as `'N'`, matching every
     /// other decline in this shell.
-    fn tick(&mut self, ctx: &mut FlowCtx) -> Option<bool> {
+    pub(crate) fn tick(&mut self, ctx: &mut FlowCtx) -> Option<bool> {
         match self.menu.tick(ctx.input, ctx.dt_ticks) {
             WidgetOutcome::Hotbar(key) => match key.to_ascii_uppercase() {
                 b'Y' => Some(true),
@@ -72,7 +72,7 @@ pub struct SpellListUi {
 }
 
 impl SpellListUi {
-    fn build(
+    pub(crate) fn build(
         ch: &crate::party::Character,
         scrolls: &magic::ScrollLookup,
         loc: SpellLoc,
@@ -94,6 +94,16 @@ impl SpellListUi {
             heading: format!("Spells {}", loc.heading()),
             prompt: source.prompt().to_string(),
         })
+    }
+
+    /// One tick of the list widget — the parked `sl_select_item`.
+    pub(crate) fn tick(&mut self, ctx: &mut FlowCtx) -> WidgetOutcome {
+        self.menu.tick(ctx.input, ctx.dt_ticks)
+    }
+
+    /// `gbl.memorize_spell_id[row]` — the spell id a chosen row stands for.
+    pub(crate) fn id_at_row(&self, row: usize) -> Option<u8> {
+        self.listing.id_at_row(row)
     }
 }
 

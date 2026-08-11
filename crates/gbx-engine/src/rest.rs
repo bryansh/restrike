@@ -409,6 +409,8 @@ pub mod status {
     pub const ANIMATED: u8 = 0x1;
     pub const UNCONSCIOUS: u8 = 0x4;
     pub const DYING: u8 = 0x5;
+    /// Roll-credits slice 5 — Raise Dead's own gate (`ovr023.cs:2345`).
+    pub const DEAD: u8 = 0x6;
 }
 
 /// `heal_player(arg_0, amount, player)` (`ovr024.cs:1335-1370`), the
@@ -900,7 +902,7 @@ impl RestSession {
 /// draws of `Random(size) + 1`, summed, and **truncated to a byte** on the way
 /// out. The truncation is the original's; it cannot bite here (3d8+3 tops out
 /// at 27).
-fn roll_dice(rng: &mut crate::rng::EngineRng, dice_size: u16, dice_count: u32) -> u8 {
+pub fn roll_dice(rng: &mut crate::rng::EngineRng, dice_size: u16, dice_count: u32) -> u8 {
     let mut total: u32 = 0;
     for _ in 0..dice_count {
         total += u32::from(rng.random(dice_size)) + 1;

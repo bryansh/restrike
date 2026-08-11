@@ -66,6 +66,10 @@ pub enum Screen {
     Scribe(Box<crate::camp_magic::ScribeScreen>),
     SpellEffects(Box<crate::camp_magic::SpellEffectsScreen>),
     Rest(Box<crate::camp_magic::RestScreen>),
+    /// ★ Roll-credits slice 5 (out-of-combat casting). Appended last for the
+    /// same reason the four above were: postcard encodes a variant as its
+    /// index, so every committed `.rsav` keeps its encoding and no golden moves.
+    Cast(Box<crate::camp_cast::CastScreen>),
 }
 
 impl Screen {
@@ -81,6 +85,7 @@ impl Screen {
             Screen::Scribe(s) => s.tick(ctx),
             Screen::SpellEffects(s) => s.tick(ctx),
             Screen::Rest(s) => s.tick(ctx),
+            Screen::Cast(s) => s.tick(ctx),
         }
     }
 }
@@ -541,13 +546,9 @@ impl MagicMenu {
                 b'M' => crate::camp_magic::MemorizeScreen::open(ctx),
                 b'S' => crate::camp_magic::ScribeScreen::open(ctx),
                 b'D' => ScreenTransition::To(crate::camp_magic::SpellEffectsScreen::open(ctx)),
-                // Cast out of camp still needs the out-of-combat casting path
-                // (G7's tail); `cast_spell` (ovr016.cs:159-200) is not this
-                // slice's business.
-                b'C' => {
-                    self.status = Some("Cast: out-of-combat casting is G7".into());
-                    ScreenTransition::Stay
-                }
+                // ★ Cast is real too (roll-credits §9): `cast_spell`
+                // (`ovr016.cs:158-197`) → `sub_5D2E1`'s non-combat arm.
+                b'C' => crate::camp_cast::CastScreen::open(ctx),
                 _ => ScreenTransition::Stay,
             },
             _ => ScreenTransition::Stay,

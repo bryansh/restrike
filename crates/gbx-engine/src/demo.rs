@@ -3203,3 +3203,173 @@ fn slice5_the_spell_books_that_size_the_set() {
         "SHARA, LEDERA and PHILIPPE are the only casters"
     );
 }
+
+/// ★ **Slice 5's acceptance drive (roll-credits §9.2)**: the camp Cast flow, on
+/// the bundled slot-A party.
+///
+/// SHARA memorizes from her own grimoire, sleeps on it, and then *casts* —
+/// which is the first time in this engine's life that a spell has come out of
+/// camp. The drive proves the three shapes `NonCombatSpellCast` switches on:
+///
+/// 1. **WholeParty** — Bless lands on all six at once;
+/// 2. **PartyMember** — Cure Light Wounds opens `selectAPlayer` and heals the
+///    member the cursor is on (MATHEW, wounded on purpose beforehand);
+/// 3. **the refusal** — a memorized Hold Person is `SpellTargets::Combat`, so
+///    camp shows "can't be cast here..." and offers "Lose it?".
+///
+/// Frames are dumped for the picker, the target selector and the result line.
+///
+/// Run: `GBX_DATA_DIR=~/goldbox-data/cotab cargo test -p gbx-engine --release \
+///   -- --nocapture --ignored slice5_the_cleric_casts_in_camp`
+#[test]
+#[ignore = "local-only demo (writes frames); run explicitly"]
+fn slice5_the_cleric_casts_in_camp() {
+    use crate::engine::Engine;
+    use crate::screens::Screen;
+    use crate::shell::Shell;
+
+    let Some(root) = std::env::var_os("GBX_DATA_DIR") else {
+        eprintln!("SKIPPED: needs GBX_DATA_DIR (slice5 camp casting)");
+        return;
+    };
+    let root = std::path::Path::new(&root);
+    let data = load_dir(root).expect("GBX_DATA_DIR must be readable");
+    let saves = load_dir(&root.join("SAVE")).expect("GBX_DATA_DIR/SAVE must be readable");
+    let master = saves.raw_file("SAVGAMA.DAT").expect("slot A must exist");
+    let set = gbx_formats::save_orig::load_from_lookup(master, 'A', |n| saves.raw_file(n))
+        .expect("slot A must parse");
+    let mut engine = crate::import::import_original(&set, data, 1).expect("slot A must import");
+
+    let out_dir = std::env::temp_dir();
+    let dump = |engine: &mut Engine, name: &str| {
+        let f = engine.tick(&[]);
+        let mut fb = Framebuffer::new();
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                fb.set_pixel(x, y, f.pixels[y * WIDTH + x]);
+            }
+        }
+        let path = out_dir.join(format!("restrike-{name}.ppm"));
+        write_ppm(&fb, &path);
+        eprintln!("  {name} -> {}", path.display());
+    };
+
+    for _ in 0..300 {
+        engine.tick(&[]);
+        if matches!(engine.shell(), Shell::WorldMenu { .. }) {
+            break;
+        }
+        if engine.shell().gate_open() {
+            engine.tick(&[InputEvent::Enter]);
+        }
+    }
+    assert!(matches!(engine.shell(), Shell::WorldMenu { .. }));
+
+    let shara = engine
+        .party()
+        .members
+        .iter()
+        .position(|m| m.name == "SHARA")
+        .expect("the bundled party carries SHARA");
+    engine.state.selected_player = shara as u8;
+    // Wound MATHEW so the cure has something to do. The memorize/rest loop is
+    // slice 4's and is already proven, so the slots are seeded directly; what
+    // this drive is about is that a memorized spell is now *castable*.
+    engine.party.members[0].hit_point_current = 12;
+
+    let feed = |engine: &mut Engine, key: u8, budget: usize| {
+        engine.tick(&[InputEvent::Char(key)]);
+        for _ in 0..budget {
+            engine.tick(&[]);
+        }
+    };
+    let settle = |engine: &mut Engine| {
+        for _ in 0..3 {
+            engine.tick(&[]);
+        }
+    };
+
+    feed(&mut engine, b'E', 4); // Encamp
+    assert!(matches!(engine.shell(), Shell::Screen(Screen::Camp(_))));
+
+    // One spell at a time, so the list has exactly one row and the opening
+    // highlight is unambiguous (§8.1's `sl_select_item` wrap makes a
+    // multi-level list open on the first *second*-level row, which is a slice-4
+    // finding this drive would otherwise trip over).
+    let open_cast = |engine: &mut Engine, spell_id: u8| {
+        crate::magic::add_learnt(&mut engine.party.members[shara].magic.spell_list, spell_id);
+        // A spent Cast list empties and bounces straight back to the magic
+        // menu (`cast_spell`'s own `while (spell_id != 0)` exit), so the drive
+        // may already be there.
+        if matches!(engine.shell(), Shell::Screen(Screen::Camp(_))) {
+            engine.tick(&[InputEvent::Char(b'M')]);
+            for _ in 0..4 {
+                engine.tick(&[]);
+            }
+        }
+        engine.tick(&[InputEvent::Char(b'C')]); // Cast
+        for _ in 0..4 {
+            engine.tick(&[]);
+        }
+        assert!(
+            matches!(engine.shell(), Shell::Screen(Screen::Cast(_))),
+            "the Cast list opened for {spell_id:#04x}: {}",
+            engine.probe()
+        );
+    };
+
+    // (1) **Bless** — `WholeParty`, so no selector at all: pick it and it lands.
+    open_cast(&mut engine, 0x01);
+    dump(&mut engine, "slice5-1-cast-picker");
+    engine.tick(&[InputEvent::Enter]);
+    settle(&mut engine);
+    dump(&mut engine, "slice5-2-bless-on-the-whole-party");
+    let blessed = engine
+        .party()
+        .members
+        .iter()
+        .filter(|m| m.has_affect(crate::spells::AFF_BLESS))
+        .count();
+    eprintln!("  after Bless: blessed={blessed}/6");
+    assert_eq!(blessed, 6, "Bless is a WholeParty spell");
+
+    // (2) **Cure Light Wounds** — `PartyMember`, so the cast parks on
+    // `selectAPlayer` with the cursor on the caster. Walk it back to MATHEW
+    // (`'G'` = Home/Kp7 is the original's own previous-player key) and commit.
+    open_cast(&mut engine, 0x03);
+    engine.tick(&[InputEvent::Enter]);
+    settle(&mut engine);
+    dump(&mut engine, "slice5-3-cast-spell-on-whom");
+    for _ in 0..shara {
+        engine.tick(&[InputEvent::Ext(ExtKey::Home)]);
+        engine.tick(&[]);
+    }
+    engine.tick(&[InputEvent::Enter]);
+    settle(&mut engine);
+    dump(&mut engine, "slice5-4-cure-light-wounds-landed");
+    let healed = engine.party().members[0].hit_point_current;
+    eprintln!("  after Cure Light Wounds: MATHEW hp={healed} (was 12)");
+    assert!(healed > 12, "the cure healed the member the cursor was on");
+
+    // (3) **Hold Person** — `SpellTargets::Combat`, so camp refuses it with
+    // "can't be cast here..." and offers "Lose it? ". Yes burns the slot.
+    open_cast(&mut engine, 0x17);
+    engine.tick(&[InputEvent::Enter]);
+    settle(&mut engine);
+    dump(&mut engine, "slice5-5-cant-be-cast-here");
+    feed(&mut engine, b'Y', 4);
+    assert!(
+        crate::magic::learnt(&engine.party().members[shara].magic.spell_list)
+            .next()
+            .is_none(),
+        "every slot was spent — including the one lost to \"Lose it?\""
+    );
+
+    // Magic ▸ Display now has something to show (slice 4's 'D' leaf, which
+    // until this slice could only ever list imported racial affects).
+    if !matches!(engine.shell(), Shell::Screen(Screen::Magic(_))) {
+        feed(&mut engine, b'E', 4);
+    }
+    feed(&mut engine, b'D', 4);
+    dump(&mut engine, "slice5-6-display-magic-effects");
+}

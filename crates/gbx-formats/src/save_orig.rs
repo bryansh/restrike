@@ -710,6 +710,25 @@ pub fn item_readied(record: &[u8]) -> bool {
     record.get(0x34).is_some_and(|&b| b != 0)
 }
 
+/// Writes [`item_readied`] (`Item.cs:186`: `data[0x34] = readied ? 1 : 0`).
+/// A short/malformed record is left alone rather than panicking.
+///
+/// Added for roll-credits slice 5: `SpellRemoveCurse` un-readies the cursed
+/// item it finds (`ovr023.cs:1841`), which is the first code path in this
+/// engine that has to *write* the flag rather than read it.
+pub fn set_item_readied(record: &mut [u8], readied: bool) {
+    if let Some(b) = record.get_mut(0x34) {
+        *b = u8::from(readied);
+    }
+}
+
+/// One item record's `cursed` flag (`Item.cs:32,134`: `bool cursed`, on-disk
+/// at byte offset `0x36`) — what `SpellRemoveCurse` scans the inventory for
+/// (`ovr023.cs:1837`). `false` for a short/malformed record.
+pub fn item_is_cursed(record: &[u8]) -> bool {
+    record.get(0x36).is_some_and(|&b| b != 0)
+}
+
 /// One item record's `type` (`Item.cs:118`: `type = (ItemType)data[0x2e]`) —
 /// the `ITEMS`-table index that decides what the item *is*, and the field the
 /// FIND ITEM (0x32) / DESTROY ITEMS (0x40) opcode pair matches on. `0` (the
