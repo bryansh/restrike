@@ -37,6 +37,9 @@ pub mod framebuffer;
 pub mod frames;
 pub mod import;
 pub mod input;
+/// ★ Out-of-combat item use (roll-credits §12): the item-name word table,
+/// `reclac_player_values`, and the character sheet's Items verbs.
+pub mod items;
 /// ★ Vancian camp magic (roll-credits §8): the `SpellList` record model, the
 /// spell table's class/level/name columns, and the capacity formula.
 pub mod magic;

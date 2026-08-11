@@ -785,6 +785,61 @@ pub fn set_item_namenum2(record: &mut [u8], value: u8) {
     }
 }
 
+/// One item record's `namenum1`/`namenum2`/`namenum3` (`Item.cs:119-121`, at
+/// `0x2F`/`0x30`/`0x31`), indexed the way `Item.field_2EArray(i)` indexes them
+/// — **1-based** (`Item.cs:13-22`). These three are the item's *name*: each is
+/// an index into the resident word table `GenerateName` assembles from
+/// (`crate::items::ITEM_NAMES` engine-side). `0` for an out-of-range index or a
+/// short record.
+pub fn item_namenum(record: &[u8], index: usize) -> u8 {
+    match index {
+        1..=3 => record.get(0x2E + index).copied().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// Writes one of the three name indices (see [`item_namenum`]).
+/// `remove_spell_from_scroll` decrements `namenum2` this way
+/// (`ovr023.cs:3107`), and so does every `join`/`halve` that rebuilds a name.
+pub fn set_item_namenum(record: &mut [u8], index: usize, value: u8) {
+    if let 1..=3 = index {
+        if let Some(slot) = record.get_mut(0x2E + index) {
+            *slot = value;
+        }
+    }
+}
+
+/// One item record's `count` (`Item.cs:34`: `count = data[0x39]`) — the stack
+/// size `halve_items`/`join_items` split and merge, and the multiplier
+/// `reclac_player_values` applies to the item's weight (`ovr025.cs:352-356`).
+/// `0` for a short/malformed record (which is also the un-stacked default).
+pub fn item_count(record: &[u8]) -> u8 {
+    record.get(0x39).copied().unwrap_or(0)
+}
+
+/// Writes `count` (see [`item_count`]).
+pub fn set_item_count(record: &mut [u8], value: u8) {
+    if let Some(slot) = record.get_mut(0x39) {
+        *slot = value;
+    }
+}
+
+/// One item record's `plus_save` (`Item.cs:29`: `plus_save = data[0x33]`) — the
+/// saving-throw bonus `sub_662A6` adds into `player.field_186`
+/// (`ovr025.cs:117`). `0` for a short/malformed record.
+pub fn item_plus_save(record: &[u8]) -> u8 {
+    record.get(0x33).copied().unwrap_or(0)
+}
+
+/// Writes `hidden_names_flag` (see [`item_hidden_names_flag`]) — what
+/// `scroll_5C912` clears when a Read Magic affect (or a cleric holding a
+/// clerical scroll) makes the scroll legible (`ovr023.cs:349-356`).
+pub fn set_item_hidden_names_flag(record: &mut [u8], value: u8) {
+    if let Some(slot) = record.get_mut(0x35) {
+        *slot = value;
+    }
+}
+
 /// One item record's `plus` (`Item.cs:122`: `plus = (sbyte)data[0x32]`) — the
 /// magical enchantment level. `calc_battle_exp` pays **400 experience per
 /// plus** for every item in the treasure pool (`ovr006.cs:56-59`).

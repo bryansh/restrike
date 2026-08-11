@@ -582,6 +582,27 @@ impl<'a> Flavor for Adnd1<'a> {
         }
     }
 
+    /// `max_encumberance`/`strength_bonus` (`ovr025.cs:709-758`), the third
+    /// [`strength_group`] ladder — transcribed with its two gaps intact: the
+    /// groups `8..=11` and every group above `30` fall through to the `else`
+    /// arm and carry **0**, exactly as the original's `if`-chain does (there is
+    /// no interpolation between the `6|7 → -150` and `12|13 → 100` rungs).
+    fn max_encumbrance(&self, str_score: u8, str_exceptional: u8) -> i32 {
+        match strength_group(str_score, str_exceptional) {
+            1..=3 => -350,
+            4 | 5 => -250,
+            6 | 7 => -150,
+            12 | 13 => 100,
+            14 | 15 => 200,
+            16 => 350,
+            g @ 17..=21 => (g - 17) * 250 + 500,
+            g @ 22..=26 => (g - 22) * 1000 + 2000,
+            27 => 7500,
+            g @ 28..=30 => (g - 28) * 3000 + 9000,
+            _ => 0,
+        }
+    }
+
     /// `ConHitPointBonus`/`sub_647BE` (`ovr024.cs:782-831`).
     fn con_hp_total_bonus(
         &self,

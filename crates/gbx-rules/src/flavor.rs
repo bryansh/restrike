@@ -190,6 +190,12 @@ pub trait Flavor {
     /// Reaction/initiative adjustment from dexterity.
     fn dex_reaction_bonus(&self, dex: u8) -> i32;
 
+    /// The weight a character may carry before `calc_movement` starts taking
+    /// movement away — `max_encumberance`/`strength_bonus` (`ovr025.cs:709-758`),
+    /// the third of the strength-group ladders. Signed: the weakest bands are
+    /// *negative*, so a 3-strength character is overloaded by their own boots.
+    fn max_encumbrance(&self, str_score: u8, str_exceptional: u8) -> i32;
+
     /// Total accumulated HP bonus from CON for one class's levels, as shown
     /// on the character sheet (distinct from [`Flavor::con_hp_adjustment`]'s
     /// per-roll adjustment — this is a display total, not a per-level
