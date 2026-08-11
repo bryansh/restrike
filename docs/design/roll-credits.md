@@ -951,6 +951,12 @@ against the arithmetic: bless spends nothing, fireball spends one
 `find_target` pick + five d6s + one d20 per target, and every survivor's loss is
 the volley or exactly half of it.
 
+**Gates, at every one of the eight commits.** Guard **16/16**, reel smoke
+**16/16** (62,108 draws checked live), clippy 0, `fmt --check` clean, and the
+workspace grown from 1,519 to **1,569** (plus four `#[ignore]` local demos:
+the spell-book dump, the camp-cast drive and the on-screen casting beat). No
+`.gbxtrace`, no game data, and no golden moved.
+
 **Residuals, named.**
 
 - ★ **The fight's HP and status never reach the roster.** `combat_host` writes
