@@ -49,9 +49,12 @@
 //! below pin the transform against the cited tables — they prove the
 //! transliteration, not the original's behaviour.
 //!
-//! Wilderness floors (`SetupWildernessFloor`, `ovr011.cs:551-754`) stay deferred
-//! with the wilderness circle-back item; [`setup_ground_tiles`] loud-fails rather
-//! than silently laying a dungeon floor outdoors.
+//! ★ **Wilderness floors land here too** (roll-credits D-S7c):
+//! [`setup_wilderness_floor`] transcribes `SetupWildernessFloor` +
+//! `01`/`02`/`03` + `SetGroupMapStepped` (`ovr011.cs:537-754`) under the same
+//! honesty rule — cited, not capture-proven, and *far* more draw-bearing than
+//! the dungeon path (five distinct `roll_dice` shapes, one of them rolled
+//! unconditionally). The M6b `WildernessFloorDeferred` fallback is retired.
 
 use super::{roll_dice, CombatMap, GridPos, BACKGROUND_TILE_INDEX, MAP_H, MAP_W};
 use crate::rng::EngineRng;
@@ -78,30 +81,6 @@ const MAP_DIR_Y: [i32; 9] = [-1, -1, 0, 1, 1, 1, 0, -1, 0];
 const FURNITURE_DIR_X: [i32; 4] = [0, 1, 0, -1];
 const FURNITURE_DIR_Y: [i32; 4] = [-1, 0, 1, 0];
 
-/// [`setup_ground_tiles`]'s one refusal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FloorError {
-    /// `SetupWildernessFloor` (`ovr011.cs:551-754`) scatters roads/rivers/grass
-    /// with five different `roll_dice` calls, so a wrong transliteration would
-    /// desync every subsequent draw rather than just look wrong. Deferred with
-    /// the wilderness circle-back item (doc §7): loud-fail beats a guess (D11).
-    WildernessFloorDeferred,
-}
-
-impl std::fmt::Display for FloorError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            FloorError::WildernessFloorDeferred => write!(
-                f,
-                "SetupWildernessFloor is deferred (combat-visualizer.md §7): a wilderness \
-                 fight's floor draws from the PRNG and has no transliteration yet"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for FloorError {}
-
 /// The mutable state one `SetupDungeonFloor` pass carries: the grid being
 /// painted, the current source square's offsets (`gbl.byte_1AD34`/`byte_1AD35`),
 /// the four directional flags, and `byte_1AD3D` (the x2 `0x40` bit).
@@ -124,24 +103,30 @@ struct FloorPass<'a> {
     byte_1ad3d: u8,
 }
 
-/// `SetupGroundTiles` (`sub_38030`, `ovr011.cs:756-783`) — the fork the fight's
+/// `SetupGroundTiles` (`sub_38030`, `ovr011.cs:757-784`) — the fork the fight's
 /// floor comes through. The art half (`Load24x24Set` of DUNGCOM/WILDCOM +
 /// RANDCOM) is [`crate::combat_art::load_ground_tiles`]'s; this is the grid.
 ///
-/// `party` is `(gbl.mapPosX, gbl.mapPosY)`; `ecl_block_id` is `gbl.EclBlockId`.
-/// The PRNG is consumed by [`furniture_dice`] — see this module's draw-bearing
-/// note.
+/// `party` is `(gbl.mapPosX, gbl.mapPosY)`; `ecl_block_id` is `gbl.EclBlockId`;
+/// `current_city` is `area_ptr.current_city`, which only the wilderness arm
+/// reads. Both arms consume the PRNG — see this module's draw-bearing note.
+///
+/// (The door cited `:755-782` for this function and the existing code
+/// `:756-783`; re-counted against the checkout, `SetupGroundTiles` opens at
+/// **757** and closes at **784**.)
 pub fn setup_ground_tiles(
     geo: &GeoBlock,
     party: (i32, i32),
     ecl_block_id: u8,
     in_dungeon: bool,
+    current_city: u8,
     rng: &mut EngineRng,
-) -> Result<CombatMap, FloorError> {
-    if !in_dungeon {
-        return Err(FloorError::WildernessFloorDeferred);
+) -> CombatMap {
+    if in_dungeon {
+        setup_dungeon_floor(geo, party, ecl_block_id, rng)
+    } else {
+        setup_wilderness_floor(current_city, rng)
     }
-    Ok(setup_dungeon_floor(geo, party, ecl_block_id, rng))
 }
 
 /// `SetupDungeonFloor` (`sub_378CD0`, `ovr011.cs:500-522`): the 13×5 band, in
@@ -611,6 +596,290 @@ fn door_field(sq: &Square, dir: u8) -> u8 {
 /// where `place_combatants` fans the roster out from.
 pub fn party_square_origin() -> GridPos {
     GridPos::new(21, 10)
+}
+
+// --- ★ The wilderness floor (`ovr011.cs:524-754`) -------------------------
+
+/// `CityInfo` (`ovr011.cs:524-529`, `unk_16664` at `seg600:0354`) — 33 bytes
+/// of terrain flags, indexed by `gbl.current_city`, transcribed verbatim.
+///
+/// The same 33-long index space as [`crate::mapcursor`]'s coordinate tables:
+/// entries 0..=13 are the named regions `ECL1#80 @0x9012` knows, the rest the
+/// en-route waypoints a journey's `GETTABLE 0x9D13` points at. So a fight
+/// picked up on the road gets the ROAD's terrain, not either endpoint's.
+///
+/// The bits, read off their uses in `01`/`02`/`03`:
+///
+/// | bit | effect |
+/// |---|---|
+/// | `0x02` | fewer streams (`02`: −5), much less vegetation (`03`: −20) |
+/// | `0x04` | fewer streams (`02`: −2), less vegetation (`03`: −10) |
+/// | `0x08` | many more streams (`02`: +10) |
+/// | `0x10` | a road, 75/100 (`01`); more vegetation (`03`: +10) |
+/// | `0x20` | a road, 35/100 (`01`); much more vegetation (`03`: +30) |
+/// | `0x40` | more streams (`02`: +5), more vegetation (`03`: +20) |
+/// | `0x80` | **no streams at all** (`02` skipped) and barren (`03`: −50) |
+pub const CITY_INFO: [u8; 33] = [
+    0x00, 0x18, 0x11, 0x15, 0x01, 0x01, 0x60, 0x14, // 0x354..0x35B
+    0x08, 0x01, 0x00, 0x21, 0x71, 0x09, 0x06, 0x04, // 0x35C..0x363
+    0x01, 0x09, 0x09, 0x08, 0x59, 0x00, 0x11, 0x11, // 0x364..0x36B
+    0x00, 0x00, 0x01, 0x11, 0x00, 0x00, 0x20, 0x20, // 0x36C..0x373
+    0x0A,
+];
+
+/// `Struct_1D1BC.SetField_7(23)` (`ovr011.cs:748`, `Struct_1D1BC.cs:17-22`):
+/// the whole 1250-cell grid starts as ground tile `23` — `0x17`, whose
+/// `tile_index` is [`FLOOR_TILE_INDEX`], the "plain open ground" every later
+/// pass tests for. The dungeon path leaves the grid at 0 (void) instead; the
+/// wilderness has no walls, so nothing is impassable until a pass makes it so.
+const WILDERNESS_BASE_TILE: u8 = 23;
+
+/// `GetCityInfo` (`ovr011.cs:531-534`). Out-of-range indices read `0` rather
+/// than panicking — the original would read past its own table.
+fn city_info(current_city: u8) -> u8 {
+    CITY_INFO.get(current_city as usize).copied().unwrap_or(0)
+}
+
+/// ★ **`SetupWildernessFloor`** (`sub_37FC8`, `ovr011.cs:746-754`): flood the
+/// grid with open ground, take the city index, then the three scatter passes
+/// **in order** — road, streams, vegetation. The order is load-bearing twice
+/// over: `02` and `03` both test for cells still reading as plain ground, and
+/// every pass spends dice.
+///
+/// `current_city` is `gbl.area_ptr.current_city`, copied into `gbl.current_city`
+/// at `:750` — that copy is why `GetCityInfo` can be a nullary function, and
+/// why the terrain follows the *map cursor's* position rather than the party's
+/// dungeon coordinates (there are none out here).
+pub fn setup_wilderness_floor(current_city: u8, rng: &mut EngineRng) -> CombatMap {
+    let mut ground = vec![WILDERNESS_BASE_TILE; (MAP_W * MAP_H) as usize];
+    let info = city_info(current_city);
+    wilderness_floor_01(&mut ground, info, rng);
+    wilderness_floor_02(&mut ground, info, rng);
+    wilderness_floor_03(&mut ground, info, rng);
+    CombatMap::from_ground(ground)
+}
+
+/// Reads/writes `gbl.mapToBackGroundTile[x, y]` — `field_7[x + y * 50]`
+/// (`Struct_1D1BC.cs:44-53`). Unlike `set_background_tile` these are DIRECT
+/// writes: no `+1`.
+fn tile_get(ground: &[u8], x: i32, y: i32) -> u8 {
+    ground[(y * MAP_W + x) as usize]
+}
+
+fn tile_set(ground: &mut [u8], x: i32, y: i32, v: u8) {
+    ground[(y * MAP_W + x) as usize] = v;
+}
+
+/// `SetGroundTile_40` (`sub_379AC`, `ovr011.cs:537-548`) — the two-cell
+/// bridge/ford decoration dropped along the road. Both writes are guarded on
+/// `map_x < 0x31`; the second additionally on `map_y < 0x18`, so the road's
+/// last row never grows one.
+fn set_ground_tile_40(ground: &mut [u8], map_x: i32, map_y: i32) {
+    if map_x < 0x31 {
+        tile_set(ground, map_x + 1, map_y, 0x40);
+    }
+    if map_y < 0x18 && map_x < 0x31 {
+        tile_set(ground, map_x + 1, map_y + 1, 0x41);
+    }
+}
+
+/// ★ **`SetupWildernessFloor01`** (`sub_37A00`, `ovr011.cs:551-594`) — the
+/// road: a two-cell-wide diagonal band running top to bottom, stepping one
+/// cell right per row.
+///
+/// Three things a paraphrase would lose, all draw-visible:
+///
+/// - **The `roll_dice(100,1)` is unconditional.** `var_1` is `0` for a city
+///   with neither road bit, and the code still rolls before comparing — so
+///   *every* wilderness floor spends that die whether or not it lays a road.
+/// - **The alignment loop has no dice.** `map_x = 0x22 - roll_dice(4,5)`
+///   (5d4, so `14..=29`), then `while ((map_x + 2) % 7) > 0 { map_x-- }` snaps
+///   the start to a 7-cell lattice.
+/// - **`map_x` advances inside the `map_y` loop**, and only while
+///   `map_x <= 0x31` — so the band shears off the right edge and the dice
+///   simply stop, mid-column. The row loop still runs to `0x18`.
+fn wilderness_floor_01(ground: &mut [u8], info: u8, rng: &mut EngineRng) {
+    let mut var_1: u8 = 0;
+    if info & 0x20 != 0 {
+        var_1 = 0x23;
+    }
+    if info & 0x10 != 0 {
+        var_1 = 0x4B;
+    }
+    if i32::from(roll_dice(rng, 100, 1)) > i32::from(var_1) {
+        return;
+    }
+    let mut map_x: i32 = 0x22 - i32::from(roll_dice(rng, 4, 5));
+    while (map_x + 2) % 7 > 0 {
+        map_x -= 1;
+    }
+    for map_y in 0..=0x18 {
+        if map_x > 0x31 {
+            continue;
+        }
+        tile_set(ground, map_x, map_y, (roll_dice(rng, 2, 1) + 0x3B) as u8);
+        if map_x < 0x31 {
+            tile_set(
+                ground,
+                map_x + 1,
+                map_y,
+                (roll_dice(rng, 2, 1) + 0x3D) as u8,
+            );
+        }
+        if roll_dice(rng, 20, 1) == 1 {
+            set_ground_tile_40(ground, map_x, map_y);
+        }
+        map_x += 1;
+    }
+}
+
+/// ★ **`SetupWildernessFloor02`** (`sub_37B0B`, `ovr011.cs:597-650`) — the
+/// streams: vertical pairs of water cells scattered over open ground.
+///
+/// Skipped whole for a `0x80` city (`:600`). `neededRoll` starts at 10 and the
+/// four flag adjustments can only push it to `1..=25` — the `< 0 → 1` clamp at
+/// `:624` is dead as the table stands, and is transcribed anyway.
+///
+/// The draw order is the short-circuit's: **both** neighbouring cells must
+/// still read as plain ground before the first `roll_dice(100,1)` is spent, and
+/// the second is spent only when the first passes. Which of the two arms fires
+/// then decides whether one cell or two are painted, and with how many further
+/// dice.
+fn wilderness_floor_02(ground: &mut [u8], info: u8, rng: &mut EngineRng) {
+    if info & 0x80 != 0 {
+        return;
+    }
+    let mut needed_roll: i32 = 10;
+    if info & 0x02 != 0 {
+        needed_roll -= 5;
+    }
+    if info & 0x04 != 0 {
+        needed_roll -= 2;
+    }
+    if info & 0x40 != 0 {
+        needed_roll += 5;
+    }
+    if info & 0x08 != 0 {
+        needed_roll += 10;
+    }
+    if needed_roll < 0 {
+        needed_roll = 1;
+    }
+    for map_x in 0..=0x31 {
+        for map_y in 1..=0x18 {
+            if background_tile_index(tile_get(ground, map_x, map_y)) == FLOOR_TILE_INDEX
+                && background_tile_index(tile_get(ground, map_x, map_y - 1)) == FLOOR_TILE_INDEX
+                && needed_roll >= i32::from(roll_dice(rng, 100, 1))
+            {
+                if needed_roll >= i32::from(roll_dice(rng, 100, 1)) {
+                    tile_set(ground, map_x, map_y, (roll_dice(rng, 2, 1) + 0x29) as u8);
+                } else {
+                    tile_set(
+                        ground,
+                        map_x,
+                        map_y - 1,
+                        (roll_dice(rng, 5, 1) + 0x1F) as u8,
+                    );
+                    tile_set(ground, map_x, map_y, (roll_dice(rng, 5, 1) + 0x24) as u8);
+                }
+            }
+        }
+    }
+}
+
+/// `SetGroupMapStepped` (`sub_37CA2`, `ovr011.cs:653-677`) — one cell's
+/// vegetation roll, a five-band cumulative ladder over a single
+/// `roll_dice(100,1)`.
+///
+/// The bands are checked from the SMALLEST cumulative bound up
+/// (`stepA`, then `stepA+stepB`, …), and a roll past the last bound leaves the
+/// cell alone — which is how a low-`var_4` region stays mostly bare while
+/// still spending exactly one die per open cell. At most one further die is
+/// spent, for the chosen tile's variant.
+#[allow(clippy::too_many_arguments)]
+fn set_group_map_stepped(
+    ground: &mut [u8],
+    rng: &mut EngineRng,
+    step_e: i32,
+    step_d: i32,
+    step_c: i32,
+    step_b: i32,
+    step_a: i32,
+    map_y: i32,
+    map_x: i32,
+) {
+    let roll = i32::from(roll_dice(rng, 100, 1));
+    if roll <= step_a {
+        tile_set(ground, map_x, map_y, (roll_dice(rng, 2, 1) + 0x39) as u8);
+    } else if roll <= step_a + step_b {
+        tile_set(ground, map_x, map_y, (roll_dice(rng, 2, 1) + 0x2F) as u8);
+    } else if roll <= step_a + step_b + step_c {
+        tile_set(ground, map_x, map_y, (roll_dice(rng, 4, 1) + 0x2B) as u8);
+    } else if roll <= step_a + step_b + step_c + step_d {
+        tile_set(ground, map_x, map_y, (roll_dice(rng, 3, 1) + 0x36) as u8);
+    } else if roll <= step_a + step_b + step_c + step_d + step_e {
+        tile_set(ground, map_x, map_y, (roll_dice(rng, 4, 1) + 0x31) as u8);
+    }
+}
+
+/// ★ **`SetupWildernessFloor03`** (`sub_37E4A`, `ovr011.cs:680-743`) — the
+/// vegetation, over every cell still reading as plain ground.
+///
+/// `var_4` is a lushness score, `50` adjusted by six flags into `0..=110` for
+/// the shipped table. Its five band tests are transcribed **including their
+/// overlap**: `60..=89` sits entirely inside the `30..=69` band tested before
+/// it, so scores 60-69 can never reach it — the original's own dead arm, kept
+/// rather than tidied (D11).
+///
+/// Note the outer loop runs `map_x` to **49** and `map_y` to **24**, the whole
+/// grid, where `02` stops at `0x31`/`0x18`. Same grid, two different bounds,
+/// both the original's.
+fn wilderness_floor_03(ground: &mut [u8], info: u8, rng: &mut EngineRng) {
+    let mut var_4: i32 = 50;
+    if info & 0x10 != 0 {
+        var_4 += 10;
+    }
+    if info & 0x20 != 0 {
+        var_4 += 30;
+    }
+    if info & 0x40 != 0 {
+        var_4 += 20;
+    }
+    if info & 0x04 != 0 {
+        var_4 -= 10;
+    }
+    if info & 0x02 != 0 {
+        var_4 -= 20;
+    }
+    if info & 0x80 != 0 {
+        var_4 -= 50;
+    }
+
+    for map_x in 0..=49 {
+        for map_y in 0..=24 {
+            if background_tile_index(tile_get(ground, map_x, map_y)) != FLOOR_TILE_INDEX {
+                continue;
+            }
+            let steps = if (-30..=9).contains(&var_4) {
+                (15, 30, 0, 0, 0)
+            } else if (10..=29).contains(&var_4) {
+                (10, 14, 5, 1, 0)
+            } else if (30..=69).contains(&var_4) {
+                (5, 10, 5, 2, 0)
+            } else if (60..=89).contains(&var_4) {
+                // Unreachable: 60..=69 was caught above. The original's own
+                // dead arm (`ovr011.cs:732`), kept verbatim.
+                (1, 10, 10, 2, 10)
+            } else if (90..=110).contains(&var_4) {
+                (1, 10, 15, 5, 15)
+            } else {
+                continue;
+            };
+            set_group_map_stepped(
+                ground, rng, steps.0, steps.1, steps.2, steps.3, steps.4, map_y, map_x,
+            );
+        }
+    }
 }
 
 #[cfg(test)]

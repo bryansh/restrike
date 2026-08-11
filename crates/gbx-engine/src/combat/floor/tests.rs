@@ -469,15 +469,37 @@ fn the_same_seed_and_area_always_lay_the_same_floor() {
 
 // --- the fork ------------------------------------------------------------
 
+/// ★ The fork is real on both sides now (D-S7c). Outdoors it ignores the GEO
+/// entirely and lays [`setup_wilderness_floor`]'s terrain from `current_city`;
+/// indoors it lays the sheared dungeon patch.
+///
+/// An all-open GEO makes the two trivially distinguishable: the dungeon path
+/// paints a uniform floor (every builder's plain arm), while the wilderness
+/// path scatters vegetation over the same grid from the same seed.
 #[test]
-fn a_wilderness_fight_refuses_loudly_rather_than_laying_a_dungeon_floor() {
+fn the_fork_lays_a_wilderness_floor_outdoors_and_a_dungeon_one_indoors() {
     let geo = open_geo();
+    let all = |m: &CombatMap| {
+        (0..MAP_W * MAP_H)
+            .map(|i| m.ground_tile(GridPos::new(i % MAP_W, i / MAP_W)))
+            .collect::<Vec<_>>()
+    };
+
     let mut rng = EngineRng::new(1);
-    assert_eq!(
-        setup_ground_tiles(&geo, (8, 8), 1, false, &mut rng).unwrap_err(),
-        FloorError::WildernessFloorDeferred
+    let dungeon = setup_ground_tiles(&geo, (8, 8), 1, true, LUSH_ROAD_CITY, &mut rng);
+    assert!(
+        all(&dungeon).iter().all(|&t| t == 0x17),
+        "an all-open dungeon is one solid floor"
     );
-    assert!(setup_ground_tiles(&geo, (8, 8), 1, true, &mut rng).is_ok());
+
+    let mut rng = EngineRng::new(1);
+    let wild = setup_ground_tiles(&geo, (8, 8), 1, false, LUSH_ROAD_CITY, &mut rng);
+    assert!(
+        all(&wild).iter().any(|&t| t != 0x17),
+        "the wilderness scatters terrain over the same grid"
+    );
+    // Every cell is still SOMETHING: `SetField_7(23)` leaves no void outdoors.
+    assert!(all(&wild).iter().all(|&t| t != 0));
 }
 
 #[test]
@@ -490,4 +512,180 @@ fn the_placement_hook_reports_the_same_flags_the_floor_reads() {
     assert_eq!(hook(0, 8, 8), dir_flags(&geo, 8, 0, 8, 8) as i32);
     assert_eq!(hook(0, 8, 8), 1);
     assert_eq!(hook(2, 8, 8), 0);
+}
+
+// --- ★ the wilderness floor (D-S7c) ---------------------------------------
+
+/// The city index whose flags exercise both road bits and the vegetation
+/// ceiling: `CITY_INFO[12] == 0x71` — road (`0x10`), streams (`0x40`),
+/// extra streams (`0x08`), and `50 + 10 + 20 = 80` lushness.
+const LUSH_ROAD_CITY: u8 = 12;
+/// `CITY_INFO[6] == 0x60` — `0x40 | 0x20`, the other road bit plus streams.
+const OTHER_ROAD_CITY: u8 = 6;
+/// `CITY_INFO[0] == 0x00` — no road, streams at the base rate, lushness 50.
+const PLAIN_CITY: u8 = 0;
+
+#[test]
+fn the_city_info_table_is_33_long_and_matches_the_cursor_tables_index_space() {
+    // `ovr011.cs:524-529` and `ovr028.cs:7-17` are indexed by the same
+    // `current_city`, so they must agree on how many there are.
+    assert_eq!(CITY_INFO.len(), crate::mapcursor::CITY_COUNT);
+    assert_eq!(CITY_INFO[0], 0x00);
+    assert_eq!(CITY_INFO[6], 0x60);
+    assert_eq!(CITY_INFO[12], 0x71);
+    assert_eq!(CITY_INFO[32], 0x0A);
+    // Out of range reads 0 rather than panicking.
+    assert_eq!(city_info(33), 0);
+}
+
+/// `SetField_7(23)` (`ovr011.cs:748`): the wilderness grid starts as open
+/// ground everywhere, which is why `02`/`03` can test for "still plain" and
+/// why nothing outdoors is ever the dungeon's void.
+#[test]
+fn the_wilderness_grid_starts_as_open_ground_everywhere() {
+    assert_eq!(
+        BACKGROUND_TILE_INDEX[WILDERNESS_BASE_TILE as usize],
+        FLOOR_TILE_INDEX
+    );
+    assert_eq!(
+        tile_passability(WILDERNESS_BASE_TILE),
+        TilePassability::Passable { move_cost: 1 }
+    );
+}
+
+/// ★ The draw-bearing shape, pinned by OPERAND SEQUENCE — the property a live
+/// wilderness capture will check.
+///
+/// The first die is always `Random(100)`: `SetupWildernessFloor01` rolls
+/// before comparing against `var_1`, even for a city whose `var_1` is 0
+/// (`ovr011.cs:565`). "Every wilderness floor opens with a d100" is an
+/// invariant, not a coincidence.
+#[test]
+fn every_wilderness_floor_opens_with_the_roads_unconditional_d100() {
+    for city in [PLAIN_CITY, OTHER_ROAD_CITY, LUSH_ROAD_CITY, 32] {
+        let tap = Tap::default();
+        let mut rng = tap.rng(0x1234_5678);
+        let _ = setup_wilderness_floor(city, &mut rng);
+        assert_eq!(
+            tap.operands().first().copied().flatten(),
+            Some(100),
+            "city {city}: the road roll is unconditional"
+        );
+        assert!(tap.count() > 1, "city {city}: later passes spend dice too");
+    }
+}
+
+/// A city with neither road bit spends exactly ONE die in `01` (the
+/// unconditional d100) and then goes straight to the streams — no 5d4, no
+/// per-row pair.
+#[test]
+fn a_roadless_city_spends_one_die_on_the_road_pass() {
+    // `CITY_INFO[0]` is 0, so `var_1` stays 0 and `roll <= 0` can never hold
+    // (`roll_dice(100,1)` is 1-based).
+    let tap = Tap::default();
+    let mut rng = tap.rng(7);
+    let mut ground = vec![WILDERNESS_BASE_TILE; (MAP_W * MAP_H) as usize];
+    wilderness_floor_01(&mut ground, city_info(PLAIN_CITY), &mut rng);
+    assert_eq!(tap.operands(), vec![Some(100)]);
+}
+
+/// `SetupWildernessFloor01`'s road, when it fires: a two-lane band that steps
+/// one cell right per row, starting on the `(x + 2) % 7 == 0` lattice.
+#[test]
+fn the_road_is_a_two_cell_diagonal_on_a_seven_cell_lattice() {
+    // Driven directly with the `0x10` bit so `var_1` is 0x4B — 75/100 per
+    // seed; this seed takes it.
+    let mut ground = vec![WILDERNESS_BASE_TILE; (MAP_W * MAP_H) as usize];
+    let mut rng = EngineRng::new(0xABCD);
+    wilderness_floor_01(&mut ground, 0x10, &mut rng);
+
+    // Row 0's first lane is 0x3C/0x3D, its second 0x3E/0x3F.
+    let start = (0..MAP_W)
+        .find(|&x| matches!(ground[x as usize], 0x3C | 0x3D))
+        .expect("the road laid a first cell");
+    assert_eq!((start + 2) % 7, 0, "snapped to the lattice");
+    assert!(
+        matches!(ground[(start + 1) as usize], 0x3E | 0x3F),
+        "the second lane sits immediately right"
+    );
+    // Row 3 is three cells further right (or a `SetGroundTile_40` decoration
+    // dropped over it).
+    let row3 = 3 * MAP_W;
+    assert!(matches!(
+        ground[(row3 + start + 3) as usize],
+        0x3C | 0x3D | 0x40 | 0x41
+    ));
+}
+
+/// `SetupWildernessFloor02` is skipped whole for a `0x80` city
+/// (`ovr011.cs:600`) — no streams, and no dice.
+#[test]
+fn a_0x80_city_gets_no_streams_and_spends_no_dice_on_them() {
+    let tap = Tap::default();
+    let mut rng = tap.rng(11);
+    let mut ground = vec![WILDERNESS_BASE_TILE; (MAP_W * MAP_H) as usize];
+    wilderness_floor_02(&mut ground, 0x80, &mut rng);
+    assert_eq!(tap.count(), 0);
+}
+
+/// `SetGroupMapStepped`'s ladder: at most two dice per cell, and a roll past
+/// the last cumulative bound leaves the cell untouched (`ovr011.cs:653-677`).
+#[test]
+fn the_vegetation_ladder_spends_one_die_when_it_declines_and_two_when_it_paints() {
+    let mut ground = vec![WILDERNESS_BASE_TILE; (MAP_W * MAP_H) as usize];
+
+    // All bands zero: the roll can never be <= 0, so one die and no write.
+    let tap = Tap::default();
+    let mut rng = tap.rng(5);
+    set_group_map_stepped(&mut ground, &mut rng, 0, 0, 0, 0, 0, 3, 4);
+    assert_eq!(tap.operands(), vec![Some(100)]);
+    assert_eq!(ground[(3 * MAP_W + 4) as usize], WILDERNESS_BASE_TILE);
+
+    // `stepA = 100`: every roll takes the first arm, which spends a d2 and
+    // writes 0x3A/0x3B.
+    let tap = Tap::default();
+    let mut rng = tap.rng(5);
+    set_group_map_stepped(&mut ground, &mut rng, 0, 0, 0, 0, 100, 3, 4);
+    assert_eq!(tap.operands(), vec![Some(100), Some(2)]);
+    assert!(matches!(ground[(3 * MAP_W + 4) as usize], 0x3A | 0x3B));
+}
+
+/// Determinism (D9): the wilderness floor is a pure function of
+/// `(current_city, seed)` — no GEO, no party position.
+#[test]
+fn the_wilderness_floor_is_a_pure_function_of_the_city_and_the_seed() {
+    let mut a = EngineRng::new(0x5A1E_5A1E);
+    let mut b = EngineRng::new(0x5A1E_5A1E);
+    assert_eq!(
+        setup_wilderness_floor(LUSH_ROAD_CITY, &mut a),
+        setup_wilderness_floor(LUSH_ROAD_CITY, &mut b)
+    );
+    let mut c = EngineRng::new(0x5A1E_5A1E);
+    let mut d = EngineRng::new(0x5A1E_5A1E);
+    assert_ne!(
+        setup_wilderness_floor(LUSH_ROAD_CITY, &mut c),
+        setup_wilderness_floor(PLAIN_CITY, &mut d),
+        "different cities, different terrain"
+    );
+}
+
+/// ★ The sixteen closed captures are all dungeon fights, and the guard's
+/// standing invariant is that this code is unreachable from them.
+/// Structurally: the wilderness generator takes no `GeoBlock` at all, and
+/// `setup_ground_tiles` reaches it only on `in_dungeon == false` — while every
+/// capture replays through `combat_entry`'s stored terrain and calls neither
+/// arm. The draw shapes make it checkable, too.
+#[test]
+fn the_wilderness_generator_is_unreachable_from_an_in_dungeon_fight() {
+    let tap = Tap::default();
+    let mut rng = tap.rng(3);
+    let _ = setup_ground_tiles(&open_geo(), (8, 8), 1, true, LUSH_ROAD_CITY, &mut rng);
+    let dungeon_draws = tap.operands();
+    // The dungeon path's only dice are the furniture d10s; a wilderness floor
+    // opens with a d100 and spends 5d4 / d20 / d2 / d5 shapes the dungeon path
+    // never rolls.
+    assert!(
+        dungeon_draws.iter().all(|d| *d == Some(10)),
+        "an in-dungeon floor rolls furniture d10s and nothing else: {dungeon_draws:?}"
+    );
 }

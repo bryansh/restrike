@@ -45,7 +45,7 @@
 //! assembly time or from `CombatState::step` inside `Fighting`, which is what
 //! the shell-path draw-parity test asserts.
 
-use crate::combat::floor::{self, FloorError};
+use crate::combat::floor;
 use crate::combat::kits;
 use crate::combat::manual::{TurnCmd, TurnOutcome};
 use crate::combat::scene::{
@@ -305,28 +305,17 @@ impl CombatHost {
         }
         let dist = ctx.state.encounter_distance;
 
-        // (1) The floor. Wilderness is deferred whole (doc §7) — rather than
-        // lay a dungeon floor outdoors, fall back to the flagged provisional
-        // derivation and SAY so in the transcript.
-        let mut map = match floor::setup_ground_tiles(
+        // (1) The floor — both arms real now (roll-credits D-S7c retired the
+        // `WildernessFloorDeferred` fallback). Outdoors the terrain comes from
+        // `current_city`, not the GEO: there is no GEO out there.
+        let mut map = floor::setup_ground_tiles(
             ctx.geo,
             party_pos,
             ctx.state.ecl_block_id,
             in_dungeon,
+            ctx.vm_memory.current_city(),
             ctx.rng,
-        ) {
-            Ok(map) => map,
-            Err(FloorError::WildernessFloorDeferred) => {
-                ctx.vm_memory
-                    .transcript
-                    .push(crate::vmhost::TranscriptEntry::Request(
-                        "combat: wilderness floor deferred — provisional terrain \
-                         (combat-visualizer.md §7)"
-                            .to_string(),
-                    ));
-                crate::combat::provisional_combat_map(ctx.geo)
-            }
-        };
+        );
 
         // (2) Placement, with the area's real walls in play.
         let party_sizes: Vec<u8> = ctx
@@ -352,6 +341,11 @@ impl CombatHost {
                 in_combat: true,
             }))
             .collect();
+        // ★ Outdoors the two wall probes in `place_combatants`' retry paths are
+        // short-circuited by `game_state == WildernessMap`
+        // (`ovr011.cs:992,1025`) — which is exactly what the `None` default
+        // (`open_ground_dir_flags`) does. Passing the GEO hook there would ask
+        // a `GeoBlock` area 1 does not ship where the walls are.
         let hook = floor::dir_flags_hook(ctx.geo, party_pos.1);
         let placements = place_combatants(
             &mut map,
@@ -359,7 +353,7 @@ impl CombatHost {
             map_dir,
             dist as i32,
             GridPos::new(party_pos.0, party_pos.1),
-            Some(&hook),
+            in_dungeon.then_some(&hook as &crate::combat::DirFlags<'_>),
         );
 
         // (3) The roster, party first (TeamList order is load-bearing).
