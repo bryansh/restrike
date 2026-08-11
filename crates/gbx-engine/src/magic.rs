@@ -1129,7 +1129,7 @@ pub fn spell_list_layout(source: SpellSource) -> crate::widgets::ListLayout {
 /// A built spell list: the rows `sl_select_item` shows, plus the parallel
 /// `gbl.memorize_spell_id` / `gbl.scribeScrolls` arrays that turn a chosen row
 /// back into a spell (and, for a scroll list, into the item it came from).
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SpellListing {
     pub items: Vec<crate::widgets::ListItem>,
     /// One id per **non-heading** row, in row order (`gbl.memorize_spell_id`).
@@ -1442,6 +1442,110 @@ pub fn memorize_capacity_table(ch: &Character) -> Vec<MemorizeCapacityRow> {
         }
     }
     rows
+}
+
+/// `EffectNameMap` (`BuildEffectNameMap`, `ovr016.cs:503-553`) — the Magic ▸
+/// Display screen's affect names.
+///
+/// The first 35 are *derived*: for each affect id in the listed set, scan
+/// `spellCastingTable[1..=0x38]` for the first row carrying that `affect_id`
+/// and take that spell's name (`:518-525`). Two of them are worth noticing —
+/// `paralyze` (`0x34`) resolves to **"Hold Person"** and `blinded` (`0x21`) to
+/// **"Cause Blindness"**, because that is the first spell that applies them —
+/// and `animate_dead` (`0x20`) resolves to nothing at all in the `1..=0x38`
+/// window, so it keeps coab's literal fallback string `"Funky--animate_dead"`
+/// (`:529`). Kept verbatim: it is what the screen shows.
+///
+/// The remaining nineteen are the explicit `Add` calls at `:533-551`.
+pub fn effect_name(affect_id: u8) -> Option<&'static str> {
+    let name = match affect_id {
+        0x01 => "Bless",
+        0x02 => "Curse",
+        0x04 => "Dispel Evil",
+        0x05 => "Detect Magic",
+        0x07 => "Faerie Fire",
+        0x08 => "Protection from Evil",
+        0x09 => "Protection from Good",
+        0x0A => "Resist Cold",
+        0x0B => "Charm Person",
+        0x0C => "Enlarge",
+        0x0E => "Friends",
+        0x10 => "Read Magic",
+        0x11 => "Shield",
+        0x13 => "Find Traps",
+        0x14 => "Resist Fire",
+        0x15 => "Silence, 15' Radius",
+        0x16 => "Slow Poison",
+        0x17 => "Spiritual Hammer",
+        0x18 => "Detect Invisibility",
+        0x19 => "Invisibility",
+        0x1B => "Fumbling",
+        0x1C => "Mirror Image",
+        0x1D => "Ray of Enfeeblement",
+        0x1F => "Helpless",
+        0x20 => "Funky--animate_dead",
+        0x21 => "Cause Blindness",
+        0x22 => "Cause Disease",
+        0x23 => "Confused",
+        0x24 => "Bestow Curse",
+        0x25 => "Blink",
+        0x26 => "Strength",
+        0x27 => "Haste",
+        0x29 => "Protection From Normal Missiles",
+        0x2A => "Slow",
+        0x2C => "Cause Disease",
+        0x2D => "Protection From Evil, 10' Radius",
+        0x2E => "Protection From Good, 10' Radius",
+        0x31 => "Prayer",
+        0x32 => "Hot Fire Shield",
+        0x33 => "Snake Charm",
+        0x34 => "Hold Person",
+        0x35 => "Sleep",
+        0x36 => "Cold Fire Shield",
+        0x37 => "Poisoned",
+        0x3B => "Regenerating",
+        0x3D => "Fire Resistance",
+        0x3F => "Minor Globe of Invulnerability",
+        0x44 => "enfeebled",
+        0x45 => "invisible to animals",
+        0x47 => "Invisible",
+        0x48 => "Camouflaged",
+        0x49 => "protected from dragon breath",
+        0x4D => "berserk",
+        0x59 => "Displaced",
+        _ => return None,
+    };
+    Some(name)
+}
+
+/// `sub_443A0` (`ovr016.cs:116-156`) — may this character do this right now?
+/// `Err` carries the exact refusal line `DisplayPlayerStatusString` shows after
+/// the character's name.
+///
+/// `learn_type` is the original's: `1` cast, `2` memorize, `3` scribe. The
+/// `learn_type == 1` arm tests the area flag and is an **`else if`**, so the
+/// health check below never runs for casting (`:120-127`).
+///
+/// ★ The area flag reads inverted, and is transcribed that way: coab's
+/// `if (gbl.area_ptr.can_cast_spells == true) text = "cannot cast spells in
+/// this area"` (`:122-125`). Whatever the cell is called, *set* means barred.
+pub fn learn_gate(
+    ch: &Character,
+    learn_type: u8,
+    area_bars_casting: bool,
+) -> Result<(), &'static str> {
+    if learn_type == 1 {
+        if area_bars_casting {
+            return Err("cannot cast spells in this area");
+        }
+    } else if ch.status.health_status == crate::rest::status::ANIMATED || !ch.status.in_combat {
+        return Err(match learn_type {
+            2 => "is in no condition to memorize spells",
+            3 => "is in no condition to scribe any scrolls",
+            _ => "is in no condition to ",
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -14,6 +14,9 @@
 
 pub mod award;
 pub mod boot;
+/// ★ The camp Magic submenu's leaves (roll-credits §8): Memorize, Scribe,
+/// Display and Rest.
+pub mod camp_magic;
 pub mod charsheet;
 pub mod combat;
 pub mod combat_art;

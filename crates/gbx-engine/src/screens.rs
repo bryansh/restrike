@@ -41,6 +41,11 @@ pub enum ScreenTransition {
     To(Screen),
     /// Back to the death screen ([`ReturnTo::GameOver`]).
     ToGameOver,
+    /// ★ `MakeCamp` returned `actionInterrupted` (roll-credits §8, FD-44):
+    /// the rest-encounter check fired, so camp ends and `TryEncamp` runs the
+    /// resident block's **vector 3**, `CampInterruptedAddr`
+    /// (`ovr003.cs:1920`) — the block's own camp-ambush script.
+    CampInterrupted,
 }
 
 /// The M3 party-facing screens. `Shell::Screen` holds one of these.
@@ -52,6 +57,15 @@ pub enum Screen {
     SaveLoad(SaveLoad),
     Training(Training),
     Shop(Shop),
+    // ★ Roll-credits slice 4 (Vancian camp magic). Appended at the END on
+    // purpose: postcard encodes an enum variant as its index, so the six
+    // above keep their encodings and no committed `.rsav` moves.
+    // Boxed: these four carry list rows and a whole rest session, and
+    // `ScreenTransition::To(Screen)` is passed by value on every transition.
+    Memorize(Box<crate::camp_magic::MemorizeScreen>),
+    Scribe(Box<crate::camp_magic::ScribeScreen>),
+    SpellEffects(Box<crate::camp_magic::SpellEffectsScreen>),
+    Rest(Box<crate::camp_magic::RestScreen>),
 }
 
 impl Screen {
@@ -63,6 +77,10 @@ impl Screen {
             Screen::SaveLoad(s) => s.tick(ctx),
             Screen::Training(s) => s.tick(ctx),
             Screen::Shop(s) => s.tick(ctx),
+            Screen::Memorize(s) => s.tick(ctx),
+            Screen::Scribe(s) => s.tick(ctx),
+            Screen::SpellEffects(s) => s.tick(ctx),
+            Screen::Rest(s) => s.tick(ctx),
         }
     }
 }
@@ -76,7 +94,7 @@ impl Screen {
 /// original layout includes the line calls this from inside its own paint.
 /// `camping` picks the `" camping"` suffix the `GameState.Camping` arm shows
 /// (`ovr025.cs:1500-1503`).
-pub(crate) fn draw_position_time(ctx: &mut FlowCtx, camping: bool) {
+pub fn draw_position_time(ctx: &mut FlowCtx, camping: bool) {
     crate::draw::cell_rect_fill(ctx.fb, 0, 15, 15, 17, 0x26);
     let text = crate::movement::position_time_text(
         ctx.state.pos,
@@ -383,10 +401,7 @@ impl Camp {
             // [`party_rest`] for the M4/M5 deferral (FD-25). The menu itself is
             // NOT rebuilt: `MakeCamp`'s loop keeps the one `displayInput` it
             // opened with, so the highlighted word survives the action.
-            b'R' => {
-                self.status = Some(party_rest(ctx));
-                ScreenTransition::Stay
-            }
+            b'R' => ScreenTransition::To(crate::camp_magic::RestScreen::open(ctx, false)),
             // Save → the save/load menu (ovr016.cs:1114 → ovr017.SaveGame).
             b'S' => ScreenTransition::To(Screen::SaveLoad(SaveLoad::new(ReturnTo::Camp))),
             // Alter (Order/Drop/Speed/Icon, ovr016.cs:1141 → alter_menu) and
@@ -399,13 +414,25 @@ impl Camp {
                 self.status = Some("Alter: party order/drop — TODO".into());
                 ScreenTransition::Stay
             }
-            b'F' => {
-                self.status = Some("Fix: auto-heal needs rest/healing (M4/M5)".into());
-                ScreenTransition::Stay
-            }
+            // Fix (`FixTeam`, `ovr016.cs:1035-1073`): roll the memorized cures,
+            // price the rest, then rest with `resting(false)` — no time menu.
+            // A party at full health short-circuits with nothing rolled.
+            b'F' => match crate::rest::plan_fix(ctx.roster, ctx.rng) {
+                Some(plan) => {
+                    ScreenTransition::To(crate::camp_magic::RestScreen::open_for_fix(ctx, plan))
+                }
+                None => ScreenTransition::Stay,
+            },
             // Exit ('E') or Escape ('\0') leaves camp for the walk loop
             // (ovr016.cs:1075's `Set(0, 69)` loop-exit set).
-            b'E' | 0 => ScreenTransition::Exit,
+            // ★ `MakeCamp`'s tail runs `cancel_spells` a second time
+            // (`ovr016.cs:1154`), so staged-but-uncommitted memorizations and
+            // scribes do not survive leaving camp.
+            b'E' | 0 => {
+                let scrolls = crate::camp_magic::camp_scrolls(ctx);
+                crate::magic::cancel_spells(ctx.roster, &scrolls);
+                ScreenTransition::Exit
+            }
             _ => ScreenTransition::Stay,
         }
     }
@@ -457,32 +484,6 @@ fn decode_camp_picture(ctx: &FlowCtx) -> Option<CampPicture> {
     })
 }
 
-/// The camp Rest action (`rest_menu`/`resting`, `ovr016.cs:274`/`ovr021.cs:516`).
-///
-/// **Faithfully a documented deferral this milestone (FD-25).** The original's
-/// rest does three things: advance the clock (`step_game_time`), heal 1 HP per
-/// time-tick (`rest_heal`), and commit each caster's *staged pending*
-/// memorizations pending → memorized (`rest_memorize` → `SpellList.MarkLearnt`,
-/// `ovr021.cs:403`). It never resets `spellCastCount` (a fixed capacity) — the
-/// task brief's "spell-slot restoration" framing does not match the original
-/// (FD-25). The clock/healing halves are the PLAN's deferred "time effects"
-/// (M4); the memorization commit needs the `SpellList` Learning-flag decode +
-/// the Magic ▸ Memorize staging path, both **M5 (Vancian)** scope, and our
-/// `party::MagicState` carries `spell_list`/`cast_count` raw. With no staging
-/// path yet, the pending list is always empty and a faithful commit is a
-/// no-op — which is *correct* for the bundled save (it stages nothing). So
-/// this reports the rest without mutating spell state, rather than faking a
-/// restoration the original never performs.
-fn party_rest(ctx: &FlowCtx) -> String {
-    let casters = ctx
-        .roster
-        .members
-        .iter()
-        .filter(|m| m.magic.cast_count.iter().flatten().any(|&c| c > 0))
-        .count();
-    format!("The party rests. ({casters} caster(s); memorization: M5)")
-}
-
 // --- Magic submenu (ovr016.cs:600, magic_menu) ---
 
 /// The Magic submenu (`magic_menu`, `ovr016.cs:600`): the command bar
@@ -504,6 +505,15 @@ impl MagicMenu {
         }
     }
 
+    /// Rebuilt carrying a leaf's refusal or result line — `magic_menu`'s own
+    /// re-display loop (`ovr016.cs:605-640`).
+    pub fn with_status(status: impl Into<String>) -> Self {
+        MagicMenu {
+            menu: menu_bar("Cast Memorize Scribe Display Rest Exit"),
+            status: Some(status.into()),
+        }
+    }
+
     pub fn tick(&mut self, ctx: &mut FlowCtx) -> ScreenTransition {
         draw_menu_backdrop(
             ctx,
@@ -514,25 +524,20 @@ impl MagicMenu {
         match self.menu.tick(ctx.input, ctx.dt_ticks) {
             WidgetOutcome::Pending => ScreenTransition::Stay,
             WidgetOutcome::Hotbar(key) => match key.to_ascii_uppercase() {
-                // Rest here calls the same rest action (ovr016.cs:635).
-                b'R' => ScreenTransition::To(Screen::Camp(Camp::with_status(party_rest(ctx)))),
+                // Rest here is the same `rest_menu` the camp bar calls
+                // (ovr016.cs:636), returning to THIS menu (:605's own loop).
+                b'R' => ScreenTransition::To(crate::camp_magic::RestScreen::open(ctx, true)),
                 // Exit ('E') / Escape back to camp (ovr016.cs:831's Set(0,69)).
                 b'E' | 0 => ScreenTransition::To(Screen::Camp(Camp::new(ctx))),
-                // Cast/Memorize/Scribe/Display: M5 (Vancian) — see FD-25.
+                // ★ Memorize / Scribe / Display are real (roll-credits §8).
+                b'M' => crate::camp_magic::MemorizeScreen::open(ctx),
+                b'S' => crate::camp_magic::ScribeScreen::open(ctx),
+                b'D' => ScreenTransition::To(crate::camp_magic::SpellEffectsScreen::open(ctx)),
+                // Cast out of camp still needs the out-of-combat casting path
+                // (G7's tail); `cast_spell` (ovr016.cs:159-200) is not this
+                // slice's business.
                 b'C' => {
-                    self.status = Some("Cast: spell effects are M5".into());
-                    ScreenTransition::Stay
-                }
-                b'M' => {
-                    self.status = Some("Memorize: staging is M5 (FD-25)".into());
-                    ScreenTransition::Stay
-                }
-                b'S' => {
-                    self.status = Some("Scribe: scroll learning is M5".into());
-                    ScreenTransition::Stay
-                }
-                b'D' => {
-                    self.status = Some("Display: affect list needs the affect model (M4)".into());
+                    self.status = Some("Cast: out-of-combat casting is G7".into());
                     ScreenTransition::Stay
                 }
                 _ => ScreenTransition::Stay,

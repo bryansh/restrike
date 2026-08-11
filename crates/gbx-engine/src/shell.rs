@@ -54,6 +54,9 @@ const STEP_BUDGET: u32 = 10_000;
 /// own `vector.unwrap_or(4)` default).
 const VECTOR_RUN_ADDR_1: usize = 0;
 const VECTOR_SEARCH_LOCATION: usize = 1;
+/// `CampInterruptedAddr` — `TryEncamp` runs it when `MakeCamp` returns
+/// "interrupted" (`ovr003.cs:1920`), i.e. when the rest-encounter check fired.
+const VECTOR_CAMP_INTERRUPTED: usize = 3;
 const VECTOR_ENTRY_POINT: usize = 4;
 
 /// What a flow's cursor is doing right now (D-UI2, generalized — see this
@@ -118,7 +121,7 @@ fn draw_hotbar_prompt(
 /// with foreground 0. Both paint functions `Trim()`/offset by the row's leading
 /// spaces, so an indented entry keeps its indent and the inverse-video block
 /// covers only the text.
-fn draw_list_menu(
+pub fn draw_list_menu(
     fb: &mut crate::framebuffer::Framebuffer,
     font: &gbx_formats::font::Font,
     list: &crate::widgets::ListMenu,
@@ -1675,6 +1678,62 @@ impl LookFlow {
     }
 }
 
+// --- CampInterruptFlow (★ FD-44: `TryEncamp`'s interrupted arm) ---
+
+/// ★ The camp ambush (`TryEncamp`, `ovr003.cs:1920`).
+///
+/// `MakeCamp` returns `actionInterrupted` when `resting`'s rest-encounter check
+/// fires (`ovr021.cs:594-602`); `TryEncamp` answers it by running the resident
+/// ECL block's header **vector 3**, `CampInterruptedAddr` — the block's own
+/// camp-ambush script, which is ordinary script content from there on (its
+/// `COMBAT`, its text, its `NEWECL` if it has one).
+///
+/// The interruption is deliberately **not** a flag the script polls: nothing
+/// writes a "you were ambushed" cell. The engine simply runs the vector.
+/// A block whose vector 3 is unresolved runs nothing and the party walks on,
+/// which is the same tolerance every other vector site here has.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CampInterruptFlow {
+    run: Option<VectorRun>,
+    chain: Option<ChainRunner>,
+}
+
+impl CampInterruptFlow {
+    pub fn start(machine: &mut EclMachine) -> Self {
+        CampInterruptFlow {
+            run: enter_vector(machine, VECTOR_CAMP_INTERRUPTED),
+            chain: None,
+        }
+    }
+
+    pub fn tick(&mut self, ctx: &mut FlowCtx) -> Option<()> {
+        if self.chain.is_some() {
+            drive_chain(&mut self.chain, ctx)?;
+            return Some(());
+        }
+        let Some(run) = self.run.as_mut() else {
+            return Some(());
+        };
+        match run.tick(ctx) {
+            RunTick::Working => None,
+            RunTick::Done(Exit::Ended) => {
+                self.run = None;
+                Some(())
+            }
+            RunTick::Done(Exit::ChainTo(id)) => {
+                self.run = None;
+                match begin_chain(ctx, id) {
+                    Some(runner) => {
+                        self.chain = Some(runner);
+                        None
+                    }
+                    None => Some(()),
+                }
+            }
+        }
+    }
+}
+
 // --- StepFlow (the forward/step sequence, `sub_29758`'s tail) ---
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -2115,6 +2174,10 @@ pub enum Shell {
     /// save/load, training, shops) — additive, no VM vector runs here; each
     /// is a parked-widget screen (`crate::screens`).
     Screen(crate::screens::Screen),
+    /// ★ The camp ambush: camp ended interrupted, so the resident block's
+    /// vector 3 runs (roll-credits §8, FD-44). Appended last so postcard keeps
+    /// every existing variant's encoding.
+    CampInterrupt(CampInterruptFlow),
 }
 
 impl Shell {
@@ -2148,6 +2211,7 @@ impl Shell {
             // (`DisplayAndPause` already put its line there), so it is not a
             // `parked_widget` for drawing purposes — see [`GameOverFlow`].
             Shell::GameOver(_) | Shell::Screen(_) => None,
+            Shell::CampInterrupt(f) => from_run(&f.run, &f.chain),
         }
     }
 
@@ -2204,6 +2268,7 @@ impl Shell {
                 _ => "game-over".to_string(),
             },
             Shell::Screen(_) => "screen".to_string(),
+            Shell::CampInterrupt(f) => format!("camp-interrupt/{}", run_probe(&f.run, &f.chain)),
         }
     }
 }
@@ -2311,6 +2376,9 @@ impl Shell {
             // A screen always has a parked widget (its command bar/list); no
             // VM vector ever runs while one is open.
             Shell::Screen(_) => true,
+            // The camp-ambush vector is ordinary script: gated exactly like
+            // Look's and Step's.
+            Shell::CampInterrupt(c) => run_gated(&c.run) || chain_gated(&c.chain),
         }
     }
 
@@ -2379,6 +2447,22 @@ impl Shell {
                     ScreenTransition::ToGameOver => {
                         *self = Shell::GameOver(GameOverFlow::start(ctx))
                     }
+                    // ★ FD-44. `MakeCamp` returned interrupted: run
+                    // `cancel_spells` (its exit tail, `ovr016.cs:1154`),
+                    // recompose the exploration screen, and hand the resident
+                    // block's vector 3 the party.
+                    ScreenTransition::CampInterrupted => {
+                        let scrolls = crate::camp_magic::camp_scrolls(ctx);
+                        crate::magic::cancel_spells(ctx.roster, &scrolls);
+                        Self::rebuild_exploration_screen(ctx);
+                        *self = Shell::CampInterrupt(CampInterruptFlow::start(ctx.machine));
+                    }
+                }
+            }
+            Shell::CampInterrupt(flow) => {
+                if flow.tick(ctx).is_some() {
+                    ctx.state.last_selected_player = ctx.state.selected_player;
+                    *self = Self::enter_world_menu(ctx);
                 }
             }
         }
@@ -2473,6 +2557,8 @@ impl Shell {
             Shell::Boot(b) => in_run(&b.run).or_else(|| in_chain(&b.chain)),
             Shell::Look(l) => in_run(&l.run).or_else(|| in_chain(&l.chain)),
             Shell::Step(s) => in_run(&s.run).or_else(|| in_chain(&s.chain)),
+            // A camp ambush's own `COMBAT` parks here like any other.
+            Shell::CampInterrupt(c) => in_run(&c.run).or_else(|| in_chain(&c.chain)),
             Shell::WorldMenu { .. } | Shell::GameOver(_) | Shell::Screen(_) => None,
         }
     }
@@ -3476,25 +3562,34 @@ mod tests {
     /// highlighted word survives a sub-action rather than snapping back to the
     /// first — the menu is not rebuilt between iterations.
     #[test]
-    fn camp_keeps_its_highlighted_word_across_an_action() {
+    /// ★ `MakeCamp`'s View/Magic/Rest/Alter arms each set
+    /// `gbl.menuSelectedWord = 1` **before** dispatching
+    /// (`ovr016.cs:1123`/`:1128`/`:1133`/`:1142`), so the camp bar comes back
+    /// from a sub-action with its FIRST word highlighted — not the word that
+    /// was pressed. (This corrects the pre-slice-4 expectation, which came from
+    /// Rest being a no-op that never left the bar.)
+    fn camp_resets_its_highlight_when_a_sub_action_returns() {
         let (mut shell, mut h) = boot_with_party();
         h.input.push_all(&[char_key(b'e')]); // Encamp
         tick_until(&mut shell, &mut h, 10, |s| {
             matches!(s, Shell::Screen(Screen::Camp(_)))
         });
-        h.input.push_all(&[char_key(b'r')]); // Rest — stays in camp
-        for _ in 0..3 {
-            let mut ctx = h.ctx();
-            shell.tick(&mut ctx);
-        }
+        h.input.push_all(&[char_key(b'r')]); // Rest → the rest screen
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::Rest(_)))
+        });
+        h.input.push_all(&[char_key(b'e')]); // Exit the rest menu
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::Camp(_)))
+        });
         let Shell::Screen(Screen::Camp(camp)) = &shell else {
-            panic!("still in camp");
+            panic!("back in camp");
         };
         let (start, _) = camp.selected_span().expect("a word is highlighted");
         assert_eq!(
             &"Save View Magic Rest Alter Fix Exit"[start..start + 4],
-            "Rest",
-            "the Rest keypress leaves Rest highlighted"
+            "Save",
+            "menuSelectedWord = 1 puts the highlight back on the first word"
         );
     }
 
@@ -3550,8 +3645,12 @@ mod tests {
     }
 
     #[test]
-    fn camp_rest_stays_in_camp_and_does_not_touch_spell_state() {
-        // FD-25: rest reports without mutating spell state this milestone.
+    /// ★ Camp Rest opens `rest_menu`'s own screen (`ovr016.cs:1134`), and
+    /// resting it through **never** touches `spellCastCount` — FD-25's finding,
+    /// re-pinned here at the shell level as well as in `crate::rest`. With
+    /// nothing staged the required time is zero, so the loop ends immediately
+    /// and the party comes back exactly as it went in.
+    fn camp_rest_opens_the_rest_screen_and_never_resets_cast_count() {
         let (mut shell, mut h) = boot_with_party();
         h.input.push_all(&[char_key(b'e')]);
         tick_until(&mut shell, &mut h, 10, |s| {
@@ -3559,15 +3658,16 @@ mod tests {
         });
         let before = h.roster.members[0].magic.clone();
         h.input.push_all(&[char_key(b'r')]); // Rest
-                                             // Rest stays in camp (a status line, no transition).
-        for _ in 0..5 {
-            let mut ctx = h.ctx();
-            shell.tick(&mut ctx);
-        }
-        assert!(matches!(shell, Shell::Screen(Screen::Camp(_))));
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::Rest(_)))
+        });
+        h.input.push_all(&[char_key(b'r')]); // Rest — commit the (zero) time
+        tick_until(&mut shell, &mut h, 10, |s| {
+            matches!(s, Shell::Screen(Screen::Camp(_)))
+        });
         assert_eq!(
             h.roster.members[0].magic, before,
-            "rest must not fake a spell-slot restoration (FD-25)"
+            "rest is not a spell-slot restoration (FD-25)"
         );
     }
 

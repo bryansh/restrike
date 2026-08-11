@@ -932,7 +932,7 @@ pub fn calculate_initial_healing(
 
 /// How many of each cure the party will be able to memorize and cast during
 /// the Fix rest — `CalculateTimeAndSpellNumbers`'s outputs.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CureCounts {
     pub light: i32,
     pub serious: i32,
@@ -1064,7 +1064,7 @@ pub fn do_team_healing(party: &mut crate::party::Party, healing_available: &mut 
 /// What camp Fix decided before it started resting (`FixTeam`,
 /// `ovr016.cs:1035-1073`). `None` means the party is at full health and Fix
 /// does nothing at all (`:1039`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FixPlan {
     /// The already-memorized cures, rolled up front (`CalculateInitialHealing`).
     pub healing_available: i32,
