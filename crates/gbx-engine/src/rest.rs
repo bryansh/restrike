@@ -859,6 +859,253 @@ impl RestSession {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ★ Camp Fix — `FixTeam` and its arithmetic (D-S4c's fourth flow)
+// ---------------------------------------------------------------------------
+
+/// `roll_dice(dice_size, dice_count)` (`ovr024.cs:586-598`): `dice_count`
+/// draws of `Random(size) + 1`, summed, and **truncated to a byte** on the way
+/// out. The truncation is the original's; it cannot bite here (3d8+3 tops out
+/// at 27).
+fn roll_dice(rng: &mut crate::rng::EngineRng, dice_size: u16, dice_count: u32) -> u8 {
+    let mut total: u32 = 0;
+    for _ in 0..dice_count {
+        total += u32::from(rng.random(dice_size)) + 1;
+    }
+    total as u8
+}
+
+/// The three cure spells camp Fix knows about, with their healing rolls
+/// (`CalculateInitialHealing`, `ovr016.cs:884-897`): Cure Light Wounds `1d8`,
+/// Cure Serious `2d8+1`, Cure Critical `3d8+3`. Their ids sit at cleric levels
+/// 1, 4 and 5, which is why `CalculateTimeAndSpellNumbers` reads
+/// `spellCastCount[0,0]`, `[0,3]` and `[0,4]`.
+pub const CURE_LIGHT: u8 = 0x03;
+pub const CURE_SERIOUS: u8 = 0x3A;
+pub const CURE_CRITICAL: u8 = 0x47;
+
+fn cure_roll(rng: &mut crate::rng::EngineRng, spell_id: u8) -> Option<i32> {
+    match spell_id {
+        CURE_LIGHT => Some(i32::from(roll_dice(rng, 8, 1))),
+        CURE_SERIOUS => Some(i32::from(roll_dice(rng, 8, 2)) + 1),
+        CURE_CRITICAL => Some(i32::from(roll_dice(rng, 8, 3)) + 3),
+        _ => None,
+    }
+}
+
+/// `TotalHitpointsLost` / `sub_4608F` (`ovr016.cs:925-934`) — summed over the
+/// **whole** roster with no status filter, so a corpse at 0 hit points
+/// contributes its full maximum. That is what makes Fix rest a long time for a
+/// party with a body in it.
+pub fn total_hitpoints_lost(party: &crate::party::Party) -> i32 {
+    party
+        .members
+        .iter()
+        .map(|m| i32::from(m.hit_point_max) - i32::from(m.hit_point_current))
+        .sum()
+}
+
+/// `CalculateInitialHealing` / `sub_45F22` (`ovr016.cs:874-903`): roll every
+/// cure spell **already in memory**, across every healthy member.
+///
+/// ★ Note, carried rather than corrected: nothing here (or anywhere else in
+/// `FixTeam`) removes those spells from the memorized list, so coab's Fix can
+/// bank the same memorized cures again on the next Fix. Transcribed as read;
+/// flagged as the one point in this flow worth settling against the listing.
+pub fn calculate_initial_healing(
+    party: &crate::party::Party,
+    rng: &mut crate::rng::EngineRng,
+) -> i32 {
+    let mut healing = 0;
+    for member in &party.members {
+        if member.status.health_status != status::OKEY {
+            continue;
+        }
+        for e in crate::magic::learnt(&member.magic.spell_list) {
+            if let Some(roll) = cure_roll(rng, e.id) {
+                healing += roll;
+            }
+        }
+    }
+    healing
+}
+
+/// How many of each cure the party will be able to memorize and cast during
+/// the Fix rest — `CalculateTimeAndSpellNumbers`'s outputs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CureCounts {
+    pub light: i32,
+    pub serious: i32,
+    pub critical: i32,
+}
+
+/// ★ `CalculateTimeAndSpellNumbers` / `sub_460ED` (`ovr016.cs:937-1003`) —
+/// how long Fix must rest, and how many cures that buys.
+///
+/// Per healthy member, from the **capacity** (`spellCastCount`), not from
+/// what is memorized:
+/// - `light  = [0,0]` slots, 15 minutes each
+/// - `serious= [0,3]` slots, 60 minutes each
+/// - `critical=[0,4]` slots, 75 minutes each
+///
+/// then a base study block: 240 minutes if there are any level-1 cures, raised
+/// to 360 if there are any level-4/5 ones (`:965-983`) — sequential `if`s
+/// again, so the higher one wins. `maxHealing` is a per-member *estimate*
+/// (27 for the level-1 block, 34 for a level-4 block, 78 when level-5 cures
+/// are in it) used only for the shortening step.
+///
+/// The party's slowest member sets the time; then, if the party has lost
+/// **less** than the estimated healing, the whole rest is divided by the
+/// integer ratio `maxHealing / lost` (`:993-998`) — so a party that has barely
+/// been scratched rests a fraction of the time. Integer division throughout,
+/// including the ratio, exactly as the original.
+pub fn calculate_time_and_spell_numbers(party: &crate::party::Party) -> (RestTime, CureCounts) {
+    let mut counts = CureCounts::default();
+    let mut max_healing = 0;
+    let mut max_time = 0;
+
+    for member in &party.members {
+        let (mut var_a, mut var_c, mut var_e) = (0, 0, 0);
+        if member.status.health_status == status::OKEY {
+            let light = i32::from(crate::magic::cast_count_at(
+                &member.magic,
+                crate::magic::SpellClass::Cleric,
+                1,
+            ));
+            let serious = i32::from(crate::magic::cast_count_at(
+                &member.magic,
+                crate::magic::SpellClass::Cleric,
+                4,
+            ));
+            let critical = i32::from(crate::magic::cast_count_at(
+                &member.magic,
+                crate::magic::SpellClass::Cleric,
+                5,
+            ));
+            counts.light += light;
+            var_a = light * 15;
+            counts.serious += serious;
+            var_c = serious * 60;
+            counts.critical += critical;
+            var_e = critical * 75;
+        }
+
+        let mut var_10 = 0;
+        if var_a > 0 {
+            var_10 = 240;
+            max_healing += 27;
+        }
+        if (var_c + var_e) != 0 {
+            var_10 = 360;
+            max_healing += if var_e > 0 { 78 } else { 34 };
+        }
+        var_10 += var_a + var_c + var_e;
+        max_time = max_time.max(var_10);
+    }
+
+    let lost = total_hitpoints_lost(party);
+    if lost > 0 && lost < max_healing {
+        let ratio = max_healing / lost;
+        if ratio > 0 {
+            max_time /= ratio;
+        }
+    }
+
+    let mut t = RestTime::default();
+    t.slots[3] = max_time / 60;
+    t.slots[2] = (max_time - t.slots[3] * 60) / 10;
+    t.slots[1] = max_time % 10;
+    (t, counts)
+}
+
+/// `CalculateHealing` / `sub_45FDD` (`ovr016.cs:906-922`): the cures the party
+/// casts *during* the Fix rest, rolled in light → serious → critical order.
+pub fn calculate_healing(
+    healing_available: &mut i32,
+    counts: CureCounts,
+    rng: &mut crate::rng::EngineRng,
+) {
+    for _ in 0..counts.light {
+        *healing_available += i32::from(roll_dice(rng, 8, 1));
+    }
+    for _ in 0..counts.serious {
+        *healing_available += i32::from(roll_dice(rng, 8, 2)) + 1;
+    }
+    for _ in 0..counts.critical {
+        *healing_available += i32::from(roll_dice(rng, 8, 3)) + 3;
+    }
+}
+
+/// `DoTeamHealing` / `sub_46280` (`ovr016.cs:1006-1032`) — spend the pool down
+/// the roster in party order, each member taking at most what they are missing.
+///
+/// The `damge_taken <= healingAvailable` re-test in the original's `&&` chain
+/// (`:1026`) is already implied by the clamp above it; kept as a comment rather
+/// than a redundant branch.
+pub fn do_team_healing(party: &mut crate::party::Party, healing_available: &mut i32) {
+    for member in &mut party.members {
+        if member.hit_point_max <= member.hit_point_current {
+            continue;
+        }
+        let mut damage_taken =
+            i32::from(member.hit_point_max) - i32::from(member.hit_point_current);
+        if damage_taken > *healing_available {
+            damage_taken = *healing_available;
+        }
+        if damage_taken < 1 {
+            damage_taken = 0;
+        }
+        if damage_taken > 0 && heal_player(0, damage_taken, member) {
+            *healing_available -= damage_taken;
+        }
+    }
+}
+
+/// What camp Fix decided before it started resting (`FixTeam`,
+/// `ovr016.cs:1035-1073`). `None` means the party is at full health and Fix
+/// does nothing at all (`:1039`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FixPlan {
+    /// The already-memorized cures, rolled up front (`CalculateInitialHealing`).
+    pub healing_available: i32,
+    pub counts: CureCounts,
+    pub time_to_rest: RestTime,
+}
+
+/// `FixTeam`'s head: nothing if the party is unhurt, otherwise the rolled
+/// initial pool plus the rest the party must take.
+///
+/// **Draw-bearing**, and deliberately so — `CalculateInitialHealing`'s d8s are
+/// the original's. Like every other draw in this module it is camp-only and so
+/// unreachable from a captured fight.
+pub fn plan_fix(party: &crate::party::Party, rng: &mut crate::rng::EngineRng) -> Option<FixPlan> {
+    if total_hitpoints_lost(party) == 0 {
+        return None;
+    }
+    let healing_available = calculate_initial_healing(party, rng);
+    let (time_to_rest, counts) = calculate_time_and_spell_numbers(party);
+    Some(FixPlan {
+        healing_available,
+        counts,
+        time_to_rest,
+    })
+}
+
+/// `FixTeam`'s tail (`ovr016.cs:1059-1068`): roll the cures cast during the
+/// rest, then spend the pool. **Only when the rest was not interrupted** — an
+/// ambush throws the whole queued healing away, including the initial pool
+/// already rolled.
+pub fn apply_fix(
+    party: &mut crate::party::Party,
+    plan: &FixPlan,
+    rng: &mut crate::rng::EngineRng,
+) -> i32 {
+    let mut healing = plan.healing_available;
+    calculate_healing(&mut healing, plan.counts, rng);
+    do_team_healing(party, &mut healing);
+    healing
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1411,6 +1658,192 @@ mod tests {
             gbx_formats::save_orig::item_affect(&party.members[0].items[0], 2),
             0x15
         );
+    }
+
+    // ----------------------------- camp Fix -----------------------------
+
+    /// `TotalHitpointsLost` counts a corpse's whole maximum — no status filter
+    /// (`ovr016.cs:925-934`).
+    #[test]
+    fn total_hitpoints_lost_counts_the_dead_too() {
+        let mut party = Party::default();
+        let mut hurt = blank_char();
+        hurt.hit_point_current = 12; // max 20
+        let mut dead = blank_char();
+        dead.status.health_status = 6;
+        dead.hit_point_current = 0;
+        party.members.push(hurt);
+        party.members.push(dead);
+        assert_eq!(total_hitpoints_lost(&party), 8 + 20);
+    }
+
+    /// ★ `CalculateTimeAndSpellNumbers`: the per-slot minutes, the 240 → 360
+    /// study block, and the integer shortening ratio.
+    #[test]
+    fn fix_time_is_a_study_block_plus_per_cure_minutes_then_shortened() {
+        let mut party = Party::default();
+        let mut cleric = blank_char();
+        // SHARA's real row: cleric levels 1/2/3 = 5/5/2 — only level 1 is a
+        // cure level Fix knows, so this is the 240-minute block.
+        cleric.magic.cast_count[0] = [5, 5, 2, 0, 0];
+        cleric.hit_point_current = 0; // 20 lost, well past maxHealing
+        party.members.push(cleric);
+
+        let (t, counts) = calculate_time_and_spell_numbers(&party);
+        assert_eq!(
+            counts,
+            CureCounts {
+                light: 5,
+                serious: 0,
+                critical: 0
+            }
+        );
+        // 240 + 5*15 = 315 minutes = 5h15.
+        assert_eq!(t.display_parts(), (0, 5, 15));
+
+        // Barely scratched: lost 1 < maxHealing 27, ratio 27, 315/27 = 11.
+        party.members[0].hit_point_current = 19;
+        let (t, _) = calculate_time_and_spell_numbers(&party);
+        assert_eq!(t.display_parts(), (0, 0, 11), "the rest is divided by 27");
+
+        // A level-5 cure raises the block to 360 and the estimate to 78+27.
+        party.members[0].hit_point_current = 0;
+        party.members[0].magic.cast_count[0] = [5, 0, 0, 0, 1];
+        let (t, counts) = calculate_time_and_spell_numbers(&party);
+        assert_eq!(
+            counts,
+            CureCounts {
+                light: 5,
+                serious: 0,
+                critical: 1
+            }
+        );
+        // 360 + 5*15 + 1*75 = 510 minutes — but maxHealing is now 27 + 78 =
+        // 105 against 20 lost, so the integer ratio 105/20 = 5 divides it to
+        // 102 minutes.
+        assert_eq!(t.display_parts(), (0, 1, 42));
+    }
+
+    /// An unhealthy member contributes no cures and no time
+    /// (`ovr016.cs:953`), but still contributes hit points lost.
+    #[test]
+    fn a_downed_cleric_contributes_no_cures() {
+        let mut party = Party::default();
+        let mut cleric = blank_char();
+        cleric.magic.cast_count[0] = [5, 0, 0, 0, 0];
+        cleric.status.health_status = status::UNCONSCIOUS;
+        cleric.hit_point_current = 0;
+        party.members.push(cleric);
+        let (t, counts) = calculate_time_and_spell_numbers(&party);
+        assert_eq!(counts, CureCounts::default());
+        assert_eq!(t.display_parts(), (0, 0, 0));
+    }
+
+    /// `DoTeamHealing` spends the pool in party order and stops when it runs
+    /// out (`ovr016.cs:1006-1032`).
+    #[test]
+    fn team_healing_spends_the_pool_in_party_order() {
+        let mut party = Party::default();
+        for hp in [5u8, 5, 5] {
+            let mut m = blank_char();
+            m.hit_point_current = hp; // 15 missing each
+            party.members.push(m);
+        }
+        let mut pool = 20;
+        do_team_healing(&mut party, &mut pool);
+        assert_eq!(pool, 0);
+        assert_eq!(party.members[0].hit_point_current, 20, "first is topped up");
+        assert_eq!(
+            party.members[1].hit_point_current, 10,
+            "second gets the rest"
+        );
+        assert_eq!(party.members[2].hit_point_current, 5, "third gets nothing");
+    }
+
+    /// ★ Fix end to end against the existing Cure Light effect's own dice: a
+    /// hurt party with a memorized Cure Light and one level-1 cure slot rests
+    /// and comes back healed, and the pool is the two rolls.
+    #[test]
+    fn fix_rolls_memorized_cures_up_front_and_slot_cures_after_the_rest() {
+        let scrolls = magic::ScrollLookup::default();
+        let mut party = Party::default();
+        let mut cleric = blank_char();
+        cleric.magic.cast_count[0] = [1, 0, 0, 0, 0];
+        magic::add_learnt(&mut cleric.magic.spell_list, CURE_LIGHT);
+        cleric.hit_point_current = 2; // 18 missing
+        party.members.push(cleric);
+
+        let mut rng = EngineRng::new(0x5EED_1234);
+        let before = rng.state();
+        let plan = plan_fix(&party, &mut rng).expect("the party is hurt");
+        assert!(
+            rng.state() != before,
+            "CalculateInitialHealing rolls the memorized cure"
+        );
+        assert!((1..=8).contains(&plan.healing_available), "one d8");
+        assert_eq!(
+            plan.counts,
+            CureCounts {
+                light: 1,
+                serious: 0,
+                critical: 0
+            }
+        );
+        // 240 + 15 = 255 minutes; lost 18 < maxHealing 27, ratio 1, unshortened.
+        assert_eq!(plan.time_to_rest.display_parts(), (0, 4, 15));
+
+        let mut session = RestSession::start(plan.time_to_rest, 1);
+        rest_to_completion(&mut party, &mut session, &scrolls);
+        assert!(!session.interrupted);
+
+        let leftover = apply_fix(&mut party, &plan, &mut rng);
+        let healed = i32::from(party.members[0].hit_point_current) - 2;
+        assert!(healed > 0, "the party is better off");
+        // The pool is the memorized roll plus one more d8 for the level-1 slot
+        // the rest bought (`CalculateHealing`), all of it spent or left over.
+        let pool = healed + leftover;
+        assert!(
+            (plan.healing_available + 1..=plan.healing_available + 8).contains(&pool),
+            "pool {pool} = initial {} + one d8",
+            plan.healing_available
+        );
+        assert!(party.members[0].hit_point_current <= 20);
+    }
+
+    /// An interrupted Fix throws the queued healing away — `apply_fix` is
+    /// simply not called (`ovr016.cs:1059`). Pinned so the flow's one
+    /// conditional cannot be lost.
+    #[test]
+    fn an_interrupted_fix_heals_nobody() {
+        let scrolls = magic::ScrollLookup::default();
+        let mut party = Party::default();
+        let mut cleric = blank_char();
+        cleric.magic.cast_count[0] = [1, 0, 0, 0, 0];
+        cleric.hit_point_current = 2;
+        party.members.push(cleric);
+
+        let mut rng = EngineRng::new(7);
+        let plan = plan_fix(&party, &mut rng).unwrap();
+        let mut session = RestSession::start(plan.time_to_rest, 1);
+        let mut clock = crate::movement::GameClock::default();
+        session.step(&mut party, &mut clock, &scrolls, &mut rng, 1, 100);
+        assert!(session.interrupted);
+        assert_eq!(
+            party.members[0].hit_point_current, 2,
+            "no healing without a completed rest"
+        );
+    }
+
+    /// A party at full health short-circuits before rolling anything
+    /// (`ovr016.cs:1039`).
+    #[test]
+    fn fix_does_nothing_to_an_unhurt_party() {
+        let mut party = Party::default();
+        party.members.push(blank_char());
+        let mut rng = EngineRng::new(1);
+        let before = rng.state();
+        assert!(plan_fix(&party, &mut rng).is_none());
+        assert_eq!(rng.state(), before, "and takes no draw");
     }
 
     /// The cells are read out of the raw Party-window store as signed shorts.
