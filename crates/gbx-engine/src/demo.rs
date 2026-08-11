@@ -677,6 +677,10 @@ fn m3_exit_gate() {
         }
         None => {
             // DEV-ONLY HOOK (clearly marked): no bundled member has enough XP
+            // *yet*. Since roll-credits slice 3 the party really does earn
+            // experience from fights (`crate::award`), so this is a shortcut
+            // past the grinding a demo has no business doing — not a stand-in
+            // for a missing mechanism, which is what it was before.
             // (MATHEW the paladin is L5 with 25000 XP; L5->L6 needs 45001).
             // Grant member 0 exactly the threshold so training proceeds — the
             // *training numbers* below are still fully pack-correct.
@@ -1910,6 +1914,84 @@ fn m6b_boot_to_the_bar_brawl() {
         "the VM resumed and the shell went back to the walk loop"
     );
     assert!(!outcome.party_killed, "nobody died, so no game-over signal");
+    // ★ roll-credits slice 3: the fight PAID. Naturally-earned experience,
+    // from real monster records, through the real award path.
+    assert!(
+        outcome.exp_each > 0,
+        "the won fight awarded experience: {}",
+        outcome.exp_each
+    );
+    assert!(
+        outcome.party_exp_gained > 0,
+        "and it reached the party's records"
+    );
+}
+
+/// ★ **The ECL DAMAGE opcode's own death screen** (roll-credits slice 3's
+/// acceptance): the wipe flow's *other* variant, side by side with combat's.
+///
+/// The two are genuinely different presentations — different words, a wider
+/// box starting one row higher, a hard three-second hold the player cannot
+/// skip, and a colour-15 prompt instead of the combat screen's colour-13 one
+/// — so this dumps both and asserts the pacing difference the ticks make
+/// visible.
+///
+/// Run: `GBX_DATA_DIR=~/goldbox-data/cotab cargo test -p gbx-engine \
+///   --release the_two_death_screens -- --ignored --nocapture`
+#[test]
+#[ignore = "local-only demo (writes frames); run explicitly"]
+fn the_two_death_screens() {
+    let Some(dir) = std::env::var_os("GBX_DATA_DIR") else {
+        eprintln!("SKIPPED: local tier needs GBX_DATA_DIR (the_two_death_screens)");
+        return;
+    };
+    let data = load_dir(std::path::Path::new(&dir)).expect("GBX_DATA_DIR must be readable");
+    let out_dir = std::env::temp_dir();
+
+    let mut prompt_ticks = Vec::new();
+    for (label, cause) in [
+        ("combat", crate::shell::WipeCause::Combat),
+        ("ecl-damage", crate::shell::WipeCause::EclDamage),
+    ] {
+        let mut engine = crate::engine::Engine::new(data.clone(), 1)
+            .expect("Engine::new must boot against real CotAB data");
+        engine.state.wipe_cause = cause;
+        engine.state.party_killed = true;
+        // Long enough for the message to finish printing and, for the ECL
+        // variant, for its `SysDelay(3000)` to run out.
+        let mut prompt_tick = None;
+        for tick in 0..600usize {
+            engine.tick(&[]);
+            if prompt_tick.is_none() && frame_has_prompt(&engine) {
+                prompt_tick = Some(tick);
+            }
+        }
+        let path = out_dir.join(format!("restrike-death-screen-{label}.ppm"));
+        write_ppm(engine.framebuffer_for_demo(), &path);
+        eprintln!(
+            "      {label}: prompt at tick {prompt_tick:?} -> {}",
+            path.display()
+        );
+        assert!(
+            matches!(engine.shell(), crate::shell::Shell::GameOver(_)),
+            "{label}: the wipe flow opened"
+        );
+        prompt_ticks.push(prompt_tick.expect("the prompt came up"));
+    }
+    // ★ `SysDelay(3000)` (`ovr003:2C82`): the ECL variant holds its screen for
+    // three seconds — 180 ticks at 60 Hz — before it will even draw the
+    // prompt, let alone take a key. The combat screen has no such beat.
+    assert!(
+        prompt_ticks[1] >= prompt_ticks[0] + 120,
+        "the ECL variant must hold its screen far longer: {prompt_ticks:?}"
+    );
+}
+
+/// Whether the prompt row carries any lit pixel — the cheapest "the prompt is
+/// up" probe that does not re-implement the font.
+fn frame_has_prompt(engine: &crate::engine::Engine) -> bool {
+    let fb = engine.framebuffer_for_demo();
+    (0..8).any(|dy| (0..320).any(|x| fb.get_pixel(x, 0x18 * 8 + dy) != 0))
 }
 
 /// ★ The other half of M6b's done-condition: **a party wipe shows its full
@@ -2016,6 +2098,11 @@ struct BrawlOutcome {
     outcome_known_tick: Option<usize>,
     flag_tick: Option<usize>,
     game_over_tick: Option<usize>,
+    /// ★ roll-credits slice 3: `gbl.exp_to_add` and the total the roster
+    /// actually gained — the award, observed rather than asserted from the
+    /// formula.
+    exp_each: i32,
+    party_exp_gained: i32,
 }
 
 /// Which way `from` must face to step onto the adjacent cell `to`.
@@ -2243,6 +2330,9 @@ impl BarBrawl {
         let mut shots = 0usize;
         let mut prints: Vec<String> = Vec::new();
         let mut menu_shots = 0usize;
+        let mut award_shot = false;
+        let mut treasure_keys = 0usize;
+        let exp_before: i32 = self.engine.party().members.iter().map(|m| m.exp).sum();
         for tick in 0..200_000usize {
             // ★ M6c: the keys a fight needs from whoever is watching it.
             //
@@ -2256,8 +2346,48 @@ impl BarBrawl {
                     scripted_player_key(&self.engine).into_iter().collect()
                 }
                 Some(Stage::PlayerTurn) => vec![InputEvent::Char(b'Q')],
+                // ★ roll-credits slice 3: the fight now ends on
+                // `displayCombatResults` and the pool screen, both blocking on
+                // a key exactly as the original's do.
+                Some(Stage::Results) => vec![InputEvent::Enter],
+                Some(Stage::Treasure) => {
+                    // Share the pool out once, then leave — `E` is the only
+                    // key that closes `distributeCombatTreasure`.
+                    treasure_keys += 1;
+                    if treasure_keys == 1 {
+                        vec![InputEvent::Char(b'S')]
+                    } else {
+                        vec![InputEvent::Char(b'E')]
+                    }
+                }
                 _ => Vec::new(),
             };
+            // The award screen, dumped the first time it is up — this is the
+            // slice's eyeball artifact.
+            if !award_shot
+                && matches!(
+                    self.engine.shell().combat_host().map(|h| h.stage()),
+                    Some(Stage::Results)
+                )
+            {
+                award_shot = true;
+                o.exp_each = self.engine.state().exp_to_add;
+                o.party_exp_gained = self
+                    .engine
+                    .party()
+                    .members
+                    .iter()
+                    .map(|m| m.exp)
+                    .sum::<i32>()
+                    - exp_before;
+                self.dump("90-the-award");
+                eprintln!(
+                    "      award: {} xp each, pool {} gp worth, {} item(s)",
+                    self.engine.state.exp_to_add,
+                    self.engine.state.pooled_money.gold_worth(),
+                    self.engine.state.treasure_items.len()
+                );
+            }
             if self.manual
                 && menu_shots < 3
                 && matches!(

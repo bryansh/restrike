@@ -478,3 +478,75 @@ CLEAR BOX/PROGRAM/ADD NPC is **withdrawn**: all three are playthrough content.
 (0x3B, 2). None are in this slice's brief; all four have their
 `EngineServices` seams already declared. `CHECKPARTY` (0x1E, 1) and
 `PROTECTION` (0x3C, 1) are likewise reached and stubbed.
+
+### 7.3 What landed, and the corrections the code forced
+
+**LOAD CHARACTER's slot 0 — coab is wrong.** `sub_262E9` (`ovr003:030B`,
+`:0328`) seeds its cursor with the `TeamList` **head** and then walks it
+`index` links, so `LOAD CHARACTER 0` selects member 0 and is *found*. coab's
+`player_index > 0 && player_index < Count ? TeamList[index] : null`
+(`ovr003.cs:186`) never finds slot 0, which would make `ECL5#48`'s own
+`0..8` scan skip the first party member. The high-bit arm additionally needs
+**both** `redrawPartySummary` flags armed (`:0377-0389`) — the flags are set
+by two Party-window writes of zero, so a script arms them deliberately before
+turning LOAD CHARACTER into a remove-this-member instruction.
+
+**DAMAGE's draw order is its whole fidelity.** The damage roll first
+(`:29BF`), then — whenever bit `0x40` is clear — one `roll_dice(party_size, 1)`
+victim roll (`:29F1`), **including on the arm that immediately re-rolls and
+discards it**, then the arm's own saves. In the hit-count arm the damage used
+by hit *n* is the value rolled at the END of hit *n−1* (`:2BDE`), so the last
+roll is drawn and thrown away. Bit `0x10` is *damage anyway on a successful
+save*, not half damage. Bit `0x20` skips the save entirely — same outcome as a
+failed save, but one fewer draw.
+
+**SAVE TABLE is not GETTABLE mirrored**: `(value, base, index)` against
+GETTABLE's `(base, index, dest)`.
+
+**FIND ITEM / FIND SPECIAL leave only two flags meaningful.** All six are
+cleared and exactly one armed, so `=` and `<>` mean something after them and
+the other four relations are simply false.
+
+**The award path is draw-free — completely.** The brief asked for a proof that
+no award draw lands inside a captured stream; the real answer is stronger.
+`calc_battle_exp`, `addExp`, `CleanupPlayersStateAfterCombat`,
+`DeallocateNonTeamMemebers`, `distributeNpcTreasure`, `displayCombatResults`,
+`poolMoney`, `share_pooled`, `TakePoolMoney` and `treasureOnGround` contain no
+`Random`/`roll_dice` call at all; every draw in that neighbourhood of
+`ovr006`/`ovr007`/`ovr022` is inside `randomBonus`, `create_item` or
+`appraiseGemsJewels`, none of which the award reaches. There is nothing on the
+path to perturb a capture with. The one draw-bearing neighbour is the script
+opcode TREASURE's `>= 0x80` arm, and its shipped uses precede their `COMBAT`
+(`ECL5#49 @0x94B3`), so those draws land before a capture's first recorded one.
+Guard 16/16 and reel 16/16 confirm both.
+
+**`distributeNpcTreasure` scales by an integer ratio.** `npcParts /
+totalParts` is `int` division (`ovr006.cs:736`) *before* it reaches
+`ScaleAll`, so one NPC among several PCs scales the pooled coins by **zero**.
+Replicated verbatim; it is why "takes and hides his share" is remembered as
+larceny.
+
+**`calc_battle_exp`'s ordering is load-bearing**: the corpses pay into the
+pool first, and only then is `GetExpWorth()` taken — so the coins the party
+just won are themselves worth experience (gold-worth + 250/gem +
+2200/jewelry), as are `+N` items at 400 per plus, *including* items a script
+TREASURE dropped before the fight.
+
+**Acceptance.** (1) Real data, live: the M6b bar brawl now ends on
+`displayCombatResults` — "THE PARTY HAS WON. / EACH CHARACTER RECEIVES 35 /
+EXPERIENCE POINTS." — with ten BAR PATRONs' twelve items in the pool, frame
+dumped and eyeballed, and the party's records really gained the experience
+(the demo asserts it). (2) Real data, live: `ECL3#16 @0x92C6`'s shipped
+PARLAY driven through all five tones, each writing its operand-table outcome
+into `0x7F79`, with the following `COMPARE` asserted — the site the old census
+could not reach. (3) The six `ADD NPC` sites pinned by address and operands,
+plus a test that the corrected traversal reaches them from the block's own
+header vectors. (4) Both death screens rendered side by side and eyeballed:
+different words, different box, and the ECL variant's un-skippable
+three-second hold measured in ticks.
+
+**Residual, named:** `distributeCombatTreasure`'s per-item `sl_select_item`
+list (Take moves the first pooled item), `TakePoolMoney`'s per-coin dialog,
+the Detect-Magic word, encumbrance in `share_pooled`, and PROGRAM's cases
+0/8/9 (start menu, end-game, `TryEncamp` — G9 and G3 own those). Each reports
+itself in the transcript rather than failing silently.
