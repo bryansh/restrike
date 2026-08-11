@@ -598,3 +598,125 @@ mid-staging save round-trips (staging is record state); the rest interruption fi
 schedule and runs vector 3 (synthetic fixture; ECL5#48's own vector 3 if reachable);
 `cast_count` untouched by rest, pinned; camp-exit cancels staging, pinned. Frame dumps of
 the Memorize list and the Rest countdown, eyeballed.
+
+### 8.1 What landed, and the corrections the code forced
+
+**No save break.** The door budgeted one; the slice needed none. coab models
+`SpellList` as an object with `Load`/`Save` over the record's 84 bytes at
+`0x1E`, but the **original has no such object** — the array *is* the state
+(`charStruct.spell_list db 84 dup(?)`), and "learning" is the high bit of the
+stored id, which is exactly what `AddLearnt` decodes (`SpellList.cs:83`). So
+`crate::magic` is a **view over `MagicState.spell_list`'s raw bytes**:
+`Character`'s serde shape is untouched, mid-staging saves round-trip for free,
+and `SAVE_FORMAT_VERSION` stays at 6. The four new `Screen` variants and the new
+`Shell::CampInterrupt` are appended last, and postcard encodes a variant as its
+index, so no committed golden moved either.
+
+**The layout is proven three ways.** Adds fill from index 83 downward
+(`SpellList.Save`'s own descending `idx`, plus doc §33's save-diff catching the
+first memorized Magic Missile at record offset `0x71`); slot 0 is never used
+(the binary's combat collector reads `0x1F..=0x71` only, `ovr010:062A-065D`);
+reads run ascending (same collector, and coab's `Load` agrees after any
+save/load cycle). The consequence is stated rather than tidied away: the
+**most recently staged spell commits first**.
+
+**Cited lines re-verified, with three corrections.**
+
+| door said | actually |
+|---|---|
+| `cancel_spells` at `ovr016.cs:1117` and `:1150-region` | `:1095` (entry) and `:1154` (exit) |
+| `MarkLearnt` per spell at `ovr021.cs:390-410` | `rest_memorize` is `:393-413`; `MarkLearnt` is `:403` |
+| D-S4d: "Display renders the grimoire + memorized sets" | `magic_menu`'s `'D'` is `DisplayMagicEffects` (`:632`) — the party's running **affects**, not spells |
+
+Everything else checked out: `SpellList.cs:19-110`, `HowManySpellsPlayerCanLearn`
+at `ovr016.cs:99-113`, `memorize_spell` `:301-374`, `scribe_spell` `:377-499`,
+`rest_menu` `:274-298`, `resting` `ovr021.cs:516-612`, `FixTeam` `:1035-1073`.
+
+**The capacity formula**, transcribed: `spellCastCount[class, level-1]` minus
+the count of entries in **`IdList`** — every entry at that (class, level),
+**memorized and staged alike** (`:103`) — which is why a caster who wakes with
+spells still in memory cannot re-fill those slots until they are cast. The
+result is **signed**: an over-full level reads negative and every caller tests
+`> 0`. The `spellCastCount` read is kept **flat** (`0x12D + class*5 + level-1`)
+so the casting table's level-6/7 rows alias into the next class's row exactly as
+the original's own indexing does, rather than panicking.
+
+**The rest-time computation**, transcribed (`sub_44032`, `ovr016.cs:8-64`):
+
+```text
+count = 4 if anything is staged (spells OR scroll scribes)
+count = 6 if any of them is level 3 or higher      (sequential ifs, not else-if)
+minutes = count * 60 + (total_scribe_levels + total_spell_levels) * 15
+```
+
+i.e. **four hours of study, six for level 3+, plus fifteen minutes per spell
+level**. `rest_menu` takes the party maximum and splits it (`:287-289`);
+`count` is *hours*, ticked down one per twelve loop iterations by `sub_58C03`,
+and twelve iterations is sixty minutes. The learning rate has an asymmetry that
+is the original's: the **first** spell after the study period is armed at
+`level * 2` iterations (ten minutes per level, `sub_58C03`), every subsequent
+one at `level * 3` (fifteen, `CheckForSpellLearning`).
+
+**★ FD-44 wired.** `RestSession::step`'s seventh action is slice 2's
+`RestEncounterSchedule::check`, reading the live Party-window cells. An
+interruption returns `ScreenTransition::CampInterrupted`, which runs
+`cancel_spells`, rebuilds the exploration screen and enters
+`Shell::CampInterrupt` — a real vector run on the resident block's header
+**vector 3**, `CampInterruptedAddr`. Acceptance proves the site the way the
+Look-vector test proves its own: the fixture block's vector 3 is the only vector
+that `NEWECL`s to block 9. Draw-neutrality is unchanged and now argued through
+the real caller: a test rests to completion with the schedule disarmed and
+asserts the PRNG never moves; captures never camp; guard 16/16 and reel 16/16.
+
+**★ FD-25 re-pinned, twice.** Nothing in `resting`, `CheckForSpellLearning`,
+`sub_58C03`, `rest_memorize` or `rest_scribe` writes `spellCastCount`. It is
+capacity, not a per-rest pool — pinned in `crate::rest` and again at shell level.
+
+**Five more things the code forced, none of which the flow names imply:**
+
+- **camp Fix prices its rest from capacity, then divides it.** When the party
+  has lost *less* than the estimated healing, the whole rest is divided by the
+  **integer ratio** `maxHealing / lost` (`:993-998`) — a scratched party's Fix
+  takes minutes, a battered one's takes hours. `TotalHitpointsLost` has no
+  status filter at all, so a corpse's full maximum is in the total.
+- **`rest_scribe` gates on `> 0x80`** (`ovr021.cs:425`) while `sub_44032`'s own
+  scroll scan uses `> 0x7f` (`ovr016.cs:34`). They disagree about exactly one
+  byte — spell id 0 staged — which no real scroll can carry. Both as written.
+- **`resting`'s opening `Array.Clear` is off by one against its own indexing**:
+  players occupy `spellLaernTimeout[1..=Count]` but the clear covers
+  `0..Count-1`, so the last member's timeout survives into the next rest.
+  Replicated (it is the shape a `memset(base, 0, party_size * 2)` produces) and
+  flagged for the listing.
+- **`Scribe`'s third gate reads capacity, not free capacity**: a caster whose
+  slots are all spoken for may still scribe, because scribing writes the
+  grimoire, not the memorized list. And its staging write walks **every** item,
+  not only scrolls (`:455-470`).
+- **the spell list's initial highlight is not row 1.** `sl_select_item` runs
+  `index_ptr++` then `menu_scroll_in_page(false, …)` before its first draw
+  (`ovr027.cs:572-573`), and `skipHeadings` walking backwards off the leading
+  `"1st Level"` heading wraps to the **bottom of the visible page**
+  (`:443-455`) — row 10 in the Memorize box's 11 rows, i.e. the first
+  *second*-level spell. Our `ListMenu` already reproduced the arithmetic; the
+  acceptance drive confirmed it against real data.
+
+**Acceptance.** (1) Real data, live: the bundled slot-A party's SHARA stages
+three spells from her grimoire, the capacity table drops `5 5 2` → `5 2 2`, the
+closing review reads `" FIND TRAPS (3)"`, and `REST TIME: 00:05:30`
+(= 240 + 3×2×15) commits all three — frames dumped and eyeballed. (2) A
+mid-staging save round-trips. (3) `cast_count` untouched by rest, pinned.
+(4) Camp exit cancels staging and keeps memory, pinned. (5) The FD-44
+interruption runs vector 3, with its uninterrupted mirror.
+
+**Residual, named:** `crate::movement::GameClock`'s `MINUTES_PER_UNIT = 10` is
+now provably wrong — `timeScales` plus `display_resting_time`'s own Days/Hours/
+Mins mapping make slot 1 **one** minute and slot 2 **ten**, and coab's
+`time_year` at `Area1` offset `0x196` is really **months** (slot 4 carries at 30,
+slot 5 at 12) with the year in `field_198`. Correcting it moves the walk goldens
+and the ScriptMemory clock cells, so it is docketed rather than folded into this
+slice; the rest loop calls `step_game_time(1, 5)` with the original's own
+arguments meanwhile. Also open: out-of-combat casting (`cast_spell`,
+`ovr016.cs:159-200`) stays G7's; `scroll_5C912`'s read-magic *unhiding*
+conditions and `CheckAffectsTimingOut` both need the out-of-combat affect system
+(G7's tail) and are named at their sites; `FixTeam` never removes the memorized
+cures it rolls, so coab's Fix can bank the same ones again — read as written,
+flagged for the listing.
