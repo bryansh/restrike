@@ -321,6 +321,22 @@ const ENCOUNTER_DISTANCE_ADDR: u16 = 0x7EC1;
 /// so this dispatch models the live pair only — deliberately, not by omission.
 const GAME_AREA_ADDR: u16 = 0x7F12;
 
+/// ★ `area2_ptr.EnterTemple` (`Classes/Area2.cs:65`, `DataOffset 0x5C4`) and
+/// `.EnterShop` (`:79`, `0x6D8`) — **the two flags that turn a `COMBAT` opcode
+/// into a shop** (roll-credits slice 6 / G8).
+///
+/// `CMD_Combat`'s non-monster branch (`ovr003.cs:974-992`) reads them, clears
+/// the one it found, and dispatches; nothing else in the game does. Under the
+/// Area2 window's `DataOffset = (addr - 0x7C00) * 2` mapping they are
+/// `0x7C00 + 0x2E2` and `0x7C00 + 0x36C`.
+///
+/// Both write sites are plain `SAVE <1> → <addr>` instructions, which is why
+/// the opcode census could never show a temple: there is no temple opcode. The
+/// four shipped temple sites and the shop sites are enumerated in
+/// [`crate::shell::describe_combat_branch`].
+const ENTER_TEMPLE_ADDR: u16 = 0x7EE2;
+const ENTER_SHOP_ADDR: u16 = 0x7F6C;
+
 /// One access kind, for the unknown-access log's `(addr, kind)` dedup key
 /// (D-VM5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -906,6 +922,12 @@ impl ScriptMemory for EngineVmHost<'_> {
         if addr == GAME_AREA_ADDR {
             return self.state.game_area as u16;
         }
+        if addr == ENTER_TEMPLE_ADDR {
+            return self.state.enter_temple;
+        }
+        if addr == ENTER_SHOP_ADDR {
+            return self.state.enter_shop;
+        }
         if TABLE_WINDOW.contains(&addr) || PARTY_WINDOW.contains(&addr) {
             self.vm.unknown_log.record(addr, AccessKind::Read, origin);
             return self.vm.raw_words.get(&addr).copied().unwrap_or(0);
@@ -934,6 +956,14 @@ impl ScriptMemory for EngineVmHost<'_> {
         }
         if addr == GAME_AREA_ADDR {
             self.state.set_game_area(value as u8);
+            return;
+        }
+        if addr == ENTER_TEMPLE_ADDR {
+            self.state.enter_temple = value;
+            return;
+        }
+        if addr == ENTER_SHOP_ADDR {
+            self.state.enter_shop = value;
             return;
         }
         if TABLE_WINDOW.contains(&addr) || PARTY_WINDOW.contains(&addr) {

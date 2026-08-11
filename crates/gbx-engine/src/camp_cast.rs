@@ -136,6 +136,7 @@ pub struct CastReport {
 pub fn cast(
     party: &mut Party,
     rng: &mut EngineRng,
+    rules: &gbx_rules::pack::RuleSet,
     caster: usize,
     spell_id: u8,
     targets: &[usize],
@@ -249,7 +250,7 @@ pub fn cast(
         // --- `SpellRaiseDead` (`cast_raise`, `:2341-2365`) ------------------
         0x4B => {
             if let Some(&t) = targets.first() {
-                if raise_dead(&mut party.members[t]) {
+                if raise_dead(&mut party.members[t], rules) {
                     out.push(report(party, t, "is raised"));
                 }
             }
@@ -368,20 +369,26 @@ fn dispel_magic(ch: &mut Character, rng: &mut EngineRng, casting_lvl: i32) -> bo
 /// the `CalcStatBonuses` recompute for an item affect above `0x7F` is cited
 /// (no §9.1 row plants one, and the stat machinery is `crate::training`'s).
 fn remove_curse(party: &mut Party, member: usize) -> Vec<CastReport> {
-    if affects::cure_affect(&mut party.members[member], spells::AFF_BESTOW_CURSE) {
-        return vec![report(party, member, "is un-cursed")];
+    match remove_curse_effect(&mut party.members[member]) {
+        Some(line) => vec![report(party, member, line)],
+        None => Vec::new(),
     }
-    let ch = &mut party.members[member];
-    let cursed = ch
+}
+
+/// The effect half of [`remove_curse`], on one character — shared with the
+/// temple's Remove Curse service, which is literally
+/// `spellTargets = [SelectedPlayer]; SpellRemoveCurse();` (`ovr005.cs:274-275`).
+pub(crate) fn remove_curse_effect(ch: &mut Character) -> Option<&'static str> {
+    if affects::cure_affect(ch, spells::AFF_BESTOW_CURSE) {
+        return Some("is un-cursed");
+    }
+    let idx = ch
         .items
         .iter()
-        .position(|it| gbx_formats::save_orig::item_is_cursed(it));
-    let Some(idx) = cursed else {
-        return Vec::new();
-    };
+        .position(|it| gbx_formats::save_orig::item_is_cursed(it))?;
     gbx_formats::save_orig::set_item_readied(&mut ch.items[idx], false);
     ch.readied_items.remove(&idx);
-    vec![report(party, member, "has an item un-cursed")]
+    Some("has an item un-cursed")
 }
 
 /// `SpellNeutralizePoison` (`cure_poison`, `ovr023.cs:2242-2275`) — the real
@@ -414,14 +421,20 @@ fn neutralize_poison(ch: &mut Character) -> &'static str {
 /// `animate_dead` and `poisoned` come off, the status goes to `okey`,
 /// **Constitution drops by one**, and the character stands up at exactly one
 /// hit point. The CON cost is what makes raising a habit expensive, and the elf
-/// clause is why an elf who dies stays dead.
-fn raise_dead(ch: &mut Character) -> bool {
-    const RACE_ELF: u8 = 2; // `Race.elf` (`Classes/Enums.cs`)
+/// clause is why an elf who dies stays dead. (The **temple's** Raise Dead
+/// imposes neither the elf clause nor the Constitution one —
+/// [`crate::temple::raise_dead`].)
+///
+/// ★ Roll-credits slice 6 correction: `CalcStatBonuses(Stat.CON, player)`
+/// (`ovr023.cs:2358`) runs between the Constitution loss and the hit-point
+/// assignment, so the raise really does cost maximum hit points, not just a
+/// stat point. Slice 5 landed the effect without it.
+fn raise_dead(ch: &mut Character, rules: &gbx_rules::pack::RuleSet) -> bool {
     let raisable = matches!(
         ch.status.health_status,
         crate::rest::status::DEAD | crate::rest::status::ANIMATED
     );
-    if !raisable || ch.stats.con.current == 0 || ch.race == RACE_ELF {
+    if !raisable || ch.stats.con.current == 0 || ch.race == crate::temple::RACE_ELF {
         return false;
     }
     affects::remove_affect(ch, spells::AFF_ANIMATE_DEAD);
@@ -429,6 +442,7 @@ fn raise_dead(ch: &mut Character) -> bool {
     ch.status.health_status = crate::rest::status::OKEY;
     ch.status.in_combat = true;
     ch.stats.con.current -= 1;
+    crate::temple::recalc_hp_for_con(ch, rules);
     ch.hit_point_current = 1;
     true
 }
@@ -555,7 +569,14 @@ impl CastScreen {
             &mut ctx.roster.members[self.member].magic.spell_list,
             spell_id,
         );
-        let reports = cast(ctx.roster, ctx.rng, self.member, spell_id, targets);
+        let reports = cast(
+            ctx.roster,
+            ctx.rng,
+            ctx.rules,
+            self.member,
+            spell_id,
+            targets,
+        );
         self.status = reports.first().map(|r| {
             player_status(
                 &ctx.roster

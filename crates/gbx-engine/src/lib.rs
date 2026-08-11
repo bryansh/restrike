@@ -58,6 +58,10 @@ pub mod shell;
 pub mod shop;
 pub mod spells;
 pub mod symbols;
+/// ★ Roll-credits slice 6 (G8): the temple and its ten services.
+pub mod temple;
+/// ★ Roll-credits slice 6 (G8): the temple's parked screen.
+pub mod temple_screen;
 pub mod text;
 pub mod training;
 pub mod vmhost;

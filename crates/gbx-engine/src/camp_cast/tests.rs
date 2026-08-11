@@ -2,6 +2,10 @@ use super::*;
 use crate::party::{character_from_record, Party};
 use crate::rest::status;
 
+fn rules() -> gbx_rules::pack::RuleSet {
+    gbx_rules::pack::RuleSet::load()
+}
+
 fn ch(name: &str) -> Character {
     let rec = vec![0u8; gbx_formats::save_orig::CHAR_RECORD_SIZE];
     let record = gbx_formats::save_orig::decode_char_record(&rec).unwrap();
@@ -89,7 +93,7 @@ fn whole_party_carries_the_caster_twice() {
 fn bless_in_camp_covers_the_whole_party() {
     let mut party = party_of(vec![cleric(), ch("MATHEW"), ch("MARK")]);
     let targets = whole_party_targets(0, &party);
-    let out = cast(&mut party, &mut rng(), 0, 0x01, &targets);
+    let out = cast(&mut party, &mut rng(), &rules(), 0, 0x01, &targets);
     for m in 0..3 {
         let a = affects::find_affect(&party.members[m], spells::AFF_BLESS)
             .unwrap_or_else(|| panic!("member {m} is blessed"));
@@ -117,7 +121,7 @@ fn bless_in_camp_covers_the_whole_party() {
 #[test]
 fn protection_from_evil_in_camp_can_be_put_on_somebody_else() {
     let mut party = party_of(vec![cleric(), ch("MATHEW")]);
-    cast(&mut party, &mut rng(), 0, 0x06, &[1]);
+    cast(&mut party, &mut rng(), &rules(), 0, 0x06, &[1]);
     let a = affects::find_affect(&party.members[1], spells::AFF_PROT_EVIL).expect("prot evil");
     assert_eq!(a.minutes, 15, "0 + 3 × 5");
     assert!(!party.members[0].has_affect(spells::AFF_PROT_EVIL));
@@ -132,7 +136,7 @@ fn read_magic_plants_the_affect_the_scribe_gate_reads() {
     c.class_level[crate::party::SKILL_MAGIC_USER] = 5;
     c.stats.int.original = 17;
     let mut party = party_of(vec![c]);
-    cast(&mut party, &mut rng(), 0, 0x12, &[0]);
+    cast(&mut party, &mut rng(), &rules(), 0, 0x12, &[0]);
     let a = affects::find_affect(&party.members[0], spells::AFF_READ_MAGIC).expect("read magic");
     assert_eq!(a.minutes, 10, "0 + 2 × 5");
 }
@@ -146,7 +150,7 @@ fn the_cures_roll_and_cap() {
         wounded.hit_point_current = 4;
         let mut party = party_of(vec![cleric(), wounded]);
         let mut r = rng();
-        let out = cast(&mut party, &mut r, 0, id, &[1]);
+        let out = cast(&mut party, &mut r, &rules(), 0, id, &[1]);
         let mut oracle = crate::rng::EngineRng::new(0x0C0F_FEE0);
         let rolled: i32 = (0..count)
             .map(|_| i32::from(crate::rest::roll_dice(&mut oracle, 8, 1)))
@@ -163,7 +167,7 @@ fn the_cures_roll_and_cap() {
     corpse.status.health_status = status::DEAD;
     corpse.hit_point_current = 0;
     let mut party = party_of(vec![cleric(), corpse]);
-    let out = cast(&mut party, &mut rng(), 0, 0x03, &[1]);
+    let out = cast(&mut party, &mut rng(), &rules(), 0, 0x03, &[1]);
     assert_eq!(party.members[1].hit_point_current, 0);
     assert!(out.is_empty(), "no line, because nothing happened");
 }
@@ -181,7 +185,7 @@ fn neutralize_poison_undoes_the_whole_poison_stack() {
     affects::add_affect(&mut victim, spells::AFF_SLOW_POISON, 60, 0xFF, true);
     affects::add_affect(&mut victim, spells::AFF_POISON_DAMAGE, 10, 0xFF, true);
     let mut party = party_of(vec![cleric(), victim]);
-    let out = cast(&mut party, &mut rng(), 0, 0x43, &[1]);
+    let out = cast(&mut party, &mut rng(), &rules(), 0, 0x43, &[1]);
     let v = &party.members[1];
     assert!(!v.has_affect(spells::AFF_POISONED));
     assert!(!v.has_affect(spells::AFF_SLOW_POISON));
@@ -193,7 +197,7 @@ fn neutralize_poison_undoes_the_whole_poison_stack() {
 
     // Not poisoned → nothing but the line.
     let mut party = party_of(vec![cleric(), ch("MARK")]);
-    let out = cast(&mut party, &mut rng(), 0, 0x43, &[1]);
+    let out = cast(&mut party, &mut rng(), &rules(), 0, 0x43, &[1]);
     assert_eq!(out[0].text, "is unaffected");
 }
 
@@ -208,7 +212,7 @@ fn slow_poison_buys_an_hour_and_a_heartbeat() {
     victim.hit_point_current = 0;
     affects::add_affect(&mut victim, spells::AFF_POISONED, 0, 0xFF, false);
     let mut party = party_of(vec![cleric(), victim]);
-    cast(&mut party, &mut rng(), 0, 0x1A, &[1]);
+    cast(&mut party, &mut rng(), &rules(), 0, 0x1A, &[1]);
     let v = &party.members[1];
     assert!(v.has_affect(spells::AFF_POISONED), "still poisoned");
     assert_eq!(
@@ -228,7 +232,7 @@ fn slow_poison_buys_an_hour_and_a_heartbeat() {
 
     // An unpoisoned target gets nothing at all.
     let mut party = party_of(vec![cleric(), ch("MARK")]);
-    let out = cast(&mut party, &mut rng(), 0, 0x1A, &[1]);
+    let out = cast(&mut party, &mut rng(), &rules(), 0, 0x1A, &[1]);
     assert!(out.is_empty());
     assert!(!party.members[1].has_affect(spells::AFF_SLOW_POISON));
 }
@@ -242,7 +246,7 @@ fn cure_disease_runs_all_three_cures_and_their_cascades() {
     affects::add_affect(&mut sick, spells::AFF_HELPLESS, 0, 0xFF, false);
     affects::add_affect(&mut sick, spells::AFF_BLESS, 6, 5, false);
     let mut party = party_of(vec![cleric(), sick]);
-    let out = cast(&mut party, &mut rng(), 0, 0x27, &[1]);
+    let out = cast(&mut party, &mut rng(), &rules(), 0, 0x27, &[1]);
     let m = &party.members[1];
     assert!(!m.has_affect(spells::AFF_WEAKEN));
     assert!(!m.has_affect(spells::AFF_CAUSE_DISEASE_2), "the cascade");
@@ -259,7 +263,7 @@ fn remove_curse_prefers_the_affect_then_un_readies_the_item() {
     let mut cursed = ch("MARK");
     affects::add_affect(&mut cursed, spells::AFF_BESTOW_CURSE, 0, 0xFF, false);
     let mut party = party_of(vec![cleric(), cursed]);
-    let out = cast(&mut party, &mut rng(), 0, 0x2B, &[1]);
+    let out = cast(&mut party, &mut rng(), &rules(), 0, 0x2B, &[1]);
     assert_eq!(out[0].text, "is un-cursed");
     assert!(!party.members[1].has_affect(spells::AFF_BESTOW_CURSE));
 
@@ -271,7 +275,7 @@ fn remove_curse_prefers_the_affect_then_un_readies_the_item() {
     holder.items.push(item);
     holder.readied_items.insert(0);
     let mut party = party_of(vec![cleric(), holder]);
-    let out = cast(&mut party, &mut rng(), 0, 0x2B, &[1]);
+    let out = cast(&mut party, &mut rng(), &rules(), 0, 0x2B, &[1]);
     assert_eq!(out[0].text, "has an item un-cursed");
     assert!(!gbx_formats::save_orig::item_readied(
         &party.members[1].items[0]
@@ -294,7 +298,7 @@ fn raise_dead_costs_a_point_of_constitution_and_never_works_on_an_elf() {
     corpse.stats.con.current = 15;
     affects::add_affect(&mut corpse, spells::AFF_POISONED, 0, 0xFF, false);
     let mut party = party_of(vec![cleric(), corpse]);
-    let out = cast(&mut party, &mut rng(), 0, 0x4B, &[1]);
+    let out = cast(&mut party, &mut rng(), &rules(), 0, 0x4B, &[1]);
     let m = &party.members[1];
     assert_eq!(m.status.health_status, status::OKEY);
     assert_eq!(m.hit_point_current, 1, "back up at exactly one hit point");
@@ -308,7 +312,7 @@ fn raise_dead_costs_a_point_of_constitution_and_never_works_on_an_elf() {
     elf.status.health_status = status::DEAD;
     elf.stats.con.current = 15;
     let mut party = party_of(vec![cleric(), elf]);
-    assert!(cast(&mut party, &mut rng(), 0, 0x4B, &[1]).is_empty());
+    assert!(cast(&mut party, &mut rng(), &rules(), 0, 0x4B, &[1]).is_empty());
     assert_eq!(party.members[1].status.health_status, status::DEAD);
 
     // Constitution already at zero (`:2346`) — raised once too often.
@@ -316,11 +320,11 @@ fn raise_dead_costs_a_point_of_constitution_and_never_works_on_an_elf() {
     spent.status.health_status = status::DEAD;
     spent.stats.con.current = 0;
     let mut party = party_of(vec![cleric(), spent]);
-    assert!(cast(&mut party, &mut rng(), 0, 0x4B, &[1]).is_empty());
+    assert!(cast(&mut party, &mut rng(), &rules(), 0, 0x4B, &[1]).is_empty());
 
     // A living character is not a candidate at all (`:2345`).
     let mut party = party_of(vec![cleric(), ch("MARK")]);
-    assert!(cast(&mut party, &mut rng(), 0, 0x4B, &[1]).is_empty());
+    assert!(cast(&mut party, &mut rng(), &rules(), 0, 0x4B, &[1]).is_empty());
 }
 
 /// ★ **Dispel Magic** out of camp: a d100 per spell-planted affect, and the
@@ -333,7 +337,7 @@ fn dispel_magic_in_camp_spares_the_racial_affects() {
     affects::add_affect(&mut target, 0x2F, 0, 0xFF, false); // dwarf/gnome vs giants
     let mut party = party_of(vec![cleric(), target]);
     let mut r = rng();
-    cast(&mut party, &mut r, 0, 0x29, &[1]);
+    cast(&mut party, &mut r, &rules(), 0, 0x29, &[1]);
     let m = &party.members[1];
     assert!(m.has_affect(0x1A), "racial affects are undispellable");
     assert!(m.has_affect(0x2F));
@@ -354,7 +358,7 @@ fn dispel_magics_ladder_punishes_a_weak_caster() {
     }
     let mut party = party_of(vec![weak, target]);
     let mut r = rng();
-    cast(&mut party, &mut r, 0, 0x29, &[1]);
+    cast(&mut party, &mut r, &rules(), 0, 0x29, &[1]);
     let left = affects::decoded(&party.members[1])
         .filter(|a| a.kind == spells::AFF_BLESS)
         .count();
@@ -368,7 +372,7 @@ fn the_buff_rows_are_draw_free() {
         let mut party = party_of(vec![cleric(), ch("MATHEW")]);
         let before = crate::rng::EngineRng::new(0x0C0F_FEE0);
         let mut r = crate::rng::EngineRng::new(0x0C0F_FEE0);
-        cast(&mut party, &mut r, 0, id, &[0, 1]);
+        cast(&mut party, &mut r, &rules(), 0, id, &[0, 1]);
         assert_eq!(
             r.state(),
             before.state(),

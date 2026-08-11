@@ -1232,5 +1232,157 @@ fn the_dead_stay_dead_on_the_roster() {
             m.status.health_status
         );
         assert!(!m.status.in_combat, "{} is still in combat", m.name);
+        let _ = m;
     }
+}
+
+// === roll-credits slice 6: the temple (G8) =================================
+
+/// ★ The shipped temple idiom, byte for byte: `SAVE 1 → 0x7EE2` (the
+/// `EnterTemple` cell), `CLEARMONSTERS`, `COMBAT` — the three instructions at
+/// `ECL2#1 @0x91DF`, the Tilverton block the playthrough opens in. The disasm
+/// of the real block reads:
+///
+/// ```text
+/// 0x91DF: SAVE imm=0xFF, mem=0x7EE1     (HeadBlockId — no head picture)
+/// 0x91E5: SAVE imm=0x01, mem=0x7EE2     (EnterTemple)
+/// 0x91EB: CLEARMONSTERS
+/// 0x91EC: COMBAT
+/// ```
+fn temple_program(resume_text: &[u8]) -> gbx_vm::test_support::EclBuilder {
+    crate::test_support::simple_block(|b| {
+        b.op(0x09).imm_byte(0xFF).mem(0x7EE1); // SAVE 0xFF → HeadBlockId
+        b.op(0x09).imm_byte(1).mem(0x7EE2); // SAVE 1 → EnterTemple
+        b.op(0x1C); // CLEARMONSTERS
+        b.op(0x24); // COMBAT
+        b.op(0x11).inline_str(resume_text); // PRINT — proves the resume
+        b.op(0x00); // EXIT
+    })
+}
+
+/// Drives `e` until a `TempleHost` is parked, then feeds `keys` one per tick
+/// until the temple closes.
+fn run_temple(e: &mut Engine, keys: &[crate::input::InputEvent]) -> Observed {
+    let mut o = Observed::default();
+    let mut parked = false;
+    let mut next = 0usize;
+    for _ in 0..MAX_TICKS {
+        let feed: Vec<crate::input::InputEvent> = if e.shell().temple_host().is_some() {
+            parked = true;
+            match keys.get(next) {
+                Some(k) => {
+                    next += 1;
+                    vec![*k]
+                }
+                None => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
+        e.tick(&feed);
+        drain(e, &mut o);
+        if parked && e.shell().temple_host().is_none() {
+            return o;
+        }
+    }
+    panic!(
+        "the temple never opened or never closed: {:?}",
+        o.transcript
+    );
+}
+
+/// ★ The COMBAT opcode's non-monster branch, live: the flag opens the temple,
+/// the temple takes the keyboard, and the script resumes when it closes.
+#[test]
+fn the_enter_temple_flag_opens_the_temple_from_a_shipped_combat_opcode() {
+    let mut e = engine_with_program(temple_program(b"AFTER-TEMPLE"), two_pcs());
+    let o = run_temple(&mut e, &[crate::input::InputEvent::Char(b'E')]);
+    assert!(
+        o.transcript
+            .iter()
+            .any(|l| l == "combat: EnterTemple → temple_shop"),
+        "the branch reported itself: {:?}",
+        o.transcript
+    );
+    assert!(o.transcript.iter().any(|l| l == "temple: closed"));
+    // The flag is cleared by the handler, exactly as `CMD_Combat` does.
+    assert_eq!(e.state().enter_temple, 0);
+    // ...and the script resumed: its post-COMBAT PRINT runs.
+    let mut o = o;
+    for _ in 0..MAX_TICKS {
+        if o.prints.iter().any(|p| p.contains("AFTER-TEMPLE")) {
+            return;
+        }
+        tick(&mut e);
+        drain(&mut e, &mut o);
+    }
+    panic!("the vector never resumed after the temple: {:?}", o.prints);
+}
+
+/// A `COMBAT` with neither flag and no monsters takes the third arm
+/// (`AfterCombatExpAndTreasure`) rather than opening anything.
+#[test]
+fn a_flagless_monsterless_combat_takes_the_after_combat_arm() {
+    let program = crate::test_support::simple_block(|b| {
+        b.op(0x24); // COMBAT, nothing loaded, no flag
+        b.op(0x11).inline_str(b"AFTERWARD");
+        b.op(0x00);
+    });
+    let mut e = engine_with_program(program, two_pcs());
+    let mut o = Observed::default();
+    for _ in 0..MAX_TICKS {
+        tick(&mut e);
+        drain(&mut e, &mut o);
+        if o.prints.iter().any(|p| p.contains("AFTERWARD")) {
+            break;
+        }
+    }
+    assert!(
+        o.transcript
+            .iter()
+            .any(|l| l == "combat: no monsters, no shop → AfterCombat"),
+        "{:?}",
+        o.transcript
+    );
+    assert!(e.shell().temple_host().is_none());
+}
+
+/// ★ **Stone to Flesh, driven live at the shipped site.** The stoned state is
+/// staged the way the game itself stages it out of combat — the
+/// `alter_character` cell a script writes (`ovr008.cs:622-628`: `set_value >=
+/// 0x80` clears `in_combat`, `0x87` sets `Status.stoned`) — written here
+/// straight onto the roster, because that cell's script route is its own
+/// docket item. The service, the money and the recovery are the temple's.
+#[test]
+fn a_petrified_member_walks_out_of_the_temple() {
+    use crate::input::InputEvent::{Char, Enter};
+    let mut party = two_pcs();
+    party[0].money.gold = 3000;
+    party[0].status.health_status = crate::rest::status::STONED;
+    party[0].status.in_combat = false;
+    party[0].hit_point_current = 0;
+    let mut e = engine_with_program(temple_program(b"AFTER-TEMPLE"), party);
+
+    // Heal → the list opens on row 0 (Cure Blindness); walk down to row 9
+    // (Stone to Flesh), commit, acknowledge the price, pay, then leave both
+    // menus.
+    let mut keys = vec![Char(b'H')];
+    for _ in 0..9 {
+        // `menu_scroll_in_page`'s own forward step — the End key, whose ctrl
+        // code is 'O' (`ovr027.cs:620-622`). 'N' is a whole PAGE.
+        keys.push(crate::input::InputEvent::Ext(crate::input::ExtKey::End));
+    }
+    keys.extend([Enter, Enter, Char(b'Y'), Char(b'E'), Char(b'E')]);
+    let o = run_temple(&mut e, &keys);
+
+    let m = &e.party.members[0];
+    assert_eq!(
+        m.status.health_status,
+        crate::rest::status::OKEY,
+        "the statue is flesh again ({:?})",
+        o.transcript
+    );
+    assert_eq!(m.hit_point_current, 1, "and stands at one hit point");
+    assert!(m.status.in_combat);
+    assert_eq!(m.money.gold, 1000, "2000 gp for Stone to Flesh");
 }

@@ -79,6 +79,11 @@ pub enum VmPhase {
     Present,
     Gate(Widget),
     Combat(Box<CombatHost>),
+    /// ★ **Roll-credits slice 6 (G8)**: `CMD_Combat`'s non-monster branch took
+    /// the `EnterTemple` arm (`ovr003.cs:985-990`) and `ovr005.temple_shop()`
+    /// is on screen. Appended last so postcard keeps every earlier variant's
+    /// index and no committed `.rsav` moves.
+    Temple(Box<crate::temple_screen::TempleHost>),
 }
 
 impl VmPhase {
@@ -98,6 +103,7 @@ impl VmPhase {
                 }
             ),
             VmPhase::Combat(h) => format!("combat({:?})", h.stage()),
+            VmPhase::Temple(_) => "temple".to_string(),
         }
     }
 }
@@ -186,6 +192,7 @@ impl Clone for VmPhase {
             VmPhase::Present => VmPhase::Present,
             VmPhase::Gate(w) => VmPhase::Gate(w.clone()),
             VmPhase::Combat(h) => VmPhase::Combat(h.clone()),
+            VmPhase::Temple(h) => VmPhase::Temple(h.clone()),
         }
     }
 }
@@ -197,6 +204,7 @@ impl PartialEq for VmPhase {
             (VmPhase::Present, VmPhase::Present) => true,
             (VmPhase::Gate(a), VmPhase::Gate(b)) => a == b,
             (VmPhase::Combat(_), VmPhase::Combat(_)) => true,
+            (VmPhase::Temple(_), VmPhase::Temple(_)) => true,
             _ => false,
         }
     }
@@ -493,6 +501,59 @@ fn widget_for_request(request: &Request, menu_selected_word: usize) -> Widget {
     }
 }
 
+/// ★ Which arm `CMD_Combat`'s non-monster branch takes (`ovr003.cs:974-992`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CombatBranch {
+    /// `area2_ptr.EnterShop == 1` → `ovr007.CityShop()`.
+    Shop,
+    /// `area2_ptr.EnterTemple == 1` → `ovr005.temple_shop()`.
+    Temple,
+    /// Neither flag → `ovr006.AfterCombatExpAndTreasure()` — the "COMBAT with
+    /// no monsters and no shop" idiom a script uses to open the treasure
+    /// screen on a pile it just laid down with `TREASURE`.
+    AfterCombat,
+}
+
+/// Reads the two flags and **clears the one it found**, in the original's own
+/// order (Shop tested first, `ovr003.cs:978`).
+fn combat_branch(ctx: &mut FlowCtx) -> CombatBranch {
+    if ctx.state.enter_shop == 1 {
+        ctx.state.enter_shop = 0;
+        return CombatBranch::Shop;
+    }
+    if ctx.state.enter_temple == 1 {
+        ctx.state.enter_temple = 0;
+        return CombatBranch::Temple;
+    }
+    CombatBranch::AfterCombat
+}
+
+/// The transcript line for a non-monster `COMBAT`.
+///
+/// ★ **Where the shipped temples are.** The flag write is a plain
+/// `SAVE 1 → 0x7EE2` (`EnterTemple`), so no opcode census could ever surface
+/// one; a scan of every `ECL*.DAX` block for the address finds exactly four,
+/// each of them the same three-instruction idiom:
+///
+/// | block | address | shape |
+/// |---|---|---|
+/// | `ECL1#80` | `0x8829` | `CLEARMONSTERS; SAVE 1 → 0x7EE2; COMBAT` |
+/// | `ECL1#81` | `0x8677` | the same |
+/// | ★ `ECL2#1` | `0x91DF` | `SAVE 0xFF → 0x7EE1` (HeadBlockId); `SAVE 1 → 0x7EE2`; `CLEARMONSTERS; COMBAT` |
+/// | `ECL5#49` | `0x8E0C` | `CLEARMONSTERS; SAVE 1 → 0x7EE2; COMBAT` |
+///
+/// `ECL2#1` is Tilverton — **the block the playthrough starts in** (§2's "where
+/// the playthrough begins"), which is why it is the slice's live acceptance
+/// site. `EnterShop` (`0x7F6C`) appears in nine places across `ECL1#80/81`,
+/// `ECL2#1`, `ECL4#32/37` and `ECL5#49`.
+pub fn describe_combat_branch(branch: CombatBranch) -> String {
+    match branch {
+        CombatBranch::Shop => "combat: EnterShop → CityShop (not wired)".to_string(),
+        CombatBranch::Temple => "combat: EnterTemple → temple_shop".to_string(),
+        CombatBranch::AfterCombat => "combat: no monsters, no shop → AfterCombat".to_string(),
+    }
+}
+
 /// Transcript-mode's (M2 step 8) request label — content, not widget shape:
 /// a `HorizontalMenu`'s joined option text (the same text a player reads),
 /// or a fixed descriptive label for the non-textual requests.
@@ -663,6 +724,11 @@ impl VectorRun {
                     }
                     // ExitStage completed — resumed to Pump this same tick.
                 }
+                VmPhase::Temple(_) => {
+                    if !self.tick_temple(ctx) {
+                        return RunTick::Working; // the temple is still on screen
+                    }
+                }
                 VmPhase::Gate(_) => {
                     if !self.tick_gate(ctx) {
                         return RunTick::Working; // still gated, or paginating
@@ -794,6 +860,26 @@ impl VectorRun {
                     {
                         self.phase = VmPhase::Combat(Box::new(CombatHost::open(ctx)));
                         return PresentTick::OpenedGate;
+                    }
+                    // ★ **Roll-credits slice 6 (G8)**: `CMD_Combat`'s
+                    // non-monster branch (`ovr003.cs:974-992`). Two `Area2`
+                    // flags a script has just set decide which shop opens; the
+                    // handler clears the flag it found, exactly here, so the
+                    // NEXT flagless `COMBAT` in the same block takes the
+                    // AfterCombat arm rather than re-entering.
+                    if matches!(request, Request::Combat) {
+                        let branch = combat_branch(ctx);
+                        ctx.vm_memory
+                            .transcript
+                            .push(crate::vmhost::TranscriptEntry::Request(
+                                describe_combat_branch(branch),
+                            ));
+                        if branch == CombatBranch::Temple {
+                            self.phase = VmPhase::Temple(Box::new(
+                                crate::temple_screen::TempleHost::open(ctx),
+                            ));
+                            return PresentTick::OpenedGate;
+                        }
                     }
                     ctx.vm_memory
                         .transcript
@@ -943,6 +1029,37 @@ impl VectorRun {
     /// ExitStage completion means the unwind fires on the NEXT tick, after the
     /// player has seen the fight end — §8.2's MUST, and the property
     /// `a_wiped_partys_final_beats_all_play_before_the_game_over_unwind` pins.
+    /// ★ Ticks the parked temple (roll-credits slice 6 / G8). `temple_shop`
+    /// returns to `CMD_Combat`, which then runs the branch's shared tail
+    /// (`ovr003.cs:1016-1026`: the game state goes back to the map, the search
+    /// flags mask down, the encounter flags clear and `LoadPic` rebuilds the
+    /// screen). Returns `true` once the visit closed and the run resumed.
+    fn tick_temple(&mut self, ctx: &mut FlowCtx) -> bool {
+        let VmPhase::Temple(host) = &mut self.phase else {
+            unreachable!("tick_temple called outside Temple phase")
+        };
+        if !matches!(host.tick(ctx), crate::screens::ScreenTransition::Exit) {
+            return false;
+        }
+        ctx.vm_memory
+            .transcript
+            .push(crate::vmhost::TranscriptEntry::Request(
+                "temple: closed".to_string(),
+            ));
+        // `CMD_Combat`'s tail, shared with the fight arm.
+        ctx.state.search_flags &= 1;
+        ctx.state.encounter_flags = [false; 2];
+        ctx.vm_memory.sprite_changed = false;
+        // `LoadPic` (`ovr025.cs:1435-1441`) — the exploration screen comes back
+        // whole, the same rebuild the fight's Restore stage performs.
+        ctx.fb.clear(0);
+        let _ = crate::frames::draw8x8_03(ctx.fb, ctx.symbols);
+        crate::corridor::redraw_view(ctx);
+        self.pending_reply = Some(Reply::Combat);
+        self.phase = VmPhase::Pump;
+        true
+    }
+
     fn tick_combat(&mut self, ctx: &mut FlowCtx) -> bool {
         let VmPhase::Combat(host) = &mut self.phase else {
             unreachable!("tick_combat called outside Combat phase")
@@ -1375,6 +1492,19 @@ pub struct EngineState {
     /// deserializes back to [`crate::monster::PendingCombat::default`]).
     #[serde(skip)]
     pub pending_combat: crate::monster::PendingCombat,
+    /// ★ `area2_ptr.EnterTemple` (`Area2.cs:65`) — set by a `SAVE 1 → 0x7EE2`
+    /// two instructions before a `COMBAT`, read and cleared by `CMD_Combat`'s
+    /// non-monster branch (`ovr003.cs:985-990`). Roll-credits slice 6 / G8.
+    ///
+    /// `#[serde(default)]`, so no `.rsav` golden moves: the flag is only ever
+    /// live across the two instructions between its write and the `COMBAT`
+    /// that consumes it, and no save can be taken in between.
+    #[serde(default)]
+    pub enter_temple: u16,
+    /// `area2_ptr.EnterShop` (`Area2.cs:79`) — the same shape, one branch over
+    /// (`ovr003.cs:978-982`).
+    #[serde(default)]
+    pub enter_shop: u16,
     /// ★ `gbl.menuSelectedWord` (`byte_1D5BE`, `Classes/Gbl.cs:375`): the
     /// highlighted word index, GLOBAL in the original and never reset —
     /// `displayInput` only clamps it on entry (`ovr027.cs:142-145`) and its
@@ -1465,6 +1595,8 @@ impl EngineState {
             encounter_flags: [false; 2],
             picture: crate::picture::PictureLayer::default(),
             pending_combat: crate::monster::PendingCombat::default(),
+            enter_temple: 0,
+            enter_shop: 0,
             menu_selected_word: 0,
             rest_encounter: crate::rest::RestEncounterSchedule::default(),
         }
@@ -2356,7 +2488,10 @@ impl Shell {
         fn parked(phase: Option<&VmPhase>) -> bool {
             // A parked fight (`combat-visualizer.md` §8.1) is an interaction
             // exactly as a Widget is: no vector may pump while one is running.
-            matches!(phase, Some(VmPhase::Gate(_)) | Some(VmPhase::Combat(_)))
+            matches!(
+                phase,
+                Some(VmPhase::Gate(_)) | Some(VmPhase::Combat(_)) | Some(VmPhase::Temple(_))
+            )
         }
         fn run_gated(run: &Option<VectorRun>) -> bool {
             parked(run.as_ref().map(|r| &r.phase))
@@ -2558,6 +2693,30 @@ impl Shell {
             Shell::Look(l) => in_run(&l.run).or_else(|| in_chain(&l.chain)),
             Shell::Step(s) => in_run(&s.run).or_else(|| in_chain(&s.chain)),
             // A camp ambush's own `COMBAT` parks here like any other.
+            Shell::CampInterrupt(c) => in_run(&c.run).or_else(|| in_chain(&c.chain)),
+            Shell::WorldMenu { .. } | Shell::GameOver(_) | Shell::Screen(_) => None,
+        }
+    }
+
+    /// ★ The temple currently on screen, if any (roll-credits slice 6 / G8) —
+    /// the same read-only seam [`Shell::combat_host`] is, one variant over.
+    pub fn temple_host(&self) -> Option<&crate::temple_screen::TempleHost> {
+        fn in_run(run: &Option<VectorRun>) -> Option<&crate::temple_screen::TempleHost> {
+            match run.as_ref().map(|r| &r.phase) {
+                Some(VmPhase::Temple(h)) => Some(h),
+                _ => None,
+            }
+        }
+        fn in_chain(chain: &Option<ChainRunner>) -> Option<&crate::temple_screen::TempleHost> {
+            match chain.as_ref().map(|c| &c.run.phase) {
+                Some(VmPhase::Temple(h)) => Some(h),
+                _ => None,
+            }
+        }
+        match self {
+            Shell::Boot(b) => in_run(&b.run).or_else(|| in_chain(&b.chain)),
+            Shell::Look(l) => in_run(&l.run).or_else(|| in_chain(&l.chain)),
+            Shell::Step(s) => in_run(&s.run).or_else(|| in_chain(&s.chain)),
             Shell::CampInterrupt(c) => in_run(&c.run).or_else(|| in_chain(&c.chain)),
             Shell::WorldMenu { .. } | Shell::GameOver(_) | Shell::Screen(_) => None,
         }

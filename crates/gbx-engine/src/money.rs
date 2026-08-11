@@ -143,6 +143,41 @@ impl MoneySet {
         self.gold_worth() + self.coins[5] as i64 * GEM_EXP + self.coins[6] as i64 * JEWELRY_EXP
     }
 
+    /// ★ `SubtractGoldWorth` (`MoneySet.cs:93-128`) on the **pool** — the arm
+    /// `buy_cure` reaches when the buyer's own purse is short
+    /// (`ovr005.cs:43-46`). The algorithm is [`subtract_gold_worth`]'s: spend
+    /// the lowest denominations first, over-paying by a coin each step, then
+    /// make change back from the highest. Assumes affordability, as every coab
+    /// call site does.
+    pub fn subtract_gold_worth(&mut self, gold: i64) {
+        let mut coppers = gold * PER_COPPER[3];
+
+        let mut coin = 0usize;
+        while coppers > 0 && coin <= 4 {
+            let rate = PER_COPPER[coin];
+            let mut sub = coppers / rate + 1;
+            let have = self.coins[coin] as i64;
+            if have < sub {
+                sub = have;
+            }
+            coppers -= rate * sub;
+            self.coins[coin] = (self.coins[coin] as i64 - sub) as i32;
+            coin += 1;
+        }
+
+        if coppers < 0 {
+            coppers = coppers.abs();
+            let mut coin = 4i64;
+            while coppers > 0 && coin >= 0 {
+                let rate = PER_COPPER[coin as usize];
+                let add = coppers / rate;
+                coppers -= rate * add;
+                self.coins[coin as usize] += add as i32;
+                coin -= 1;
+            }
+        }
+    }
+
     /// `ScaleAll(scale)` (`MoneySet.cs:143-153`): scales copper..platinum
     /// (never gems/jewelry) and reports whether any of those five was nonzero
     /// **before** scaling — the "an NPC actually took something" answer
