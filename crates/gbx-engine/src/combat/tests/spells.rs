@@ -801,3 +801,90 @@ fn the_area_shape_returns_both_teams() {
     assert!(list.contains(&1), "so is his ally");
     assert!(list.iter().any(|&i| i >= 2), "and the monsters");
 }
+
+/// ★ **The slice's combat drive** (roll-credits §9.2's acceptance): a cleric
+/// blesses the line, a magic-user drops a fireball on the monsters standing in
+/// it, and the whole draw sequence is asserted against the arithmetic rather
+/// than against a recorded blob.
+///
+/// The two casts are the staples §9.1 picked out of the party's own books, and
+/// between them they exercise every piece of machinery this slice built: the
+/// area shape, the team filter, `DoSpellCastingWork`'s save gate,
+/// `damage_person`'s halving, and `ApplyAttackSpellAffect`.
+///
+/// Draw accounting, in order:
+///
+/// | who | draws | why |
+/// |---|---|---|
+/// | Bless | none | `field_E = 0` picks the caster with no `find_target`, and `damageOnSave = Normal` rolls no save |
+/// | Fireball | 1 × d(count) | `sub_4001C`'s `find_target` picks the blast centre |
+/// | | 5 × d6 | `roll_dice_save(6, castingLvl)`, PHILIPPE at magic-user 5 |
+/// | | 1 × d20 per target | `DamageOnSave::Half` ⇒ a save each |
+#[test]
+fn a_bless_and_a_fireball_in_one_scripted_fight() {
+    let mut w = cleric_world();
+    w.auto_pcs_cast_magic = true;
+    // [0] SHARA the cleric, [1] PHILIPPE the magic-user, [2..6] four monsters
+    // packed tight enough for one fireball to catch all four.
+    w.fighters[0].memorized_list = vec![0x01];
+    w.fighters[1].memorized_list = vec![0x2F];
+    w.fighters[1].skill_level_magic_user = 5;
+    w.fighters[1].skill_level_cleric = 0;
+    // Far enough out that the radius-3 blast catches the four of them and
+    // nobody else — a fireball is not team-filtered, so the distance is the
+    // only thing keeping the party out of it.
+    for (i, m) in (2..6).enumerate() {
+        w.fighters[m].pos = GridPos::new(18 + (i as i32 % 2), 12 + (i as i32 / 2));
+        w.fighters[m].hp_current = 40;
+        w.fighters[m].hp_max = 40;
+    }
+    w.rebuild_occupancy();
+    let philippe_hp = w.fighters[1].hp_current;
+
+    // --- the bless (draw-free) -------------------------------------------
+    let log = DrawLog::default();
+    let mut rng = EngineRng::new(SEED);
+    rng.attach_sink(log.sink());
+    w.sub_5d2e1(&mut rng, 0, 0x01);
+    assert_eq!(log.len(), 0, "a bless spends nothing: {:?}", log.ns());
+    assert!(w.fighters[0].has_affect(AFF_BLESS), "SHARA");
+    assert!(w.fighters[1].has_affect(AFF_BLESS), "PHILIPPE");
+    for m in 2..6 {
+        assert!(!w.fighters[m].has_affect(AFF_BLESS), "not the monsters");
+    }
+
+    // …and the blessing is live where it matters: `CheckAffectsEffect(Type_10)`
+    // is the attacker-side dispatch inside `PC_CanHitTarget`, and `bless`'s
+    // handler adds +1 to the live `attack_roll` there (§47.7).
+    w.attack_roll = 0;
+    w.check_affects_effect(1, CheckType::Type10);
+    assert_eq!(w.attack_roll, 1, "bless is +1 to hit, live at the swing");
+
+    // --- the fireball -----------------------------------------------------
+    let before = log.len();
+    w.sub_5d2e1(&mut rng, 1, 0x2F);
+    let ns: Vec<u16> = log.ns()[before..].to_vec();
+    assert_eq!(ns.len(), 1 + 5 + 4, "1 pick + 5 d6s + 4 saves: {ns:?}");
+    assert_eq!(&ns[1..6], &[6, 6, 6, 6, 6], "the volley: {ns:?}");
+    assert!(
+        ns[6..].iter().all(|&n| n == 20),
+        "one save per target: {ns:?}"
+    );
+
+    // The damage is ONE number spread over the blast, halved on a made save —
+    // so every survivor's loss is either the full roll or half of it.
+    let mut replay = Replay::new(SEED);
+    replay.roll(4); // the `find_target` pick (the near-list has four entries)
+    let volley: i32 = (0..5).map(|_| replay.roll(6) as i32).sum();
+    for m in 2..6 {
+        let lost = 40 - w.fighters[m].hp_current;
+        assert!(
+            lost == volley || lost == volley / 2,
+            "monster {m} lost {lost}, expected {volley} or {}",
+            volley / 2
+        );
+    }
+    // PHILIPPE stood clear of his own blast — seven squares is out of a
+    // radius-3 sweep. Move him three closer and the same cast would burn him.
+    assert_eq!(w.fighters[1].hp_current, philippe_hp);
+}
