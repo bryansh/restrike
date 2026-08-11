@@ -241,6 +241,28 @@ const LAST_YPOS_ADDR: u16 = 0x4BF1;
 /// value since M2; it was simply never wired to the address scripts read it
 /// at, so after the first chain every arrival branch took its default arm.
 const LAST_ECL_BLOCK_ID_ADDR: u16 = 0x4BF2;
+/// ★ `area_ptr.block_area_view` (`Classes/Area1.cs:79`, DataOffset `0x1F6`;
+/// setter case `:256-258`) — **FD-41's unread cell**. Nonzero forbids the
+/// area map: `main_3d_world_menu`'s `'A'` shows the timed `"Not Here"`
+/// instead of toggling (`ovr015.cs:368-379`), and `RedrawView` force-clears
+/// `mapAreaDisplay` on every redraw while it is set (`ovr029.cs:34-38`).
+///
+/// A live cell, not a boot-time config: `ECL5#48 @0x8086` writes it `0`
+/// immediately before crossing to the overland, so both consumers read it at
+/// the moment they need it ([`VmMemoryState::block_area_view`]).
+const BLOCK_AREA_VIEW_ADDR: u16 = 0x4BFB;
+/// ★ `area_ptr.current_city` (`Classes/Area1.cs:154`, DataOffset `0x342`;
+/// setter case `:390-392`) — the index into `MapCursor`'s 33-city coordinate
+/// tables (`crate::mapcursor`), i.e. where the blinking cursor sits on the
+/// Dalelands map.
+///
+/// `ECL1#80` owns it: `@0x809F SAVE [0x4C9B],[0x4CA1]` sets it to the city
+/// the party is standing at, and `@0x910C GETTABLE 0x9D13,[0x4C9D],[0x4CA1]`
+/// re-points it mid-journey at the route's own map cell, so a travel
+/// encounter's "PRESS BUTTON" prompt blinks where the encounter happened.
+/// `ovr011.cs:750` copies it into `gbl.current_city` at wilderness-floor
+/// setup, which is where the terrain generator reads it from.
+const CURRENT_CITY_ADDR: u16 = 0x4CA1;
 /// `area2_ptr.rest_incounter_period`/`rest_incounter_percentage`
 /// (`Classes/Area2.cs:56-59`, DataOffsets `0x5A4`/`0x5A6`) — Rest's random-
 /// encounter schedule, read by the camp loop (`ovr021.cs:586-594`) and zeroed
@@ -728,6 +750,20 @@ impl VmMemoryState {
     /// sprite-load gate (`ovr008.cs:233`) is such a consumer.
     pub fn in_dungeon(&self) -> bool {
         self.raw_word(IN_DUNGEON_ADDR).unwrap_or(0) != 0
+    }
+
+    /// ★ `gbl.area_ptr.block_area_view` ([`BLOCK_AREA_VIEW_ADDR`]) — FD-41.
+    /// Read live at both consumers (`RedrawView`'s force-clear and the world
+    /// menu's `'A'`), because a block can `SAVE` into it at any time.
+    pub fn block_area_view(&self) -> u16 {
+        self.raw_word(BLOCK_AREA_VIEW_ADDR).unwrap_or(0)
+    }
+
+    /// ★ `gbl.area_ptr.current_city` ([`CURRENT_CITY_ADDR`]) — the
+    /// [`crate::mapcursor`] table index, and `SetupWildernessFloor`'s own
+    /// terrain seed (`ovr011.cs:750`).
+    pub fn current_city(&self) -> u8 {
+        self.raw_word(CURRENT_CITY_ADDR).unwrap_or(0) as u8
     }
 
     /// Queues one [`crate::picture::EncounterVisualPlan`] (execution time).
@@ -1827,6 +1863,9 @@ impl gbx_vm::EngineServices for EngineVmHost<'_> {
         self.state.picture.bigpic_block = Some(id);
         self.state.picture.anim_block = None;
         self.state.picture.anim_frame = 0;
+        // The same free writes `lastDaxBlockId = 0xFF` (`ovr030.cs:164`) —
+        // see `crate::picture::CITY_SCENE_PIC_BLOCK`.
+        self.state.picture.last_dax_block = crate::picture::NO_DAX_BLOCK;
     }
 
     fn reset_wall_set(&mut self, index: u8) {

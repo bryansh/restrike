@@ -93,7 +93,15 @@ pub const CONTAINER_VERSION: u16 = 1;
 /// the award payload a dead monster pays out. New postcard fields in the
 /// middle of the payload: reject-not-migrate, hard version bump. The
 /// committed golden was recomputed in the same commit.
-pub const SAVE_FORMAT_VERSION: u32 = 7;
+/// **v8** (roll-credits slice 7, wilderness/overworld — the slice's ONE
+/// break, taken up front): `PictureLayer` gained `last_dax_block`
+/// (`gbl.lastDaxBlockId`, the single byte the city-scene guard's four sites
+/// read — `crate::picture::CITY_SCENE_PIC_BLOCK`), and `EngineState` LOST
+/// `area_view_allowed`, the hardcoded `true` nothing ever wrote: FD-41's
+/// `block_area_view` is a live ScriptMemory cell read at its two consumers
+/// instead. Both a payload-shape addition and a removal: reject-not-migrate,
+/// hard version bump. The committed golden was recomputed in the same commit.
+pub const SAVE_FORMAT_VERSION: u32 = 8;
 
 /// This engine's one shipped flavor (M3's slice — `xxvc` is M7). An 8-byte
 /// ASCII tag rather than a numeric id, matching the header's own

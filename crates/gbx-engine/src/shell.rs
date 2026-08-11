@@ -1325,10 +1325,6 @@ pub struct EngineState {
     /// bit 0 = search mode; bit 1 = transient "Look in progress" marker
     /// (`search_flags |= 2` on `'L'`, cleared by [`LookFlow`]'s restore).
     pub search_flags: u8,
-    /// `block_area_view == 0`-equivalent: whether the area map is available
-    /// at all in the resident block (a per-area config, M6 scope in full —
-    /// defaults `true`).
-    pub area_view_allowed: bool,
     /// `mapAreaDisplay`: whether the area map is currently being shown.
     pub area_map_shown: bool,
     /// The persistent `vmFlag01` equivalent (D-UI2): survives across
@@ -1565,7 +1561,6 @@ impl EngineState {
             pos: (0, 0),
             facing: Facing::North,
             search_flags: 0,
-            area_view_allowed: true,
             area_map_shown: false,
             chained: false,
             party_killed: false,
@@ -2613,7 +2608,11 @@ impl Shell {
 
     fn dispatch_world_menu_key(&mut self, key: u8, ctx: &mut FlowCtx) {
         use WorldMenuCommand::*;
-        let cmd = crate::movement::world_menu_command(key, ctx.state.area_view_allowed);
+        // ★ FD-41: the `'A'` arm's permission is the LIVE `block_area_view`
+        // cell (`ovr015.cs:369`), not a boot-time copy — `EngineState` used to
+        // carry a hardcoded `true` nothing ever wrote.
+        let area_view_allowed = ctx.vm_memory.block_area_view() == 0;
+        let cmd = crate::movement::world_menu_command(key, area_view_allowed);
         match cmd {
             ToggleAreaView => {
                 ctx.state.area_map_shown = !ctx.state.area_map_shown;

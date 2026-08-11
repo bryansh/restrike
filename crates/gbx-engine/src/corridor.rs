@@ -757,15 +757,83 @@ fn draw_3d_world(
     }
 }
 
-/// `RedrawView` (`ovr029.cs:10-49`), M2's dungeon-only slice (wilderness/
-/// bigpic is M6): picks the sky color from the current cell's `indoor` flag
-/// (`mapWallRoof > 0x7F`, confirmed exactly equivalent to `x2 & 0x80` for a
-/// `u8`) and the hypothesized indoor/outdoor sky-index cells, then composes
-/// [`draw_3d_world`]. Called at every point the design doc's walk loop
-/// calls the original's own `RedrawView` (`shell.rs`'s `enter_world_menu`
-/// — see that function's doc comment for the deliberate call-site
-/// simplification).
+/// ★ **`RedrawView`** (`ovr029.cs:10-49`) — whole, both arms
+/// (roll-credits D-S7a; M2 shipped the `inDungeon != 0` half only).
+///
+/// The shape, statement for statement:
+///
+/// ```text
+/// :12  if lastDaxBlockId == 0x50   -> can_draw_bigpic = false
+/// :17  if party_killed == false
+/// :19    if area_ptr.inDungeon != 0
+/// :21      mapWallRoof = get_wall_x2(partyY, partyX)
+/// :23-31   sky_colour = sky_colours[indoor ? indoor_sky_colour : outdoor_sky_colour]
+/// :34-38   if block_area_view != 0 && !Cheats.always_show_areamap -> mapAreaDisplay = false
+/// :40      Draw3dWorld(...)
+/// :42    else if can_draw_bigpic  -> draw_bigpic()
+/// :47    can_draw_bigpic = false
+/// ```
+///
+/// Three details the M2 slice could not carry, and one that is a correction:
+///
+/// - The fork is on the **RAW `area_ptr.inDungeon` cell**, not `game_state`
+///   (FD-37's asymmetry — `vm_init_ecl` writes the struct field directly,
+///   `ovr008.cs:126`, bypassing the hook that maintains `game_state`).
+/// - `can_draw_bigpic = false` at `:47` is INSIDE the `party_killed` gate;
+///   the `lastDaxBlockId` force-clear at `:12-15` is outside it. Both
+///   transcribed where they sit.
+/// - **`lastDaxBlockId == 0x50` is not a demo guard** (the door's working
+///   name for it): `0x50` is the block `load_pic_final` last loaded, and the
+///   only script that loads it is `ECL1#80`'s own city preamble
+///   (`@0x85E5 PICTURE 0x50`, the "YOU ARE IN <city>. WHAT PLACE WILL YOU
+///   VISIT?" scene). The guard means "a city scene owns the viewport" — while
+///   it does, the overland map must not be repainted under it. The `Shop`
+///   arm of `LoadPic` reads the same cell the same way (`ovr025.cs:1414`).
+/// - FD-41's unread cell is read here: `block_area_view` (`0x4BFB`) is a live
+///   ScriptMemory cell a block can `SAVE` into, so it is sampled at redraw
+///   time rather than copied at boot.
+///
+/// Called at every point the design doc's walk loop calls the original's own
+/// `RedrawView` (`shell.rs`'s `enter_world_menu` — see that function's doc
+/// comment for the deliberate call-site simplification).
 pub fn redraw_view(ctx: &mut FlowCtx) {
+    // `:12-15` — outside the `party_killed` gate, and the first thing the
+    // function does.
+    if ctx.state.picture.last_dax_block == crate::picture::CITY_SCENE_PIC_BLOCK {
+        ctx.vm_memory.can_draw_bigpic = false;
+    }
+
+    if ctx.state.party_killed {
+        // `:17` — a wiped party gets no view at all, and `:47`'s consume is
+        // skipped with it.
+        ctx.vm_memory.clear_redraw_flags();
+        return;
+    }
+
+    if ctx.vm_memory.in_dungeon() {
+        draw_dungeon_view(ctx);
+    } else if ctx.vm_memory.can_draw_bigpic {
+        // `:44 ovr030.draw_bigpic()` — the full-screen overland backdrop,
+        // whichever BIGPIC block a `PICTURE >= 0x78` last selected.
+        draw_bigpic(ctx);
+    }
+
+    // `RedrawView`'s own tail (`ovr029.cs:47`): the bigpic permission is
+    // one-shot, consumed by every redraw whether or not the non-dungeon
+    // branch used it.
+    ctx.vm_memory.can_draw_bigpic = false;
+
+    // The consolidated gate's own clear (`ovr003.cs:1855-1859`) — see
+    // `VmMemoryState::clear_redraw_flags`'s doc comment for why this
+    // session's redraw isn't itself gated on these flags.
+    ctx.vm_memory.clear_redraw_flags();
+}
+
+/// `RedrawView`'s `inDungeon != 0` arm (`ovr029.cs:21-40`): the sky colour
+/// from the party cell's `indoor` flag (`mapWallRoof > 0x7F`, exactly
+/// equivalent to `x2 & 0x80` for a `u8`), FD-41's area-map force-clear, then
+/// [`draw_3d_world`].
+fn draw_dungeon_view(ctx: &mut FlowCtx) {
     // The 3D world is painted over the very cells a picture occupies (a PIC
     // is 88x88 at cell (3,3), exactly the viewport), so a redraw destroys it
     // — in the original too, which is why every picture-bearing vector in the
@@ -787,6 +855,12 @@ pub fn redraw_view(ctx: &mut FlowCtx) {
     let sky_colour = SKY_COLOURS[sky_idx];
     let hour = ctx.state.clock.hh_mm().0;
 
+    // `:34-38` — FD-41. `Cheats.always_show_areamap` is coab's own debug
+    // switch, permanently false here.
+    if ctx.vm_memory.block_area_view() != 0 {
+        ctx.state.area_map_shown = false;
+    }
+
     draw_3d_world(
         ctx.fb,
         ctx.symbols,
@@ -799,16 +873,22 @@ pub fn redraw_view(ctx: &mut FlowCtx) {
         ctx.state.area_map_shown,
         sky_colour,
     );
+}
 
-    // `RedrawView`'s own tail (`ovr029.cs:46`): the bigpic permission is
-    // one-shot, consumed by every redraw whether or not the non-dungeon
-    // branch used it.
-    ctx.vm_memory.can_draw_bigpic = false;
-
-    // The consolidated gate's own clear (`ovr003.cs:1855-1859`) — see
-    // `VmMemoryState::clear_redraw_flags`'s doc comment for why this
-    // session's redraw isn't itself gated on these flags.
-    ctx.vm_memory.clear_redraw_flags();
+/// `draw_bigpic` (`ovr030.cs:243-247`) — `DrawFrame_WildernessMap()` then the
+/// resident `bigpic_dax` at cell (1,1). Both live in
+/// [`crate::picture::compose`]'s [`Shown::BigPic`] arm already (the
+/// `PICTURE >= 0x78` path draws through exactly the same code), so this is
+/// the same paint reached from the redraw side.
+///
+/// The block id is the one `load_bigpic` last resolved. With none resident
+/// the original would blit a null `bigpic_dax`; ours simply draws the frame,
+/// which is the honest empty overland screen rather than a crash.
+///
+/// [`Shown::BigPic`]: crate::picture::Shown::BigPic
+fn draw_bigpic(ctx: &mut FlowCtx) {
+    ctx.state.picture.shown = crate::picture::Shown::BigPic;
+    crate::picture::compose(ctx);
 }
 
 #[cfg(test)]

@@ -254,8 +254,10 @@ impl EnginePaneState {
         ui.monospace(format!("pos: {:?}", state.pos));
         ui.monospace(format!("facing: {:?}", state.facing));
         ui.monospace(format!(
-            "search_flags: {:#04b}  area_map_shown: {}  area_view_allowed: {}",
-            state.search_flags, state.area_map_shown, state.area_view_allowed
+            "search_flags: {:#04b}  area_map_shown: {}  block_area_view: {}",
+            state.search_flags,
+            state.area_map_shown,
+            engine.vm_memory().block_area_view()
         ));
         ui.monospace(format!("clock: {hh:02}:{mm:02}"));
         ui.monospace(format!(
@@ -296,7 +298,10 @@ impl EnginePaneState {
                 ("facing", format!("{:?}", state.facing)),
                 ("search_flags", format!("{:#04b}", state.search_flags)),
                 ("area_map_shown", state.area_map_shown.to_string()),
-                ("area_view_allowed", state.area_view_allowed.to_string()),
+                (
+                    "block_area_view",
+                    engine.vm_memory().block_area_view().to_string(),
+                ),
                 ("clock", format!("{hh:02}:{mm:02}")),
                 ("ecl_block_id", state.ecl_block_id.to_string()),
                 ("last_ecl_block_id", state.last_ecl_block_id.to_string()),

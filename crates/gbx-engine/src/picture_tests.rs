@@ -773,3 +773,143 @@ fn the_shipped_approach_shape_runs_two_bands_off_one_sprit_load() {
         "the script's own reset still landed after the drain"
     );
 }
+
+// --- roll-credits slice 7: `RedrawView`'s wilderness arm (D-S7a / D-S7e) ---
+
+/// `area_ptr.inDungeon`'s ECL address (`vmhost.rs`'s `IN_DUNGEON_ADDR`).
+const IN_DUNGEON_ADDR: u16 = 0x4BE6;
+/// `area_ptr.block_area_view` (`vmhost.rs`'s `BLOCK_AREA_VIEW_ADDR`), FD-41.
+const BLOCK_AREA_VIEW_ADDR: u16 = 0x4BFB;
+
+/// `SAVE 0, [0x4BE6]` — exactly what `ECL1#80`'s entry vector opens with
+/// (`@0x8014`), and the only way into `RedrawView`'s else-arm.
+fn step_outdoors(b: &mut EclBuilder) {
+    b.op(0x09).imm_byte(0).mem(IN_DUNGEON_ADDR);
+}
+
+/// ★ D-S7a: outdoors with the permission armed, `RedrawView` paints the
+/// BIGPIC (`ovr029.cs:42-45`) instead of the 3D world — and consumes the
+/// permission on the way out (`:47`).
+///
+/// The shipped sequence this mirrors is `ECL1#80 @0x8014`: `SAVE 0,[0x4BE6]`,
+/// `LOAD FILES`, `PICTURE 0x79`. `PICTURE`'s BIGPIC arm clears
+/// `can_draw_bigpic` itself (`ovr003.cs:332`), so the arm under test is
+/// reached the way the scripts reach it — through `PICTURE 0xFF`'s
+/// `can_draw_bigpic = true; RedrawView()` pair (`:347-349`).
+#[test]
+fn outdoors_redraw_view_paints_the_bigpic_and_consumes_the_permission() {
+    let mut engine = engine_running(|b| {
+        step_outdoors(b);
+        b.op(0x0E).imm_byte(0x78); // PICTURE 0x78 — the overland backdrop
+        b.op(0x0E).imm_byte(0xFF); // PICTURE 0xFF — arm + RedrawView
+        b.op(0x00);
+    });
+    let px = tick_pixels(&mut engine, &[]);
+
+    assert_eq!(
+        engine.state.game_state,
+        crate::shell::GameState::WildernessMap,
+        "the inDungeon write hook moved game_state"
+    );
+    assert_eq!(
+        engine.state.picture.shown,
+        Shown::BigPic,
+        "the redraw re-established the map, it did not clear it"
+    );
+    assert_eq!(
+        at(&px, 8, 8),
+        BIGPIC_FILL,
+        "the bigpic is back at cell (1,1)"
+    );
+    assert!(
+        !engine.vm_memory.can_draw_bigpic,
+        "`:47` consumes the permission on every redraw"
+    );
+}
+
+/// ★ D-S7e: with the city scene up (`lastDaxBlockId == 0x50`), the same
+/// redraw paints nothing — `:12-15` force-clears the permission before the
+/// fork is even reached, so the city picture survives.
+///
+/// This is `ECL1#80 @0x85D8`'s own shape: `PICTURE 0x50` and then the city
+/// menu, whose every prompt would otherwise repaint the Dalelands map under
+/// the scene.
+#[test]
+fn the_city_scene_pic_suppresses_the_overland_redraw() {
+    let mut engine = engine_running(|b| {
+        step_outdoors(b);
+        b.op(0x0E).imm_byte(0x78); // the map is loaded and shown
+        b.op(0x0E).imm_byte(1); // PICTURE 1 — stand in for `PICTURE 0x50`
+        b.op(0x0E).imm_byte(0xFF); // arm + RedrawView
+        b.op(0x00);
+    });
+    // The fixture set has no block 0x50, so the guard is exercised by poking
+    // the modeled cell to the value `PICTURE 0x50` would have written — the
+    // load path itself is pinned by `a_plain_picture_...`'s `last_dax_block`
+    // assertion below.
+    engine.tick(&[]);
+    assert_eq!(
+        engine.state.picture.last_dax_block, 1,
+        "`load_pic_final` wrote the shared cell (`ovr030.cs:51`)"
+    );
+
+    let mut guarded = engine_running(|b| {
+        step_outdoors(b);
+        b.op(0x0E).imm_byte(0x78);
+        b.op(0x0E).imm_byte(1);
+        b.op(0x00);
+    });
+    guarded.tick(&[]);
+    guarded.state.picture.last_dax_block = crate::picture::CITY_SCENE_PIC_BLOCK;
+    guarded.vm_memory.can_draw_bigpic = true;
+    guarded.state.picture.shown = Shown::Pic;
+    guarded.tick(&[]);
+
+    assert!(
+        !guarded.vm_memory.can_draw_bigpic,
+        "`ovr029.cs:12-15` clears the permission unconditionally"
+    );
+    assert_eq!(
+        guarded.state.picture.shown,
+        Shown::Pic,
+        "and the city scene keeps the viewport — no bigpic repaint under it"
+    );
+}
+
+/// A BIGPIC load frees the running animation object, and that free is what
+/// disarms the city-scene guard (`DaxArrayFreeDaxBlocks`, `ovr030.cs:164`
+/// writes `lastDaxBlockId = 0xFF`). `ECL1#80 @0x86C7`'s `PICTURE 0x79` on
+/// the way out of a city menu depends on exactly this.
+#[test]
+fn a_bigpic_load_clears_the_last_dax_block_cell() {
+    let mut engine = engine_running(|b| {
+        b.op(0x0E).imm_byte(1); // PICTURE 1 -> last_dax_block = 1
+        b.op(0x0E).imm_byte(0x78); // PICTURE 0x78 -> the free
+        b.op(0x00);
+    });
+    engine.tick(&[]);
+    assert_eq!(
+        engine.state.picture.last_dax_block,
+        crate::picture::NO_DAX_BLOCK
+    );
+}
+
+/// ★ FD-41 closed: `block_area_view != 0` force-clears `mapAreaDisplay` on
+/// every dungeon redraw (`ovr029.cs:34-38`) — the cell is read live, so a
+/// block that sets it mid-run takes the map away immediately.
+#[test]
+fn block_area_view_force_clears_the_area_map_on_redraw() {
+    let mut engine = engine_running(|b| {
+        b.op(0x09).imm_byte(1).mem(BLOCK_AREA_VIEW_ADDR);
+        b.op(0x00);
+    });
+    engine.state.area_map_shown = true;
+    engine.tick(&[]);
+    // The boot flow finishes into `enter_world_menu`, whose `redraw_view` is
+    // the force-clear's call site.
+    engine.tick(&[]);
+    assert!(
+        !engine.state.area_map_shown,
+        "the redraw took the auto-map away while the cell is set"
+    );
+}

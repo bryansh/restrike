@@ -68,6 +68,31 @@ use gbx_formats::image::{self, ImageBlock};
 /// `blockId >= 0x78` selects the BIGPIC arm (`ovr003.cs:328`).
 pub const BIGPIC_FIRST_BLOCK: u8 = 0x78;
 
+/// ★ The `PIC{area}` block whose presence suppresses the overland's own
+/// presentation — `gbl.lastDaxBlockId == 0x50`, tested in four places:
+/// `RedrawView` (`ovr029.cs:12`), `MapCursor`'s four blink gates
+/// (`ovr027.cs:167,178,317,333`), `CMD_LoadFiles`' bigpic reload
+/// (`ovr003.cs:530`), and `LoadPic`'s `Shop`/`WildernessMap` arms
+/// (`ovr025.cs:1414,1444`).
+///
+/// **What it actually is** (roll-credits D-S7e, corrected from the door's
+/// "demo-title guard"): `lastDaxBlockId` is set by `load_pic_final`
+/// (`ovr030.cs:51`) to whatever `PIC`/`SPRIT` block was last decoded, and the
+/// only shipped script that loads block `0x50` is `ECL1#80`'s own city
+/// preamble — `@0x85D8` runs `SAVE 1,[0x4BE6]` / `CLEAR BOX` /
+/// `SAVE 0,[0x4BE6]` / **`PICTURE 0x50`** and then prints "YOU ARE IN
+/// <city>. WHAT PLACE WILL YOU VISIT?". So the guard reads "a city scene owns
+/// the viewport": while it does, the Dalelands map underneath must not be
+/// repainted and its cursor must not blink. `PICTURE 0x79` on the way out of
+/// the city menu (`@0x86C7`) puts the map back and, by moving
+/// `lastDaxBlockId` off `0x50`, re-arms all four guards.
+pub const CITY_SCENE_PIC_BLOCK: u8 = 0x50;
+
+/// `gbl.lastDaxBlockId`'s "nothing loaded" value — `DaxArrayFreeDaxBlocks`
+/// (`ovr030.cs:164`) writes it, and `InitFirst` leaves the byte at 0 only
+/// until the first load.
+pub const NO_DAX_BLOCK: u8 = 0xFF;
+
 /// The PIC / head anchor cell, `DrawMaybeOverlayed(…, 3, 3)`
 /// (`ovr003.cs:337`, `ovr008.cs:216`). An 88×88 `PIC` block lands exactly on
 /// the 3D viewport (cells 3..=13, inside `draw8x8_03`'s inner frame at
@@ -161,6 +186,22 @@ pub struct PictureLayer {
     pub sprite_block: Option<u8>,
     pub sprite_frame: u8,
     pub shown: Shown,
+    /// ★ `gbl.lastDaxBlockId` itself (`byte_1D5B4`), the single cell
+    /// [`CITY_SCENE_PIC_BLOCK`]'s four guards read (roll-credits D-S7e).
+    ///
+    /// Modeled once rather than derived, because in the original it is ONE
+    /// byte shared by every `load_pic_final` call — `PIC` closeups and
+    /// `SPRIT` approach sets alike (`ovr030.cs:35-51`) — while [`anim_block`]
+    /// and [`sprite_block`] are this engine's deliberately *split* caches (see
+    /// [`PictureCache::sprite`]'s note). Derivation from the pair would be
+    /// wrong exactly when the two disagree, which is the encounter path.
+    ///
+    /// [`NO_DAX_BLOCK`] (`0xFF`) is "nothing loaded", written by every free
+    /// (`ovr030.cs:164`).
+    ///
+    /// [`anim_block`]: PictureLayer::anim_block
+    /// [`sprite_block`]: PictureLayer::sprite_block
+    pub last_dax_block: u8,
 }
 
 impl Default for PictureLayer {
@@ -174,6 +215,7 @@ impl Default for PictureLayer {
             sprite_block: None,
             sprite_frame: 0,
             shown: Shown::Nothing,
+            last_dax_block: NO_DAX_BLOCK,
         }
     }
 }
@@ -474,6 +516,11 @@ pub fn cmd_picture(ctx: &mut FlowCtx, block_id: u8, head_block_id: u8) {
         ctx.pictures.free_pic(); // `load_bigpic`'s own first act, `ovr030.cs:230`
         ctx.state.picture.anim_block = None;
         ctx.state.picture.anim_frame = 0;
+        // That free is also what disarms the city-scene guard: it writes
+        // `lastDaxBlockId = 0xFF` (`ovr030.cs:164`). This is exactly how
+        // `ECL1#80`'s `@0x86C7 PICTURE 0x79` re-arms the overland's cursor
+        // after a city menu closes.
+        ctx.state.picture.last_dax_block = NO_DAX_BLOCK;
         ctx.state.picture.bigpic_block = Some(block_id);
         ctx.state.picture.shown = Shown::BigPic;
         ctx.vm_memory.can_draw_bigpic = false; // `:332`
@@ -481,6 +528,7 @@ pub fn cmd_picture(ctx: &mut FlowCtx, block_id: u8, head_block_id: u8) {
         // `:335-337`
         ctx.state.picture.anim_block = Some(block_id);
         ctx.state.picture.anim_frame = 1; // `load_pic_final`, `ovr030.cs:66`
+        ctx.state.picture.last_dax_block = block_id; // `ovr030.cs:51`
         ctx.state.picture.shown = Shown::Pic;
     }
     compose(ctx);
@@ -579,6 +627,10 @@ pub fn encounter_visual_state(
             if vm.in_dungeon() {
                 // `:233` — the RAW `area_ptr.inDungeon` cell, per FD-37
                 state.picture.sprite_block = Some(state.sprite_block_id); // `:235`
+                                                                          // `load_pic_final(…, "SPRIT")` moves the shared cell too
+                                                                          // (`ovr030.cs:51`), which is why it is modeled once here and
+                                                                          // not derived from the split caches.
+                state.picture.last_dax_block = state.sprite_block_id;
                 state.encounter_flags[0] = true; // `:236`
                 vm.display_player_sprite = true; // `:237`
             }
@@ -602,6 +654,7 @@ pub fn encounter_visual_state(
                 // `:263` load_pic_final(…, 0, pic_block_id, "PIC")
                 state.picture.anim_block = Some(state.pic_block_id);
                 state.picture.anim_frame = 1; // `load_pic_final`, `ovr030.cs:66`
+                state.picture.last_dax_block = state.pic_block_id; // `ovr030.cs:51`
                 state.encounter_flags[1] = true; // `:264`
                 plan.close_up = Some(Shown::Pic); // `:266`
             } else {
