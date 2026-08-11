@@ -175,7 +175,7 @@ fn drain(e: &mut Engine, into: &mut Observed) {
 
 /// The fight's **closing** line — the one `tick_combat` writes at ExitStage
 /// completion. Matched on `round(s)` because the host also emits `combat:`
-/// diagnostics mid-fight (a dropped key, a deferred wilderness floor).
+/// diagnostics mid-fight (a dropped key, a refusal to assemble).
 fn combat_line(o: &Observed) -> Option<&String> {
     o.transcript
         .iter()

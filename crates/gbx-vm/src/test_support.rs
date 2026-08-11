@@ -320,6 +320,11 @@ pub struct TestHost {
     pub wall_roof_replies: VecDeque<u8>,
     pub wall_type_replies: VecDeque<u8>,
     pub call_sound_variant_replies: VecDeque<u8>,
+    /// `gbl.lastDaxBlockId` — LOAD FILES' city-scene guard reads it. Defaults
+    /// to `0` rather than the `0xFF` a real free writes, because `Default` is
+    /// what every fixture takes and `0` is equally "not 0x50"; a test that
+    /// cares sets it.
+    pub last_dax_block: u8,
 }
 
 impl TestHost {
@@ -612,6 +617,10 @@ impl EngineServices for TestHost {
 
     fn reset_wall_set(&mut self, index: u8) {
         self.calls.push(RecordedCall::ResetWallSet { index });
+    }
+
+    fn last_dax_block(&mut self) -> u8 {
+        self.last_dax_block
     }
 
     fn step_game_time(&mut self, time_slot: u8, amount: u8) {

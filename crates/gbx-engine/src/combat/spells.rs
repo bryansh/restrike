@@ -1175,11 +1175,12 @@ impl CombatState {
     ///
     /// The `inDungeon == 0` re-target (`:1894-1902`) rebuilds `spellTargets`
     /// from a **radius-2** list around `targetPos` instead of the row's own
-    /// radius 3 — the outdoor blast is smaller. `CombatState` carries no
-    /// dungeon/wilderness flag (every floor it can build today is the dungeon
-    /// path; the wilderness generator is G2's `WildernessFloorDeferred`), so
-    /// the branch is cited here and lands with G2 rather than being guessed at
-    /// from a flag that does not exist yet.
+    /// radius 3 — the outdoor blast is smaller. **Still cited, not
+    /// implemented**: roll-credits slice 7 landed the wilderness *floor*
+    /// (`crate::combat::floor::setup_wilderness_floor`) but `CombatState`
+    /// still carries no dungeon/wilderness flag of its own, and inventing one
+    /// for a spell no capture casts is the wrong slice's work. Named in
+    /// slice 7's residuals.
     ///
     /// ★ **Draw-bearing** (the d6 volley plus a d20 per target) and reachable
     /// only by casting Fireball, which no capture does.

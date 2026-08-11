@@ -1289,8 +1289,15 @@ stays the one place showing the complete open-hypothesis picture.
 
 ### FD-41: `block_area_view` is imported but never read — the area map is always permitted
 
-- **Status:** open (found while investigating the "imported boot lands in
-  the area map" report, 2026-08-09 — see that entry's resolution below)
+- **Status:** **RESOLVED 2026-08-11** (roll-credits slice 7, D-S7a).
+  `EngineState::area_view_allowed` — the hardcoded `true` nothing ever wrote
+  — is gone; both consumers read the live cell through
+  `VmMemoryState::block_area_view()` (`0x4BFB`), which is what a block
+  writing it mid-run requires. `RedrawView`'s force-clear
+  (`ovr029.cs:34-38`) landed with the rest of that function
+  (`crate::corridor::draw_dungeon_view`), and the world menu's `'A'` arm
+  samples the cell at the keypress. `SAVE_FORMAT_VERSION` 7 → 8 carries the
+  field's removal.
 - **Question:** `area_ptr.block_area_view` (`Classes/Area1.cs:79`,
   DataOffset `0x1F6` → addr `0x4BFB` under FD-31's halved mapping) blocks
   the area map when nonzero: `main_3d_world_menu`'s `'A'` shows the timed

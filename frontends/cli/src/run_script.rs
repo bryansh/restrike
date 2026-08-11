@@ -669,6 +669,13 @@ impl EngineServices for CliHost {
         eprintln!("svc: reset_wall_set(index={index})");
     }
 
+    /// `run-script` carries no picture layer, so the city-scene guard reads
+    /// "nothing loaded" (`DaxArrayFreeDaxBlocks`' own `0xFF`) — LOAD FILES'
+    /// bigpic reload is never suppressed here.
+    fn last_dax_block(&mut self) -> u8 {
+        0xFF
+    }
+
     fn step_game_time(&mut self, time_slot: u8, amount: u8) {
         eprintln!("svc: step_game_time(time_slot={time_slot}, amount={amount})");
     }

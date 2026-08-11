@@ -323,6 +323,16 @@ pub trait EngineServices {
     /// (M1 task 3) needed the full `CMD_LoadFiles` branch read to cover a
     /// real demo block.
     fn reset_wall_set(&mut self, index: u8);
+    /// ★ `gbl.lastDaxBlockId` (`byte_1D5B4`) — the block `load_pic_final` last
+    /// decoded (`ovr030.cs:51`), `0xFF` after a free (`:164`).
+    ///
+    /// LOAD FILES' bigpic reload is gated on it not being `0x50`
+    /// (`ovr003.cs:528-533`). It has no `ScriptMemory` address, so unlike that
+    /// gate's `inDungeon` conjunct it cannot come through `mem_read` — hence a
+    /// service call. `0x50` is the city-scene PIC (`ECL1#80 @0x85E5`): while
+    /// one is up, reloading the overland map underneath it is exactly what the
+    /// original refuses to do.
+    fn last_dax_block(&mut self) -> u8;
     fn step_game_time(&mut self, time_slot: u8, amount: u8);
     fn move_position_forward(&mut self);
     /// CALL (0x2D) case `0xAE11`/`0x4019` — `get_wall_x2`.

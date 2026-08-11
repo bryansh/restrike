@@ -102,8 +102,9 @@ presentation sites may trust coab with a docket note (§6).
   (+1,+1) per row; `ovr011.cs:149-173`); doors/corners from dedicated tables.
   **Draw-bearing**: tables/chairs inside "building" cells roll 50%/90% dice
   (`sub_370D3`, `ovr011.cs:28-93`). Wilderness floors
-  (`SetupWildernessFloor`, `ovr011.cs:551-754`) are heavily random
-  (roads/rivers/scatter) — deferred with the wilderness circle-back item.
+  (`SetupWildernessFloor`, `ovr011.cs:537-754`) are heavily random
+  (roads/rivers/scatter) — **landed in roll-credits slice 7 (D-S7c)**, no
+  longer deferred; see `roll-credits.md` §11.
 
 ### 1.3 Combatant icons
 
@@ -680,6 +681,7 @@ sessions resume-don't-respawn on infra drops (the M5 pattern).
 
 - No XP/treasure screens (circle-back; the fight still ends cleanly).
 - No wilderness floor generation (deferred with wilderness tiles).
+  **Closed by roll-credits slice 7** (`roll-credits.md` §11, D-S7c).
 - No spell-menu UI beyond what M6c's Cast needs from the already-modeled
   memorized lists; exotic spell visuals land with their circle-back rows
   (unknown spell id still trips `spell-entry`).

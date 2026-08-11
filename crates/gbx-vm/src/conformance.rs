@@ -1235,6 +1235,26 @@ mod opcodes {
         assert!(h.calls.contains(&RecordedCall::LoadBigpic { id: 0x79 }));
     }
 
+    /// ★ LOAD FILES' third conjunct (`ovr003.cs:530`), landed in roll-credits
+    /// slice 7 (D-S7e): `lastDaxBlockId != 0x50`. While `ECL1#80`'s city scene
+    /// owns the viewport, the overland map underneath it is not reloaded.
+    #[test]
+    fn load_files_does_not_reload_the_bigpic_under_a_city_scene() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x21).imm_byte(0xFF).imm_byte(0xFF).imm_byte(5);
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+        h.set_word(0x4BE6, 0); // inDungeon = 0
+        h.last_dax_block = 0x50; // the city scene is up
+
+        assert_eq!(run_until_done(&mut m, &mut h), Exit::Ended);
+        assert!(!h.calls.contains(&RecordedCall::LoadBigpic { id: 0x79 }));
+    }
+
     /// LOAD PIECES (0x37), `CMD_LoadFiles` ovr003.cs:501-604 (shared with
     /// 0x21; the `0x37` branch): `var_3 == 0x7F` is the fixed-walldef
     /// shortcut, `LoadWalldef(1, 0)`.

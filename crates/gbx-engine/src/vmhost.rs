@@ -1868,6 +1868,10 @@ impl gbx_vm::EngineServices for EngineVmHost<'_> {
         self.state.picture.last_dax_block = crate::picture::NO_DAX_BLOCK;
     }
 
+    fn last_dax_block(&mut self) -> u8 {
+        self.state.picture.last_dax_block
+    }
+
     fn reset_wall_set(&mut self, index: u8) {
         self.vm.calls.push(RecordedCall::ResetWallSet { index });
         if let Some(entry) = self.vm.assets.walldefs.get_mut(index as usize) {

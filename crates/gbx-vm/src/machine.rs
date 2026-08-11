@@ -1725,10 +1725,12 @@ impl EclMachine {
     /// (`var_3, var_2, var_1` from operands 1-3, matching the original's own
     /// quirky reversed naming).
     ///
-    /// 0x21 (`load_pieces == false`): drops the `lastDaxBlockId != 0x50`
-    /// gate on the big-picture load — an engine-internal field with no
-    /// documented `ScriptMemory` address — as a documented simplification
-    /// (unconditionally allowed rather than silently suppressed).
+    /// 0x21 (`load_pieces == false`): ★ the `lastDaxBlockId != 0x50` gate is
+    /// real as of roll-credits D-S7e — it reads through
+    /// [`VmHost::last_dax_block`], the field having no `ScriptMemory` address
+    /// of its own. (M2 dropped it as a documented simplification; the door
+    /// asked for the cell modeled once and all three of its guards threaded
+    /// from it.)
     ///
     /// 0x37 (`load_pieces == true`, added for `restrike run-script`'s M1
     /// task 3 real-block demo — under-traced by the original M1 step-0
@@ -1752,6 +1754,11 @@ impl EclMachine {
         load_pieces: bool,
     ) -> Result<VmStep, VmError> {
         const IN_DUNGEON_ADDR: u16 = 0x4BE6;
+        /// `gbl.lastDaxBlockId == 0x50`, the city-scene guard
+        /// (`crate::gbx_engine::picture::CITY_SCENE_PIC_BLOCK` in the engine —
+        /// this crate has no dependency on it, so the literal is repeated with
+        /// its citation).
+        const CITY_SCENE_PIC_BLOCK: u8 = 0x50;
         let (args, next) = self.load_cmd_sets(pc.wrapping_add(1), 3, host, pc);
         let var_3 = self.resolve_numeric(&args[0], pc, opcode, host)? as u8;
         let var_2 = self.resolve_numeric(&args[1], pc, opcode, host)? as u8;
@@ -1762,7 +1769,10 @@ impl EclMachine {
             if var_3 != 0xFF && var_3 != 0x7F && in_dungeon != 0 {
                 host.load_3d_map(var_3);
             }
-            if var_1 != 0xFF && in_dungeon == 0 {
+            // `ovr003.cs:528-533`. Note the block id is the HARDCODED `0x79`,
+            // not `var_1`: the third operand only decides *whether* to reload
+            // the overland map, never which one.
+            if var_1 != 0xFF && in_dungeon == 0 && host.last_dax_block() != CITY_SCENE_PIC_BLOCK {
                 host.load_bigpic(0x79);
             }
         } else if var_3 == 0x7F {

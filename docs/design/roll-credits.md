@@ -100,6 +100,7 @@ BIGPIC2 `0x78`, BIGPIC6 `0x7A`), `RedrawView`'s non-dungeon branch + `can_draw_b
 missing `lastDaxBlockId != 0x50` condition (`ovr003.cs:526-531`), overland
 movement/encounter scheduling, and wilderness combat floors (the M6b
 `WildernessFloorDeferred` fallback). Own full door before implementation.
+**LANDED 2026-08-11 — see §11 and §11.1.**
 
 **G3 — Vancian camp magic (D-RC5, FD-25).** `SpellList` Learning-flag decode, Memorize/
 Scribe staging, Rest's commit + clock + healing, camp Fix's real behavior.
@@ -177,7 +178,7 @@ owns the version-bump churn**; later slices rebase onto it and batch their enum 
 | 4 | Vancian camp magic (G3) | Opus @ high | **Yes — short** (the SpellList staging model on the character record) | 1 |
 | 5 | Spell tail must-haves (G7) — **landed, §9** | Opus @ high | No — G7's enumeration IS the spec | 4 |
 | 6 | Death recovery + temple services (G8) — **landed, §10** | Opus @ high | No | 4 (shares the record), 5 (clerical spells) |
-| 7 | Wilderness/overworld (G2) | Opus @ high–xhigh | **Yes — full door** | 1 |
+| 7 | Wilderness/overworld (G2) — **landed, §11.1** | Opus @ high–xhigh | **Yes — full door** | 1 |
 | 8 | Out-of-combat item use (G6) | Opus @ high | No | 1 |
 | 9 | Ending sequence + FD-32 fade (G9) | sized during G2/G1 work | — | 7 |
 | 10+ | D-RC2's playthrough loop | as shaped | per item | rolling |
@@ -1329,3 +1330,180 @@ back into an area (the reverse transition), JOURNEY ON running its beat with an
 encounter fired en route (scheduled per D-S7d's findings), and a wilderness COMBAT on a
 real WildCom floor (frames eyeballed; floor dice cited). The m6b demos and all sixteen
 captures stay green (dungeon floors untouched).
+
+### 11.1 Status: LANDED 2026-08-11
+
+All four acceptance items met, driven on real data by pressing letters and
+Enter and nothing else (`crate::wilderness_tests`, `demo::slice7_the_overland_
+and_a_wilderness_fight`). Guard 16/16, reel smoke 16/16, workspace 1,631,
+clippy 0. `SAVE_FORMAT_VERSION` 7 → 8 — the slice's one break.
+
+**D-S7a — landed, and the door's name for the guard was wrong.**
+`RedrawView` is now whole, with each write where it actually sits: the
+`lastDaxBlockId == 0x50` force-clear *outside* the `party_killed` gate, the
+one-shot `can_draw_bigpic` consume *inside* it, and the fork on the RAW
+`inDungeon` cell (FD-37's asymmetry), not `game_state`.
+
+★ **`0x50` is not the demo title.** `lastDaxBlockId` is whatever
+`load_pic_final` last decoded (`ovr030.cs:51`), and the only shipped script
+that loads `PIC1` block `0x50` is `ECL1#80`'s own city preamble: `@0x85D8`
+runs `SAVE 1,[0x4BE6]` / `CLEAR BOX` / `SAVE 0,[0x4BE6]` / **`PICTURE 0x50`**
+and then prints "YOU ARE IN <city>. WHAT PLACE WILL YOU VISIT?". The guard
+reads *"a city scene owns the viewport"* — while it does, the map underneath
+must not be repainted and its cursor must not blink. `LoadPic`'s `Shop` arm
+reads the same cell the same way (`ovr025.cs:1414`). Modeled once as
+`PictureLayer::last_dax_block` /
+`crate::picture::CITY_SCENE_PIC_BLOCK`.
+
+**FD-41 closed here**, as the door asked: `EngineState::area_view_allowed`
+(a hardcoded `true` nothing wrote) is gone and both consumers read
+`0x4BFB` live.
+
+**D-S7b — landed** as `crate::mapcursor`: both 33-entry tables verbatim, the
+three-condition gate, and the blink itself. Two things worth banking:
+
+- The cadence is **asymmetric**. `timeCursorOn` and `timeCursorOff` re-arm
+  *each other* (`ovr027.cs:182,322`), which unrolls to 300 ms dark, then
+  **500 ms lit / 300 ms dark** forever — not the symmetric blink the two
+  constants suggest.
+- **Only `displayInput` blinks it.** `VertMenuSelect` — the loop a VERTICAL
+  MENU parks in — has no cursor code at all, so the JOURNEY destination list
+  is the one overland prompt with no cursor. Transcribed, not smoothed; the
+  blink rides the same parked-`Hotbar` seam FD-33's picture animation does.
+- The frames show *why* it reads as a cursor: the BIGPIC draws **hollow**
+  city markers and the blink **fills** the one you are standing at.
+
+**D-S7c — landed**, and the `WildernessFloorDeferred` fallback is retired.
+`CityInfo`'s 33 flag bytes + `SetupWildernessFloor01/02/03` +
+`SetGroundTile_40` + `SetGroupMapStepped`, cited-not-capture-proven like the
+dungeon floor. Pinned by **operand sequence**, which is what a future
+wilderness capture will check:
+
+- `01`'s `roll_dice(100,1)` is **unconditional** — a city with neither road
+  bit still spends the die before comparing against a `var_1` of 0, so *every*
+  wilderness floor opens with a d100.
+- `02`'s two rolls sit behind a short-circuit (both neighbouring cells must
+  still read as plain ground), and the second only fires when the first
+  passes.
+- `03`'s `60..=89` band is inside the `30..=69` band tested before it and can
+  never fire. The original's own dead arm, kept.
+- The grid starts flooded with tile `23` (`SetField_7`), not the dungeon's
+  zero, so **nothing outdoors is ever void**.
+- Terrain is keyed by `current_city`, which mid-journey is the ROUTE's own
+  waypoint (`@0x910C`), not either endpoint — a fight on the road gets the
+  road's terrain. `CityInfo` and `MapCursor`'s tables share that index space
+  and are both 33 long.
+- `place_combatants` gets `None` for its wall hook outdoors, which is what
+  `game_state == WildernessMap` does to its two retry probes
+  (`ovr011.cs:992,1025`). It had been handed a `GeoBlock` area 1 does not
+  ship.
+
+**D-S7d — answered: the overland has NO walk loop of its own.**
+`main_3d_world_menu`'s entire body — the prompt, the six letters, the four
+movement keys — is inside `if (game_state == DungeonMap)` (`ovr015.cs:354`).
+Outdoors it clears the bottom text area and returns `'\0'`. `locked_door` is
+gated the same way (`:475`). So `sub_29758`'s loop degenerates to: run the
+resident block's `vm_run_addr_1`, `RedrawView`, run `SearchLocationAddr`,
+repeat — i.e. [`StepFlow`] with its door stage inert. There is no engine-side
+movement outdoors at all; travel is entirely `ECL1#80`'s menus. (`'E'` never
+reaches `TryEncamp` either: `char.ToUpper('\0') != 'E'`. CAMP outdoors is the
+script's `PROGRAM 0x09` at `@0x879B`.)
+
+Two more from the same read:
+
+- `locked_door`'s **tail** (`:587-592`) is *outside* the gate and runs every
+  iteration: `DaxArrayFreeDaxBlocks` + the head/body cache reset. That is what
+  bounds the city-scene guard to a single loop pass — `lastDaxBlockId` goes
+  back to `0xFF` the moment the vector that ran `PICTURE 0x50` returns.
+- `display_map_position_time` opens with
+  `if (game_state != WildernessMap)` (`ovr025.cs:1478`): **no status line on
+  the overland screen**, matching `PartySummary`'s own early return.
+
+**How JOURNEY schedules encounters — it doesn't roll for them.** The model,
+from `ECL1#80`'s disassembly and its 510-byte data region:
+
+1. A per-city VERTICAL MENU of destinations, built from four bytes at
+   `0x9C02 + city*4` (`@0x8FBE`).
+2. `route = city*4 + selection` (`@0x8E72`, into `[0x4C9D]`).
+3. `GETTABLE 0x9C3A[route] → [0x4C06]` the travel **time**;
+   `GETTABLE 0x9C72[route] → [0x4C08]` the route **kind** (0 = wilderness
+   only, 1 = boat+wilderness, 2 = trail+wilderness, 3 = boat only).
+4. The travel-mode HORIZONTAL MENU multiplies the time — **×2** for TRAIL,
+   **×4** for WILDERNESS, **0** for EXIT (which loops back to the menu).
+5. `ECL CLOCK [0x4C06], #0x04` spends it **in days**.
+6. Three routes (`7`, `13`, `18`) `NEWECL 0x51` — the *other* overland block.
+7. Otherwise: `GOSUB 0x99EB` — a `LOAD CHARACTER` party-slot scan plus a
+   `RANDOM 0x63` gate, the **only** random draw in the whole overland loop,
+   which drips three journal notes ("ONE MORNING, THE PARTY SPOTS A NOTE
+   PINNED TO <name>'S CHEST"); then `GOSUB 0x9A92`, a counter that fires the
+   bridge-keeper on every 6th journey (two `INPUT STRING`s and the
+   `PROTECTION` opcode — the copy-protection prompt's single shipped use);
+   then `GETTABLE 0x9D13[route] → current_city`, which re-points the cursor at
+   the route's own map cell for the encounter's duration.
+8. `GETTABLE 0x9CAA[route] → [0x7F7A]`, then `ON GOTO … #0x0E` — the route's
+   own **scripted set-piece**, each behind a one-shot flag. Fourteen of them:
+   the Shadow Gap displacer beasts, Tilver's Gap, the black dragons, a lich,
+   Voonlar's beaten army, the giants at the farm, and so on.
+
+So overland encounters are a **route-indexed table of one-shot scripted
+events**, not a wandering-monster roll — which is consistent with slice 2's
+finding that the engine's only random-encounter scheduler is rest-only
+(FD-44).
+
+**D-S7e — landed, and the door's "slice 2 landed the last" was wrong**:
+`op_load_files` still carried M2's documented simplification. All three
+guards now read the one modeled cell; the VM's reads it through a new
+`VmHost::last_dax_block` (the field has no `ScriptMemory` address). Note the
+block id that arm loads is the hardcoded `0x79`, never the operand.
+
+**Four corrections the code forced, none of them in the door:**
+
+- ★ **Script-space reads are BYTE-wide, not word.**
+  `vm_GetMemoryValueType` gives `0x8000..=0x9DFF` its own class
+  (`ovr008.cs:319-322`) and that arm returns `gbl.ecl_ptr[…]`, whose indexer
+  is `public byte this[int index]` (`Classes/EclBlock.cs:31`). M2 read a
+  little-endian word. No shipped table survives that: `ECL1#80`'s route
+  tables are 56 consecutive bytes each, a word read of `0x9C02` returns
+  `0x0201` where the script needs `1`, and the result feeds an
+  `ON GOTO … #0x0E`. Overlapping word reads at consecutive indices cannot
+  encode a table at all.
+- ★ **`GameClock` was a placeholder, and `step_game_time`'s slots are UNITS,
+  not rates.** `ovr021.cs:150-172` keeps the seven ScriptMemory words and
+  increments ONE slot `amount` times, normalizing after each: slot 1 is a
+  minute, slot 2 **ten**, slot 3 an hour, slot 4 a **day**
+  (`crate::rest::TIME_SCALES`). The old model's "slot 2 runs at double rate"
+  made a search-mode step twice a normal one instead of ten times, and would
+  have made a four-day journey take forty minutes. ECL CLOCK (0x34) landed
+  with it — its two shipped uses are this block's and `ECL2#1 @0x8E56`.
+- ★ **`LoadPic`'s `WildernessMap` arm on the way out of a fight.** The combat
+  restore ran the `DungeonMap` arm unconditionally: `draw8x8_03` painted the
+  88×88 viewport frame and the col-16 panel divider straight over the
+  full-width map, and nothing re-armed `can_draw_bigpic`, so the overland
+  came back as an empty box. `ovr025.cs:1443-1448` is `RedrawView()` and
+  nothing else, behind the city-scene guard.
+  `Shell::rebuild_exploration_screen` had the same bug and takes the same
+  fork.
+- **Line numbers**: `SetupGroundTiles` is `ovr011.cs:757-784` (the door said
+  `:755-782`, the existing code `:756-783`); `op_load_files`' guard is
+  `ovr003.cs:528-533` (the door said `:526-531`). Every other citation in the
+  door re-verified as written.
+
+**Residuals, named:**
+
+- The wilderness floor is **cited, not capture-proven** — no `.gbxtrace` has
+  ever been staged outdoors. Its transcription is pinned by operand sequence,
+  which is exactly what the first wilderness capture will check. The sixteen
+  closed captures stay unreachable from it by construction: they are all
+  dungeon fights replaying `combat_entry`'s stored terrain, and the new arm
+  takes no `GeoBlock` at all.
+- `PROTECTION` (0x3C) and `INPUT STRING` (0x10) are still unimplemented, and
+  their shipped uses are **in this block** — the bridge-keeper on every 6th
+  journey (`@0x9A92`). D-RC4's copy-protection decision needs its own small
+  slice; a real playthrough will reach it.
+- `ECL1` block `0x51`, the second overland block three routes chain to, is
+  not driven by anything here.
+- Fireball's `inDungeon == 0` radius-2 re-target (`ovr014:1894-1902`) is
+  still cited-not-implemented: `CombatState` carries no dungeon/wilderness
+  flag, and inventing one for a spell no capture casts belongs elsewhere.
+- `CMD_Picture`'s `0xFF` arm still mutates its flags at presentation time
+  (slice 2's residual, unchanged).
