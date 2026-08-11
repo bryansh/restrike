@@ -111,6 +111,13 @@ impl CombatState {
     /// `bleeding` and `delay = 0` writes are unconditional here.
     pub(super) fn apply_damage(&mut self, rng: &mut EngineRng, target: usize, amount: i32) {
         let t = &mut self.fighters[target];
+        // NOTE (slice 6): `damage_player` has **no** terminal-status guard
+        // (`ovr025.cs:1183-1196` opens straight on the arithmetic) — unlike
+        // `KillPlayer` (`ovr024.cs:39-42`) and the DAMAGE opcode's `sub_32200`
+        // (`ovr008.cs:1403`), both of which refuse to touch a `dead`/`stoned`/
+        // `gone` record. The asymmetry is the original's and is kept: a statue
+        // is unreachable here anyway, because `KillPlayer` cleared its
+        // `in_combat` and every target list filters on that.
         let (neg_hp, new_hp) = if t.hp_current >= amount {
             (0, t.hp_current - amount)
         } else {

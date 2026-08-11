@@ -407,10 +407,33 @@ pub fn rest_menu_time(
 pub mod status {
     pub const OKEY: u8 = 0x0;
     pub const ANIMATED: u8 = 0x1;
+    /// `tempgone` — read by `sub_3F2E9`'s target scan only (`ovr014.cs:1073`).
+    pub const TEMPGONE: u8 = 0x2;
+    /// `running` — fled and got away (`sub_644A7`).
+    pub const RUNNING: u8 = 0x3;
     pub const UNCONSCIOUS: u8 = 0x4;
     pub const DYING: u8 = 0x5;
     /// Roll-credits slice 5 — Raise Dead's own gate (`ovr023.cs:2345`).
     pub const DEAD: u8 = 0x6;
+    /// ★ Roll-credits slice 6 — petrified. Terminal for `KillPlayer`
+    /// (`ovr024.cs:40`); the temple's Stone to Flesh is the only way back
+    /// (`ovr005.cs:285-297`).
+    pub const STONED: u8 = 0x7;
+    /// ★ Roll-credits slice 6 — disintegrated/dispelled (`ovr014.cs:2378`,
+    /// `ovr013.cs:1601`). Terminal, and nothing in the game restores it.
+    pub const GONE: u8 = 0x8;
+
+    /// ★ `CleanupPlayersStateAfterCombat`'s liveness set (`ovr006.cs:221-223`)
+    /// on the raw byte — the set that decides `gbl.party_killed`. `stoned` and
+    /// `gone` are **not** in it: a party of statues has lost.
+    pub fn counts_as_alive(byte: u8) -> bool {
+        matches!(byte, RUNNING | ANIMATED | OKEY)
+    }
+
+    /// `KillPlayer`'s refusal set (`ovr024.cs:39-42`).
+    pub fn is_terminal(byte: u8) -> bool {
+        matches!(byte, DEAD | STONED | GONE)
+    }
 }
 
 /// `heal_player(arg_0, amount, player)` (`ovr024.cs:1335-1370`), the

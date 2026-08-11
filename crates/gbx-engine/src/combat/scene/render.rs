@@ -300,16 +300,20 @@ pub fn clear_prompt_line(fb: &mut Framebuffer) {
     cell_rect_fill(fb, 0, PROMPT_ROW, PROMPT_ROW, 0, LAST_COL);
 }
 
-/// `ovr020.statusString[health_status]` (`ovr020.cs:36-38`) — indexed by the
-/// raw `Status` value, so the unmodeled rungs keep their slots.
+/// `ovr020.statusString[health_status]` (`ovr020.cs:36-38`) — the whole nine-row
+/// table, indexed by the raw `Status` value. `tempgone` really is lower-case in
+/// the original's own array; the rest are capitalized.
 pub fn status_string(status: HealthStatus) -> &'static str {
     match status {
         HealthStatus::Okey => "Okay",
         HealthStatus::Animated => "Animated",
+        HealthStatus::TempGone => "tempgone",
         HealthStatus::Running => "Running",
         HealthStatus::Unconscious => "Unconscious",
         HealthStatus::Dying => "Dying",
         HealthStatus::Dead => "Dead",
+        HealthStatus::Stoned => "Stoned",
+        HealthStatus::Gone => "Gone",
     }
 }
 

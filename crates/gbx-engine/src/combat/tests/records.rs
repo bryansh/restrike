@@ -236,3 +236,90 @@ fn caster_record_decodes_memorized_list_and_casting_level() {
     assert!(state0.fighters[0].caster_no_class);
     assert!(state0.fighters[0].memorized_list.is_empty());
 }
+
+// --- roll-credits slice 6: the truthful health-status ladder -------------
+
+/// ★ D-RC6's find, closed: `decode_health_status` used to fold `tempgone`,
+/// `running`, **`stoned`** and **`gone`** onto `Okey`, so a petrified or
+/// disintegrated record read back as a healthy one. All nine `Status` values
+/// (`Classes/Enums.cs:7-18`) now round-trip.
+#[test]
+fn every_status_rung_round_trips() {
+    use crate::combat::{decode_health_status, encode_health_status, HealthStatus};
+    let table = [
+        (0u8, HealthStatus::Okey),
+        (1, HealthStatus::Animated),
+        (2, HealthStatus::TempGone),
+        (3, HealthStatus::Running),
+        (4, HealthStatus::Unconscious),
+        (5, HealthStatus::Dying),
+        (6, HealthStatus::Dead),
+        (7, HealthStatus::Stoned),
+        (8, HealthStatus::Gone),
+    ];
+    for (byte, status) in table {
+        assert_eq!(decode_health_status(byte), status, "byte {byte}");
+        assert_eq!(encode_health_status(status), byte, "{status:?}");
+    }
+    // Out of range still reads as okey — the original branches on nothing else.
+    assert_eq!(decode_health_status(9), HealthStatus::Okey);
+    assert_eq!(decode_health_status(0xFF), HealthStatus::Okey);
+}
+
+/// `CleanupPlayersStateAfterCombat`'s liveness set (`ovr006.cs:221-223`) and
+/// `KillPlayer`'s refusal set (`ovr024.cs:39-42`), as predicates. Note what is
+/// NOT alive: `unconscious`, `dying`, `stoned`, `gone`.
+#[test]
+fn the_liveness_and_terminal_sets_are_the_originals() {
+    use crate::combat::HealthStatus as H;
+    for s in [H::Okey, H::Animated, H::Running] {
+        assert!(s.counts_as_alive(), "{s:?} keeps the party standing");
+    }
+    for s in [
+        H::TempGone,
+        H::Unconscious,
+        H::Dying,
+        H::Dead,
+        H::Stoned,
+        H::Gone,
+    ] {
+        assert!(!s.counts_as_alive(), "{s:?} does not");
+    }
+    for s in [H::Dead, H::Stoned, H::Gone] {
+        assert!(s.is_terminal(), "{s:?} cannot be killed again");
+    }
+    for s in [
+        H::Okey,
+        H::Animated,
+        H::TempGone,
+        H::Running,
+        H::Unconscious,
+        H::Dying,
+    ] {
+        assert!(!s.is_terminal(), "{s:?} can");
+    }
+}
+
+/// A stoned record entering a fight stays stoned rather than standing up
+/// (which is what the old fold did).
+#[test]
+fn a_petrified_record_decodes_as_petrified() {
+    use crate::combat::HealthStatus;
+    let mut r = synthetic_record(b"STATUE", 1, 20, 40, 12, 10, 5, 12, false, 2, (1, 6, 0));
+    r[0x195] = crate::rest::status::STONED;
+    let entries = vec![RecordCombatant {
+        team: Team::Party,
+        pos: GridPos::new(10, 10),
+        record: &r,
+        affects: vec![],
+    }];
+    let rules = gbx_rules::pack::RuleSet::load();
+    let flavor = gbx_rules::adnd1::flavor_impl::Adnd1::new(&rules);
+    let state = combat_state_from_records(&entries, CombatMap::uniform(0x17), &flavor).unwrap();
+    assert_eq!(state.fighters[0].health_status, HealthStatus::Stoned);
+    assert!(!state.fighters[0].health_status.counts_as_alive());
+    assert_eq!(
+        crate::combat::scene::render::status_string(HealthStatus::Stoned),
+        "Stoned"
+    );
+}

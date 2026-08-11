@@ -162,6 +162,14 @@ pub struct SheetView {
     pub ac: i32,
     /// Descending display THAC0 = `0x3C - hitBonus` (`ovr020.cs:169`).
     pub thac0: i32,
+    /// ★ `displayPlayerName`'s two inputs (`ovr025.cs:827-838`) — the roster
+    /// panel paints a removed member's name in `0x0C` and an enemy's in `0x0E`.
+    /// Carried on the view since roll-credits slice 6, because the post-fight
+    /// writeback finally makes `in_combat == false` reachable on a walk-loop
+    /// roster: a member who died in the last fight now really is one.
+    pub in_combat: bool,
+    /// `combat_team` (`0` ours, `1` enemy).
+    pub combat_team: u8,
     pub hp_current: u8,
     pub hp_max: u8,
     /// `NdM+B` primary-attack damage (`ovr020.cs:172-173`).
@@ -340,6 +348,8 @@ pub fn sheet_view(ch: &Character) -> SheetView {
         exp: ch.exp,
         ac: 0x3C - ch.combat.ac as i32,
         thac0: 0x3C - ch.combat.thac0_current as i32,
+        in_combat: ch.status.in_combat,
+        combat_team: ch.status.combat_team,
         hp_current: ch.hit_point_current,
         hp_max: ch.hit_point_max,
         damage,
@@ -361,6 +371,10 @@ const CYAN: u8 = 0x0B;
 /// `display_hp`'s wounded color (`ovr025.cs:276`) — yellow, drawn whenever
 /// `hit_point_current < hit_point_max`.
 const HP_WOUNDED: u8 = 0x0E;
+/// `displayPlayerName`'s `in_combat == false` colour (`ovr025.cs:831`).
+const NAME_REMOVED: u8 = 0x0C;
+/// `displayPlayerName`'s `combat_team == Enemy` colour (`ovr025.cs:835`).
+const NAME_ENEMY: u8 = 0x0E;
 const BG: u8 = 0;
 
 /// Paints `view` into `fb` as the full character sheet, at coab's exact
@@ -439,14 +453,16 @@ pub fn render_sheet(fb: &mut Framebuffer, font: &Font, sets: &SymbolSets, view: 
 /// draws white (`displayString(name, 0, 15, …)`, `ovr025.cs:238-239`), every
 /// other goes through `displayPlayerName` (`ovr025.cs:827-846`), whose three
 /// colors are `0x0C` (`in_combat == false`), `0x0E` (`combat_team ==
-/// Enemy`), else `0x0B`. Only the `0x0B` arm can fire for a walk-loop
-/// roster, and the reason is *not* that the cells are runtime-only —
-/// `in_combat` is a persistent character field (`Player.cs:589-591`,
-/// DataOffset `0x196`), set `true` at creation (`ovr018.cs:347`) and
-/// restored from the save (`ovr017.cs:359`), which [`crate::party::Character`]
-/// carries verbatim. It is that a live party member's stored value is
-/// `true` with `combat_team` on our own team, so the third arm is the one
-/// the original itself paints here.
+/// Enemy`), else `0x0B`.
+///
+/// ★ **Slice 6 made the first arm reachable.** M3 painted every row `0x0B` and
+/// argued the removed-colour arm could not fire on a walk-loop roster, because
+/// a live party member's stored `in_combat` is `true`. That was true only
+/// because nothing ever wrote it back: since
+/// `combat_host::carry_state_home`, a member who died or was knocked out in the
+/// last fight walks around with `in_combat == false`, and the panel now says so
+/// — dark red for the fallen, which together with the character sheet's own
+/// nine-row `statusString` is the whole of "the roster tells the truth".
 ///
 /// **Wilderness:** `PartySummary` early-returns outright when
 /// `game_state == WildernessMap` (`ovr025.cs:218-221`) — the panel is not a
@@ -467,9 +483,17 @@ pub fn render_party_summary(
         // draw8x8_clear_area(y_pos, 0x26, y_pos, x_pos) per row (ovr025.cs:234)
         // — a shortened roster must not leave the old row behind.
         crate::draw::cell_rect_fill(fb, BG, y, y, 17, 0x26);
-        // `displayPlayerName`'s live-team-member color is `0x0B` — the same
-        // cyan the sheet's own labels use.
-        let name_color = if selected == Some(i) { WHITE } else { CYAN };
+        // `displayPlayerName` (`ovr025.cs:827-838`): removed first, then enemy,
+        // then the live team member's `0x0B` cyan.
+        let name_color = if selected == Some(i) {
+            WHITE
+        } else if !r.in_combat {
+            NAME_REMOVED
+        } else if r.combat_team != 0 {
+            NAME_ENEMY
+        } else {
+            CYAN
+        };
         draw_string(fb, font, &r.name, y, 17, BG, name_color);
         // AC left-justified width 3 at col 31 (ovr025.cs:244, "{0,-3}").
         draw_string(fb, font, &format!("{:<3}", r.ac), y, 31, BG, GREEN);
@@ -716,6 +740,67 @@ mod tests {
 
         ch.hit_point_current = 12;
         assert_eq!(hp_cells(&[sheet_view(&ch)]).1, HP_WOUNDED);
+    }
+
+    /// ★ Roll-credits slice 6: the sheet's Status line tells the truth for the
+    /// whole ladder, `stoned` and `gone` included (`statusString`,
+    /// `ovr020.cs:36-38`). Before the slice a petrified member's *combat*
+    /// record read back as "Okay"; the sheet's own table was already complete,
+    /// so this pins the pair together.
+    #[test]
+    fn the_status_line_names_every_rung_including_stoned_and_gone() {
+        let mut ch = mathew();
+        for (byte, text) in [
+            (0u8, "Okay"),
+            (1, "Animated"),
+            (2, "tempgone"),
+            (3, "Running"),
+            (4, "Unconscious"),
+            (5, "Dying"),
+            (6, "Dead"),
+            (7, "Stoned"),
+            (8, "Gone"),
+        ] {
+            ch.status.health_status = byte;
+            assert_eq!(sheet_view(&ch).status, text, "status byte {byte}");
+            // The scene's own copy of the table has to agree with the sheet's.
+            assert_eq!(
+                crate::combat::scene::render::status_string(crate::combat::decode_health_status(
+                    byte
+                )),
+                text
+            );
+        }
+    }
+
+    /// The colour of one roster row's name cell.
+    fn name_colour(rows: &[SheetView], row: usize) -> u8 {
+        let mut fb = Framebuffer::new();
+        // `selected` is somebody else, so the row takes `displayPlayerName`'s
+        // own choice rather than the white highlight.
+        render_party_summary(&mut fb, &solid_font(), rows, None);
+        fb.get_pixel(17 * 8, (4 + row) * 8)
+    }
+
+    /// ★ `displayPlayerName`'s three arms (`ovr025.cs:827-838`) — and the first
+    /// of them is reachable on a walk-loop roster only since slice 6's
+    /// post-fight writeback, which is what puts `in_combat == false` on a
+    /// member who fell in the last fight.
+    #[test]
+    fn a_fallen_member_is_named_in_the_removed_colour() {
+        let mut alive = mathew();
+        alive.status.in_combat = true;
+        alive.status.combat_team = 0;
+        assert_eq!(name_colour(&[sheet_view(&alive)], 0), CYAN);
+
+        let mut fallen = alive.clone();
+        fallen.status.in_combat = false;
+        fallen.status.health_status = crate::rest::status::DEAD;
+        assert_eq!(name_colour(&[sheet_view(&fallen)], 0), NAME_REMOVED);
+
+        let mut charmed = alive.clone();
+        charmed.status.combat_team = 1;
+        assert_eq!(name_colour(&[sheet_view(&charmed)], 0), NAME_ENEMY);
     }
 
     #[test]

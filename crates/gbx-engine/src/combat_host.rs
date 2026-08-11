@@ -842,7 +842,7 @@ impl CombatHost {
     /// Every call here is draw-free (`crate::award`'s module doc has the
     /// proof), so this runs with the fight's RNG untouched.
     fn settle_and_award(&mut self, ctx: &mut FlowCtx) {
-        self.carry_affects_home(ctx);
+        self.carry_state_home(ctx);
         let animated = crate::award::animated_count(ctx.roster);
         let party_size = if ctx.state.party_size == 0 {
             ctx.roster.members.len() as u8
@@ -1146,57 +1146,102 @@ impl CombatHost {
         }
     }
 
-    /// ★ **Roll-credits slice 5**: the fight's final affect chains go back onto
-    /// the roster.
+    /// ★ **The post-fight member sync** (roll-credits slice 6, deliverable A) —
+    /// everything the fight changed about a party member, put back on the
+    /// roster record.
     ///
-    /// In the original there is nothing to do here — combat mutates the same
-    /// `Player.affects` list camp reads, so a bless cast in round 1 is simply
-    /// still on the character when the results screen closes. Our split model
-    /// has to copy it, and the copy is the *whole* list rather than a merge:
-    /// the fight is the authority on what a party member is carrying by the
-    /// time it ends, having already run `RemoveCombatAffects`'s strip table on
-    /// anybody who died or fled (`ovr024.cs:48`, `:1270`).
+    /// **In the original this function does not exist**, and that is the whole
+    /// point: `gbl.TeamList` holds the *same* `Player` objects the combat
+    /// overlays mutate, so `damage_person`'s `hit_point_current` write, the
+    /// `Status` ladder, `RemoveFromCombat`'s `in_combat = false`, the Quick
+    /// word's `quick_fight = True` (`ovr009.cs:709`) and `SpellList.ClearSpell`
+    /// are already on the record by the time `CleanupPlayersStateAfterCombat`
+    /// (`ovr006.cs:169`) runs over it. Our split roster/`Combatant` model has
+    /// to copy them, and until this slice it copied only the affect chain — so
+    /// **wounds vanished after every fight** (slice 5's flagged residual,
+    /// §9.2).
     ///
-    /// So the surviving set is exactly the original's: combat-scoped affects
-    /// (`paralyze`, `sleep`, `stinking_cloud`, …) are in that strip table and
-    /// are gone; `bless`, `prayer`, `protection_from_evil` and the racial
-    /// affects are **not**, and walk out of the fight still running — until
-    /// the next camp ticks them down ([`crate::affects`]).
+    /// The complete carried set, each cell named where the fight writes it:
     ///
-    /// Draw-free, and unreachable from a replay (no capture runs the host).
-    fn carry_affects_home(&mut self, ctx: &mut FlowCtx) {
-        let carried: Vec<(usize, Vec<Vec<u8>>)> = self
+    /// | record cell | where combat writes it |
+    /// |---|---|
+    /// | `hit_point_current` @0x1A3 | `damage_person`/`heal_player` (`ovr024.cs:1183-1243`) |
+    /// | `health_status` @0x195 | the `damage_player` ladder + `KillPlayer` (`ovr024.cs:39`) |
+    /// | `in_combat` @0x196 | `RemoveFromCombat` (`sub_644A7`), the ladder's non-conscious arm |
+    /// | `quick_fight` @0x198 | the Quick menu word (`ovr009.cs:709`) and SPACE's revoke (`:233`, `ovr010.cs:738`) |
+    /// | `spell_list` @0x1E | `SpellList.ClearSpell` on every cast (`Classes/SpellList.cs:30`) |
+    /// | `affects` (`.fx` chain) | every `add_affect`/`remove_affect` in the fight |
+    ///
+    /// ★ **The brief expected spell expenditure to be handled already; it was
+    /// not.** Nothing wrote the fight's `memorized_list` back, so a cleric who
+    /// spent every Cure Light Wounds in a bar brawl walked out with all of them
+    /// still memorized. The mapping is a multiset difference against the
+    /// character's own entry list (`records.rs`' collector: every nonzero byte
+    /// of `spell_list[1..]`), resolved one `magic::clear_spell` per spent id —
+    /// which is exactly `ClearSpell`'s remove-the-first-match semantics.
+    ///
+    /// **Not carried, and named rather than silently dropped:** the
+    /// ready/unready cells (`ac`, `hit_bonus`, the current attack profile, and
+    /// each item's `readied` flag). The original's per-turn `AI_items_selection`
+    /// really does re-ready a weapon and `reclac_player_values` really does
+    /// rewrite those cells; ours models the swap inside the fight's
+    /// [`Loadout`](crate::combat::Loadout) and never touches
+    /// `Character::readied_items`, so writing the derived cells back without
+    /// the flags that justify them would desync the record from the inventory.
+    ///
+    /// **The affect chain** is copied whole rather than merged: the fight is
+    /// the authority on what a member carries by the time it ends, having
+    /// already run `RemoveCombatAffects`'s strip table on anybody who died or
+    /// fled (`ovr024.cs:48`, `:1270`). So combat-scoped affects (`paralyze`,
+    /// `sleep`, `stinking_cloud`, …) are gone while `bless`, `prayer`,
+    /// `protection_from_evil` and the racial affects walk out still running.
+    ///
+    /// ## Draw-neutrality
+    ///
+    /// Every line here is a **copy**. There is no `random`, no `roll_dice`, and
+    /// no call to anything that has one — the same standing argument
+    /// [`crate::award`] makes for the award path, and stronger, because this
+    /// runs entirely on already-computed state. It is also unreachable from a
+    /// replay: no capture ever constructs a [`CombatHost`].
+    fn carry_state_home(&mut self, ctx: &mut FlowCtx) {
+        // ★ The index map is taken ONCE, before the first write. `party_kits`
+        // picks the living members in roster order, so the mapping is a
+        // function of `hit_point_current > 0` — and this function is about to
+        // write zeroes into that very predicate. Resolving lazily (as the
+        // affect-only version could afford to) would shift every actor past
+        // the first casualty by one.
+        let map = Self::party_member_map(ctx);
+        let carried: Vec<(usize, Carried)> = self
             .state
             .roster()
             .iter()
             .enumerate()
             .filter(|(_, f)| f.team == Team::Party && !f.non_team_member)
-            .map(|(actor, f)| {
-                (
-                    actor,
-                    f.affects.iter().map(|a| a.encode().to_vec()).collect(),
-                )
-            })
+            .filter_map(|(actor, f)| map.get(actor).map(|&member| (member, Carried::of(f))))
             .collect();
-        for (actor, chain) in carried {
-            let member = self.party_member_of(ctx, actor);
-            if let Some(ch) = ctx.roster.members.get_mut(member) {
-                ch.affects = chain;
-            }
+        for (member, carried) in carried {
+            let Some(ch) = ctx.roster.members.get_mut(member) else {
+                continue;
+            };
+            carried.apply(ch);
         }
     }
 
-    /// The `party.members` index behind a roster index — the fight's party run
-    /// is the living members in order ([`kits::party_kits`]).
-    fn party_member_of(&self, ctx: &FlowCtx, actor: usize) -> usize {
+    /// The `party.members` index behind each fight roster index — the fight's
+    /// party run is the living members in order ([`kits::party_kits`]).
+    fn party_member_map(ctx: &FlowCtx) -> Vec<usize> {
         ctx.roster
             .members
             .iter()
             .enumerate()
             .filter(|(_, c)| c.hit_point_current > 0)
-            .nth(actor)
             .map(|(i, _)| i)
-            .unwrap_or(0)
+            .collect()
+    }
+
+    /// The `party.members` index behind one fight roster index.
+    fn party_member_of(&self, ctx: &FlowCtx, actor: usize) -> usize {
+        Self::party_member_map(ctx).get(actor).copied().unwrap_or(0)
     }
 
     /// The mid-combat character sheet (`viewPlayer`, `ovr020.cs:236-339`), with
@@ -1344,6 +1389,77 @@ impl CombatHost {
     }
 }
 
+/// One party member's post-fight delta — the cells
+/// [`CombatHost::carry_state_home`] copies out of the fight's final
+/// [`Combatant`] and onto the roster record. Read whole before any write, so a
+/// casualty cannot shift the roster index of the member after it.
+struct Carried {
+    hit_point_current: u8,
+    health_status: u8,
+    in_combat: bool,
+    quick_fight: bool,
+    /// The fight's surviving `memorized_list` — the collected candidate list
+    /// (`records.rs`' `spell_list[1..]` non-zero sweep), minus every id
+    /// `clear_spell` removed as it was cast.
+    memorized: Vec<u8>,
+    /// The `.fx` chain, re-encoded.
+    affects: Vec<Vec<u8>>,
+}
+
+impl Carried {
+    fn of(f: &Combatant) -> Self {
+        Carried {
+            hit_point_current: f.hp_current.clamp(0, u8::MAX as i32) as u8,
+            health_status: crate::combat::encode_health_status(f.health_status),
+            in_combat: f.in_combat,
+            quick_fight: f.quick_fight,
+            memorized: f.memorized_list.clone(),
+            affects: f.affects.iter().map(|a| a.encode().to_vec()).collect(),
+        }
+    }
+
+    fn apply(self, ch: &mut crate::party::Character) {
+        ch.hit_point_current = self.hit_point_current;
+        ch.status.health_status = self.health_status;
+        ch.status.in_combat = self.in_combat;
+        ch.status.quick_fight = u8::from(self.quick_fight);
+        ch.affects = self.affects;
+        spend_memorized(ch, &self.memorized);
+    }
+}
+
+/// `SpellList.ClearSpell` for every spell the fight spent
+/// (`Classes/SpellList.cs:30`).
+///
+/// The fight's `memorized_list` is `records.rs`' collected candidate list: every
+/// non-zero byte of the record's `spell_list[1..]`, in slot order, high-bit
+/// "learning" entries included. Rebuilding that list from the character (whose
+/// `spell_list` has not moved since fight entry) and taking the multiset
+/// difference gives exactly the ids `clear_spell` removed — one call each,
+/// which removes the first matching slot, as the original's `List.Remove` does.
+fn spend_memorized(ch: &mut crate::party::Character, survived: &[u8]) {
+    let entry: Vec<u8> = ch
+        .magic
+        .spell_list
+        .iter()
+        .skip(1)
+        .copied()
+        .filter(|&b| b != 0)
+        .collect();
+    let mut left = survived.to_vec();
+    for raw in entry {
+        match left.iter().position(|&s| s == raw) {
+            Some(i) => {
+                left.remove(i);
+            }
+            // Not in the surviving list: the fight cast it.
+            None => {
+                crate::magic::clear_spell(&mut ch.magic.spell_list, raw & 0x7F);
+            }
+        }
+    }
+}
+
 /// The resident `ITEMS` table, parsed from the data set at fight entry.
 ///
 /// coab loads it once at boot into `gbl.ItemDataTable`; parsing it here instead
@@ -1372,4 +1488,132 @@ fn weapon_display_names(ctx: &FlowCtx) -> BTreeMap<u8, String> {
         }
     }
     names
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::combat::HealthStatus;
+
+    fn member() -> crate::party::Character {
+        let rec = vec![0u8; gbx_formats::save_orig::CHAR_RECORD_SIZE];
+        let record = gbx_formats::save_orig::decode_char_record(&rec).unwrap();
+        let mut ch = crate::party::character_from_record(&record, Vec::new(), Vec::new());
+        ch.hit_point_max = 20;
+        ch.hit_point_current = 20;
+        ch.status.in_combat = true;
+        ch
+    }
+
+    fn fighter(hp: i32, status: HealthStatus) -> Combatant {
+        let mut f = Combatant::new_melee(
+            0,
+            Team::Party,
+            false,
+            GridPos::new(0, 0),
+            20,
+            0,
+            0,
+            0,
+            (1, 4, 0),
+            0,
+            1,
+        );
+        f.hp_current = hp;
+        f.health_status = status;
+        f.in_combat = status.is_conscious();
+        f.quick_fight = false;
+        f
+    }
+
+    /// ★ The three cases the slice's acceptance names: a wounded member, a
+    /// poisoned one and a dead one all reach the record.
+    #[test]
+    fn a_wound_a_poisoning_and_a_death_all_land_on_the_record() {
+        // Wounded.
+        let mut ch = member();
+        Carried::of(&fighter(7, HealthStatus::Okey)).apply(&mut ch);
+        assert_eq!(ch.hit_point_current, 7);
+        assert_eq!(ch.status.health_status, 0);
+        assert!(ch.status.in_combat);
+
+        // Poisoned — the affect chain is the carrier, and the fight is the
+        // authority on the whole chain (`RemoveCombatAffects` already ran).
+        let mut ch = member();
+        let mut f = fighter(3, HealthStatus::Okey);
+        f.affects.push(gbx_formats::affects::AffectRecord {
+            kind: 0x37, // `Affects.poisoned`
+            minutes: 0,
+            data: 0xFF,
+            call_affect_table: false,
+        });
+        Carried::of(&f).apply(&mut ch);
+        assert!(ch.has_affect(0x37), "the poison walked out of the fight");
+
+        // Dead.
+        let mut ch = member();
+        Carried::of(&fighter(0, HealthStatus::Dead)).apply(&mut ch);
+        assert_eq!(ch.hit_point_current, 0);
+        assert_eq!(ch.status.health_status, 6);
+        assert!(!ch.status.in_combat);
+    }
+
+    /// The Quick word (`ovr009.cs:709`) writes `quick_fight` on the record, so
+    /// a member who went auto stays auto into the next fight.
+    #[test]
+    fn the_quick_word_persists_past_the_fight() {
+        let mut ch = member();
+        assert_eq!(ch.status.quick_fight, 0);
+        let mut f = fighter(20, HealthStatus::Okey);
+        f.quick_fight = true;
+        Carried::of(&f).apply(&mut ch);
+        assert_eq!(ch.status.quick_fight, 1);
+    }
+
+    /// ★ Spell expenditure: a spell the fight cast is gone from the record's
+    /// `spell_list`, and one it merely carried is not
+    /// (`SpellList.ClearSpell`, `Classes/SpellList.cs:30`).
+    #[test]
+    fn a_spell_cast_in_the_fight_is_spent_on_the_record() {
+        let mut ch = member();
+        ch.magic.spell_list = vec![0u8; crate::magic::SPELL_LIST_SIZE];
+        crate::magic::add_learnt(&mut ch.magic.spell_list, 0x03); // cure light
+        crate::magic::add_learnt(&mut ch.magic.spell_list, 0x03); // and another
+        crate::magic::add_learnt(&mut ch.magic.spell_list, 0x0F); // magic missile
+        let entry: Vec<u8> = ch
+            .magic
+            .spell_list
+            .iter()
+            .skip(1)
+            .copied()
+            .filter(|&b| b != 0)
+            .collect();
+        assert_eq!(entry.len(), 3);
+
+        // The fight cast one Cure Light Wounds: its collected list comes home
+        // one entry short.
+        let mut f = fighter(20, HealthStatus::Okey);
+        f.memorized_list = vec![0x03, 0x0F];
+        Carried::of(&f).apply(&mut ch);
+
+        let left: Vec<u8> = crate::magic::learnt(&ch.magic.spell_list)
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(left.len(), 2, "one slot was spent");
+        assert_eq!(left.iter().filter(|&&id| id == 0x03).count(), 1);
+        assert_eq!(left.iter().filter(|&&id| id == 0x0F).count(), 1);
+    }
+
+    /// Nothing cast, nothing spent.
+    #[test]
+    fn an_unspent_grimoire_is_left_alone() {
+        let mut ch = member();
+        ch.magic.spell_list = vec![0u8; crate::magic::SPELL_LIST_SIZE];
+        crate::magic::add_learnt(&mut ch.magic.spell_list, 0x17);
+        let before = ch.magic.spell_list.clone();
+        let mut f = fighter(20, HealthStatus::Okey);
+        f.memorized_list = vec![0x17];
+        Carried::of(&f).apply(&mut ch);
+        assert_eq!(ch.magic.spell_list, before);
+    }
 }

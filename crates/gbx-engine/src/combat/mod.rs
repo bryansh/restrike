@@ -128,14 +128,21 @@ pub enum Team {
 /// turn faithfully consumes whatever `attack1_left`/`attack2_left` the combatant
 /// carries (`attack2_left` defaults 0, so the `AttackTarget01` loop makes exactly
 /// `attack1_left` swings with the profile-1 dice).
-/// `Player.health_status@0x195` (`Status`, `Classes/Enums.cs`) reduced to the
-/// values `damage_player` / the bandage / bleed paths key on (§26). The original
-/// `Status` enum runs `okey=0 … gone=8`; a melee replay only ever moves a
-/// combatant through **okey → {unconscious, dying, dead}**, and reads `animated`
-/// in `damage_player`'s special-case (`new_hp == 0 && animated → dead`). The
-/// other original values (`tempgone`/`running`/`stoned`/`gone`) are set only by
-/// spell/affect paths (M5), so they are not modeled — an entry record carrying
-/// one decodes to [`HealthStatus::Okey`] (documented on [`decode_health_status`]).
+/// ★ `Player.health_status@0x195` — **the whole `Status` ladder**
+/// (`Classes/Enums.cs:7-18`), roll-credits slice 6 deliverable B.
+///
+/// Through M6 this enum carried only the five values a melee replay reaches,
+/// and [`decode_health_status`] folded everything else — `tempgone`, `running`,
+/// **`stoned`** and **`gone`** — onto [`HealthStatus::Okey`]. That fold is what
+/// D-RC6 named: the shipped bestiary petrifies (the hooded medusa; the
+/// beholder's stone-to-flesh ray, `ovr014.cs:2392`) and disintegrates
+/// (`:2378`), and a petrified party member who reads back as "Okey" is a member
+/// the temple cannot see is stoned and the wipe check cannot see is gone.
+///
+/// The discriminants are **declaration order, not the `Status` codes** — every
+/// conversion goes through [`decode_health_status`]/[`encode_health_status`],
+/// and the three slice-6 additions are appended **last** so postcard keeps
+/// every committed `.rsav`'s encoding (a parked fight serializes its roster).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum HealthStatus {
     /// `okey` (0) — conscious and fighting. Entry records are all okey.
@@ -155,33 +162,95 @@ pub enum HealthStatus {
     /// `running` (3) — a combatant that fled and **Got Away** (`flee_battle` →
     /// `RemoveFromCombat(..., Status.running, ...)`, `ovr014:0D90`/`sub_644A7`).
     /// Out of combat; unlike every other removal, `RemoveFromCombat` **skips** the
-    /// `hp_current = 0` write for a `running` combatant (`sub_644A7:151A`). Never
-    /// present on an entry record — [`decode_health_status`] folds a raw `3` to
-    /// [`HealthStatus::Okey`] as with the other non-entry states.
+    /// `hp_current = 0` write for a `running` combatant (`sub_644A7:151A`).
     Running,
+    /// `tempgone` (2) — the "temporarily off the board" marker. Only
+    /// `sub_3F2E9`'s target scan ever reads it (`ovr014.cs:1073`, alongside
+    /// `running`); nothing in the reached content sets it.
+    TempGone,
+    /// ★ `stoned` (7) — **petrified**. `KillPlayer` refuses to overwrite it
+    /// (`ovr024.cs:40-42`), so a statue cannot be killed again; the party keeps
+    /// carrying it, and the **only** way back is the temple's Stone to Flesh
+    /// (`ovr005.cs:285-297`) — the spell does not exist in CotAB (§9.1).
+    Stoned,
+    /// ★ `gone` (8) — disintegrated / dispelled (`ovr014.cs:2378`,
+    /// `ovr013.cs:1601`, `:1769`). Like `stoned` it is terminal for
+    /// `KillPlayer`, and unlike `dead` **no** service in the game restores it:
+    /// Raise Dead's gate is `dead || animated` (`ovr005.cs:164`,
+    /// `ovr023.cs:2344`).
+    Gone,
 }
 
 impl HealthStatus {
     /// `damage_player`'s survivor test: a combatant whose status is `okey` or
     /// `animated` after the ladder keeps its HP and stays in combat; any other
     /// status flips `in_combat = false` (`ovr025.cs:1218`).
-    fn is_conscious(self) -> bool {
+    pub(crate) fn is_conscious(self) -> bool {
         matches!(self, HealthStatus::Okey | HealthStatus::Animated)
+    }
+
+    /// ★ `KillPlayer`'s own guard (`ovr024.cs:39-42`): a combatant already
+    /// `stoned`, `dead` or `gone` is not killed again — the function returns
+    /// without touching status, hit points or `in_combat`. A statue that takes
+    /// a fireball stays a statue.
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            HealthStatus::Stoned | HealthStatus::Dead | HealthStatus::Gone
+        )
+    }
+
+    /// ★ `CleanupPlayersStateAfterCombat`'s liveness set (`ovr006.cs:221-223`):
+    /// a party member in one of these three states is what makes
+    /// `gbl.party_killed` false. Note `unconscious` and `dying` are **not** in
+    /// it — a party all of whose members are merely bleeding out has still
+    /// lost — and neither are `stoned` and `gone`.
+    pub fn counts_as_alive(self) -> bool {
+        matches!(
+            self,
+            HealthStatus::Running | HealthStatus::Animated | HealthStatus::Okey
+        )
     }
 }
 
-/// Decode the `health_status@0x195` byte onto the minimal [`HealthStatus`]. Entry
-/// records are `okey` (0); the unmodeled `Status` values (`tempgone`/`running`/
-/// `stoned`/`gone`, and any out-of-range byte) fold to [`HealthStatus::Okey`]
-/// since a plain-melee replay never enters those states (they are spell/affect
-/// outcomes, M5). `animated=1`/`unconscious=4`/`dying=5`/`dead=6` map through.
+/// Decode the `health_status@0x195` byte onto [`HealthStatus`]
+/// (`Classes/Enums.cs:7-18`). Every one of the nine `Status` values now maps
+/// through; an out-of-range byte still reads as [`HealthStatus::Okey`], which
+/// is the original's own effective behaviour (no branch tests for one).
+///
+/// ★ Slice 6 corrected this: `2`/`3`/`7`/`8` used to fold to `Okey`, so a
+/// petrified or disintegrated record came back to life on the way into a fight.
 pub fn decode_health_status(byte: u8) -> HealthStatus {
     match byte {
         1 => HealthStatus::Animated,
+        2 => HealthStatus::TempGone,
+        3 => HealthStatus::Running,
         4 => HealthStatus::Unconscious,
         5 => HealthStatus::Dying,
         6 => HealthStatus::Dead,
+        7 => HealthStatus::Stoned,
+        8 => HealthStatus::Gone,
         _ => HealthStatus::Okey,
+    }
+}
+
+/// The inverse of [`decode_health_status`]: the `Status` byte a
+/// [`HealthStatus`] serializes to on the record (`Classes/Enums.cs:7-18`).
+///
+/// Needed by the post-fight member sync (`combat_host::carry_state_home`),
+/// which writes the fight's final status onto the roster — in the original the
+/// combatant *is* the record, so no such conversion exists there.
+pub fn encode_health_status(status: HealthStatus) -> u8 {
+    match status {
+        HealthStatus::Okey => 0,
+        HealthStatus::Animated => 1,
+        HealthStatus::TempGone => 2,
+        HealthStatus::Running => 3,
+        HealthStatus::Unconscious => 4,
+        HealthStatus::Dying => 5,
+        HealthStatus::Dead => 6,
+        HealthStatus::Stoned => 7,
+        HealthStatus::Gone => 8,
     }
 }
 

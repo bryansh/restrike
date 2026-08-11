@@ -1108,3 +1108,129 @@ fn placement_uses_the_areas_real_walls() {
         "the fan-out saw the map edge"
     );
 }
+
+// === roll-credits slice 6: the post-fight member sync ======================
+
+/// A frail PC beside a sturdy one, both swinging for 1 point a hit. The
+/// goblins have three hit points each, so a 1d1 party takes several rounds to
+/// clear them — and the frail member (raw AC 10, hit by anything) is on the
+/// receiving end of every one of those rounds. Deterministic: the fixture
+/// engine's PRNG seed is fixed, and the party still wins.
+fn one_frail_one_sturdy() -> Vec<crate::party::Character> {
+    let mut party = vec![
+        party_member("Sturdy", 40, 54, 50),
+        party_member("Frail", 30, 10, 50),
+    ];
+    for c in &mut party {
+        c.combat.attacks.current[2] = 1; // a1 dice_count
+        c.combat.attacks.current[4] = 1; // a1 dice_size
+        c.combat.attacks.current[6] = 0; // a1 damage_bonus
+    }
+    party
+}
+
+/// Drives `e` until the parked fight reaches [`Stage::FinalBeats`] and returns
+/// the fight's own view of the party — the last boundary at which the
+/// `CombatState` is still the authority (D-CV2's end-of-STEP rule).
+fn party_at_final_beats(e: &mut Engine) -> Vec<(i32, HealthStatus, bool)> {
+    for _ in 0..MAX_TICKS {
+        tick(e);
+        if let Some(host) = e.shell().combat_host() {
+            if matches!(host.stage(), Stage::FinalBeats { .. }) {
+                return host
+                    .state()
+                    .roster()
+                    .iter()
+                    .filter(|f| f.team == crate::combat::Team::Party)
+                    .map(|f| (f.hp_current, f.health_status, f.in_combat))
+                    .collect();
+            }
+        }
+    }
+    panic!("the fight never reached its final beats");
+}
+
+/// Runs `e` until the fight's closing transcript line lands.
+fn finish_the_fight(e: &mut Engine) -> Observed {
+    let mut o = Observed::default();
+    for _ in 0..MAX_TICKS {
+        tick(e);
+        drain(e, &mut o);
+        if combat_line(&o).is_some() {
+            return o;
+        }
+    }
+    panic!("the fight never ended");
+}
+
+/// ★ Slice 5's flagged residual, closed: the fight's hit points reach the
+/// roster. Before this slice `combat_host` wrote back experience, treasure and
+/// affects and nothing else, so every wound healed itself the moment the
+/// results screen closed.
+#[test]
+fn a_wound_survives_the_fight_and_reaches_the_roster() {
+    let mut e = engine_with_program(
+        load_then_combat_program(3, b"AFTERWARD"),
+        one_frail_one_sturdy(),
+    );
+    let entry_hp: Vec<u8> = e
+        .party
+        .members
+        .iter()
+        .map(|m| m.hit_point_current)
+        .collect();
+    let fight = party_at_final_beats(&mut e);
+    finish_the_fight(&mut e);
+
+    // Hit points are copied verbatim — `settle_survivors` moves statuses, never
+    // hit points (`ovr006.cs:267-302`).
+    for (i, (hp, _, _)) in fight.iter().enumerate() {
+        assert_eq!(
+            e.party.members[i].hit_point_current as i32, *hp,
+            "member {i}'s hit points did not reach the roster"
+        );
+    }
+    let now: Vec<u8> = e
+        .party
+        .members
+        .iter()
+        .map(|m| m.hit_point_current)
+        .collect();
+    assert!(
+        now.iter().zip(&entry_hp).any(|(a, b)| a < b),
+        "the fixture is supposed to wound somebody: {now:?} vs {entry_hp:?}"
+    );
+
+    // ...and it survives a save/load, which is what a multi-session
+    // playthrough actually needs (D-RC0). The fixture engine has no bootable
+    // asset set (`Engine::new_fixture` hands it a font and one symbol set
+    // directly), so the round trip is asserted at the `.rsav` payload, which is
+    // the layer that carries the roster.
+    let bytes = e.save();
+    let data = combat_game_data(load_then_combat_program(3, b"AFTERWARD"));
+    let (_, state) = crate::save::load(&bytes, &data).expect("the save round-trips");
+    for (a, b) in state.party.members.iter().zip(&e.party.members) {
+        assert_eq!(a.hit_point_current, b.hit_point_current);
+        assert_eq!(a.status.health_status, b.status.health_status);
+        assert_eq!(a.status.in_combat, b.status.in_combat);
+    }
+}
+
+/// A member who went down stays down on the roster: hit points zeroed, a
+/// death-ladder status, `in_combat` clear. The wiped party is the sharpest
+/// case — every member is a casualty.
+#[test]
+fn the_dead_stay_dead_on_the_roster() {
+    let mut e = engine_with_program(load_then_combat_program(4, b"UNREACHED"), doomed_pcs());
+    finish_the_fight(&mut e);
+    for m in &e.party.members {
+        assert_eq!(m.hit_point_current, 0, "{} kept hit points", m.name);
+        assert!(
+            matches!(m.status.health_status, 4..=6),
+            "{} came out of a lost fight as status {}",
+            m.name,
+            m.status.health_status
+        );
+        assert!(!m.status.in_combat, "{} is still in combat", m.name);
+    }
+}
