@@ -1279,3 +1279,53 @@ neither moved an encoding on its own.
 - **The wiped-party arm of `CleanupPlayersStateAfterCombat`** frees every team
   member and sets `party_size = 0` (`ovr006.cs:326-346`). Ours leaves the roster
   intact and lets the `GameOver` flow reload a save, which is D-RC0's shape.
+
+## 11. Slice-7 door: wilderness/overworld (Fable, 2026-08-11)
+
+G2's implementation shape. Smaller than feared: slices 1-6 already landed the overland's
+script machinery (cross-file NEWECL, the travel menus are plain HORIZONTAL MENUs, CLEAR
+BOX, LOAD CHARACTER's slot scan, the temple at `ECL1#80 @0x8829`) — what remains is the
+PRESENTATION mode and the combat floor.
+
+**D-S7a — the bigpic mode.** `RedrawView`'s real else-arm (`ovr029.cs:42-46`):
+`inDungeon == 0 && can_draw_bigpic → draw_bigpic()`, with `can_draw_bigpic` cleared after
+every redraw and force-cleared when `lastDaxBlockId == 0x50` (`:12-15`). Our
+`corridor::redraw_view` gains the same fork (the sky/3D path is the existing body). Note
+`RedrawView` also picks the 3D sky by the PARTY CELL's `x2` high bit and carries the
+`block_area_view != 0 → mapAreaDisplay = false` arm (FD-41's unread cell — name it here).
+
+**D-S7b — MapCursor.** The 33-city coordinate table (`ovr028.cs` `city_map_x/y` —
+transcribe verbatim, cite), positioned from `current_city` (`Area1.field_342`, DataOffset
+`0x342` → cell **`0x4CA1`** under the halved mapping — name it in the Area window),
+EGA-backup blink at the `displayInput` wait loop's 300/500ms cadence
+(`ovr027.cs:150-152,165-172,320,335`) gated on `game_state == WildernessMap &&
+bigpic_block_id == 0x79 && lastDaxBlockId != 0x50`. The FD-33 menu-wait animation seam is
+the delivery vehicle (a second per-tick job beside the picture animation).
+
+**D-S7c — the wilderness combat floor.** `SetupGroundTiles` (`ovr011.cs:755-782`) swaps
+`WildCom` for `DungCom` (base slot `0x21` — the WILDCOM atlas the combat-art slice
+already decodes; its 34-vs-33 quirk is banked) and calls `SetupWildernessFloor` — read
+and transcribe it (the M4-era note says it is DRAW-BEARING; its dice join the floor
+stream exactly as `SetupDungeonFloor`'s did, same capture-honesty rule: cited-not-
+capture-proven until a wilderness fight is captured). Retire the M6b
+`WildernessFloorDeferred` fallback.
+
+**D-S7d — the walk loop's wilderness shape.** With no GEO (area 1 has none by
+construction), what does the world-menu loop DO in `WildernessMap`? Read the original's
+main loop for `inDungeon == 0`: which words show, what movement means (the overland is
+script-menu-driven — `ECL1#80`'s own "ENTER CITY / JOURNEY ON / CAMP / SEARCH AREA"
+beats), where `current_city` gets written, and how JOURNEY schedules encounters
+(`rest_incounter_*`? a per-journey roll? — read the block's disasm + the loop). This is
+the door's one open research area; transcribe what the code says, in-slice.
+
+**D-S7e — the demo-title guard.** `lastDaxBlockId == 0x50` appears in three guards
+(RedrawView, MapCursor, `op_load_files` — slice 2 landed the last). Model the cell once
+(`lastDaxFile`/`lastDaxBlockId` are picture-layer state we already carry) and thread the
+three guards from it.
+
+**Acceptance.** The slice-1 overland arrival drive extended past the edge menu: the
+Dalelands bigpic with the CURSOR BLINKING at the right city cell, ENTER CITY crossing
+back into an area (the reverse transition), JOURNEY ON running its beat with an
+encounter fired en route (scheduled per D-S7d's findings), and a wilderness COMBAT on a
+real WildCom floor (frames eyeballed; floor dice cited). The m6b demos and all sixteen
+captures stay green (dungeon floors untouched).
