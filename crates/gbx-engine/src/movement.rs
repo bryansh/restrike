@@ -369,20 +369,41 @@ pub fn attempt_knock(party: &mut dyn PartyPredicates) -> bool {
     party.attempt_knock()
 }
 
-/// The game-world clock (§1.6's "clock slot 2 in search mode else 1").
-/// Implementation note (flagged): the exact original per-step minute value
-/// wasn't in the material read this session (`step_game_time`'s unit
-/// definition lives outside `ovr015.cs`/`ovr031.cs`) — `MINUTES_PER_UNIT`
-/// is a placeholder pending that read; only the 2x-in-search relative rate
-/// is confirmed.
+/// ★ **The game-world clock, as `step_game_time` actually keeps it**
+/// (`ovr021.cs:150-172`) — roll-credits slice 7's correction of the M2
+/// placeholder this type carried ("`MINUTES_PER_UNIT` is a placeholder
+/// pending that read"; that read is done).
+///
+/// The original does not hold a scalar. It holds the **seven ScriptMemory
+/// words at `0x4BC6..=0x4BCC`** (FD-31's halved Area mapping;
+/// `Classes/Area1.cs:41-61`) and advances them by incrementing one slot
+/// `amount` times, normalizing after each increment:
+///
+/// ```text
+/// for i in 1..=amount { rest_time[time_slot] += 1; NormalizeClock(rest_time) }
+/// ```
+///
+/// with [`crate::rest::TIME_SCALES`]'s carries `[10, 10, 6, 24, 30, 12, 256]`.
+/// So the slots are, in order: (unused), **minutes-ones**, **minutes-tens**,
+/// **hours**, **days**, months, years — and the slot argument's meaning is a
+/// *unit*, not a rate. `step_game_time(1,1)` is one minute; `(2,1)` is ten;
+/// `(4,4)` — `ECL1#80`'s `@0x8EA7 ECL CLOCK [0x4C06], #0x04` — is four DAYS.
+/// The placeholder's "slot 2 runs at double rate" made a search-mode step
+/// twice a normal one instead of ten times, and made a four-day journey take
+/// forty minutes.
+///
+/// (The slot-5/slot-6 naming correction is `crate::rest`'s, banked with
+/// `TIME_SCALES`: coab calls slot 5 `time_year`, but it carries at 12, so it
+/// is months. The five words a `.sav` carries still map to slots 1..=5, which
+/// is the mapping `save_orig` and `import` were built against.)
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GameClock {
-    pub total_units: u32,
+    /// The seven raw slots, verbatim — the ScriptMemory words a script reads
+    /// with `[0x4BC6+i]` and the values `display_map_position_time` formats.
+    pub slots: [u16; 7],
 }
 
 impl GameClock {
-    const MINUTES_PER_UNIT: u32 = 10;
-
     /// `step_game_time(2, 1)` in search mode, `step_game_time(1, 1)`
     /// otherwise (`MovePartyForward`, confirmed exact) — sugar over
     /// [`GameClock::step`].
@@ -390,65 +411,67 @@ impl GameClock {
         self.step(if search_mode { 2 } else { 1 }, 1);
     }
 
-    /// `EngineServices::step_game_time(time_slot, amount)` — ECL CLOCK
-    /// (0x34)'s general form: `time_slot == 2` runs at double rate (the
-    /// same search-mode multiplier `MovePartyForward` uses), any other
-    /// slot at normal rate. This session's research confirmed the field
-    /// *identities* the raw clock cells back (§ScriptMemory `0x4BC6`+) but
-    /// not the original's exact minutes-per-tick/calendar constants;
-    /// `MINUTES_PER_UNIT` and [`GameClock::raw_clock_words`]'s day/year
-    /// derivation are documented placeholders pending that read.
+    /// ★ `step_game_time(time_slot, amount)` (`ovr021.cs:150-172`), the body
+    /// of `EngineServices::step_game_time` and of ECL CLOCK (0x34).
+    ///
+    /// Incremented one at a time with a normalize pass between, exactly as
+    /// written — a single `+= amount` would skip carries whenever `amount`
+    /// pushes a slot past two multiples of its scale.
+    ///
+    /// The tail `CheckAffectsTimingOut(time_slot, amount)` (`:171`) is NOT
+    /// here: it needs the party, which this shared type has no handle on. Its
+    /// callers run it (`crate::rest::RestSession::step`, and the ECL CLOCK /
+    /// walk-loop paths through `crate::affects::check_affects_timing_out`),
+    /// which is the same split M4 already documented for the rest loop.
+    ///
+    /// A slot index past 6 is ignored rather than panicking; the original
+    /// would index its own `RestTime` out of range, which is not behaviour
+    /// worth reproducing.
     pub fn step(&mut self, time_slot: u8, amount: u8) {
-        let multiplier = if time_slot == 2 { 2 } else { 1 };
-        self.total_units += amount as u32 * multiplier;
+        let Some(slot) = self
+            .slots
+            .get(time_slot as usize)
+            .map(|_| time_slot as usize)
+        else {
+            return;
+        };
+        let mut t = crate::rest::RestTime {
+            slots: self.slots.map(|w| w as i32),
+        };
+        for _ in 0..amount {
+            t.slots[slot] += 1;
+            // `NormalizeClock`'s slot-6 arm ages the party instead of
+            // carrying (`ovr021.cs:121-127`); nothing this engine reaches
+            // spends 256 years, and the ageing hook is `crate::rest`'s.
+            crate::rest::normalize_clock(&mut t);
+        }
+        self.slots = t.slots.map(|v| v.clamp(0, u16::MAX as i32) as u16);
     }
 
     /// The inverse of [`GameClock::raw_clock_words`]' inner 5 words
-    /// (minutes-ones, minutes-tens, hour, day, year) — original-save import
-    /// (task deliverable 4, `docs/design/save-formats.md` §1.4's clock
-    /// cells). `day`/`year` are 1-based on the wire (clamped to `>= 1`
-    /// here so a zeroed/malformed save can't underflow); reconstructs
-    /// `total_units` exactly for any value this module itself produced.
+    /// (minutes-ones, minutes-tens, hour, day, "year") — original-save import
+    /// (`docs/design/save-formats.md` §1.4's clock cells). Straight into the
+    /// slots now: the representation and the wire format are the same thing.
     pub fn from_raw_clock_words(words: [u16; 5]) -> Self {
         let [minutes_ones, minutes_tens, hour, day, year] = words;
-        let minutes = (minutes_tens as u32) * 10 + minutes_ones as u32;
-        let day = (day as u32).max(1);
-        let year = (year as u32).max(1);
-        let total_minutes =
-            minutes + hour as u32 * 60 + (day - 1) * 60 * 24 + (year - 1) * 360 * 24 * 60;
         GameClock {
-            total_units: total_minutes / Self::MINUTES_PER_UNIT,
+            slots: [0, minutes_ones, minutes_tens, hour, day, year, 0],
         }
     }
 
+    /// `display_map_position_time`'s own arithmetic (`ovr025.cs:1482-1483`):
+    /// the hour verbatim, the minutes as `tens * 10 + ones`.
     pub fn hh_mm(&self) -> (u8, u8) {
-        let total_minutes = self.total_units * Self::MINUTES_PER_UNIT;
         (
-            ((total_minutes / 60) % 24) as u8,
-            (total_minutes % 60) as u8,
+            self.slots[3] as u8,
+            (self.slots[2] * 10 + self.slots[1]) as u8,
         )
     }
 
     /// The 7 ScriptMemory clock words at the CONSECUTIVE addresses
-    /// `0x4BC6..=0x4BCC` (FD-31's halved Area mapping;
-    /// `Classes/Area1.cs:41-61`): two unlabeled bracketing words (kept `0`,
-    /// matching the original's own "never separately assigned" fields),
-    /// minutes-ones, minutes-tens, hour, day, year.
+    /// `0x4BC6..=0x4BCC` — now simply the slots.
     pub fn raw_clock_words(&self) -> [u16; 7] {
-        let total_minutes = self.total_units * Self::MINUTES_PER_UNIT;
-        let minutes = total_minutes % 60;
-        let hour = (total_minutes / 60) % 24;
-        let day = (total_minutes / 60 / 24) % 30 + 1;
-        let year = 1 + total_minutes / 60 / 24 / 360;
-        [
-            0,
-            (minutes % 10) as u16,
-            (minutes / 10) as u16,
-            hour as u16,
-            day as u16,
-            year as u16,
-            0,
-        ]
+        self.slots
     }
 }
 
@@ -527,7 +550,11 @@ mod tests {
 
     #[test]
     fn game_clock_from_raw_words_round_trips_through_to_the_same_words() {
-        let clock = GameClock { total_units: 54321 }; // arbitrary nonzero value
+        // Slot 6 is deliberately 0: the wire carries only the inner five,
+        // which is `save_orig`'s own `clock_words()` shape.
+        let clock = GameClock {
+            slots: [0, 7, 4, 13, 21, 3, 0],
+        };
         let words = clock.raw_clock_words();
         let rebuilt =
             GameClock::from_raw_clock_words([words[1], words[2], words[3], words[4], words[5]]);
@@ -536,8 +563,54 @@ mod tests {
 
     #[test]
     fn game_clock_from_raw_words_at_zero_is_the_default_clock() {
-        let rebuilt = GameClock::from_raw_clock_words([0, 0, 0, 1, 1]);
-        assert_eq!(rebuilt.total_units, 0);
+        let rebuilt = GameClock::from_raw_clock_words([0, 0, 0, 0, 0]);
+        assert_eq!(rebuilt, GameClock::default());
+    }
+
+    /// ★ `step_game_time`'s slot table (`ovr021.cs:150-172` +
+    /// `crate::rest::TIME_SCALES`): slot 1 is one minute, slot 2 is ten, slot
+    /// 3 an hour, slot 4 a day — and every increment normalizes, so amounts
+    /// that cross two multiples still carry.
+    #[test]
+    fn the_clock_slots_are_units_not_rates() {
+        let mut c = GameClock::default();
+        c.step(1, 1);
+        assert_eq!(c.hh_mm(), (0, 1), "slot 1 is one minute");
+
+        let mut c = GameClock::default();
+        c.step(2, 1);
+        assert_eq!(c.hh_mm(), (0, 10), "slot 2 is ten minutes");
+
+        let mut c = GameClock::default();
+        c.step(1, 25);
+        assert_eq!(c.hh_mm(), (0, 25), "the per-increment normalize carries");
+        assert_eq!(c.slots[1], 5);
+        assert_eq!(c.slots[2], 2);
+
+        let mut c = GameClock::default();
+        c.step(3, 25);
+        assert_eq!(c.hh_mm().0, 1, "25 hours is one day and one hour");
+        assert_eq!(c.slots[4], 1);
+
+        // `ECL1#80 @0x8EA7 ECL CLOCK [0x4C06], #0x04`: a four-day journey.
+        let mut c = GameClock::default();
+        c.step(4, 4);
+        assert_eq!(c.slots[4], 4);
+        assert_eq!(c.hh_mm(), (0, 0), "days do not move the time of day");
+    }
+
+    /// A search-mode step is TEN normal steps, not two — the placeholder's
+    /// `time_slot == 2 → double rate` was the one thing about the old model
+    /// that was actively wrong rather than merely unscaled.
+    #[test]
+    fn a_search_mode_step_costs_ten_minutes_and_a_plain_one_costs_one() {
+        let mut plain = GameClock::default();
+        plain.advance(false);
+        assert_eq!(plain.hh_mm(), (0, 1));
+
+        let mut searching = GameClock::default();
+        searching.advance(true);
+        assert_eq!(searching.hh_mm(), (0, 10));
     }
 
     const GEO_BLOCK_SIZE: usize = gbx_formats::geo::GEO_BLOCK_SIZE;
@@ -614,14 +687,14 @@ mod tests {
     }
 
     #[test]
-    fn move_party_forward_advances_clock_twice_as_fast_searching() {
+    fn move_party_forward_advances_clock_ten_times_as_fast_searching() {
         let mut pos = (5, 5);
         let mut flags = DoorStepFlags::all_true();
         let mut clock = GameClock::default();
         move_party_forward(&mut pos, Facing::East, true, &mut flags, &mut clock);
-        assert_eq!(clock.total_units, 2);
+        assert_eq!(clock.hh_mm(), (0, 10));
         move_party_forward(&mut pos, Facing::East, false, &mut flags, &mut clock);
-        assert_eq!(clock.total_units, 3);
+        assert_eq!(clock.hh_mm(), (0, 11));
     }
 
     #[test]

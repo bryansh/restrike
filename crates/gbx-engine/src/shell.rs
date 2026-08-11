@@ -267,6 +267,12 @@ pub struct VectorRun {
     /// a restored save simply restarts the current frame's dwell).
     #[serde(skip)]
     anim_wait: u32,
+    /// ★ The parked prompt's `MapCursor` blink (`crate::mapcursor`) — the
+    /// other per-iteration job `displayInput`'s wait loop runs. Transient for
+    /// the same reason [`Self::anim_wait`] is: two stack locals and a scratch
+    /// backup block in the original.
+    #[serde(skip)]
+    map_cursor: crate::mapcursor::MapCursorBlink,
 }
 
 /// One tick's result from [`VectorRun::tick`].
@@ -655,6 +661,7 @@ fn enter_vector(machine: &mut EclMachine, index: usize) -> Option<VectorRun> {
         pending: None,
         pending_reply: None,
         anim_wait: 0,
+        map_cursor: Default::default(),
     })
 }
 
@@ -683,6 +690,7 @@ pub(crate) fn boot_at_address(machine: &mut EclMachine, addr: u16) -> Shell {
             pending: None,
             pending_reply: None,
             anim_wait: 0,
+            map_cursor: Default::default(),
         }),
         chain: None,
     })
@@ -1165,9 +1173,17 @@ impl VectorRun {
             // `useOverlay` in play — the world/door menus never park here.
             if matches!(widget, Widget::Hotbar(_)) {
                 crate::picture::menu_wait_animation(ctx, &mut self.anim_wait);
+                // ★ The same loop's OTHER per-iteration job (D-S7b): the
+                // overland map cursor's blink (`ovr027.cs:176-183,315-323`).
+                // Both jobs sit inside `displayInput`, which is why they share
+                // this seam; `VertMenuSelect` has neither.
+                map_cursor_blink(ctx, &mut self.map_cursor);
             }
             return false;
         }
+        // `displayInput`'s exit restore (`ovr027.cs:331-336`): whatever ended
+        // the loop, the cursor cell goes back to the map underneath it.
+        self.map_cursor.restore(ctx.fb);
         if let WidgetOutcome::PartyScroll(code) = outcome {
             // `sub_317AA`'s special-key arm (`ovr008.cs:1181-1187`): an
             // extended key scrolls the team list and RE-PROMPTS — it never
@@ -1986,7 +2002,26 @@ impl StepFlow {
 
     /// `locked_door` (`ovr015.cs:468-593`) — no VM run of any kind; a
     /// direct Widget park (the Fable review fix, see module doc comment).
+    ///
+    /// ★ Its whole body is `game_state == DungeonMap`-gated (`:475`), so
+    /// outdoors the walk loop steps straight from `vm_run_addr_1` to
+    /// `SearchLocationAddr` — no wall probe, no door menu, and above all no
+    /// `MovePartyForward` off a `GeoBlock` area 1 does not even ship
+    /// (roll-credits D-S7d).
+    ///
+    /// ★ Its TAIL (`:587-592`) is outside that gate and runs on every
+    /// iteration, in both modes: `DaxArrayFreeDaxBlocks(byte_1D556)` plus the
+    /// head/body cache reset. That free is what bounds the city-scene guard's
+    /// life to one loop iteration — `lastDaxBlockId` goes back to `0xFF` the
+    /// moment the vector that ran `PICTURE 0x50` returns
+    /// (`crate::picture::CITY_SCENE_PIC_BLOCK`).
     fn tick_door_interaction(&mut self, ctx: &mut FlowCtx) -> Option<()> {
+        if ctx.state.game_state != GameState::DungeonMap {
+            locked_door_tail(ctx);
+            self.run = enter_vector(ctx.machine, VECTOR_SEARCH_LOCATION);
+            self.stage = StepStage::RunVector2;
+            return None;
+        }
         if let Some(widget) = &mut self.door_widget {
             match widget.tick(ctx.input, ctx.dt_ticks) {
                 WidgetOutcome::Pending => return None,
@@ -2065,10 +2100,50 @@ impl StepFlow {
         if ctx.state.pos != ctx.state.last_pos {
             ctx.sounds.push(SoundEvent(crate::movement::SOUND_A));
         }
+        locked_door_tail(ctx);
         self.run = enter_vector(ctx.machine, VECTOR_SEARCH_LOCATION);
         self.stage = StepStage::RunVector2;
         None
     }
+}
+
+/// ★ One `displayInput` iteration's `MapCursor` work (`ovr027.cs:165-183`,
+/// `:315-323`), gated exactly as the original gates it.
+///
+/// `SetPosition(area_ptr.current_city)` runs at `:169`, once, before the loop
+/// — so the position is resolved from the LIVE cell each tick here and the
+/// blink state simply follows it; a `current_city` that moved mid-prompt is
+/// not something any shipped script does (`ECL1#80` writes it at `@0x809F`
+/// and `@0x910C`, both outside a parked menu).
+fn map_cursor_blink(ctx: &mut FlowCtx, blink: &mut crate::mapcursor::MapCursorBlink) {
+    if !crate::mapcursor::blinks(
+        ctx.state.game_state,
+        ctx.state.picture.bigpic_block,
+        ctx.state.picture.last_dax_block,
+    ) {
+        return;
+    }
+    let Some(pos) = crate::mapcursor::position(ctx.vm_memory.current_city()) else {
+        return;
+    };
+    blink.tick(ctx.fb, pos, ctx.dt_ticks);
+}
+
+/// `locked_door`'s ungated tail (`ovr015.cs:587-592`): free the running
+/// picture object and drop both portrait caches, every walk-loop iteration.
+///
+/// The picture LAYER is left alone — the original frees `byte_1D556`'s frames
+/// without repainting, and `RedrawView` three lines earlier already owns the
+/// pixels. What moves is the load bookkeeping: `lastDaxBlockId` back to
+/// `0xFF` (which is what expires the city-scene guard) and
+/// `current_head_id`/`current_body_id` back to "none loaded".
+fn locked_door_tail(ctx: &mut FlowCtx) {
+    ctx.pictures.free_pic();
+    ctx.state.picture.anim_block = None;
+    ctx.state.picture.anim_frame = 0;
+    ctx.state.picture.last_dax_block = crate::picture::NO_DAX_BLOCK;
+    ctx.state.picture.head_block = 0xFF;
+    ctx.state.picture.body_block = 0xFF;
 }
 
 // --- The total party kill (roll-credits slice 0, G0) ---
@@ -2474,9 +2549,30 @@ impl Shell {
     /// never outlives its scene (`crate::picture`'s module doc has the
     /// evidence). `crate::corridor::redraw_view` clears the picture layer
     /// itself; this call site needs no special handling.
+    /// ★ **The overland has no world menu at all** (roll-credits D-S7d).
+    /// `main_3d_world_menu`'s ENTIRE body — the "Area Cast View Encamp Search
+    /// Look" prompt, the six letter commands, the four movement keys, the
+    /// per-command `display_map_position_time` — is inside
+    /// `if (gbl.game_state == GameState.DungeonMap)` (`ovr015.cs:354-455`).
+    /// In `WildernessMap` the function clears the bottom text area and returns
+    /// `'\0'` immediately.
+    ///
+    /// So `sub_29758`'s loop (`ovr003.cs:2315-2392`) degenerates outdoors to
+    /// exactly: run the resident block's `vm_run_addr_1`, `locked_door()`
+    /// (itself DungeonMap-gated, `:475`), `RedrawView()`, run
+    /// `SearchLocationAddr`, repeat — which is [`StepFlow`] with its door
+    /// stage inert. There is no engine-side movement in the wilderness: the
+    /// overland is *script*-driven, `ECL1#80`'s own "ENTER CITY / JOURNEY ON /
+    /// CAMP / SEARCH AREA" menu being the only thing the player ever answers.
+    /// (`'E'` never fires the `TryEncamp` arm either — `char.ToUpper('\0')`
+    /// is not `'E'`; CAMP outdoors is the script's `PROGRAM 0x09` at
+    /// `@0x879B`.)
     fn enter_world_menu(ctx: &mut FlowCtx) -> Shell {
         ctx.state.field_592 = 0;
         crate::corridor::redraw_view(ctx);
+        if ctx.state.game_state != GameState::DungeonMap {
+            return Shell::Step(StepFlow::start(ctx.machine, ctx.state));
+        }
         let mut hotbar = Hotbar::new("Area Cast View Encamp Search Look");
         hotbar.accept_ext = true;
         Shell::WorldMenu {

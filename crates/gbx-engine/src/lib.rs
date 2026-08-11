@@ -40,6 +40,7 @@ pub mod input;
 /// ★ Vancian camp magic (roll-credits §8): the `SpellList` record model, the
 /// spell table's class/level/name columns, and the capacity formula.
 pub mod magic;
+pub mod mapcursor;
 pub mod money;
 pub mod monster;
 pub mod movement;
@@ -92,6 +93,11 @@ mod shell_combat_tests;
 mod test_support;
 #[cfg(test)]
 mod walk_goldens;
+
+/// Roll-credits slice 7's acceptance suite (`roll-credits.md` §11): the
+/// overland loop against real CotAB data.
+#[cfg(test)]
+mod wilderness_tests;
 
 #[cfg(test)]
 mod tests {

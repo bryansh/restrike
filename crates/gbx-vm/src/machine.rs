@@ -553,11 +553,28 @@ impl EclMachine {
     // window (read-only — self-modifying writes are out of scope this
     // session, see `mem_write`'s doc comment) before delegating to the host.
 
+    /// ★ **Script-space reads are BYTE-wide** (roll-credits slice 7's
+    /// correction).
+    ///
+    /// `vm_GetMemoryValueType` gives `0x8000..=0x9DFF` its own memory class
+    /// (`ovr008.cs:319-322`) and `vm_GetMemoryValue`'s arm for that class
+    /// returns `gbl.ecl_ptr[…]` (`:848`) — and `EclBlock`'s indexer is
+    /// `public byte this[int index]` (`Classes/EclBlock.cs:31`). One byte,
+    /// widened. (coab's own expression there is `ecl_ptr[loc + 0x8000]`, which
+    /// would index past the 0x1E00-byte buffer; the `// When does this
+    /// happen?` beside it says the decompiler did not resolve this arm. The
+    /// *width* is not in doubt — the indexer's return type settles it.)
+    ///
+    /// M2 read a little-endian WORD here, which no shipped table survives:
+    /// `ECL1#80`'s overland route tables are 56 consecutive bytes each, and a
+    /// word read of `0x9C02` returns `0x0201` where the script needs `1`
+    /// (`@0x8FCE GETTABLE 0x9C02,[0x7F79],[0x4C02]`, whose result feeds an
+    /// `ON GOTO … #0x0E`). Every table read in the game is byte-indexed for
+    /// the same reason: overlapping word reads at consecutive indices could
+    /// not encode a table at all.
     fn mem_read(&self, addr: u16, host: &mut dyn VmHost, origin: Origin) -> u16 {
         if in_block(addr) {
-            let lo = self.block.get(addr);
-            let hi = self.block.get(addr.wrapping_add(1));
-            u16::from_le_bytes([lo, hi])
+            u16::from(self.block.get(addr))
         } else {
             host.read(addr, origin)
         }
@@ -813,6 +830,7 @@ impl EclMachine {
             0x31 => self.op_sprite_off(activation, host, pc),
             0x32 => self.op_find_item(activation, host, pc, opcode),
             0x33 => self.op_print_return(activation),
+            0x34 => self.op_ecl_clock(activation, host, pc, opcode),
             0x35 => self.op_save_table(activation, host, pc, opcode),
             0x36 => self.op_add_npc(activation, host, pc, opcode),
             0x37 => self.op_load_files(activation, host, pc, opcode, true),
@@ -2052,6 +2070,36 @@ impl EclMachine {
             Effect::PrintReturn,
             next,
         ))
+    }
+
+    /// ★ ECL CLOCK (0x34), `CMD_EclClock` (`ovr003.cs:1720-1727`).
+    ///
+    /// `vm_LoadCmdSets(2)`, then `timeStep = GetCmdValue(1) & 0xFF` and
+    /// `timeSlot = GetCmdValue(2) & 0xFF` — note the ORDER: the *step* is the
+    /// first operand and the *slot* the second, which is the reverse of
+    /// `step_game_time`'s own parameter order it then calls with.
+    ///
+    /// One of the census's two uses is the overland's own: `ECL1#80 @0x8EA7
+    /// ECL CLOCK [0x4C06], #0x04` spends a journey's route cost in DAYS
+    /// (`crate::movement::GameClock::step` has the slot table). The other is
+    /// `ECL2#1 @0x8E56`.
+    ///
+    /// The dialect already records this opcode's confirmed skip≠run
+    /// divergence (`skip_size` 1, two operands decoded), so an `IF`-guarded
+    /// ECL CLOCK skips the right distance.
+    fn op_ecl_clock(
+        &mut self,
+        activation: &mut Activation,
+        host: &mut dyn VmHost,
+        pc: u16,
+        opcode: u8,
+    ) -> Result<VmStep, VmError> {
+        let (args, next) = self.load_cmd_sets(pc.wrapping_add(1), 2, host, pc);
+        let time_step = self.resolve_numeric(&args[0], pc, opcode, host)? as u8;
+        let time_slot = self.resolve_numeric(&args[1], pc, opcode, host)? as u8;
+        host.step_game_time(time_slot, time_step);
+        activation.pc = next;
+        Ok(VmStep::Continue)
     }
 
     /// DELAY (0x3A), `CMD_Delay` ovr003.cs:1588-1592. `game_speed_var` (the

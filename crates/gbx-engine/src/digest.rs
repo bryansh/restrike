@@ -108,8 +108,13 @@ pub(crate) fn state_digest(engine: &Engine) -> String {
     f.u8(state.game_area);
     // 4. resident ECL block id
     f.u8(state.ecl_block_id);
-    // 5. clock
-    f.u32(state.clock.total_units);
+    // 5. clock — the seven raw slots (roll-credits slice 7 turned
+    //    `GameClock` from a scalar into `step_game_time`'s own seven-word
+    //    record; hashing all seven keeps a day/month/year advance as visible
+    //    to a checkpoint as a minute one).
+    for w in state.clock.raw_clock_words() {
+        f.u32(u32::from(w));
+    }
     // 6. party
     let party = engine.party();
     f.u32(party.members.len() as u32);
@@ -186,7 +191,7 @@ mod tests {
         assert_ne!(e.state_digest(), base_digest, "ecl block id");
 
         let mut e = engine();
-        e.state.clock.total_units += 1;
+        e.state.clock.slots[1] += 1;
         assert_ne!(e.state_digest(), base_digest, "clock");
 
         let mut e = engine();

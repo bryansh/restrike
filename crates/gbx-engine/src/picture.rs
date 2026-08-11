@@ -395,8 +395,9 @@ impl PictureCache {
     }
 
     /// `DaxArrayFreeDaxBlocks(gbl.byte_1D556)` (`ovr030.cs:152-162`), which
-    /// `load_bigpic` does first thing (`ovr030.cs:230`).
-    fn free_pic(&mut self) {
+    /// `load_bigpic` does first thing (`ovr030.cs:230`) and `locked_door`'s
+    /// ungated tail does once per walk-loop iteration (`ovr015.cs:587`).
+    pub(crate) fn free_pic(&mut self) {
         self.pic = None;
     }
 

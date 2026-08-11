@@ -2469,9 +2469,10 @@ mod tests {
     fn the_hour_cell_the_tilverton_script_reads_is_the_live_clock() {
         let mut f = Fixture::new();
         let mut host = f.host();
-        // 100 units × 10 min = 1000 minutes -> 16:40.
+        // `step_game_time(1, N)` is N MINUTES (roll-credits slice 7's
+        // correction): 100 of them is 1:40.
         host.step_game_time(1, 100);
-        assert_eq!(host.read(0x4BC9, origin()), 16, "hour");
+        assert_eq!(host.read(0x4BC9, origin()), 1, "hour");
         assert_eq!(host.read(0x4BC7, origin()), 0, "minutes ones (40 % 10)");
         assert_eq!(host.read(0x4BC8, origin()), 4, "minutes tens");
     }

@@ -822,6 +822,13 @@ impl Engine {
             // (`ovr025.cs:218-221`) — the overland screen has no roster
             // band. The status line's own predicate is separate
             // (`Shell::draws_engine_status_line`) and unchanged.
+            // ★ And the status line is not in the wilderness either:
+            // `display_map_position_time` opens with
+            // `if (gbl.game_state != GameState.WildernessMap)`
+            // (`ovr025.cs:1476-1478`) — the overland screen is the BIGPIC and
+            // the script's own text, nothing else. (Roll-credits D-S7d; it
+            // also keeps the position line off the map cells the
+            // `crate::mapcursor` blink owns.)
             let wilderness = self.state.game_state == crate::shell::GameState::WildernessMap;
             if !wilderness && !self.party.members.is_empty() {
                 let rows: Vec<_> = self
@@ -833,8 +840,10 @@ impl Engine {
                 let selected = Some((self.state.selected_player as usize) % rows.len());
                 crate::charsheet::render_party_summary(&mut self.fb, &self.font, &rows, selected);
             }
-            let status = Shell::status_line(&self.state);
-            draw_string(&mut self.fb, &self.font, &status, 15, 17, 0, 10);
+            if !wilderness {
+                let status = Shell::status_line(&self.state);
+                draw_string(&mut self.fb, &self.font, &status, 15, 17, 0, 10);
+            }
         }
 
         // The host's save/load verdict, last so it lands on top of whatever

@@ -179,14 +179,18 @@ fn golden_walk_trace() {
             "90321f7a40e233cc85f716f4b5e0636bcfe020e9c69eedef2d51eb9b5f3b85bd",
         ),
         // Stepped into the open square (pos (6,5)), facing East again.
+        // Regenerated for roll-credits slice 7's `GameClock` correction: a
+        // plain step now costs ONE minute, not ten, so the status line's
+        // HH:MM differs from tick 12 on (the two earlier checkpoints have not
+        // stepped yet and are unchanged).
         (
             12,
-            "64cda2cd0f28fed782c6c9cf89d9a710dae4be23f01450839ed742a08e841995",
+            "07767f2d27b0d1ab30f2c99d4a131d6118e51b1346cedf2df5108b1e84c145b4",
         ),
         // Bashed through the locked door (pos (7,5)).
         (
             22,
-            "1829e1a0f19df8fe60a4a77822d9857a9485db4c5212d6e107a56062e50a477f",
+            "2295c58dbb7c423e86708e52abfb85f873e9c6068636c4e6b2d770fff3da8dc6",
         ),
     ];
     let mut next_checkpoint = 0usize;
