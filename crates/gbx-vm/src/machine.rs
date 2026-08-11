@@ -25,6 +25,13 @@ use crate::decode::{decode_operand, Arg, BlockBytes, ECL_BLOCK_BASE, ECL_BLOCK_S
 use crate::dialect::Dialect;
 use crate::host::{Effect, Origin, PlayerId, ProgramOutcome, Reply, Request, VmHost, VmString};
 
+/// PARLAY (0x2C)'s five tones — a code-segment literal in the original
+/// (`aHaughtySlyNice`, `ovr003:2806`), not script data, so the words are the
+/// same at every site. Passed as plain options: the engine's own
+/// `buildMenuStrings` transform re-marks the first letter of each, which
+/// reproduces the original's `~`-prefixed literal exactly.
+const PARLAY_TONES: [&[u8]; 5] = [b"HAUGHTY", b"SLY", b"NICE", b"MEEK", b"ABUSIVE"];
+
 /// Identifies a script block for `Exit::ChainTo` (NEWECL/PROGRAM-8's target).
 /// A raw `.dax`-file-relative block id, exactly as coab's `CMD_NewECL`
 /// decodes it (`(byte)ovr008.vm_GetCmdValue(1)`).
@@ -142,6 +149,15 @@ enum Completion {
     /// locals across the loop, and `vm_LoadCmdSets` has long since advanced
     /// past the bytes.
     EncounterMenu(Box<EncounterMenuState>),
+    /// ★ PARLAY (0x2C)'s write (`talk_style`, `ovr003:2837-284D`): the reply
+    /// **indexes an operand-borne table** and the table's entry is what
+    /// reaches memory, so the selection itself is never written. Five entries
+    /// for five tones.
+    WriteToneOutcomeThenAdvance {
+        dest: u16,
+        values: [u8; 5],
+        next: u16,
+    },
 }
 
 /// ENCOUNTER MENU (0x29)'s decoded operands, held across the menu loop. Field
@@ -509,6 +525,20 @@ impl EclMachine {
                 activation.pc = next;
                 Ok(VmStep::Continue)
             }
+            Completion::WriteToneOutcomeThenAdvance { dest, values, next } => {
+                // `ovr003:2837-2841` — `var_2 = var_8[selection]`. A reply
+                // outside 0..5 cannot happen (the menu has five words), but
+                // the original would have read a stack byte past its array;
+                // clamping to the last entry is the closest safe analogue.
+                let selection = match reply {
+                    Some(Reply::Selection(v)) => (v as usize).min(values.len() - 1),
+                    _ => 0,
+                };
+                let value = values[selection] as u16;
+                self.mem_write(dest, value, host, Origin { pc: origin_pc });
+                activation.pc = next;
+                Ok(VmStep::Continue)
+            }
             Completion::EncounterMenu(state) => {
                 let selection = match reply {
                     Some(Reply::Selection(v)) => v,
@@ -774,6 +804,7 @@ impl EclMachine {
             0x29 => self.op_encounter_menu(activation, host, pc, opcode),
             0x2A => self.op_gettable(activation, host, pc, opcode),
             0x2B => self.op_horizontal_menu(activation, host, pc, opcode),
+            0x2C => self.op_parlay(activation, host, pc, opcode),
             0x2D => self.op_call(activation, host, pc, opcode),
             0x2E => self.op_damage(activation, host, pc, opcode),
             0x2F => self.op_and(activation, host, pc, opcode),
@@ -2207,6 +2238,53 @@ impl EclMachine {
             pc,
             Effect::ClearBox,
             pc.wrapping_add(1),
+        ))
+    }
+
+    /// ★ PARLAY (0x2C), `CMD_Parlay` (`talk_style`, `ovr003:27B7-2855`).
+    ///
+    /// Not a dialogue tree (review E6 was right): six operands, of which the
+    /// first five are a **five-entry outcome table** and the sixth is a
+    /// destination cell. The player picks a tone from a fixed, hard-coded
+    /// menu — `"~HAUGHTY ~SLY ~NICE ~MEEK ~ABUSIVE"` lives in the code
+    /// segment (`ovr003:2806`), not in the script — and the table entry under
+    /// that tone is written to the cell, where a COMPARE picks it up.
+    ///
+    /// So the script decides what each tone *means* at this encounter, and
+    /// the same word can be the right answer in one conversation and the
+    /// wrong one in the next. That is the whole mechanism.
+    ///
+    /// **Draw-free**, start to finish: `sub_317AA` is a menu wait and
+    /// `cmd_table01` is `vm_SetMemoryValue`. Nothing in `talk_style` touches
+    /// the PRNG, so PARLAY is draw-neutral by construction rather than by
+    /// argument.
+    ///
+    /// The operand loop is `for i in 0..=4 { values[i] = GetCmdValue(i + 1) }`
+    /// (`:27D0-27EF`) and the destination is `cmd_opps[6].Word` (`:2827-2834`)
+    /// — the raw word, never dereferenced, like every destination operand.
+    fn op_parlay(
+        &mut self,
+        activation: &mut Activation,
+        host: &mut dyn VmHost,
+        pc: u16,
+        opcode: u8,
+    ) -> Result<VmStep, VmError> {
+        let (args, next) = self.load_cmd_sets(pc.wrapping_add(1), 6, host, pc);
+        let mut values = [0u8; 5];
+        for (i, slot) in values.iter_mut().enumerate() {
+            *slot = self.resolve_numeric(&args[i], pc, opcode, host)? as u8;
+        }
+        let dest = self.resolve_target(&args[5], pc, opcode)?;
+        Ok(Self::yield_request(
+            activation,
+            pc,
+            Request::HorizontalMenu {
+                options: PARLAY_TONES
+                    .iter()
+                    .map(|w| VmString::from_bytes(&w[..]))
+                    .collect(),
+            },
+            Completion::WriteToneOutcomeThenAdvance { dest, values, next },
         ))
     }
 

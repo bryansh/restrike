@@ -1824,6 +1824,113 @@ mod opcodes {
 
     // --- roll-credits slice 3: the items/roster/mechanics tail ------------
 
+    /// ★ PARLAY's five tones are a fixed code-segment menu, and the operands
+    /// are the OUTCOME TABLE the reply indexes — the selection itself is
+    /// never written (`ovr003:2837-284D`).
+    #[test]
+    fn parlay_writes_the_table_entry_under_the_chosen_tone() {
+        // `ECL3#16 @0x8B15`'s shape: five outcome bytes and a destination.
+        for (choice, expected) in [(0u8, 1u16), (2, 3), (4, 9)] {
+            let mut b = EclBuilder::new();
+            b.label("entry");
+            b.op(0x2C)
+                .imm_byte(1)
+                .imm_byte(2)
+                .imm_byte(3)
+                .imm_byte(4)
+                .imm_byte(9)
+                .mem(0x7F80);
+            b.label("after");
+            b.op(0x00);
+
+            let entry = b.addr_of("entry");
+            let after = b.addr_of("after");
+            let mut m = machine_from(&b, entry);
+            let mut h = TestHost::new();
+
+            let step = m.step(&mut h).expect("step");
+            let VmStep::Request(Request::HorizontalMenu { options }) = step else {
+                panic!("expected the tone menu, got {step:?}");
+            };
+            let words: Vec<String> = options
+                .iter()
+                .map(|o| String::from_utf8_lossy(&o.0).into_owned())
+                .collect();
+            assert_eq!(words, ["HAUGHTY", "SLY", "NICE", "MEEK", "ABUSIVE"]);
+
+            assert_continue(m.resume(Reply::Selection(choice), &mut h));
+            assert_eq!(h.word(0x7F80), Some(expected));
+            assert_eq!(m.current_pc(), Some(after));
+        }
+    }
+
+    /// PARLAY never touches the PRNG — the draw-neutrality claim, asserted
+    /// rather than argued.
+    #[test]
+    fn parlay_draws_nothing() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x2C)
+            .imm_byte(0)
+            .imm_byte(0)
+            .imm_byte(0)
+            .imm_byte(0)
+            .imm_byte(0)
+            .mem(0x7F80);
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+
+        assert!(matches!(
+            m.step(&mut h),
+            Ok(VmStep::Request(Request::HorizontalMenu { .. }))
+        ));
+        assert_continue(m.resume(Reply::Selection(1), &mut h));
+        assert!(
+            !h.calls
+                .iter()
+                .any(|c| matches!(c, RecordedCall::Roll { .. } | RecordedCall::RollDice { .. })),
+            "PARLAY is draw-free start to finish"
+        );
+    }
+
+    /// A parked PARLAY survives a snapshot round-trip with its outcome table
+    /// intact — the table lives in the completion, not in the block bytes the
+    /// operand cursor has already passed.
+    #[test]
+    fn a_parked_parlay_survives_a_snapshot_round_trip() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x2C)
+            .imm_byte(7)
+            .imm_byte(8)
+            .imm_byte(9)
+            .imm_byte(10)
+            .imm_byte(11)
+            .mem(0x7F84);
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+        assert!(matches!(
+            m.step(&mut h),
+            Ok(VmStep::Request(Request::HorizontalMenu { .. }))
+        ));
+
+        let snap = m.snapshot();
+        let mut restored = EclMachine::restore(snap, &COTAB).expect("restore");
+        assert!(matches!(
+            restored.pending(),
+            Some(Request::HorizontalMenu { .. })
+        ));
+
+        assert_continue(restored.resume(Reply::Selection(3), &mut h));
+        assert_eq!(h.word(0x7F84), Some(10));
+    }
+
     /// LOAD CHARACTER passes the operand byte through **raw**, high bit and
     /// all: the mask is the service's business (`ovr003:0318-0325`).
     #[test]
