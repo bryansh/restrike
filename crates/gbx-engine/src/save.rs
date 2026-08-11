@@ -80,7 +80,20 @@ pub const CONTAINER_VERSION: u16 = 1;
 /// redraw gate's fifth flag), `byte_1EE95` and `byte_1EE96`. New postcard
 /// fields in the middle of the payload: reject-not-migrate, hard version
 /// bump. The committed golden was recomputed in the same commit.
-pub const SAVE_FORMAT_VERSION: u32 = 5;
+/// **v6** (roll-credits slice 3, the items/roster/mechanics tail — §3's churn
+/// rule says a slice takes ONE break, so every shape this slice needs lands
+/// here at once, including the ones later commits in the same slice fill in):
+/// `EngineState` gained the roster/selection cells the LOAD CHARACTER family
+/// reads and writes (`player_not_found`, `restore_player_ptr`,
+/// `redraw_party_summary`, `party_size`), the treasure pool
+/// (`pooled_money` — a new `crate::money::MoneySet`, `int`-wide like the
+/// original's, and `treasure_items`), `exp_to_add`, and `wipe_cause` (which
+/// of the original's two death screens the wipe flow shows). `GameOverFlow`
+/// gained `cause`/`delay_ticks` for the same reason, and `Combatant` gained
+/// the award payload a dead monster pays out. New postcard fields in the
+/// middle of the payload: reject-not-migrate, hard version bump. The
+/// committed golden was recomputed in the same commit.
+pub const SAVE_FORMAT_VERSION: u32 = 6;
 
 /// This engine's one shipped flavor (M3's slice — `xxvc` is M7). An 8-byte
 /// ASCII tag rather than a numeric id, matching the header's own

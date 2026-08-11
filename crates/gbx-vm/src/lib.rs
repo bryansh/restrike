@@ -31,8 +31,8 @@ pub use dialect::{
 };
 pub use disasm::{disassemble, render_instr, DataRegion, Hazard, Listing, Summary};
 pub use host::{
-    Effect, EngineServices, ItemHandle, MissingData, MonsterHandle, NotFound, Origin, PlayerId,
-    RecordedCall, Reply, Request, ScriptMemory, VmHost, VmRng, VmString,
+    Effect, EngineServices, ItemHandle, MissingData, MonsterHandle, Origin, PlayerId,
+    ProgramOutcome, RecordedCall, Reply, Request, ScriptMemory, VmHost, VmRng, VmString,
 };
 pub use machine::{
     BlockId, EclMachine, Exit, HeaderError, RestoreError, Snapshot, VmError, VmStep,

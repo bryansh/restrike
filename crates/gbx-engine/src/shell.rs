@@ -483,6 +483,10 @@ fn widget_for_request(request: &Request, menu_selected_word: usize) -> Widget {
         // key. The real paint is step 5's rendering scope; the flow-control
         // shape (park, resolve, resume) is what this session proves.
         Request::Combat => Widget::PressAnyKey(PressAnyKey),
+        // `DisplayAndPause`: the prompt line is painted by `tick_present`
+        // (which owns the framebuffer at that point); the widget is the
+        // blocking `GetInputKey` that follows it.
+        Request::PressAnyKey { .. } => Widget::PressAnyKey(PressAnyKey),
     }
 }
 
@@ -516,6 +520,9 @@ fn describe_request(request: &Request) -> String {
         // the real-combat branch resolves in `tick_present` before a widget is
         // ever built, so it never reaches here.
         Request::Combat => "combat (non-combat branch: deferred)".to_string(),
+        Request::PressAnyKey { text, .. } => {
+            format!("pause: {}", String::from_utf8_lossy(&text.0))
+        }
     }
 }
 
@@ -811,6 +818,23 @@ impl VectorRun {
                         self.pending = Some(PendingOutcome::VerticalPrompt(request));
                         continue;
                     }
+                    // `DisplayAndPause` (`seg041.cs:297-303`):
+                    // `ClearPromptAreaNoUpdate`, the message on the prompt
+                    // line in its own colour, then a blocking `GetInputKey`.
+                    // Drawn here rather than as an `Effect` because the
+                    // message and the key are one interaction.
+                    if let Request::PressAnyKey { text, color } = &request {
+                        crate::combat::scene::render::clear_prompt_line(ctx.fb);
+                        crate::text::draw_string(
+                            ctx.fb,
+                            ctx.font,
+                            &String::from_utf8_lossy(&text.0),
+                            0x18,
+                            0,
+                            0,
+                            *color,
+                        );
+                    }
                     let widget = widget_for_request(&request, ctx.state.menu_selected_word);
                     self.pending = Some(PendingOutcome::Request(request));
                     self.phase = VmPhase::Gate(widget);
@@ -818,6 +842,21 @@ impl VectorRun {
                 }
             }
         }
+    }
+
+    /// `PartySummary(gbl.SelectedPlayer)` (`ovr025.cs:1430`) — the roster panel,
+    /// painted from the live roster with the current selection highlighted. The
+    /// same three lines `screens.rs`'s camp draw and `Engine::build` already use.
+    fn draw_party_summary(ctx: &mut FlowCtx) {
+        let rows: Vec<_> = ctx
+            .roster
+            .members
+            .iter()
+            .map(crate::charsheet::sheet_view)
+            .collect();
+        let selected =
+            (!rows.is_empty()).then(|| (ctx.state.selected_player as usize) % rows.len());
+        crate::charsheet::render_party_summary(ctx.fb, ctx.font, &rows, selected);
     }
 
     /// One buffered [`Effect`] presented (D-VM3's ordered drain).
@@ -870,6 +909,23 @@ impl VectorRun {
             // ★ `sub_30580`'s draw half (FD-34), authorized by the
             // execution-time state pass that emitted this effect.
             Effect::EncounterVisual => crate::picture::encounter_visual(ctx),
+            // `PartySummary(SelectedPlayer)` — the roster panel alone. Every
+            // frame this engine composes already redraws that panel from the
+            // live roster (`Engine::build`'s party summary step), so the
+            // effect's job is to make sure a *frame happens* at this point in
+            // the queue; the panel it asks for is repainted with it.
+            Effect::PartySummary => Self::draw_party_summary(ctx),
+            // ★ CLEAR BOX (`ovr003.cs:1741-1754`): `draw8x8_03` +
+            // `PartySummary` + `display_map_position_time` + the picture
+            // window's frame-0 redraw + the status line again. The frame
+            // rebuild is `redraw_view`'s own clear→frame→viewport idiom (the
+            // one `combat_host`'s Restore documents), so this reuses it rather
+            // than half-painting.
+            Effect::ClearBox => {
+                let _ = crate::frames::draw8x8_03(ctx.fb, ctx.symbols);
+                crate::corridor::redraw_view(ctx);
+                Self::draw_party_summary(ctx);
+            }
         }
     }
 
@@ -1017,6 +1073,7 @@ impl VectorRun {
             (Request::VerticalMenu { .. }, _) => Reply::Selection(list_index as u8),
             (Request::Delay, _) => Reply::Delay,
             (Request::Combat, _) => Reply::Combat,
+            (Request::PressAnyKey { .. }, _) => Reply::PressAnyKey,
             // Unreachable: Hotbar yields only Hotbar(key)/PartyScroll (both
             // handled), the list arm is exhaustive above. Kept as a quiet
             // fallback, not a panic — but note option 0 is NOT "safe" at a
@@ -1150,8 +1207,55 @@ pub struct EngineState {
     /// `WorldMenu`, suppresses `LastEclBlockId` commits while set.
     pub chained: bool,
     pub party_killed: bool,
+    /// Which death screen the wipe flow shows — the combat one, or the ECL
+    /// DAMAGE opcode's own (`ovr003:2C43-2C86`, different words, different
+    /// box, a hard 3-second beat, a different prompt colour). Set by whatever
+    /// killed the party; read by [`GameOverFlow::start`].
+    pub wipe_cause: WipeCause,
     pub selected_player: u8,
     pub last_selected_player: u8,
+    /// ★ `gbl.player_not_found` (`byte_1EE97`, `Classes/Gbl.cs:417`): LOAD
+    /// CHARACTER's miss flag. Its one reader is the Party-window cell
+    /// `0x7D00` (`get_player_values`' `arg_4 == 0x100` arm,
+    /// `ovr008.cs:425-441`), which returns **0** when it is set — and clears
+    /// it on the way past. That read-and-clear is what makes the shipped
+    /// slot-scan idiom work: `LOAD CHARACTER n` then a compare against
+    /// `0x7D00` distinguishes "no such slot" (0) from "in combat" (1) and
+    /// "out of combat" (0x80).
+    pub player_not_found: bool,
+    /// `gbl.restore_player_ptr` (`byte_1AB0A`, `Gbl.cs:290`): set by LOAD
+    /// CHARACTER (`ovr003:02EF`), consumed by EXIT (`:14-18`) and PROGRAM
+    /// (`:1934-1938`), which put `LastSelectedPlayer` back when it is armed —
+    /// so a script that retargets the selection mid-vector does not leak that
+    /// retarget into the world menu.
+    pub restore_player_ptr: bool,
+    /// `gbl.redrawPartySummary1`/`2` (`byte_1EE7C`/`byte_1EE7D`,
+    /// `Gbl.cs:400-401`), armed by two Party-window writes of zero
+    /// (`alter_character`'s `0x7C00` and `0x7D00` arms, `ovr008.cs:568-571`,
+    /// `:628-631`) and cleared by `vm_init_ecl` (`:92-93`). Both armed **plus**
+    /// LOAD CHARACTER's high operand bit is what turns that opcode into a
+    /// remove-this-member instruction (`ovr003:0377-03C0`).
+    pub redraw_party_summary: [bool; 2],
+    /// `area2_ptr.party_size` (`area2.field_67C`) — the count of *real* party
+    /// members. Joined NPCs are appended to the roster past it and are not
+    /// counted (`load_npc` gates on `party_size <= 7` without incrementing,
+    /// `ovr017.cs:880`), which is exactly the distinction combat's
+    /// `nonTeamMember` split already relies on. DAMAGE rolls its victim over
+    /// this, not over the roster length.
+    pub party_size: u8,
+    /// ★ `gbl.pooled_money` (`Classes/Gbl.cs:528`) — the treasure pool
+    /// TREASURE (0x27) writes, dead monsters pay into
+    /// (`calc_battle_exp`, `ovr006.cs:29`), CLEARMONSTERS clears
+    /// (`ovr003.cs:767`) and the post-fight screen shares out.
+    pub pooled_money: crate::money::MoneySet,
+    /// `gbl.items_pointer` (`Gbl.cs:526`) — the treasure pool's item half,
+    /// as opaque `0x3F`-byte `.swg`-shaped records, the same representation
+    /// [`crate::party::Character::items`] uses.
+    pub treasure_items: Vec<Vec<u8>>,
+    /// `gbl.exp_to_add` — the per-survivor experience `calc_battle_exp`
+    /// computed for the last fight, kept because `displayCombatResults` prints
+    /// it after `addExp` has already spent it (`ovr006.cs:251-252`, `:795`).
+    pub exp_to_add: i32,
     pub ecl_block_id: u8,
     pub last_ecl_block_id: u8,
     pub tried_to_exit_map: bool,
@@ -1324,8 +1428,16 @@ impl EngineState {
             area_map_shown: false,
             chained: false,
             party_killed: false,
+            wipe_cause: WipeCause::Combat,
             selected_player: 0,
             last_selected_player: 0,
+            player_not_found: false,
+            restore_player_ptr: false,
+            redraw_party_summary: [false; 2],
+            party_size: 0,
+            pooled_money: crate::money::MoneySet::default(),
+            treasure_items: Vec::new(),
+            exp_to_add: 0,
             ecl_block_id: 1,
             last_ecl_block_id: 0,
             tried_to_exit_map: false,
@@ -1769,6 +1881,18 @@ impl StepFlow {
 
 /// `AfterCombatExpAndTreasure`'s wipe branch (`ovr006.cs:801-809`), verbatim.
 /// 36 columns of box (`xStart = 2 .. xEnd = 0x25`) wrap it onto two lines.
+/// Which of the original's two party-wipe screens the [`GameOverFlow`] shows.
+/// They are genuinely different presentations, not one screen with two
+/// strings, so the choice is engine state rather than a caller argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum WipeCause {
+    /// `AfterCombatExpAndTreasure`'s `else` arm (`ovr006.cs:803-808`).
+    Combat,
+    /// The ECL `DAMAGE` opcode's own arm (`ovr003:2C43-2C86`), whose
+    /// party-killed scan runs inside the opcode.
+    EclDamage,
+}
+
 const WIPE_TEXT: &str = "The monsters rejoice for the party has been destroyed";
 
 /// `press_any_key(..., yEnd = 0x16, xEnd = 0x25, yStart = 5, xStart = 2)`
@@ -1785,6 +1909,28 @@ const WIPE_TEXT_REGION: crate::text::TextRegion = crate::text::TextRegion {
 /// a blocking `GetInputKey`.
 const WIPE_PROMPT: &str = "Press any key to continue";
 const WIPE_PROMPT_COLOR: u8 = 13;
+
+/// ★ The ECL DAMAGE variant (`ovr003:2C4A-2C86`), transcribed from the binary
+/// rather than from coab's paraphrase. Four differences from the combat
+/// screen, all of them visible: the words, the box (`press_any_key(text,
+/// clear, 10, yEnd 0x16, xEnd 0x26, yStart 1, xStart 1)` — a *wider* box
+/// starting one row higher), the cursor it is placed from (`textXCol = 2`,
+/// `textYCol = 2` at `:2C4F-2C54`, against the combat screen's `2, 6`), and a
+/// hard `DELAY(3000)` (`:2C82`) before anything else may happen.
+const DAMAGE_WIPE_TEXT: &str = "The entire party is killed!";
+const DAMAGE_WIPE_TEXT_REGION: crate::text::TextRegion = crate::text::TextRegion {
+    y_start: 1,
+    y_end: 0x16,
+    x_start: 1,
+    x_end: 0x26,
+};
+/// `SysDelay(3000)` at 60 Hz (`crate::input::TICK_HZ`).
+const DAMAGE_WIPE_DELAY_TICKS: u32 = 3 * crate::input::TICK_HZ;
+/// The opcode's own trailing prompt is `DisplayAndPause("press
+/// &lt;enter&gt;/&lt;return&gt; to continue", 15)` (`:2C98-2CAD`) — colour 15, and a
+/// different sentence from the combat screen's colour-13 one.
+const DAMAGE_WIPE_PROMPT: &str = "press <enter>/<return> to continue";
+const DAMAGE_WIPE_PROMPT_COLOR: u8 = 15;
 
 /// ★ **The party wipe** (`ovr006.cs:801-809` for the screen; `seg001.cs:133-153`
 /// for what happens next).
@@ -1831,24 +1977,56 @@ pub struct GameOverFlow {
     /// `DisplayAndPause`'s blocking `GetInputKey`, armed once the message is
     /// fully on screen.
     gate: Option<Widget>,
+    /// Which screen this is — the two differ in words, box, cursor, pacing and
+    /// prompt colour (see [`WipeCause`]).
+    #[serde(default = "wipe_cause_combat")]
+    cause: WipeCause,
+    /// The ECL variant's `SysDelay(3000)` (`ovr003:2C82`), counted down before
+    /// the prompt is even drawn. Zero for the combat screen, which has none.
+    #[serde(default)]
+    delay_ticks: u32,
+}
+
+fn wipe_cause_combat() -> WipeCause {
+    WipeCause::Combat
 }
 
 impl GameOverFlow {
-    /// Paints the death screen and starts the message printing
-    /// (`ovr006.cs:802-807`).
+    /// Paints the death screen and starts the message printing — the combat
+    /// arm (`ovr006.cs:802-807`) or the ECL DAMAGE arm (`ovr003:2C4A-2C86`),
+    /// whichever [`EngineState::wipe_cause`] says killed the party.
     fn start(ctx: &mut FlowCtx) -> Self {
+        let cause = ctx.state.wipe_cause;
         // A fixture engine with no symbol set 4 gets no border, exactly as
         // the screens' own `draw_frame_outer` calls already tolerate.
         let _ = crate::frames::draw_frame_outer(ctx.fb, ctx.symbols);
-        // `gbl.textXCol = 2; gbl.textYCol = 6;` (`ovr006.cs:805-806`) — then
-        // `press_any_key`'s `clear_first` resets the cursor to the box origin
-        // anyway (`seg041.cs:151-158`), which is what actually places the text.
-        ctx.cursor.col = 2;
-        ctx.cursor.row = 6;
-        let job = TextJob::new(WIPE_TEXT, 10, WIPE_TEXT_REGION, true, ctx.cursor, ctx.fb);
+        // `gbl.textXCol/textYCol` (`ovr006.cs:805-806` / `ovr003:2C4F-2C54`) —
+        // then `press_any_key`'s `clear_first` resets the cursor to the box
+        // origin anyway (`seg041.cs:151-158`), which is what actually places
+        // the text.
+        let (text, color, region, delay_ticks) = match cause {
+            WipeCause::Combat => {
+                ctx.cursor.col = 2;
+                ctx.cursor.row = 6;
+                (WIPE_TEXT, 10, WIPE_TEXT_REGION, 0)
+            }
+            WipeCause::EclDamage => {
+                ctx.cursor.col = 2;
+                ctx.cursor.row = 2;
+                (
+                    DAMAGE_WIPE_TEXT,
+                    10,
+                    DAMAGE_WIPE_TEXT_REGION,
+                    DAMAGE_WIPE_DELAY_TICKS,
+                )
+            }
+        };
+        let job = TextJob::new(text, color, region, true, ctx.cursor, ctx.fb);
         GameOverFlow {
             job: Some(job),
             gate: None,
+            cause,
+            delay_ticks,
         }
     }
 
@@ -1860,6 +2038,8 @@ impl GameOverFlow {
         GameOverFlow {
             job: None,
             gate: Some(Widget::PressAnyKey(PressAnyKey)),
+            cause: WipeCause::Combat,
+            delay_ticks: 0,
         }
     }
 
@@ -1885,20 +2065,27 @@ impl GameOverFlow {
                 }
                 JobStatus::Done => {
                     self.job = None;
-                    // `DisplayAndPause` (`seg041.cs:297-303`).
-                    crate::combat::scene::render::clear_prompt_line(ctx.fb);
-                    crate::text::draw_string(
-                        ctx.fb,
-                        ctx.font,
-                        WIPE_PROMPT,
-                        0x18,
-                        0,
-                        0,
-                        WIPE_PROMPT_COLOR,
-                    );
-                    self.gate = Some(Widget::PressAnyKey(PressAnyKey));
                 }
             }
+        }
+        // ★ The ECL variant's `SysDelay(3000)` (`ovr003:2C82`) sits BETWEEN
+        // the message and the prompt: the original really does hold the
+        // "entire party is killed!" screen for three seconds with nothing
+        // else on it before it will take a key.
+        if self.delay_ticks > 0 {
+            self.delay_ticks = self.delay_ticks.saturating_sub(ctx.dt_ticks);
+            ctx.input.clear(); // the delay is not interruptible
+            return None;
+        }
+        if self.gate.is_none() {
+            // `DisplayAndPause` (`seg041.cs:297-303`).
+            let (prompt, color) = match self.cause {
+                WipeCause::Combat => (WIPE_PROMPT, WIPE_PROMPT_COLOR),
+                WipeCause::EclDamage => (DAMAGE_WIPE_PROMPT, DAMAGE_WIPE_PROMPT_COLOR),
+            };
+            crate::combat::scene::render::clear_prompt_line(ctx.fb);
+            crate::text::draw_string(ctx.fb, ctx.font, prompt, 0x18, 0, 0, color);
+            self.gate = Some(Widget::PressAnyKey(PressAnyKey));
         }
         let gate = self.gate.as_mut()?;
         match gate.tick(ctx.input, ctx.dt_ticks) {

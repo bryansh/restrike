@@ -75,10 +75,19 @@ pub struct ItemHandle(pub u16);
 )]
 pub struct PlayerId(pub u8);
 
-/// LOAD CHARACTER (0x0A) with an out-of-range/absent index —
-/// `gbl.player_not_found`, not an exception, in the original.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NotFound;
+/// PROGRAM (0x38)'s per-case outcome (`CMD_Program`, `ovr003.cs:1929-1987`).
+/// The opcode's cases differ in whether the *script* keeps running, so the
+/// engine-side service reports back rather than the VM guessing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ProgramOutcome {
+    /// Cases `0` and `8`: the handler returns and the script continues at the
+    /// next instruction. (Case 8 never really returns in the original — it
+    /// ends the process — but the engine decides that, not the VM.)
+    Continue,
+    /// Cases `3` and `9`: the handler ends with `CMD_Exit()`
+    /// (`ovr003.cs:1980`, `:1985`), so the activation ends here.
+    Exit,
+}
 
 /// LOAD MONSTER (0x0B)'s missing-`.dax`-asset path. The original hits a hard
 /// `print_and_exit()` here (`ovr017.cs:836-838`) — a fatal, non-recoverable
@@ -121,8 +130,47 @@ pub struct MissingData;
 ///   share one signature.
 pub trait EngineServices {
     // --- Character / party ---
-    fn retarget_selected_player(&mut self, index: u8) -> Result<(), NotFound>;
+    /// ★ LOAD CHARACTER (0x0A) in full — `sub_262E9` (`ovr003:02E9-03C8`),
+    /// which is a **party-slot selector**, not a join op.
+    ///
+    /// `index` is the operand byte **raw**, high bit included: the mask is
+    /// engine-side because everything the mask decides is engine state (there
+    /// is no draw and no `ScriptMemory` write anywhere in this handler).
+    ///
+    /// **Correction to coab** (`ovr003.cs:186`), from the binary: coab reads
+    /// `player_index > 0 && player_index < TeamList.Count ? TeamList[index] :
+    /// null`, so slot **0 is never found**. The binary seeds its cursor with
+    /// the list HEAD and then walks it `index` times
+    /// (`ovr003:030B` `player_ptr = player_next_ptr`, `:0328`
+    /// `cmp var_6,0 / jbe loc_26356`) — index 0 skips the walk and selects
+    /// `TeamList[0]`, which is exactly what makes `ECL5#48 @0x809B`'s
+    /// `SAVE 0, 0x7F79` … `LOAD CHARACTER 0x7F79` … `< 8` scan cover all eight
+    /// slots instead of seven. Out of range still lands on a null cursor and
+    /// sets `player_not_found` (`:0372`).
+    fn retarget_selected_player(&mut self, index: u8);
+    /// DUMP (0x3E), `CMD_Dump` (`ovr003.cs:2007-2018`): drop the selected
+    /// member from the roster, re-seat the selection, and mirror it into
+    /// `LastSelectedPlayer`. ADD NPC's mirror image — this is how `ECL5#48`
+    /// says goodbye to Akabar.
+    fn dump_selected_player(&mut self);
     fn free_current_player(&mut self, free_icon: bool, leave_party_size: bool) -> PlayerId;
+    /// `area2_ptr.party_size` (`area2.field_67C`) — the count of real party
+    /// members, which is *not* `TeamList.Count`: joined NPCs sit past it.
+    /// DAMAGE rolls its victim over this (`roll_dice(party_size, 1)`,
+    /// `ovr003:29F4-29FE`).
+    fn party_size(&mut self) -> u8;
+    /// `gbl.TeamList.Count` — party members **plus** joined NPCs. DAMAGE's
+    /// `var_1 & 0x40` arm walks the whole list, and its victim walk stops at
+    /// a null cursor rather than at `party_size`.
+    fn team_size(&mut self) -> u8;
+    /// `gbl.SelectedPlayer`, as a roster index. DAMAGE brackets its whole body
+    /// with a save/restore of this (`ovr003:295E`, `:2C8B`).
+    fn selected_player(&mut self) -> PlayerId;
+    fn set_selected_player(&mut self, player: PlayerId);
+    /// DAMAGE's closing scan (`ovr003:2C04-2C43`): `party_killed` is set iff
+    /// **no** roster member is `in_combat`. Sets the engine cell and reports
+    /// it, because the opcode's own death screen is gated on the answer.
+    fn party_wipe_check(&mut self) -> bool;
     fn party_strength(&mut self) -> u8;
     /// CHECKPARTY (0x1E)'s query dispatch is a partial function in the
     /// original (docket item 7): unrecognized `query` codes silently no-op.
@@ -157,7 +205,22 @@ pub trait EngineServices {
     /// `ushort` `area2_ptr.max_encounter_distance`.
     fn setup_monster(&mut self, sprite_id: u8, max_distance: u16, pic_id: u8);
     fn clear_monsters(&mut self);
-    fn add_npc(&mut self, monster_id: u8, morale: u8);
+    /// ★ ADD NPC (0x36), `CMD_AddNPC` (`ovr003.cs:1769-1782`) — **the game's
+    /// only join mechanism**, and (roll-credits §7.1) genuinely shipped
+    /// content, not attract-mode-only: six sites recruit Alias, Dragonbait,
+    /// Akabar and area 6's Rakshasa.
+    ///
+    /// `load_npc` (`ovr017.cs:878-890`) is gated on `party_size <= 7` and
+    /// loads the record through `load_mob` — `MON{area}CHA` plus its `SPC`
+    /// (innate affects) and `ITM` (carried items) companions
+    /// (`ovr017.cs:824-873`) — then `AssignPlayerIconId` (`:892-896`) is what
+    /// actually appends to `TeamList` and re-seats `SelectedPlayer`. The
+    /// handler then overwrites the record's own morale byte with
+    /// `(morale >> 1) + Control.NPC_Base` (`:1778`).
+    ///
+    /// A missing `.dax` is `load_mob`'s `print_and_exit` (`ovr017.cs:836`),
+    /// surfaced the same way LOAD MONSTER's is.
+    fn add_npc(&mut self, monster_id: u8, morale: u8) -> Result<(), MissingData>;
     /// CALL (0x2D) cases `1`/`2` — `SetupDuel(bool)`.
     fn setup_duel(&mut self, is_duel: bool);
     /// ENCOUNTER MENU (0x29)'s own first act (`ovr003.cs:1250`):
@@ -217,8 +280,19 @@ pub trait EngineServices {
     fn set_encounter_menu_active(&mut self, active: bool);
 
     // --- Items / treasure ---
+    /// TREASURE (0x27)'s random arm: `create_item` (`ovr022.cs:443`), which
+    /// **draws** (its `randomBonus`/charge rolls) — so the interpreter calls it
+    /// in the original's own order and never batches it.
     fn create_item(&mut self, item_type: u8) -> ItemHandle;
-    fn load_item_from_table(&mut self, block_id: u8) -> ItemHandle;
+    /// TREASURE (0x27)'s table arm (`ovr003.cs:1083-1099`): decode block
+    /// `block_id` of `ITEM{game_area}.DAX` and append **every** `Item`-sized
+    /// record in it to the treasure pool. Draw-free. A missing file is
+    /// `Logger.LogAndExit` in the original (`:1090`), surfaced as
+    /// [`MissingData`] like every other hard asset stop.
+    fn load_treasure_items(&mut self, block_id: u8) -> Result<(), MissingData>;
+    /// TREASURE (0x27)'s first seven operands (`ovr003.cs:1076-1079`):
+    /// `gbl.pooled_money.SetCoins(coin, value)` — an assignment, not an add.
+    fn set_pooled_coin(&mut self, coin: u8, value: u16);
     /// SPELL (0x3B)'s not-found sentinel is a deliberate byte-underflow pair
     /// in the original (`0xFF`, `0xFF`) — replicate exactly, don't "fix" it.
     fn find_spell_in_party(&mut self, spell_id: u8) -> (u8, u8);
@@ -229,8 +303,13 @@ pub trait EngineServices {
     /// opcode handler, not here — see `machine.rs`'s RANDOM implementation.
     fn roll(&mut self, max: u8) -> u8;
     fn roll_dice(&mut self, size: u8, count: u8) -> u16;
-    fn roll_saving_throw(&mut self, bonus: u8, save_type: u8) -> bool;
-    fn can_hit_target(&mut self, bonus: u8) -> bool;
+    /// `do_saving_throw(bonus, save_type, player)` — the target is an explicit
+    /// argument in the original at every DAMAGE call site (`ovr003:2A57`,
+    /// `:2ABE`, `:2B2F`), never `SelectedPlayer` by implication.
+    fn roll_saving_throw(&mut self, player: PlayerId, bonus: u8, save_type: u8) -> bool;
+    /// `sub_641DD(bonus, player)` — DAMAGE's per-victim to-hit check
+    /// (`ovr003:2BC7`), likewise target-explicit.
+    fn can_hit_target(&mut self, player: PlayerId, bonus: u8) -> bool;
     fn apply_damage(&mut self, player: PlayerId, damage: u16);
 
     // --- World / map / files ---
@@ -258,6 +337,12 @@ pub trait EngineServices {
     /// execution time, while the *draw* it guards travels as
     /// [`Effect::RedrawView`] so it presents in queue order (D-VM3).
     fn redraw_view_gate(&mut self) -> bool;
+
+    /// PROGRAM (0x38), `CMD_Program` (`ovr003.cs:1929-1987`). Every case is
+    /// engine-level flow (`startGameMenu`, the end-game text, `TryEncamp`,
+    /// the party-killed flag), so the operand goes over as-is and the engine
+    /// reports whether the activation continues.
+    fn program(&mut self, code: u8) -> ProgramOutcome;
 
     // --- CALL (0x2D) case 0x3201 ---
     /// Selects which sound effect CALL's `0x3201` case plays, from
@@ -336,6 +421,18 @@ pub enum Effect {
     /// head+body put up. Payload-less for the same reason [`Effect::RedrawView`]
     /// is: the plan lives in engine state the VM does not own.
     EncounterVisual,
+    /// `PartySummary(SelectedPlayer)` (`ovr025`) — the roster panel repaint
+    /// LOAD CHARACTER's dump arm (`ovr003.cs:208`), DUMP (`:2017`) and
+    /// ADD NPC (`:1781`) each end with. Payload-less: the panel reads the
+    /// engine's own roster.
+    PartySummary,
+    /// CLEAR BOX (0x3D), `CMD_ClearBox` (`ovr003.cs:1741-1754`): the whole
+    /// exploration frame is rebuilt — `draw8x8_03`, the party summary, the
+    /// map/position/time line, the picture window's frame-0 redraw, then the
+    /// line again. One effect because the original does it as one
+    /// unconditional sequence with nothing the VM can influence between the
+    /// steps.
+    ClearBox,
 }
 
 /// Interactions that suspend the activation awaiting a reply (D-VM3).
@@ -372,6 +469,12 @@ pub enum Request {
     /// (opcode-classification.md docket item 10, explicitly out of scope for
     /// M1 step 0).
     Combat,
+    /// `seg041.DisplayAndPause(text, color)` — the prompt-line message plus a
+    /// blocking `GetInputKey`. DAMAGE (0x2E) ends with one unconditionally
+    /// (`ovr003:2C98-2CAD`: "press \<enter\>/\<return\> to continue", colour
+    /// 15), which is distinct from the death screen's own prompt (colour 13,
+    /// different words) — that one belongs to the wipe flow, not the opcode.
+    PressAnyKey { text: VmString, color: u8 },
 }
 
 /// Replies to a suspended `Request`. `resume()` checks the reply kind
@@ -383,6 +486,9 @@ pub enum Reply {
     Selection(u8),
     Delay,
     Combat,
+    /// Acknowledges a [`Request::PressAnyKey`]. Carries no key: the original's
+    /// `DisplayAndPause` discards whatever was pressed.
+    PressAnyKey,
 }
 
 impl Reply {
@@ -394,6 +500,7 @@ impl Reply {
                 | (Reply::Selection(_), Request::VerticalMenu { .. })
                 | (Reply::Delay, Request::Delay)
                 | (Reply::Combat, Request::Combat)
+                | (Reply::PressAnyKey, Request::PressAnyKey { .. })
         )
     }
 }
@@ -436,10 +543,18 @@ pub enum RecordedCall {
     RetargetSelectedPlayer {
         index: u8,
     },
+    DumpSelectedPlayer,
     FreeCurrentPlayer {
         free_icon: bool,
         leave_party_size: bool,
     },
+    PartySize,
+    TeamSize,
+    SelectedPlayer,
+    SetSelectedPlayer {
+        player: PlayerId,
+    },
+    PartyWipeCheck,
     PartyStrength,
     CheckParty {
         query: u16,
@@ -494,8 +609,12 @@ pub enum RecordedCall {
     CreateItem {
         item_type: u8,
     },
-    LoadItemFromTable {
+    LoadTreasureItems {
         block_id: u8,
+    },
+    SetPooledCoin {
+        coin: u8,
+        value: u16,
     },
     FindSpellInParty {
         spell_id: u8,
@@ -509,10 +628,12 @@ pub enum RecordedCall {
         count: u8,
     },
     RollSavingThrow {
+        player: PlayerId,
         bonus: u8,
         save_type: u8,
     },
     CanHitTarget {
+        player: PlayerId,
         bonus: u8,
     },
     ApplyDamage {
@@ -542,6 +663,9 @@ pub enum RecordedCall {
     WallType,
     RedrawViewGate {
         armed: bool,
+    },
+    Program {
+        code: u8,
     },
 
     CallSoundVariant,

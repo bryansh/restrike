@@ -23,7 +23,7 @@ use std::collections::VecDeque;
 
 use crate::decode::{decode_operand, Arg, BlockBytes, ECL_BLOCK_BASE, ECL_BLOCK_SIZE};
 use crate::dialect::Dialect;
-use crate::host::{Effect, Origin, Reply, Request, VmHost, VmString};
+use crate::host::{Effect, Origin, PlayerId, ProgramOutcome, Reply, Request, VmHost, VmString};
 
 /// Identifies a script block for `Exit::ChainTo` (NEWECL/PROGRAM-8's target).
 /// A raw `.dax`-file-relative block id, exactly as coab's `CMD_NewECL`
@@ -753,6 +753,7 @@ impl EclMachine {
             0x07 => self.op_multiply(activation, host, pc, opcode),
             0x08 => self.op_random(activation, host, pc, opcode),
             0x09 => self.op_save(activation, host, pc, opcode),
+            0x0A => self.op_load_character(activation, host, pc, opcode),
             0x0B => self.op_load_monster(activation, host, pc, opcode),
             0x0C => self.op_setup_monster(activation, host, pc, opcode),
             0x0D => self.op_approach(activation, host, pc),
@@ -774,12 +775,21 @@ impl EclMachine {
             0x2A => self.op_gettable(activation, host, pc, opcode),
             0x2B => self.op_horizontal_menu(activation, host, pc, opcode),
             0x2D => self.op_call(activation, host, pc, opcode),
+            0x2E => self.op_damage(activation, host, pc, opcode),
             0x2F => self.op_and(activation, host, pc, opcode),
             0x30 => self.op_or(activation, host, pc, opcode),
             0x31 => self.op_sprite_off(activation, host, pc),
+            0x32 => self.op_find_item(activation, host, pc, opcode),
             0x33 => self.op_print_return(activation),
+            0x35 => self.op_save_table(activation, host, pc, opcode),
+            0x36 => self.op_add_npc(activation, host, pc, opcode),
             0x37 => self.op_load_files(activation, host, pc, opcode, true),
+            0x38 => self.op_program(activation, host, pc, opcode),
             0x3A => self.op_delay(activation),
+            0x3D => self.op_clear_box(activation, pc),
+            0x3E => self.op_dump(activation, host, pc),
+            0x3F => self.op_find_special(activation, host, pc, opcode),
+            0x40 => self.op_destroy_items(activation, host, pc, opcode),
             _ if self.dialect.lookup(opcode).is_some() => {
                 Err(VmError::Unimplemented { pc, opcode })
             }
@@ -2024,5 +2034,358 @@ impl EclMachine {
             Request::Delay,
             Completion::Advance(next),
         ))
+    }
+
+    // --- roll-credits slice 3: the items/roster/mechanics tail -------------
+
+    /// LOAD CHARACTER (0x0A), `CMD_LoadCharacter` (`sub_262E9`,
+    /// `ovr003:02E9`). One operand, byte-cast, passed through **raw** — the
+    /// high bit is part of it. Nothing in this handler draws or writes
+    /// `ScriptMemory`; every effect is roster state, so the whole body is one
+    /// service call (see [`crate::EngineServices::retarget_selected_player`],
+    /// which carries the binary transcription and coab's slot-0 correction).
+    ///
+    /// The dump arm's `PartySummary` repaint is not emitted here: the arm is
+    /// conditional on engine-side flags the VM cannot see
+    /// (`redrawPartySummary1/2`), so the service owns both the decision and
+    /// its redraw.
+    fn op_load_character(
+        &mut self,
+        activation: &mut Activation,
+        host: &mut dyn VmHost,
+        pc: u16,
+        opcode: u8,
+    ) -> Result<VmStep, VmError> {
+        let (args, next) = self.load_cmd_sets(pc.wrapping_add(1), 1, host, pc);
+        let index = self.resolve_numeric(&args[0], pc, opcode, host)? as u8;
+        host.retarget_selected_player(index);
+        activation.pc = next;
+        Ok(VmStep::Continue)
+    }
+
+    /// FIND ITEM (0x32), `CMD_FindItem` (`ovr003.cs:1560-1585`). Scans every
+    /// roster member's inventory for an item of the operand's type.
+    ///
+    /// The flag convention is the original's, verbatim: all six cleared, then
+    /// `compare_flags[1] = true` **before** the scan, and only a hit flips
+    /// `[0]` on and `[1]` off. So "not found" reads as `!=` and "found" as
+    /// `=`, and the other four relations are left false — a `IF <` after a
+    /// FIND ITEM tests nothing, which is exactly what the original leaves
+    /// behind.
+    fn op_find_item(
+        &mut self,
+        activation: &mut Activation,
+        host: &mut dyn VmHost,
+        pc: u16,
+        opcode: u8,
+    ) -> Result<VmStep, VmError> {
+        let (args, next) = self.load_cmd_sets(pc.wrapping_add(1), 1, host, pc);
+        let item_type = self.resolve_numeric(&args[0], pc, opcode, host)? as u8;
+        let found = host.party_has_item(item_type);
+        self.flags = [found, !found, false, false, false, false];
+        activation.pc = next;
+        Ok(VmStep::Continue)
+    }
+
+    /// FIND SPECIAL (0x3F), `CMD_FindSpecial` (`ovr003.cs:2021-2039`) — FIND
+    /// ITEM's twin over `SelectedPlayer.HasAffect`, with the same two-flag
+    /// convention (and the same clear-all-six preamble, which here happens
+    /// *before* the operand load, `:2023-2028`).
+    fn op_find_special(
+        &mut self,
+        activation: &mut Activation,
+        host: &mut dyn VmHost,
+        pc: u16,
+        opcode: u8,
+    ) -> Result<VmStep, VmError> {
+        let (args, next) = self.load_cmd_sets(pc.wrapping_add(1), 1, host, pc);
+        let affect_type = self.resolve_numeric(&args[0], pc, opcode, host)? as u8;
+        let found = host.find_special(affect_type);
+        self.flags = [found, !found, false, false, false, false];
+        activation.pc = next;
+        Ok(VmStep::Continue)
+    }
+
+    /// DESTROY ITEMS (0x40), `CMD_DestroyItems` (`ovr003.cs:2042-2055`):
+    /// remove every item of the operand's type from every roster member, then
+    /// recompute each member's derived values (the removal can drop a readied
+    /// weapon or armour). Sets no flags.
+    fn op_destroy_items(
+        &mut self,
+        activation: &mut Activation,
+        host: &mut dyn VmHost,
+        pc: u16,
+        opcode: u8,
+    ) -> Result<VmStep, VmError> {
+        let (args, next) = self.load_cmd_sets(pc.wrapping_add(1), 1, host, pc);
+        let item_type = self.resolve_numeric(&args[0], pc, opcode, host)? as u8;
+        host.destroy_items(item_type);
+        activation.pc = next;
+        Ok(VmStep::Continue)
+    }
+
+    /// SAVE TABLE (0x35), `CMD_SaveTable` (`ovr003.cs:651-660`) — GETTABLE's
+    /// mirror, and note the operand roles are **not** mirrored: GETTABLE is
+    /// `(base, index, dest)` while SAVE TABLE is `(value, base, index)`. The
+    /// base is the raw destination `.Word` (never dereferenced, docket item
+    /// 3); the index is a resolved value added to it.
+    fn op_save_table(
+        &mut self,
+        activation: &mut Activation,
+        host: &mut dyn VmHost,
+        pc: u16,
+        opcode: u8,
+    ) -> Result<VmStep, VmError> {
+        let (args, next) = self.load_cmd_sets(pc.wrapping_add(1), 3, host, pc);
+        let value = self.resolve_numeric(&args[0], pc, opcode, host)?;
+        let base = self.resolve_target(&args[1], pc, opcode)?;
+        let index = self.resolve_numeric(&args[2], pc, opcode, host)?;
+        let dest = base.wrapping_add(index);
+        self.mem_write(dest, value, host, Origin { pc });
+        activation.pc = next;
+        Ok(VmStep::Continue)
+    }
+
+    /// ★ ADD NPC (0x36), `CMD_AddNPC` (`ovr003.cs:1769-1782`) — the game's one
+    /// join mechanism (roll-credits §7.1).
+    ///
+    /// **`skip_size` 1, arity 2** — the confirmed divergence the dialect table
+    /// already records (`Fixed(2)` with `skip_size: 1`): the handler really
+    /// does `vm_LoadCmdSets(2)` while an `IF` skipping over it advances by one
+    /// batch. Both shipped pairs (`ADD NPC 0x16,0x64` then `ADD NPC 0x17,0x64`)
+    /// sit on a straight path, so the divergence is unreachable in practice;
+    /// the arity here follows the handler, as everywhere else.
+    ///
+    /// A missing `MON{area}CHA` block is `load_mob`'s hard stop, surfaced as
+    /// [`VmError::MissingAsset`] exactly like LOAD MONSTER's.
+    fn op_add_npc(
+        &mut self,
+        activation: &mut Activation,
+        host: &mut dyn VmHost,
+        pc: u16,
+        opcode: u8,
+    ) -> Result<VmStep, VmError> {
+        let (args, next) = self.load_cmd_sets(pc.wrapping_add(1), 2, host, pc);
+        let monster_id = self.resolve_numeric(&args[0], pc, opcode, host)? as u8;
+        let morale = self.resolve_numeric(&args[1], pc, opcode, host)? as u8;
+        host.add_npc(monster_id, morale)
+            .map_err(|_| VmError::MissingAsset { pc, opcode })?;
+        // `:1780-1781` — `reclac_player_values` is inside the service (roster
+        // state); the summary repaint is the presented half.
+        Ok(Self::yield_effect(
+            activation,
+            pc,
+            Effect::PartySummary,
+            next,
+        ))
+    }
+
+    /// DUMP (0x3E), `CMD_Dump` (`ovr003.cs:2007-2018`) — ADD NPC's mirror.
+    /// Zero operands.
+    fn op_dump(
+        &mut self,
+        activation: &mut Activation,
+        host: &mut dyn VmHost,
+        pc: u16,
+    ) -> Result<VmStep, VmError> {
+        host.dump_selected_player();
+        Ok(Self::yield_effect(
+            activation,
+            pc,
+            Effect::PartySummary,
+            pc.wrapping_add(1),
+        ))
+    }
+
+    /// CLEAR BOX (0x3D), `CMD_ClearBox` (`ovr003.cs:1741-1754`). Zero
+    /// operands, pure presentation — the whole exploration frame is rebuilt.
+    /// **Not demo-only** (roll-credits §7.2 withdraws that claim): 17 shipped
+    /// uses, concentrated in the wilderness blocks.
+    fn op_clear_box(&mut self, activation: &mut Activation, pc: u16) -> Result<VmStep, VmError> {
+        Ok(Self::yield_effect(
+            activation,
+            pc,
+            Effect::ClearBox,
+            pc.wrapping_add(1),
+        ))
+    }
+
+    /// ★ DAMAGE (0x2E), `CMD_Damage` (`sub_28958`, `ovr003:2958-2CB5`) — the
+    /// script's own damage primitive, and the one opcode in this slice that
+    /// draws. Five operands:
+    ///
+    /// | # | name | meaning |
+    /// |---|---|---|
+    /// | 1 | `var_1` | mode bits **and**, in the `& 0x80 == 0` arm, the hit COUNT |
+    /// | 2 | `var_2` | dice count |
+    /// | 3 | `var_3` | dice size |
+    /// | 4 | `var_7` | flat damage bonus |
+    /// | 5 | `var_6` | save type / to-hit bonus |
+    ///
+    /// `var_1`'s bits: `0x80` = "saving throw mode" (else: `var_1` hits, each
+    /// gated by `CanHitTarget`), `0x40` = whole party, `0x20` = no save at all,
+    /// `0x10` = **damage anyway on a successful save**, `0x1F` = the save
+    /// bonus. `var_6`'s: `0x80` = target `SelectedPlayer` (with the save type
+    /// taken as `type - 1`), low 3 bits = the save type.
+    ///
+    /// **Draw order, exactly** (`:29BF`, `:29F1`, then per-arm): the damage
+    /// roll first; then, iff `var_1 & 0x40 == 0`, one `roll_dice(party_size, 1)`
+    /// victim roll — **even in the `0x80`-clear arm, which immediately
+    /// re-rolls and discards it**; then each arm's saving throws / to-hit
+    /// checks. In the `0x80`-clear loop the damage for iteration *n* is the
+    /// value rolled at the END of iteration *n-1* (`:2BDE`), so the pre-loop
+    /// roll is the first hit's damage and the last roll is thrown away.
+    ///
+    /// Draw-neutral for every capture: `DAMAGE` is an ECL opcode and the
+    /// captures are combat streams — no capture's script ever executes one.
+    fn op_damage(
+        &mut self,
+        activation: &mut Activation,
+        host: &mut dyn VmHost,
+        pc: u16,
+        opcode: u8,
+    ) -> Result<VmStep, VmError> {
+        // `:295E` — `SelectedPlayer` is saved and restored around the body.
+        let selected_backup = host.selected_player();
+
+        let (args, next) = self.load_cmd_sets(pc.wrapping_add(1), 5, host, pc);
+        let var_1 = self.resolve_numeric(&args[0], pc, opcode, host)? as u8;
+        let dice_count = self.resolve_numeric(&args[1], pc, opcode, host)? as u8;
+        let dice_size = self.resolve_numeric(&args[2], pc, opcode, host)? as u8;
+        let dam_plus = self.resolve_numeric(&args[3], pc, opcode, host)?;
+        let var_6 = self.resolve_numeric(&args[4], pc, opcode, host)? as u8;
+
+        // `:29BF-29D7` — the first draw, unconditionally.
+        let mut damage = host.roll_dice(dice_size, dice_count).wrapping_add(dam_plus);
+
+        let damage_even_on_save = var_1 & 0x10 != 0; // `var_1B`, `:29DA`
+        let whole_party = var_1 & 0x40 != 0; // `var_1A`, `:29E2`
+
+        // `:29F1` — the victim roll, taken here (before the 0x80 test) so its
+        // draw lands in the original's position even on the arm that re-rolls.
+        let mut victim = 0u16;
+        if !whole_party {
+            let party_size = host.party_size();
+            victim = host.roll_dice(party_size, 1);
+        }
+
+        if var_1 & 0x80 != 0 {
+            let save_bonus = var_1 & 0x1F; // `:2A12`
+            let save_type = var_6 & 7; // `:2A1A`
+            if whole_party {
+                // `:2A28-2A97` — every roster member, walking to the list end.
+                let members = host.team_size();
+                for index in 0..members {
+                    let target = PlayerId(index);
+                    // `:2A30` — no save offered at all; `:2A49-2A5E` — a
+                    // failed save; `:2A70` — a successful one, which still
+                    // hurts under the 0x10 bit. The first two arms have the
+                    // same outcome but NOT the same cost: the 0x20 arm must
+                    // not draw the save at all.
+                    let hit = if var_1 & 0x20 != 0 {
+                        true
+                    } else {
+                        !host.roll_saving_throw(target, save_bonus, save_type)
+                            || damage_even_on_save
+                    };
+                    if hit {
+                        host.apply_damage(target, damage);
+                    }
+                }
+            } else if var_6 & 0x80 != 0 {
+                // `:2A9C-2AEF` — the selected member, with the save type
+                // taken one lower (and type 0 meaning "no save").
+                let target = host.selected_player();
+                let hit = if save_type == 0
+                    || !host.roll_saving_throw(target, save_bonus, save_type - 1)
+                {
+                    true
+                } else {
+                    damage_even_on_save
+                };
+                if hit {
+                    host.apply_damage(target, damage);
+                }
+            } else {
+                // `:2AF1-2B5C` — the rolled victim. The original walks a
+                // linked list `victim - 1` times with no bounds check; the
+                // roll's own range (`1..=party_size`) is what keeps it in
+                // bounds, so the saturation here can never bite.
+                let target = PlayerId(victim.saturating_sub(1) as u8);
+                let hit = if !host.roll_saving_throw(target, save_bonus, save_type) {
+                    true
+                } else {
+                    damage_even_on_save
+                };
+                if hit {
+                    host.apply_damage(target, damage);
+                }
+            }
+        } else {
+            // `:2B5F-2C01` — `var_1` separate hits, each on its own freshly
+            // rolled victim, each gated by `CanHitTarget(var_6, target)`.
+            for _ in 0..var_1 {
+                let party_size = host.party_size();
+                let rolled = host.roll_dice(party_size, 1);
+                let target = PlayerId(rolled.saturating_sub(1) as u8);
+                if host.can_hit_target(target, var_6) {
+                    host.apply_damage(target, damage);
+                }
+                // `:2BDE` — the NEXT hit's damage, rolled at the tail. The
+                // final iteration's roll is drawn and discarded.
+                damage = host.roll_dice(dice_size, dice_count).wrapping_add(dam_plus);
+            }
+        }
+
+        // `:2C04-2C43` — `party_killed` iff nobody is left `in_combat`. The
+        // death screen the original prints inline is the engine's wipe flow
+        // here (it swaps the shell at top-of-tick once `party_killed` is set),
+        // which is why this opcode emits only the trailing prompt: printing
+        // the message twice is the one thing the two models must not do.
+        host.party_wipe_check();
+        // `:2C8B` — restore, before the prompt.
+        host.set_selected_player(selected_backup);
+
+        Ok(Self::yield_request(
+            activation,
+            pc,
+            Request::PressAnyKey {
+                text: VmString::from_bytes(&b"press <enter>/<return> to continue"[..]),
+                color: 15,
+            },
+            Completion::Advance(next),
+        ))
+    }
+
+    /// PROGRAM (0x38), `CMD_Program` (`ovr003.cs:1929-1987`). One operand
+    /// selecting one of four engine-level behaviours; the engine performs it
+    /// and reports whether the activation continues (case 3 and case 9 both
+    /// end in `CMD_Exit()`).
+    ///
+    /// `ConservativeFallthrough` in the dialect stays honest here: the
+    /// disassembler cannot know the operand's case, so it keeps walking; the
+    /// interpreter, which *does* know, ends the activation when the engine
+    /// says so.
+    fn op_program(
+        &mut self,
+        activation: &mut Activation,
+        host: &mut dyn VmHost,
+        pc: u16,
+        opcode: u8,
+    ) -> Result<VmStep, VmError> {
+        let (args, next) = self.load_cmd_sets(pc.wrapping_add(1), 1, host, pc);
+        let code = self.resolve_numeric(&args[0], pc, opcode, host)? as u8;
+        match host.program(code) {
+            ProgramOutcome::Continue => {
+                activation.pc = next;
+                Ok(VmStep::Continue)
+            }
+            ProgramOutcome::Exit => {
+                // `CMD_Exit`'s own body (`ovr003.cs:9-42`), reached through
+                // `CMD_Program`'s tail call.
+                self.call_stack.clear();
+                Ok(VmStep::Done(Exit::Ended))
+            }
+        }
     }
 }

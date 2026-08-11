@@ -710,6 +710,21 @@ pub fn item_readied(record: &[u8]) -> bool {
     record.get(0x34).is_some_and(|&b| b != 0)
 }
 
+/// One item record's `type` (`Item.cs:118`: `type = (ItemType)data[0x2e]`) —
+/// the `ITEMS`-table index that decides what the item *is*, and the field the
+/// FIND ITEM (0x32) / DESTROY ITEMS (0x40) opcode pair matches on. `0` (the
+/// `Clear()` default) for a short/malformed record.
+pub fn item_type(record: &[u8]) -> u8 {
+    record.get(0x2E).copied().unwrap_or(0)
+}
+
+/// One item record's `plus` (`Item.cs:122`: `plus = (sbyte)data[0x32]`) — the
+/// magical enchantment level. `calc_battle_exp` pays **400 experience per
+/// plus** for every item in the treasure pool (`ovr006.cs:56-59`).
+pub fn item_plus(record: &[u8]) -> i8 {
+    record.get(0x32).copied().unwrap_or(0) as i8
+}
+
 /// One item record's buy/sell `_value` (`Item.cs:35`: `short _value` on-disk
 /// at offset `0x3A`) — the base price a shop scales by its price class. `0`
 /// for a short/malformed record. (Read from the *user's* runtime data; never

@@ -22,7 +22,7 @@ use gbx_formats::dax::{self, DaxArchive};
 use gbx_prng::Prng;
 use gbx_vm::{
     decode, render_instr, BlockBytes, EclMachine, Effect, EngineServices, ItemHandle, MissingData,
-    MonsterHandle, NotFound, Origin, PlayerId, Reply, Request, ScriptMemory, VmError, VmHost,
+    MonsterHandle, Origin, PlayerId, ProgramOutcome, Reply, Request, ScriptMemory, VmError, VmHost,
     VmRng, VmStep, VmString, COTAB, ECL_BLOCK_SIZE,
 };
 
@@ -192,6 +192,8 @@ fn print_effect(effect: &Effect) {
         Effect::AnimationFrame => println!("-- [animation frame] --"),
         Effect::RedrawView => println!("-- [redraw view] --"),
         Effect::EncounterVisual => println!("-- [encounter visual] --"),
+        Effect::PartySummary => println!("-- [party summary] --"),
+        Effect::ClearBox => println!("-- [clear box] --"),
     }
 }
 
@@ -228,6 +230,9 @@ fn describe_request(request: &Request) -> String {
         }
         Request::Delay => "Delay".to_string(),
         Request::Combat => "Combat".to_string(),
+        Request::PressAnyKey { text, color } => {
+            format!("PressAnyKey({}, color={color})", vm_string_to_display(text))
+        }
     }
 }
 
@@ -236,6 +241,7 @@ fn describe_reply(reply: &Reply) -> String {
         Reply::Selection(i) => format!("Selection({i})"),
         Reply::Delay => "Delay".to_string(),
         Reply::Combat => "Combat".to_string(),
+        Reply::PressAnyKey => "PressAnyKey".to_string(),
     }
 }
 
@@ -347,6 +353,7 @@ impl ReplyPolicy {
             }
             Request::Delay => Reply::Delay,
             Request::Combat => Reply::Combat,
+            Request::PressAnyKey { .. } => Reply::PressAnyKey,
         }
     }
 }
@@ -450,9 +457,36 @@ impl ScriptMemory for CliHost {
 /// default (`false`/`0`/`Ok`) since this host has no game-entity state to
 /// consult.
 impl EngineServices for CliHost {
-    fn retarget_selected_player(&mut self, index: u8) -> Result<(), NotFound> {
+    fn retarget_selected_player(&mut self, index: u8) {
         eprintln!("svc: retarget_selected_player(index={index})");
-        Ok(())
+    }
+
+    fn dump_selected_player(&mut self) {
+        eprintln!("svc: dump_selected_player()");
+    }
+
+    fn party_size(&mut self) -> u8 {
+        eprintln!("svc: party_size()");
+        0
+    }
+
+    fn team_size(&mut self) -> u8 {
+        eprintln!("svc: team_size()");
+        0
+    }
+
+    fn selected_player(&mut self) -> PlayerId {
+        eprintln!("svc: selected_player()");
+        PlayerId(0)
+    }
+
+    fn set_selected_player(&mut self, player: PlayerId) {
+        eprintln!("svc: set_selected_player(player={})", player.0);
+    }
+
+    fn party_wipe_check(&mut self) -> bool {
+        eprintln!("svc: party_wipe_check()");
+        false
     }
 
     fn free_current_player(&mut self, free_icon: bool, leave_party_size: bool) -> PlayerId {
@@ -523,8 +557,9 @@ impl EngineServices for CliHost {
         eprintln!("svc: clear_monsters()");
     }
 
-    fn add_npc(&mut self, monster_id: u8, morale: u8) {
+    fn add_npc(&mut self, monster_id: u8, morale: u8) -> Result<(), MissingData> {
         eprintln!("svc: add_npc(monster_id={monster_id}, morale={morale})");
+        Ok(())
     }
 
     fn setup_duel(&mut self, is_duel: bool) {
@@ -569,9 +604,13 @@ impl EngineServices for CliHost {
         ItemHandle(0)
     }
 
-    fn load_item_from_table(&mut self, block_id: u8) -> ItemHandle {
-        eprintln!("svc: load_item_from_table(block_id={block_id:#04X})");
-        ItemHandle(0)
+    fn load_treasure_items(&mut self, block_id: u8) -> Result<(), MissingData> {
+        eprintln!("svc: load_treasure_items(block_id={block_id:#04X})");
+        Ok(())
+    }
+
+    fn set_pooled_coin(&mut self, coin: u8, value: u16) {
+        eprintln!("svc: set_pooled_coin(coin={coin}, value={value})");
     }
 
     fn find_spell_in_party(&mut self, spell_id: u8) -> (u8, u8) {
@@ -597,13 +636,16 @@ impl EngineServices for CliHost {
         total
     }
 
-    fn roll_saving_throw(&mut self, bonus: u8, save_type: u8) -> bool {
-        eprintln!("svc: roll_saving_throw(bonus={bonus}, save_type={save_type})");
+    fn roll_saving_throw(&mut self, player: PlayerId, bonus: u8, save_type: u8) -> bool {
+        eprintln!(
+            "svc: roll_saving_throw(player={}, bonus={bonus}, save_type={save_type})",
+            player.0
+        );
         false
     }
 
-    fn can_hit_target(&mut self, bonus: u8) -> bool {
-        eprintln!("svc: can_hit_target(bonus={bonus})");
+    fn can_hit_target(&mut self, player: PlayerId, bonus: u8) -> bool {
+        eprintln!("svc: can_hit_target(player={}, bonus={bonus})", player.0);
         false
     }
 
@@ -643,6 +685,15 @@ impl EngineServices for CliHost {
     fn wall_type(&mut self) -> u8 {
         eprintln!("svc: wall_type()");
         0
+    }
+
+    fn program(&mut self, code: u8) -> ProgramOutcome {
+        eprintln!("svc: program(code={code})");
+        if code == 3 || code == 9 {
+            ProgramOutcome::Exit
+        } else {
+            ProgramOutcome::Continue
+        }
     }
 
     fn call_sound_variant(&mut self) -> u8 {

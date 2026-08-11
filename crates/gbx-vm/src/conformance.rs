@@ -1821,6 +1821,490 @@ mod opcodes {
         assert_continue(m.resume(Reply::Delay, &mut h));
         assert_eq!(m.current_pc(), Some(after));
     }
+
+    // --- roll-credits slice 3: the items/roster/mechanics tail ------------
+
+    /// LOAD CHARACTER passes the operand byte through **raw**, high bit and
+    /// all: the mask is the service's business (`ovr003:0318-0325`).
+    #[test]
+    fn load_character_hands_the_service_the_raw_operand_byte() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x0A).imm_byte(0x83);
+        b.label("after");
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let after = b.addr_of("after");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+
+        assert_continue(m.step(&mut h));
+        assert_eq!(m.current_pc(), Some(after));
+        assert!(h
+            .calls
+            .contains(&RecordedCall::RetargetSelectedPlayer { index: 0x83 }));
+    }
+
+    /// FIND ITEM's flag convention (`ovr003.cs:1566-1581`): a hit is `=`, a
+    /// miss is `<>`, and **no other relation is left true** — the original
+    /// clears all six and then arms exactly one.
+    #[test]
+    fn find_item_sets_only_the_equal_flag_on_a_hit() {
+        for (found, expect_hit) in [(true, true), (false, false)] {
+            let mut b = EclBuilder::new();
+            b.label("entry");
+            b.op(0x32).imm_byte(0x5E);
+            b.op(0x16); // IF =
+            b.op(0x01).imm_word_label("hit"); // GOTO hit
+            b.label("miss");
+            b.op(0x00);
+            b.label("hit");
+            b.op(0x00);
+
+            let entry = b.addr_of("entry");
+            let hit = b.addr_of("hit");
+            let miss = b.addr_of("miss");
+            let mut m = machine_from(&b, entry);
+            let mut h = TestHost::new();
+            h.party_has_item_replies.push_back(found);
+
+            assert_continue(m.step(&mut h)); // FIND ITEM
+            assert!(h
+                .calls
+                .contains(&RecordedCall::PartyHasItem { item_type: 0x5E }));
+            assert_continue(m.step(&mut h)); // IF =
+            if expect_hit {
+                assert_continue(m.step(&mut h)); // the guarded GOTO runs
+                assert_eq!(m.current_pc(), Some(hit));
+            } else {
+                // The IF skipped the GOTO outright: the false arm is the very
+                // next instruction, which is the shape the census gap hid.
+                assert_eq!(m.current_pc(), Some(miss));
+            }
+        }
+    }
+
+    /// FIND SPECIAL is the same shape over `HasAffect` (`ovr003.cs:2021-2039`).
+    #[test]
+    fn find_special_sets_the_same_two_flags() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x3F).imm_byte(0x27);
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+        h.find_special_replies.push_back(true);
+
+        assert_continue(m.step(&mut h));
+        assert!(h
+            .calls
+            .contains(&RecordedCall::FindSpecial { affect_type: 0x27 }));
+    }
+
+    /// DESTROY ITEMS is one service call and no flags (`ovr003.cs:2042-2055`).
+    #[test]
+    fn destroy_items_calls_the_service_and_advances() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x40).imm_byte(0x60);
+        b.label("after");
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let after = b.addr_of("after");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+
+        assert_continue(m.step(&mut h));
+        assert_eq!(m.current_pc(), Some(after));
+        assert!(h
+            .calls
+            .contains(&RecordedCall::DestroyItems { item_type: 0x60 }));
+    }
+
+    /// ★ SAVE TABLE's operand roles are NOT GETTABLE's mirror image
+    /// (`ovr003.cs:651-660` against `:635-647`): the value comes first, the
+    /// table base second (raw, never dereferenced) and the index third.
+    #[test]
+    fn save_table_writes_value_to_base_plus_index() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x35).imm_byte(0x2A).mem(0x7A00).imm_byte(5);
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+
+        assert_continue(m.step(&mut h));
+        assert_eq!(h.word(0x7A05), Some(0x2A));
+    }
+
+    /// SAVE TABLE and GETTABLE round-trip through the same cell — the pairing
+    /// the shipped quest-flag tables are built on.
+    #[test]
+    fn save_table_then_gettable_round_trips_one_cell() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x35).imm_byte(0x07).mem(0x7A80).imm_byte(3); // SAVE TABLE 7 -> 0x7A83
+        b.op(0x2A).mem(0x7A80).imm_byte(3).mem(0x7F00); // GETTABLE 0x7A83 -> 0x7F00
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+
+        assert_continue(m.step(&mut h));
+        assert_continue(m.step(&mut h));
+        assert_eq!(h.word(0x7F00), Some(7));
+    }
+
+    /// CLEAR BOX: no operands, one effect, one byte of pc (`ovr003.cs:1743`).
+    #[test]
+    fn clear_box_yields_one_effect_and_advances_one_byte() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x3D);
+        b.label("after");
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let after = b.addr_of("after");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+
+        assert_eq!(m.step(&mut h), Ok(VmStep::Effect(Effect::ClearBox)));
+        assert_continue(m.step(&mut h));
+        assert_eq!(m.current_pc(), Some(after));
+    }
+
+    /// DUMP: the service, then the summary repaint (`ovr003.cs:2007-2018`).
+    #[test]
+    fn dump_frees_the_selected_member_then_repaints() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x3E);
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+
+        assert_eq!(m.step(&mut h), Ok(VmStep::Effect(Effect::PartySummary)));
+        assert!(h.calls.contains(&RecordedCall::DumpSelectedPlayer));
+    }
+
+    /// ★ ADD NPC decodes **two** operands even though its `skip_size` is 1 —
+    /// the fixed-arity divergence the dialect records. Both shipped pairs use
+    /// morale 0x64.
+    #[test]
+    fn add_npc_decodes_two_operands_and_repaints() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x36).imm_byte(0x16).imm_byte(0x64);
+        b.label("after");
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let after = b.addr_of("after");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+
+        assert_eq!(m.step(&mut h), Ok(VmStep::Effect(Effect::PartySummary)));
+        assert!(h.calls.contains(&RecordedCall::AddNpc {
+            monster_id: 0x16,
+            morale: 0x64
+        }));
+        assert_continue(m.step(&mut h));
+        assert_eq!(m.current_pc(), Some(after), "both operands were consumed");
+    }
+
+    /// A missing `MON{area}CHA` block is `load_mob`'s hard stop
+    /// (`ovr017.cs:836`), surfaced like LOAD MONSTER's.
+    #[test]
+    fn add_npc_missing_asset_halts_the_machine() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x36).imm_byte(0x16).imm_byte(0x64);
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+        h.add_npc_replies.push_back(Err(MissingData));
+
+        assert_eq!(
+            m.step(&mut h),
+            Err(VmError::MissingAsset {
+                pc: entry,
+                opcode: 0x36
+            })
+        );
+    }
+
+    /// PROGRAM 3 sets the party-killed flag and ends the activation
+    /// (`ovr003.cs:1982-1986`); every other case returns to the next
+    /// instruction.
+    #[test]
+    fn program_exits_or_continues_per_the_engines_verdict() {
+        for (outcome, expect_exit) in [
+            (crate::ProgramOutcome::Exit, true),
+            (crate::ProgramOutcome::Continue, false),
+        ] {
+            let mut b = EclBuilder::new();
+            b.label("entry");
+            b.op(0x38).imm_byte(3);
+            b.label("after");
+            b.op(0x00);
+
+            let entry = b.addr_of("entry");
+            let after = b.addr_of("after");
+            let mut m = machine_from(&b, entry);
+            let mut h = TestHost::new();
+            h.program_replies.push_back(outcome);
+
+            let step = m.step(&mut h);
+            assert!(h.calls.contains(&RecordedCall::Program { code: 3 }));
+            if expect_exit {
+                assert_eq!(step, Ok(VmStep::Done(Exit::Ended)));
+            } else {
+                assert_eq!(step, Ok(VmStep::Continue));
+                assert_eq!(m.current_pc(), Some(after));
+            }
+        }
+    }
+
+    /// ★ DAMAGE's draw ORDER, which is the whole of its fidelity: the damage
+    /// roll first, then the victim roll (taken whenever `var_1 & 0x40` is
+    /// clear, **before** the mode test), then the arm's own checks.
+    #[test]
+    fn damage_rolls_damage_then_victim_then_saves() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        // var_1 = 0x80 (save mode, single random victim), 2d6+1, save type 3.
+        b.op(0x2E)
+            .imm_byte(0x80)
+            .imm_byte(2)
+            .imm_byte(6)
+            .imm_byte(1)
+            .imm_byte(3);
+        b.label("after");
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let after = b.addr_of("after");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+        h.party_size_replies.push_back(6);
+        h.roll_dice_replies.push_back(9); // the damage roll
+        h.roll_dice_replies.push_back(4); // the victim roll -> index 3
+        h.roll_saving_throw_replies.push_back(false); // failed save -> damage
+
+        assert!(matches!(
+            m.step(&mut h),
+            Ok(VmStep::Request(Request::PressAnyKey { .. }))
+        ));
+
+        let rolls: Vec<_> = h
+            .calls
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    RecordedCall::RollDice { .. }
+                        | RecordedCall::RollSavingThrow { .. }
+                        | RecordedCall::ApplyDamage { .. }
+                )
+            })
+            .cloned()
+            .collect();
+        assert_eq!(
+            rolls,
+            vec![
+                RecordedCall::RollDice { size: 6, count: 2 },
+                RecordedCall::RollDice { size: 6, count: 1 },
+                RecordedCall::RollSavingThrow {
+                    player: crate::PlayerId(3),
+                    bonus: 0,
+                    save_type: 3
+                },
+                RecordedCall::ApplyDamage {
+                    player: crate::PlayerId(3),
+                    damage: 10
+                },
+            ]
+        );
+
+        assert_continue(m.resume(Reply::PressAnyKey, &mut h));
+        assert_eq!(m.current_pc(), Some(after));
+    }
+
+    /// The `& 0x80`-clear arm: `var_1` separate hits, each re-rolling its own
+    /// victim, each gated by `CanHitTarget` — and the damage used by hit *n*
+    /// is the value rolled at the end of hit *n-1* (`ovr003:2BDE`), so the
+    /// last roll is drawn and thrown away.
+    #[test]
+    fn damage_hit_count_arm_rerolls_victim_and_trails_its_damage_roll() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x2E)
+            .imm_byte(2) // two hits, no save mode
+            .imm_byte(1)
+            .imm_byte(4)
+            .imm_byte(0)
+            .imm_byte(11); // to-hit bonus
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+        h.party_size_replies.extend([6, 6, 6]);
+        h.roll_dice_replies.extend([3, 2, 5, 1, 7]);
+        h.can_hit_target_replies.extend([true, true]);
+
+        assert!(matches!(
+            m.step(&mut h),
+            Ok(VmStep::Request(Request::PressAnyKey { .. }))
+        ));
+
+        let damages: Vec<_> = h
+            .calls
+            .iter()
+            .filter_map(|c| match c {
+                RecordedCall::ApplyDamage { player, damage } => Some((player.0, *damage)),
+                _ => None,
+            })
+            .collect();
+        // Draw order: damage=3, victim=2 (pre-loop, discarded by the loop's
+        // own re-roll), then hit 1: victim=5 -> index 4 with damage 3, the
+        // trailing roll 1; hit 2: victim=7 -> index 6 with damage 1, the
+        // trailing roll 7 discarded.
+        assert_eq!(damages, vec![(4, 3), (6, 1)]);
+        let dice = h
+            .calls
+            .iter()
+            .filter(|c| matches!(c, RecordedCall::RollDice { .. }))
+            .count();
+        assert_eq!(dice, 6, "1 damage + 1 pre-loop victim + 2x(victim+damage)");
+    }
+
+    /// The whole-party arm walks the roster and offers each member a save.
+    #[test]
+    fn damage_whole_party_arm_walks_every_member() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x2E)
+            .imm_byte(0xC0) // 0x80 save mode | 0x40 whole party
+            .imm_byte(1)
+            .imm_byte(8)
+            .imm_byte(0)
+            .imm_byte(2);
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+        h.team_size_replies.push_back(3);
+        h.roll_dice_replies.push_back(6);
+        h.roll_saving_throw_replies.extend([false, true, false]);
+
+        assert!(matches!(
+            m.step(&mut h),
+            Ok(VmStep::Request(Request::PressAnyKey { .. }))
+        ));
+
+        let hit: Vec<_> = h
+            .calls
+            .iter()
+            .filter_map(|c| match c {
+                RecordedCall::ApplyDamage { player, .. } => Some(player.0),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(hit, vec![0, 2], "the member who saved took nothing");
+        assert!(
+            !h.calls.iter().any(|c| matches!(c, RecordedCall::PartySize)),
+            "the whole-party arm never rolls a victim, so it never reads party_size"
+        );
+    }
+
+    /// `0x10` means "damage anyway on a successful save" — not half damage.
+    #[test]
+    fn damage_bit_0x10_damages_through_a_successful_save() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x2E)
+            .imm_byte(0xD0) // save mode | whole party | damage-through-save
+            .imm_byte(1)
+            .imm_byte(8)
+            .imm_byte(0)
+            .imm_byte(2);
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+        h.team_size_replies.push_back(2);
+        h.roll_dice_replies.push_back(6);
+        h.roll_saving_throw_replies.extend([true, true]);
+
+        assert!(matches!(
+            m.step(&mut h),
+            Ok(VmStep::Request(Request::PressAnyKey { .. }))
+        ));
+
+        let hit = h
+            .calls
+            .iter()
+            .filter(|c| matches!(c, RecordedCall::ApplyDamage { .. }))
+            .count();
+        assert_eq!(hit, 2, "both saved, both still took the damage");
+    }
+
+    /// DAMAGE brackets its body with a save/restore of `SelectedPlayer`
+    /// (`ovr003:295E`, `:2C8B`) and ends with the wipe scan.
+    #[test]
+    fn damage_restores_the_selection_and_runs_the_wipe_scan() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x2E)
+            .imm_byte(0xC0)
+            .imm_byte(1)
+            .imm_byte(4)
+            .imm_byte(0)
+            .imm_byte(0);
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+        h.selected_player = crate::PlayerId(4);
+        h.team_size_replies.push_back(1);
+        h.roll_dice_replies.push_back(2);
+
+        assert!(matches!(
+            m.step(&mut h),
+            Ok(VmStep::Request(Request::PressAnyKey { .. }))
+        ));
+        assert!(h.calls.contains(&RecordedCall::PartyWipeCheck));
+        assert!(h.calls.contains(&RecordedCall::SetSelectedPlayer {
+            player: crate::PlayerId(4)
+        }));
+        let wipe = h
+            .calls
+            .iter()
+            .position(|c| matches!(c, RecordedCall::PartyWipeCheck))
+            .unwrap();
+        let restore = h
+            .calls
+            .iter()
+            .position(|c| matches!(c, RecordedCall::SetSelectedPlayer { .. }))
+            .unwrap();
+        assert!(wipe < restore, "the scan runs before the restore (`:2C04`)");
+    }
 }
 
 /// Skip-semantics tests (§4): IF-false over every opcode class the design

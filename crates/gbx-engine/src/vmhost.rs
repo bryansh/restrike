@@ -28,10 +28,22 @@ use gbx_formats::game_data::{GameData, GameDataError};
 use gbx_formats::geo::GeoBlock;
 use gbx_formats::walldef::WalldefBlock;
 use gbx_vm::{
-    BlockBytes, ItemHandle, MissingData, MonsterHandle, NotFound, Origin, PlayerId, RecordedCall,
-    ScriptMemory, VmRng, VmString, ECL_BLOCK_SIZE,
+    BlockBytes, ItemHandle, MissingData, MonsterHandle, Origin, PlayerId, ProgramOutcome,
+    RecordedCall, ScriptMemory, VmRng, VmString, ECL_BLOCK_SIZE,
 };
 use std::collections::{HashMap, HashSet};
+
+/// `Status` (`Classes/Enums.cs`; `charsheet.rs`'s `STATUS` table is the same
+/// indexing): the health-status codes the out-of-combat damage path assigns.
+const HEALTH_OKAY: u8 = 0;
+const HEALTH_ANIMATED: u8 = 1;
+const HEALTH_UNCONSCIOUS: u8 = 4;
+const HEALTH_DYING: u8 = 5;
+const HEALTH_DEAD: u8 = 6;
+
+/// `Control.NPC_Base` (`Classes/Player.cs:318-325`) — the morale-byte floor
+/// that marks a roster member as an NPC.
+const NPC_BASE: u8 = 0x80;
 
 /// The color code every wallset's paired 8×8 symbol data is loaded masked
 /// against — the same convention as boot's `Load8x8D` (`boot.rs`'s
@@ -1113,19 +1125,119 @@ impl EngineVmHost<'_> {
 // --- EngineServices (D-VM4's placement rule; M2 subset real, rest logged M3/M4 stubs) ---
 
 impl gbx_vm::EngineServices for EngineVmHost<'_> {
-    fn retarget_selected_player(&mut self, index: u8) -> Result<(), NotFound> {
+    /// ★ `CMD_LoadCharacter` in full (`sub_262E9`, `ovr003:02E9-03C8`) —
+    /// see the trait's own doc comment for the binary transcription and for
+    /// coab's slot-0 mis-transcription.
+    fn retarget_selected_player(&mut self, index: u8) {
         self.vm
             .calls
             .push(RecordedCall::RetargetSelectedPlayer { index });
-        Ok(())
+        self.state.restore_player_ptr = true; // `:02EF`
+        let high_bit = index & 0x80 != 0; // `:0318-031D`
+        let slot = (index & 0x7F) as usize; // `:0320-0325`
+
+        // `:0328-0354` — the cursor starts at the list HEAD and walks `slot`
+        // links, stopping early at a null. Index 0 therefore selects member 0.
+        if slot < self.roster.members.len() {
+            self.state.selected_player = slot as u8; // `:035E-0367`
+            self.state.player_not_found = false; // `:036B`
+        } else {
+            self.state.player_not_found = true; // `:0372`
+        }
+
+        // `:0377-03C0` — the dump arm. Both summary flags must be armed;
+        // `LastSelectedPlayer == SelectedPlayer` disarms the EXIT-time restore
+        // (there would be nothing left to restore to).
+        if high_bit && self.state.redraw_party_summary == [true, true] {
+            if self.state.last_selected_player == self.state.selected_player {
+                self.state.restore_player_ptr = false; // `:039E`
+            }
+            <Self as gbx_vm::EngineServices>::free_current_player(self, true, false);
+            self.state.redraw_party_summary = [false, false]; // `:03BB-03C0`
+        }
     }
 
+    /// `CMD_Dump` (`ovr003.cs:2007-2018`): free the selected member, then
+    /// mirror the new selection into `LastSelectedPlayer` — the mirror is what
+    /// stops a later EXIT restoring a member that no longer exists.
+    fn dump_selected_player(&mut self) {
+        self.vm.calls.push(RecordedCall::DumpSelectedPlayer);
+        <Self as gbx_vm::EngineServices>::free_current_player(self, true, false);
+        self.state.last_selected_player = self.state.selected_player;
+    }
+
+    /// `area2_ptr.party_size`. Seeded at import/boot from the roster and
+    /// maintained by `FreeCurrentPlayer`; a zero here means the state predates
+    /// the field, so the roster length stands in.
+    fn party_size(&mut self) -> u8 {
+        self.vm.calls.push(RecordedCall::PartySize);
+        if self.state.party_size == 0 {
+            self.roster.members.len() as u8
+        } else {
+            self.state.party_size
+        }
+    }
+
+    fn team_size(&mut self) -> u8 {
+        self.vm.calls.push(RecordedCall::TeamSize);
+        self.roster.members.len() as u8
+    }
+
+    fn selected_player(&mut self) -> PlayerId {
+        self.vm.calls.push(RecordedCall::SelectedPlayer);
+        PlayerId(self.state.selected_player)
+    }
+
+    fn set_selected_player(&mut self, player: PlayerId) {
+        self.vm
+            .calls
+            .push(RecordedCall::SetSelectedPlayer { player });
+        self.state.selected_player = player.0;
+    }
+
+    /// DAMAGE's closing scan (`ovr003:2C04-2C43`) — and the *only* condition
+    /// is `in_combat`, not health status: a member knocked unconscious is
+    /// already `in_combat == false` by the time this runs, which is what makes
+    /// the test work at all.
+    fn party_wipe_check(&mut self) -> bool {
+        self.vm.calls.push(RecordedCall::PartyWipeCheck);
+        let killed = !self.roster.members.iter().any(|m| m.status.in_combat);
+        self.state.party_killed = killed;
+        if killed {
+            self.state.wipe_cause = crate::shell::WipeCause::EclDamage;
+        }
+        killed
+    }
+
+    /// ★ `FreeCurrentPlayer` (`ovr018.cs:1580-1607`): remove `SelectedPlayer`
+    /// from the roster, drop `party_size` unless the caller asked to leave it,
+    /// and re-seat the selection **one slot back** (`index > 0 ? index - 1 :
+    /// 0`, `:1600`) — not on the member that slid into the vacated slot. An
+    /// emptied roster leaves the selection at 0, matching the original's
+    /// `null` as closely as an index can.
+    ///
+    /// `ReleaseCombatIcon` is combat-art bookkeeping our own icon loader does
+    /// not need (it takes no slot table out of combat).
     fn free_current_player(&mut self, free_icon: bool, leave_party_size: bool) -> PlayerId {
         self.vm.calls.push(RecordedCall::FreeCurrentPlayer {
             free_icon,
             leave_party_size,
         });
-        PlayerId(0)
+        let index = self.state.selected_player as usize;
+        if index >= self.roster.members.len() {
+            return PlayerId(self.state.selected_player);
+        }
+        self.roster.members.remove(index);
+        if !leave_party_size {
+            self.state.party_size = self.state.party_size.saturating_sub(1);
+        }
+        let next = index.saturating_sub(1);
+        self.state.selected_player = if self.roster.members.is_empty() {
+            0
+        } else {
+            next as u8
+        };
+        PlayerId(self.state.selected_player)
     }
 
     /// ★ `CMD_PartyStrength`'s power sum (`ovr003.cs:776-805`), transcribed
@@ -1171,20 +1283,50 @@ impl gbx_vm::EngineServices for EngineVmHost<'_> {
         0
     }
 
+    /// `CMD_FindItem`'s scan (`ovr003.cs:1573-1584`): every roster member,
+    /// every item, first match wins. The item's `type` is byte `0x2E` of its
+    /// `.swg` record (`Classes/Item.cs:118`).
     fn party_has_item(&mut self, item_type: u8) -> bool {
         self.vm.calls.push(RecordedCall::PartyHasItem { item_type });
-        false
+        self.roster.members.iter().any(|m| {
+            m.items
+                .iter()
+                .any(|item| gbx_formats::save_orig::item_type(item) == item_type)
+        })
     }
 
+    /// `CMD_FindSpecial` (`ovr003.cs:2021-2039`) — `SelectedPlayer` only, not
+    /// the whole party (unlike FIND ITEM, which is the pair's asymmetry).
     fn find_special(&mut self, affect_type: u8) -> bool {
         self.vm
             .calls
             .push(RecordedCall::FindSpecial { affect_type });
-        false
+        let selected = self.state.selected_player as usize;
+        self.roster
+            .members
+            .get(selected)
+            .is_some_and(|m| m.has_affect(affect_type))
     }
 
+    /// `CMD_DestroyItems` (`ovr003.cs:2042-2055`): `RemoveAll` by type across
+    /// the whole roster, then `reclac_player_values` per member — which here
+    /// means rebuilding [`crate::party::Character::readied_items`], since the
+    /// removal renumbers every index after it and a stale set would ready the
+    /// wrong item.
     fn destroy_items(&mut self, item_type: u8) {
         self.vm.calls.push(RecordedCall::DestroyItems { item_type });
+        for member in self.roster.members.iter_mut() {
+            member
+                .items
+                .retain(|item| gbx_formats::save_orig::item_type(item) != item_type);
+            member.readied_items = member
+                .items
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| gbx_formats::save_orig::item_readied(item))
+                .map(|(i, _)| i)
+                .collect();
+        }
     }
 
     fn rob_money(&mut self, pct: u8) {
@@ -1261,10 +1403,56 @@ impl gbx_vm::EngineServices for EngineVmHost<'_> {
         self.state.pending_combat.clear();
     }
 
-    fn add_npc(&mut self, monster_id: u8, morale: u8) {
+    /// ★ `CMD_AddNPC` (`ovr003.cs:1769-1782`) → `load_npc` (`ovr017.cs:878`)
+    /// → `load_mob` (`:824`) → `AssignPlayerIconId` (`:892`). The game's only
+    /// join mechanism; roll-credits §7.1 has the six shipped sites.
+    ///
+    /// The `party_size <= 7` gate is `load_npc`'s own (`:880`) and is a **silent
+    /// no-op** when it fails — a full party simply does not gain the NPC, with
+    /// no message. `party_size` is deliberately NOT incremented: the joined
+    /// NPC sits past it in the roster, which is exactly what combat's
+    /// `nonTeamMember` split reads.
+    ///
+    /// `MON{area}SPC` (innate affects) and `MON{area}ITM` (carried items) ride
+    /// along when present, both optional in the original (`decode_size != 0`).
+    fn add_npc(&mut self, monster_id: u8, morale: u8) -> Result<(), MissingData> {
         self.vm
             .calls
             .push(RecordedCall::AddNpc { monster_id, morale });
+        if <Self as gbx_vm::EngineServices>::party_size(self) > 7 {
+            return Ok(()); // `ovr017.cs:880`
+        }
+        let area = self.game_area();
+        let cha =
+            gbx_formats::monster::monster_filename(area, gbx_formats::monster::MonsterFile::Cha);
+        let block = self.data.block(&cha, monster_id).map_err(|_| MissingData)?;
+        let record = gbx_formats::save_orig::decode_char_record(&block).map_err(|_| MissingData)?;
+
+        // `load_mob`'s two optional companions (`ovr017.cs:846-869`).
+        let spc =
+            gbx_formats::monster::monster_filename(area, gbx_formats::monster::MonsterFile::Spc);
+        let affects = self
+            .data
+            .block(&spc, monster_id)
+            .ok()
+            .and_then(|b| gbx_formats::save_orig::read_affects(&b).ok())
+            .unwrap_or_default();
+        let itm =
+            gbx_formats::monster::monster_filename(area, gbx_formats::monster::MonsterFile::Itm);
+        let items = self
+            .data
+            .block(&itm, monster_id)
+            .ok()
+            .and_then(|b| gbx_formats::save_orig::read_items(&b).ok())
+            .unwrap_or_default();
+
+        let mut member = crate::party::character_from_record(&record, items, affects);
+        member.monster_index = monster_id; // `ovr017.cs:884` — `player.mod_id`
+                                           // `:1778` — the operand's morale REPLACES the record's own byte.
+        member.control_morale = (morale >> 1).wrapping_add(NPC_BASE);
+        self.roster.members.push(member); // `AssignPlayerIconId`, `:896`
+        self.state.selected_player = (self.roster.members.len() - 1) as u8; // `:897`
+        Ok(())
     }
 
     fn setup_duel(&mut self, is_duel: bool) {
@@ -1360,11 +1548,28 @@ impl gbx_vm::EngineServices for EngineVmHost<'_> {
         ItemHandle(0)
     }
 
-    fn load_item_from_table(&mut self, block_id: u8) -> ItemHandle {
+    /// TREASURE's table arm (`ovr003.cs:1083-1099`): every `Item.StructSize`
+    /// record in block `block_id` of `ITEM{game_area}.DAX`, appended to the
+    /// pool. The block is read whole and split on the fixed record size — a
+    /// trailing partial record is a malformed file, which the original would
+    /// have walked off the end of; we drop it.
+    fn load_treasure_items(&mut self, block_id: u8) -> Result<(), MissingData> {
         self.vm
             .calls
-            .push(RecordedCall::LoadItemFromTable { block_id });
-        ItemHandle(0)
+            .push(RecordedCall::LoadTreasureItems { block_id });
+        let file = format!("ITEM{}.DAX", self.game_area()); // `:1085`
+        let data = self.data.block(&file, block_id).map_err(|_| MissingData)?;
+        for record in data.chunks_exact(gbx_formats::save_orig::ITEM_RECORD_SIZE) {
+            self.state.treasure_items.push(record.to_vec());
+        }
+        Ok(())
+    }
+
+    fn set_pooled_coin(&mut self, coin: u8, value: u16) {
+        self.vm
+            .calls
+            .push(RecordedCall::SetPooledCoin { coin, value });
+        self.state.pooled_money.set(coin as usize, value as i32);
     }
 
     fn find_spell_in_party(&mut self, spell_id: u8) -> (u8, u8) {
@@ -1401,22 +1606,97 @@ impl gbx_vm::EngineServices for EngineVmHost<'_> {
         total
     }
 
-    fn roll_saving_throw(&mut self, bonus: u8, save_type: u8) -> bool {
+    /// `do_saving_throw(bonus, type, player)` (`ovr024:12F1`, doc §48) — the
+    /// same transcription combat already carries
+    /// ([`crate::combat::saving_throw`]), reached here with a roster member
+    /// rather than a combatant. **Draws one d20.**
+    fn roll_saving_throw(&mut self, player: PlayerId, bonus: u8, save_type: u8) -> bool {
+        self.vm.calls.push(RecordedCall::RollSavingThrow {
+            player,
+            bonus,
+            save_type,
+        });
+        let Some(member) = self.roster.members.get(player.0 as usize) else {
+            // The original would have dereferenced a null here; there is no
+            // reachable operand that gets it there (see `op_damage`).
+            return false;
+        };
+        let target = member
+            .skills
+            .save_verse
+            .get(save_type as usize)
+            .copied()
+            .unwrap_or(0) as i32;
+        let save_bonus = member.status.save_bonus as i32 + bonus as i32;
+        let roll = 1 + self.rng.random(20) as i32;
+        roll + save_bonus >= target
+    }
+
+    /// `sub_641DD(bonus, player)` — DAMAGE's per-victim to-hit check. The
+    /// operand is a to-hit number in the raw-AC compare space, exactly like a
+    /// combatant's `hitBonus`, tested against the victim's stored AC.
+    /// **Draws one d20.**
+    fn can_hit_target(&mut self, player: PlayerId, bonus: u8) -> bool {
         self.vm
             .calls
-            .push(RecordedCall::RollSavingThrow { bonus, save_type });
-        false
+            .push(RecordedCall::CanHitTarget { player, bonus });
+        let Some(member) = self.roster.members.get(player.0 as usize) else {
+            return false;
+        };
+        let ac = member.combat.ac as i32;
+        let roll = 1 + self.rng.random(20) as i32;
+        roll + bonus as i32 >= ac
     }
 
-    fn can_hit_target(&mut self, bonus: u8) -> bool {
-        self.vm.calls.push(RecordedCall::CanHitTarget { bonus });
-        false
-    }
-
+    /// ★ `sub_32200` (`ovr008.cs:1401-1437`) → `damage_player`
+    /// (`ovr025.cs:1183-1243`), transcribed whole because its thresholds are
+    /// the difference between an unconscious party member and a dead one:
+    ///
+    /// - Already `dead`? `sub_32200` returns immediately (`:1403`) — a corpse
+    ///   takes no further damage and prints nothing.
+    /// - `neg_hp` is the overkill past 0. **`neg_hp > 9` is death**
+    ///   (`:1197`), and so is being reduced to exactly 0 while `animated`.
+    /// - Otherwise any overkill at all is `dying` (`:1206`), and landing
+    ///   exactly on 0 is `unconscious` (`:1215`).
+    /// - Only `okey`/`animated` keep their HP; every other outcome zeroes it
+    ///   and clears `in_combat` (`:1226-1227`) — which is precisely what
+    ///   DAMAGE's own wipe scan then counts.
+    ///
+    /// The combat-only arms (`actions.bleeding`, the friend/foe counters, the
+    /// delay reset) belong to a `CombatState`, not to the roster this service
+    /// walks; a script DAMAGE never runs inside one.
     fn apply_damage(&mut self, player: PlayerId, damage: u16) {
         self.vm
             .calls
             .push(RecordedCall::ApplyDamage { player, damage });
+        let Some(member) = self.roster.members.get_mut(player.0 as usize) else {
+            return;
+        };
+        if member.status.health_status == HEALTH_DEAD {
+            return; // `ovr008.cs:1403`
+        }
+        let hp = member.hit_point_current as i32;
+        let damage = damage as i32;
+        let (new_hp, neg_hp) = if hp >= damage {
+            (hp - damage, 0)
+        } else {
+            (0, damage - hp)
+        };
+        if neg_hp > 9 || (new_hp == 0 && member.status.health_status == HEALTH_ANIMATED) {
+            member.status.health_status = HEALTH_DEAD;
+        } else if neg_hp > 0 {
+            member.status.health_status = HEALTH_DYING;
+        } else if new_hp == 0 {
+            member.status.health_status = HEALTH_UNCONSCIOUS;
+        }
+        if member.status.health_status == HEALTH_OKAY
+            || member.status.health_status == HEALTH_ANIMATED
+        {
+            member.hit_point_current = new_hp as u8;
+        } else {
+            member.status.in_combat = false;
+            member.hit_point_current = 0;
+        }
     }
 
     /// ★ `Load3DMap` (`ovr031.cs:690-705`) — **the resident map really
@@ -1567,6 +1847,37 @@ impl gbx_vm::EngineServices for EngineVmHost<'_> {
     /// == 8` -> `sound_a`-class, `== 10` -> `sound_b`-class, else
     /// `sound_a`-class. Real sound-catalog ids are a documented placeholder
     /// (`movement::SOUND_A`'s doc comment) pending a `seg044.cs` read.
+    /// `CMD_Program` (`ovr003.cs:1929-1987`). Cases 0 and 8 are start-menu /
+    /// end-game flows this engine does not have yet (FD-45, roll-credits G9
+    /// owns the ending); case 9 is `TryEncamp`, which belongs to G3's camp
+    /// work. Case 3 — the party-killed flag plus an EXIT — is real here.
+    fn program(&mut self, code: u8) -> ProgramOutcome {
+        self.vm.calls.push(RecordedCall::Program { code });
+        // `:1934-1938` — every case restores the selection first.
+        if self.state.restore_player_ptr {
+            self.state.selected_player = self.state.last_selected_player;
+            self.state.restore_player_ptr = false;
+        }
+        match code {
+            3 => {
+                self.state.party_killed = true; // `:1984`
+                ProgramOutcome::Exit
+            }
+            _ => {
+                self.vm
+                    .transcript
+                    .push(crate::vmhost::TranscriptEntry::Request(format!(
+                        "PROGRAM {code}: not implemented (docket FD-45)"
+                    )));
+                if code == 9 {
+                    ProgramOutcome::Exit // `:1980` — TryEncamp then CMD_Exit
+                } else {
+                    ProgramOutcome::Continue
+                }
+            }
+        }
+    }
+
     fn call_sound_variant(&mut self) -> u8 {
         self.vm.calls.push(RecordedCall::CallSoundVariant);
         if self.vm.word_1ee76 == 10 {
@@ -1647,6 +1958,213 @@ mod tests {
                 symbols: &mut self.symbols,
             }
         }
+    }
+
+    // --- roll-credits slice 3: the roster/item services -------------------
+
+    /// A `.swg`-shaped item record with the two fields the tail's opcodes
+    /// read: `type` @0x2E and `readied` @0x34 (`Classes/Item.cs:118`, `:124`).
+    fn item(item_type: u8, readied: bool) -> Vec<u8> {
+        let mut rec = vec![0u8; gbx_formats::save_orig::ITEM_RECORD_SIZE];
+        rec[0x2E] = item_type;
+        rec[0x34] = u8::from(readied);
+        rec
+    }
+
+    fn member(name: &str, hp: u8) -> crate::party::Character {
+        let mut rec = vec![0u8; gbx_formats::save_orig::CHAR_RECORD_SIZE];
+        rec[0] = name.len() as u8;
+        rec[1..1 + name.len()].copy_from_slice(name.as_bytes());
+        rec[0x78] = hp;
+        rec[0x1a4] = hp;
+        let record = gbx_formats::save_orig::decode_char_record(&rec).unwrap();
+        let mut ch = crate::party::character_from_record(&record, Vec::new(), Vec::new());
+        ch.status.in_combat = true;
+        ch
+    }
+
+    #[test]
+    fn find_item_scans_every_member_not_just_the_selected_one() {
+        let mut f = Fixture::new();
+        f.roster.members.push(member("A", 10));
+        let mut third = member("C", 10);
+        third.items.push(item(0x5E, false));
+        f.roster.members.push(member("B", 10));
+        f.roster.members.push(third);
+
+        let mut h = f.host();
+        assert!(h.party_has_item(0x5E));
+        assert!(!h.party_has_item(0x5F));
+    }
+
+    /// DESTROY ITEMS removes by type across the whole roster **and** rebuilds
+    /// each member's readied set — the removal renumbers every index after it,
+    /// so a stale set would ready the wrong item.
+    #[test]
+    fn destroy_items_removes_by_type_and_renumbers_the_readied_set() {
+        let mut f = Fixture::new();
+        let mut m = member("A", 10);
+        m.items = vec![item(0x5E, false), item(0x60, true), item(0x5E, false)];
+        m.readied_items = [1].into_iter().collect();
+        f.roster.members.push(m);
+
+        let mut h = f.host();
+        h.destroy_items(0x5E);
+
+        let m = &f.roster.members[0];
+        assert_eq!(m.items.len(), 1);
+        assert_eq!(gbx_formats::save_orig::item_type(&m.items[0]), 0x60);
+        assert_eq!(
+            m.readied_items.iter().copied().collect::<Vec<_>>(),
+            vec![0],
+            "the readied item moved from index 1 to index 0"
+        );
+    }
+
+    /// ★ The binary's slot semantics, against coab's: `LOAD CHARACTER 0`
+    /// selects member 0 and is FOUND (`ovr003:0328` `jbe` skips the walk with
+    /// the cursor already on the list head). coab's transliteration returns
+    /// null for index 0, which would make the shipped `ECL5#48` slot scan miss
+    /// the first party member entirely.
+    #[test]
+    fn load_character_slot_zero_selects_the_first_member() {
+        let mut f = Fixture::new();
+        f.roster.members.push(member("A", 10));
+        f.roster.members.push(member("B", 10));
+        f.state.selected_player = 1;
+
+        let mut h = f.host();
+        h.retarget_selected_player(0);
+        assert_eq!(f.state.selected_player, 0);
+        assert!(!f.state.player_not_found);
+        assert!(f.state.restore_player_ptr, "`ovr003:02EF`, unconditional");
+    }
+
+    #[test]
+    fn load_character_out_of_range_sets_player_not_found_and_keeps_the_selection() {
+        let mut f = Fixture::new();
+        f.roster.members.push(member("A", 10));
+        f.state.selected_player = 0;
+
+        let mut h = f.host();
+        h.retarget_selected_player(5);
+        assert!(f.state.player_not_found);
+        assert_eq!(f.state.selected_player, 0, "the miss leaves it alone");
+    }
+
+    /// The high bit alone does nothing: both summary flags must be armed too
+    /// (`ovr003:0377-0389`).
+    #[test]
+    fn load_character_high_bit_only_removes_when_both_summary_flags_are_armed() {
+        let mut f = Fixture::new();
+        f.roster.members.push(member("A", 10));
+        f.roster.members.push(member("B", 10));
+
+        let mut h = f.host();
+        h.retarget_selected_player(0x81);
+        assert_eq!(f.roster.members.len(), 2, "flags unarmed: nothing removed");
+
+        f.state.redraw_party_summary = [true, true];
+        let mut h = f.host();
+        h.retarget_selected_player(0x81);
+        assert_eq!(f.roster.members.len(), 1);
+        assert_eq!(f.roster.members[0].name, "A");
+        assert_eq!(
+            f.state.redraw_party_summary,
+            [false, false],
+            "`:03BB-03C0` clears them"
+        );
+    }
+
+    /// `FreeCurrentPlayer` re-seats one slot BACK (`ovr018.cs:1600`), not on
+    /// the member that slid into the vacated slot.
+    #[test]
+    fn free_current_player_reseats_one_slot_back_and_drops_party_size() {
+        let mut f = Fixture::new();
+        for name in ["A", "B", "C"] {
+            f.roster.members.push(member(name, 10));
+        }
+        f.state.party_size = 3;
+        f.state.selected_player = 2;
+
+        let mut h = f.host();
+        h.free_current_player(true, false);
+        assert_eq!(f.state.selected_player, 1);
+        assert_eq!(f.state.party_size, 2);
+
+        f.state.selected_player = 0;
+        let mut h = f.host();
+        h.free_current_player(true, true);
+        assert_eq!(f.state.selected_player, 0);
+        assert_eq!(f.state.party_size, 2, "leave_party_size held it");
+    }
+
+    /// ★ `damage_player`'s thresholds (`ovr025.cs:1183-1243`) — the ones that
+    /// decide unconscious vs dying vs dead.
+    #[test]
+    fn apply_damage_walks_the_full_status_ladder() {
+        let cases = [
+            // (hp, damage, expected status, expected hp, still in combat?)
+            (10u8, 3u16, HEALTH_OKAY, 7u8, true),
+            (10, 10, HEALTH_UNCONSCIOUS, 0, false),
+            (10, 15, HEALTH_DYING, 0, false),
+            (10, 20, HEALTH_DEAD, 0, false),
+        ];
+        for (hp, damage, status, left, in_combat) in cases {
+            let mut f = Fixture::new();
+            f.roster.members.push(member("A", hp));
+            let mut h = f.host();
+            h.apply_damage(PlayerId(0), damage);
+            let m = &f.roster.members[0];
+            assert_eq!(m.status.health_status, status, "hp {hp} - {damage}");
+            assert_eq!(m.hit_point_current, left);
+            assert_eq!(m.status.in_combat, in_combat);
+        }
+    }
+
+    #[test]
+    fn apply_damage_never_touches_a_corpse() {
+        let mut f = Fixture::new();
+        let mut m = member("A", 10);
+        m.status.health_status = HEALTH_DEAD;
+        m.hit_point_current = 0;
+        f.roster.members.push(m);
+
+        let mut h = f.host();
+        h.apply_damage(PlayerId(0), 40);
+        assert_eq!(f.roster.members[0].status.health_status, HEALTH_DEAD);
+    }
+
+    /// DAMAGE's wipe scan reads `in_combat`, nothing else — and it is the flag
+    /// `apply_damage` clears on the way down.
+    #[test]
+    fn party_wipe_check_fires_only_when_nobody_is_left_in_combat() {
+        let mut f = Fixture::new();
+        f.roster.members.push(member("A", 10));
+        f.roster.members.push(member("B", 10));
+
+        let mut h = f.host();
+        assert!(!h.party_wipe_check());
+
+        f.roster.members[0].status.in_combat = false;
+        let mut h = f.host();
+        assert!(!h.party_wipe_check());
+
+        f.roster.members[1].status.in_combat = false;
+        let mut h = f.host();
+        assert!(h.party_wipe_check());
+        assert!(f.state.party_killed);
+        assert_eq!(f.state.wipe_cause, crate::shell::WipeCause::EclDamage);
+    }
+
+    /// `load_npc`'s silent `party_size <= 7` gate (`ovr017.cs:880`).
+    #[test]
+    fn add_npc_refuses_silently_once_the_party_is_full() {
+        let mut f = Fixture::new();
+        f.state.party_size = 8;
+        let mut h = f.host();
+        assert_eq!(h.add_npc(0x16, 0x64), Ok(()));
+        assert!(f.roster.members.is_empty(), "no join, and no error either");
     }
 
     fn origin() -> Origin {

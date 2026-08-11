@@ -179,6 +179,12 @@ fn master_to_engine_state(
     // the mechanism by which field_200/field_6F2 survive a load without
     // being cleared by vm_init_ecl's fresh-block-entry reset.
     state.reload_ecl_and_pictures = true;
+    // ★ `area2_ptr.party_size` (roll-credits slice 3): the count of real party
+    // members, which DAMAGE rolls its victim over and `load_npc` gates joins
+    // on. The original serializes it inside the `area2_ptr` blob; ours takes
+    // it from the save's own `party_count` (section 10), which is the same
+    // number by construction — `SaveGame` writes both from one roster.
+    state.party_size = master.party_count;
     state
 }
 

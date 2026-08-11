@@ -10,7 +10,7 @@
 
 use crate::decode::{BlockBytes, ECL_BLOCK_BASE, ECL_BLOCK_SIZE};
 use crate::host::{
-    EngineServices, ItemHandle, MissingData, MonsterHandle, NotFound, Origin, PlayerId,
+    EngineServices, ItemHandle, MissingData, MonsterHandle, Origin, PlayerId, ProgramOutcome,
     RecordedCall, ScriptMemory, VmHost, VmRng, VmString,
 };
 use std::collections::{HashMap, VecDeque};
@@ -288,7 +288,15 @@ pub struct TestHost {
     /// checks and clears.
     pub display_player_sprite: bool,
 
-    pub retarget_selected_player_replies: VecDeque<Result<(), NotFound>>,
+    /// `gbl.SelectedPlayer`, a live cell rather than a reply queue — DAMAGE
+    /// saves and restores it around its body.
+    pub selected_player: PlayerId,
+
+    pub party_size_replies: VecDeque<u8>,
+    pub team_size_replies: VecDeque<u8>,
+    pub party_wipe_check_replies: VecDeque<bool>,
+    pub add_npc_replies: VecDeque<Result<(), MissingData>>,
+    pub program_replies: VecDeque<ProgramOutcome>,
     pub free_current_player_replies: VecDeque<PlayerId>,
     pub party_strength_replies: VecDeque<u8>,
     pub check_party_replies: VecDeque<u16>,
@@ -301,7 +309,7 @@ pub struct TestHost {
     pub approach_distance_replies: VecDeque<u8>,
 
     pub create_item_replies: VecDeque<ItemHandle>,
-    pub load_item_from_table_replies: VecDeque<ItemHandle>,
+    pub load_treasure_items_replies: VecDeque<Result<(), MissingData>>,
     pub find_spell_in_party_replies: VecDeque<(u8, u8)>,
 
     pub roll_replies: VecDeque<u8>,
@@ -383,12 +391,38 @@ impl ScriptMemory for TestHost {
 }
 
 impl EngineServices for TestHost {
-    fn retarget_selected_player(&mut self, index: u8) -> Result<(), NotFound> {
+    fn retarget_selected_player(&mut self, index: u8) {
         self.calls
             .push(RecordedCall::RetargetSelectedPlayer { index });
-        self.retarget_selected_player_replies
-            .pop_front()
-            .unwrap_or(Ok(()))
+    }
+
+    fn dump_selected_player(&mut self) {
+        self.calls.push(RecordedCall::DumpSelectedPlayer);
+    }
+
+    fn party_size(&mut self) -> u8 {
+        self.calls.push(RecordedCall::PartySize);
+        Self::next_or_default(&mut self.party_size_replies)
+    }
+
+    fn team_size(&mut self) -> u8 {
+        self.calls.push(RecordedCall::TeamSize);
+        Self::next_or_default(&mut self.team_size_replies)
+    }
+
+    fn selected_player(&mut self) -> PlayerId {
+        self.calls.push(RecordedCall::SelectedPlayer);
+        self.selected_player
+    }
+
+    fn set_selected_player(&mut self, player: PlayerId) {
+        self.calls.push(RecordedCall::SetSelectedPlayer { player });
+        self.selected_player = player;
+    }
+
+    fn party_wipe_check(&mut self) -> bool {
+        self.calls.push(RecordedCall::PartyWipeCheck);
+        Self::next_or_default(&mut self.party_wipe_check_replies)
     }
 
     fn free_current_player(&mut self, free_icon: bool, leave_party_size: bool) -> PlayerId {
@@ -464,8 +498,9 @@ impl EngineServices for TestHost {
         self.calls.push(RecordedCall::ClearMonsters);
     }
 
-    fn add_npc(&mut self, monster_id: u8, morale: u8) {
+    fn add_npc(&mut self, monster_id: u8, morale: u8) -> Result<(), MissingData> {
         self.calls.push(RecordedCall::AddNpc { monster_id, morale });
+        self.add_npc_replies.pop_front().unwrap_or(Ok(()))
     }
 
     fn setup_duel(&mut self, is_duel: bool) {
@@ -514,10 +549,16 @@ impl EngineServices for TestHost {
         Self::next_or_default(&mut self.create_item_replies)
     }
 
-    fn load_item_from_table(&mut self, block_id: u8) -> ItemHandle {
+    fn load_treasure_items(&mut self, block_id: u8) -> Result<(), MissingData> {
         self.calls
-            .push(RecordedCall::LoadItemFromTable { block_id });
-        Self::next_or_default(&mut self.load_item_from_table_replies)
+            .push(RecordedCall::LoadTreasureItems { block_id });
+        self.load_treasure_items_replies
+            .pop_front()
+            .unwrap_or(Ok(()))
+    }
+
+    fn set_pooled_coin(&mut self, coin: u8, value: u16) {
+        self.calls.push(RecordedCall::SetPooledCoin { coin, value });
     }
 
     fn find_spell_in_party(&mut self, spell_id: u8) -> (u8, u8) {
@@ -537,14 +578,18 @@ impl EngineServices for TestHost {
         Self::next_or_default(&mut self.roll_dice_replies)
     }
 
-    fn roll_saving_throw(&mut self, bonus: u8, save_type: u8) -> bool {
-        self.calls
-            .push(RecordedCall::RollSavingThrow { bonus, save_type });
+    fn roll_saving_throw(&mut self, player: PlayerId, bonus: u8, save_type: u8) -> bool {
+        self.calls.push(RecordedCall::RollSavingThrow {
+            player,
+            bonus,
+            save_type,
+        });
         Self::next_or_default(&mut self.roll_saving_throw_replies)
     }
 
-    fn can_hit_target(&mut self, bonus: u8) -> bool {
-        self.calls.push(RecordedCall::CanHitTarget { bonus });
+    fn can_hit_target(&mut self, player: PlayerId, bonus: u8) -> bool {
+        self.calls
+            .push(RecordedCall::CanHitTarget { player, bonus });
         Self::next_or_default(&mut self.can_hit_target_replies)
     }
 
@@ -586,6 +631,13 @@ impl EngineServices for TestHost {
     fn wall_type(&mut self) -> u8 {
         self.calls.push(RecordedCall::WallType);
         Self::next_or_default(&mut self.wall_type_replies)
+    }
+
+    fn program(&mut self, code: u8) -> ProgramOutcome {
+        self.calls.push(RecordedCall::Program { code });
+        self.program_replies
+            .pop_front()
+            .unwrap_or(ProgramOutcome::Continue)
     }
 
     fn call_sound_variant(&mut self) -> u8 {

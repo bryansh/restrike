@@ -69,6 +69,100 @@ pub fn can_afford(money: &Money, gold: i64, rules: &RuleSet) -> bool {
     gold_worth(money, rules) >= gold
 }
 
+/// ★ `gbl.pooled_money`'s type (`Classes/MoneySet.cs`) — the same seven
+/// denominations as [`Money`], but held as **`int`**, not `short`. That is not
+/// a detail to smooth over: a fight against a well-paid roster, or a
+/// `TREASURE` with seven word operands, can pool more copper than a `short`
+/// holds, and the original's own pool never truncates.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MoneySet {
+    pub coins: [i32; 7],
+}
+
+/// `Money.per_copper` (`MoneySet.cs:19`) — copper/silver/electrum/gold/platinum.
+/// Gems and jewelry have no copper rate (they are appraised, not converted).
+const PER_COPPER: [i64; 5] = [1, 10, 100, 200, 1000];
+
+/// `Money.Gems` / `Money.Jewelry` experience values (`MoneySet.cs:60-61`).
+const GEM_EXP: i64 = 250;
+const JEWELRY_EXP: i64 = 2200;
+
+impl MoneySet {
+    pub fn get(&self, coin: usize) -> i32 {
+        self.coins.get(coin).copied().unwrap_or(0)
+    }
+
+    /// `SetCoins` — an assignment, which is what TREASURE's seven operands do
+    /// (`ovr003.cs:1078`): a second TREASURE **replaces** the pool's coins
+    /// rather than adding to them.
+    pub fn set(&mut self, coin: usize, value: i32) {
+        if let Some(slot) = self.coins.get_mut(coin) {
+            *slot = value;
+        }
+    }
+
+    /// `AddCoins`.
+    pub fn add(&mut self, coin: usize, value: i32) {
+        if let Some(slot) = self.coins.get_mut(coin) {
+            *slot += value;
+        }
+    }
+
+    /// `ClearAll` (`MoneySet.cs:40-46`) — all seven, gems and jewelry
+    /// included. (`ClearCoins` clears only 0..=4; nothing in this slice's
+    /// paths calls it.)
+    pub fn clear(&mut self) {
+        self.coins = [0; 7];
+    }
+
+    /// `AnyMoney` (`MoneySet.cs:130-141`).
+    pub fn any(&self) -> bool {
+        self.coins.iter().any(|&c| c > 0)
+    }
+
+    /// `operator+` over a party member's `short` purse (`MoneySet.cs:26-37`) —
+    /// how a dead monster pays into the pool (`ovr006.cs:29`).
+    pub fn add_purse(&mut self, purse: &Money) {
+        for coin in 0..7 {
+            self.coins[coin] += purse.get_coin(coin) as i32;
+        }
+    }
+
+    /// `GetGoldWorth` (`MoneySet.cs:67-79`): copper..platinum converted to
+    /// copper and divided by the gold rate. Gems/jewelry excluded.
+    pub fn gold_worth(&self) -> i64 {
+        let copper: i64 = (0..5).map(|c| self.coins[c] as i64 * PER_COPPER[c]).sum();
+        copper / PER_COPPER[3]
+    }
+
+    /// ★ `GetExpWorth` (`MoneySet.cs:57-65`) — the treasure half of a fight's
+    /// experience award: the gold worth, **plus 250 per gem and 2200 per piece
+    /// of jewelry**. Those two multipliers are the whole reason a chest of
+    /// jewelry is worth more XP than the monsters guarding it.
+    pub fn exp_worth(&self) -> i64 {
+        self.gold_worth() + self.coins[5] as i64 * GEM_EXP + self.coins[6] as i64 * JEWELRY_EXP
+    }
+
+    /// `ScaleAll(scale)` (`MoneySet.cs:143-153`): scales copper..platinum
+    /// (never gems/jewelry) and reports whether any of those five was nonzero
+    /// **before** scaling — the "an NPC actually took something" answer
+    /// `distributeNpcTreasure` prints its message on.
+    pub fn scale_coins(&mut self, numerator: i64, denominator: i64) -> bool {
+        let mut did_scale = false;
+        for coin in 0..5 {
+            did_scale = did_scale || self.coins[coin] > 0;
+            if denominator != 0 {
+                // The original scales by an integer-divided `double`
+                // (`npcParts / totalParts`, both `int` — C# integer division,
+                // so the ratio is 0 unless the NPCs outnumber everyone else).
+                // Replicated exactly: the truncation is the behaviour.
+                self.coins[coin] = (self.coins[coin] as i64 * (numerator / denominator)) as i32;
+            }
+        }
+        did_scale
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
