@@ -213,6 +213,12 @@ fn combat_from_a_running_script_resolves_and_resumes() {
     // it `N`, the way an operator who is done fighting does.
     for _ in 0..3000 {
         let keys: Vec<crate::input::InputEvent> = match e.shell().combat_host().map(|h| h.stage()) {
+            Some(crate::combat_host::Stage::Results) => {
+                vec![crate::input::InputEvent::Enter]
+            }
+            Some(crate::combat_host::Stage::Treasure) => {
+                vec![crate::input::InputEvent::Char(b'E')]
+            }
             Some(crate::combat_host::Stage::ContinuePrompt) => {
                 vec![crate::input::InputEvent::Char(b'N')]
             }

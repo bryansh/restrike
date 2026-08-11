@@ -26,6 +26,7 @@ use crate::shell::{EngineState, GameState};
 use crate::symbols::SymbolSets;
 use gbx_formats::game_data::{GameData, GameDataError};
 use gbx_formats::geo::GeoBlock;
+use gbx_formats::monster::MonsterFile;
 use gbx_formats::walldef::WalldefBlock;
 use gbx_vm::{
     BlockBytes, ItemHandle, MissingData, MonsterHandle, Origin, PlayerId, ProgramOutcome,
@@ -1374,7 +1375,20 @@ impl gbx_vm::EngineServices for EngineVmHost<'_> {
             .map_err(|_| MissingData)?;
         let record = gbx_formats::monster::MonsterRecord::from_cha_block(monster_id, &block)
             .map_err(|_| MissingData)?;
-        let monster = crate::monster::LoadedMonster::from_record(&record);
+        let mut monster = crate::monster::LoadedMonster::from_record(&record);
+        // ★ `load_mob`'s optional `MON{area}ITM.DAX` companion
+        // (`ovr017.cs:861-869`) — a monster's carried items. Combat never
+        // reads them (its attacks come from the record's own profiles); they
+        // exist so the corpse has something to drop into the treasure pool
+        // (`calc_battle_exp`, `ovr006.cs:36-43`). A file or block that is
+        // absent is not an error in the original either (`decode_size != 0`).
+        let itm = gbx_formats::monster::monster_filename(self.game_area(), MonsterFile::Itm);
+        monster.award.items = self
+            .data
+            .block(&itm, monster_id)
+            .ok()
+            .and_then(|b| gbx_formats::save_orig::read_items(&b).ok())
+            .unwrap_or_default();
         self.state
             .pending_combat
             .load(monster, num_copies, icon_block_id);

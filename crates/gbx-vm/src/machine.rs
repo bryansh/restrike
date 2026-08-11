@@ -804,6 +804,7 @@ impl EclMachine {
             0x29 => self.op_encounter_menu(activation, host, pc, opcode),
             0x2A => self.op_gettable(activation, host, pc, opcode),
             0x2B => self.op_horizontal_menu(activation, host, pc, opcode),
+            0x27 => self.op_treasure(activation, host, pc, opcode),
             0x2C => self.op_parlay(activation, host, pc, opcode),
             0x2D => self.op_call(activation, host, pc, opcode),
             0x2E => self.op_damage(activation, host, pc, opcode),
@@ -2239,6 +2240,133 @@ impl EclMachine {
             Effect::ClearBox,
             pc.wrapping_add(1),
         ))
+    }
+
+    /// ★ TREASURE (0x27), `CMD_Treasure` (`load_item`, `ovr003:1B9D`;
+    /// `ovr003.cs:1068-1199`) — the script's own treasure drop.
+    ///
+    /// Eight operands: seven coin counts **assigned** into `gbl.pooled_money`
+    /// (`SetCoins`, not `AddCoins` — a second TREASURE replaces the pool's
+    /// coins rather than topping them up) and one block selector:
+    ///
+    /// - `< 0x80`: a **fixed** drop — every item record in block `id` of
+    ///   `ITEM{game_area}.DAX`. Draw-free.
+    /// - `0x80 < id < 0xFF`: `id - 0x80` **random** items, each rolled off the
+    ///   ladder below.
+    /// - `== 0x80` or `== 0xFF`: coins only. (`0x80` falls through the
+    ///   `else if` with a zero count and generates nothing, which is the same
+    ///   outcome by a different route.)
+    ///
+    /// **The draws, and their neutrality.** The random arm is genuinely
+    /// reachable in shipped content — `ECL5#49 @0x94B3` is
+    /// `TREASURE 0,0,0,0,0,6,3,0x82`, two random items, immediately before a
+    /// `COMBAT`. Every capture in the frontier manifest is a *combat* draw
+    /// stream that begins at `BattleSetup`, so a TREASURE preceding the fight
+    /// draws entirely before the capture's first recorded draw. The guard
+    /// confirms this the only way that counts: 16/16 still closed.
+    ///
+    /// The ladder (`ovr003.cs:1102-1195`, thresholds re-read off
+    /// `ovr003:1D53-1DF9`), per item:
+    ///
+    /// | outer d100 | result |
+    /// |---|---|
+    /// | 1..=60 | a weapon/armour roll (a second d100, below) |
+    /// | 61..=85 | magic-user scroll |
+    /// | 86..=92 | clerical scroll |
+    /// | 91..=98 | potion/wand — **but 91 and 92 are unreachable**, taken by the arm above |
+    /// | 99, 100 | shield |
+    ///
+    /// and the weapon roll: `1..=47` and `50..=59` are the item type
+    /// *directly* (with 45 special-cased to a shield), `60..=90` is a third
+    /// roll over the five sword types, `91..=94` arrows, `95..=97` a ring of
+    /// protection, `98..=100` bracers, and the 48/49 gap falls to a shield.
+    /// The overlapping range and the two dead values are the original's, kept.
+    fn op_treasure(
+        &mut self,
+        activation: &mut Activation,
+        host: &mut dyn VmHost,
+        pc: u16,
+        opcode: u8,
+    ) -> Result<VmStep, VmError> {
+        let (args, next) = self.load_cmd_sets(pc.wrapping_add(1), 8, host, pc);
+        for coin in 0..7u8 {
+            let value = self.resolve_numeric(&args[coin as usize], pc, opcode, host)?;
+            host.set_pooled_coin(coin, value); // `:1078`
+        }
+        let block_id = self.resolve_numeric(&args[7], pc, opcode, host)? as u8;
+
+        if block_id < 0x80 {
+            host.load_treasure_items(block_id)
+                .map_err(|_| VmError::MissingAsset { pc, opcode })?;
+        } else if block_id != 0xFF {
+            for _ in 0..(block_id - 0x80) {
+                let item_type = Self::roll_random_item_type(host);
+                host.create_item(item_type);
+            }
+        }
+        activation.pc = next;
+        Ok(VmStep::Continue)
+    }
+
+    /// One random treasure item's type (`ovr003.cs:1104-1193`). Kept out of
+    /// [`Self::op_treasure`]'s body only for readability — the draws are the
+    /// opcode's own, in the opcode's own order.
+    fn roll_random_item_type(host: &mut dyn VmHost) -> u8 {
+        // `ItemType` (`Classes/ItemData.cs:120`), only the values this ladder
+        // can produce.
+        const BASTARD_SWORD: u8 = 34;
+        const BROAD_SWORD: u8 = 35;
+        const LONG_SWORD: u8 = 36;
+        const SHORT_SWORD: u8 = 37;
+        const TWO_HANDED_SWORD: u8 = 38;
+        const SHIELD: u8 = 59;
+        const MU_SCROLL: u8 = 61;
+        const CLERIC_SCROLL: u8 = 62;
+        const POTION: u8 = 71;
+        const ARROW: u8 = 73;
+        const BRACERS: u8 = 77;
+        const WAND_B: u8 = 79;
+        const TYPE_84: u8 = 84;
+        const RING_OF_PROT: u8 = 93;
+
+        let outer = host.roll_dice(100, 1); // `:1104`
+        match outer {
+            1..=60 => {
+                let inner = host.roll_dice(100, 1); // `:1108`
+                match inner {
+                    45 => SHIELD,                    // `:1113`
+                    1..=47 | 50..=59 => inner as u8, // `:1110-1120`
+                    60..=90 => match host.roll_dice(10, 1) {
+                        // `:1124`
+                        1..=4 => LONG_SWORD,
+                        5..=7 => BROAD_SWORD,
+                        8 => BASTARD_SWORD,
+                        9 => SHORT_SWORD,
+                        // `:1142` tests `== 10` and leaves the type at its
+                        // previous value otherwise — unreachable for a d10.
+                        _ => TWO_HANDED_SWORD,
+                    },
+                    91..=94 => ARROW,        // `:1147`
+                    95..=97 => RING_OF_PROT, // `:1151`
+                    98..=100 => BRACERS,     // `:1155`
+                    // 48 and 49 — the gap the `else` catches (`:1159`).
+                    _ => SHIELD,
+                }
+            }
+            61..=85 => MU_SCROLL,     // `:1164`
+            86..=92 => CLERIC_SCROLL, // `:1168`
+            // `:1172`'s range is `0x5B..=0x62` (91..=98), but 91 and 92 were
+            // already taken by the arm above: only 93..=98 reach here.
+            93..=98 => match host.roll_dice(15, 1) {
+                1..=9 => POTION,
+                10 => TYPE_84,
+                _ => WAND_B, // 11..=15
+            },
+            99 | 100 => SHIELD, // `:1189`
+            // `roll_dice(100,1)` cannot leave this range; the original's own
+            // fall-through leaves `item_type` at its initializer, 0.
+            _ => 0,
+        }
     }
 
     /// ★ PARLAY (0x2C), `CMD_Parlay` (`talk_style`, `ovr003:27B7-2855`).

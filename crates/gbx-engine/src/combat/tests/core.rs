@@ -805,6 +805,7 @@ fn weak_goblin() -> LoadedMonster {
         movement: 6,
         icon_slot: 8,
         icon_block: 4,
+        award: crate::combat::MonsterAward::default(),
         attacks: [
             MonsterAttack {
                 attacks: 1,

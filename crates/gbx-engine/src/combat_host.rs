@@ -100,6 +100,16 @@ pub enum Stage {
     ContinuePrompt,
     /// The last frame, held one `GameDelay` beat before the screen restores.
     FinalBeats { ticks_left: u32 },
+    /// ★ **roll-credits slice 3**: `displayCombatResults` (`ovr006.cs:381`) —
+    /// the headline, the experience the party just earned, and a blocking
+    /// keypress. Reached only for a fight that was not a party wipe (the wipe
+    /// arm is `AfterCombatExpAndTreasure`'s own `else`, which is the
+    /// [`crate::shell::GameOverFlow`]'s screen).
+    Results,
+    /// ★ `distributeCombatTreasure` (`ovr006.cs:564`) — the pool screen. Its
+    /// word list is composed exactly as the original composes it, from what is
+    /// actually on the ground.
+    Treasure,
     /// The one-tick screen restore + the deferred writes.
     Restore,
 }
@@ -176,6 +186,13 @@ pub struct CombatHost {
     /// §8.2 rule, and the next unmodeled key should land here rather than
     /// vanish.
     dropped_keys: Vec<u8>,
+    /// ★ roll-credits slice 3: what the fight paid out, computed once at the
+    /// FinalBeats boundary and printed by [`Stage::Results`].
+    #[serde(default)]
+    award: Option<crate::award::AwardOutcome>,
+    /// `distributeNpcTreasure`'s message lines, if a joined NPC took a cut.
+    #[serde(default)]
+    npc_share: Vec<String>,
     /// Presentation, rebuilt on load (D-CV7).
     #[serde(skip)]
     scene: Option<CombatScene>,
@@ -203,6 +220,8 @@ impl Clone for CombatHost {
             manual: self.manual.clone(),
             menu_selected: self.menu_selected,
             dropped_keys: self.dropped_keys.clone(),
+            award: self.award,
+            npc_share: self.npc_share.clone(),
             scene: None,
             batch: Rc::new(RefCell::new(Vec::new())),
         }
@@ -371,7 +390,7 @@ impl CombatHost {
                 (m.icon_slot as usize).min(COMBAT_ICON_SLOTS - 1),
             ));
             monster_blocks.insert(m.icon_slot, m.icon_block);
-            fighters.push(Combatant::new_melee(
+            let mut combatant = Combatant::new_melee(
                 id,
                 Team::Monster,
                 m.is_npc(),
@@ -383,7 +402,13 @@ impl CombatHost {
                 (a1.dice_count, a1.dice_size, a1.damage_bonus as u8),
                 0, // delay — CalculateInitiative sets it each round
                 1, // one swing/round
-            ));
+            );
+            // ★ What this one is worth dead (roll-credits slice 3). Carried
+            // here because `calc_battle_exp` runs against the fight's final
+            // roster, after the original has already deallocated the monster
+            // records. Nothing in combat reads it, so it cannot move a draw.
+            combatant.award = m.award.clone();
+            fighters.push(combatant);
         }
 
         let mut state = CombatState::new(map, fighters);
@@ -444,6 +469,8 @@ impl CombatHost {
             manual: None,
             menu_selected: 0,
             dropped_keys: Vec::new(),
+            award: None,
+            npc_share: Vec::new(),
             scene: None,
             batch: Rc::new(RefCell::new(Vec::new())),
         }
@@ -491,12 +518,28 @@ impl CombatHost {
             }
             Stage::FinalBeats { ticks_left } => {
                 let left = ticks_left.saturating_sub(ctx.dt_ticks);
-                self.stage = if left > 0 {
-                    Stage::FinalBeats { ticks_left: left }
+                if left > 0 {
+                    self.stage = Stage::FinalBeats { ticks_left: left };
+                    self.render(ctx);
                 } else {
-                    Stage::Restore
-                };
-                self.render(ctx);
+                    // ★ `AfterCombatExpAndTreasure` (`ovr006.cs:763`): the
+                    // award is computed here, once, and the screens that show
+                    // it follow. A wiped party takes the `else` arm instead —
+                    // and that arm is the wipe flow, which `Shell::tick` opens
+                    // from `party_killed` after this host finishes.
+                    self.settle_and_award(ctx);
+                    self.stage = if self.outcome == Some(CombatOutcome::MonstersWin) {
+                        Stage::Restore
+                    } else {
+                        self.draw_results(ctx);
+                        Stage::Results
+                    };
+                }
+                HostTick::Working
+            }
+            Stage::Results | Stage::Treasure => {
+                // Input-driven; `drain_input` did this tick's work and the
+                // screen is already composed.
                 HostTick::Working
             }
             Stage::Restore => {
@@ -780,7 +823,164 @@ impl CombatHost {
             Stage::PlayerTurn => self.drain_menu_input(ctx),
             Stage::ContinuePrompt => self.drain_continue_input(ctx),
             Stage::Sheet { .. } => self.drain_sheet_input(ctx),
+            Stage::Results => self.drain_results_input(ctx),
+            Stage::Treasure => self.drain_treasure_input(ctx),
             _ => self.drain_ai_turn_input(ctx),
+        }
+    }
+
+    // --- roll-credits slice 3: the award screens --------------------------
+
+    /// ★ `CleanupPlayersStateAfterCombat` + `calc_battle_exp` + `addExp` +
+    /// `distributeNpcTreasure` (`ovr006.cs:169-253`, `:713`), in the
+    /// original's order — which matters twice over: `partyAnimatedCount` is
+    /// counted **before** the survivor ladder wakes anybody up (so a member
+    /// who was down when the last monster fell does not dilute the share),
+    /// and the NPC's cut comes off the pool **before** the results screen
+    /// prints the number the party will see.
+    ///
+    /// Every call here is draw-free (`crate::award`'s module doc has the
+    /// proof), so this runs with the fight's RNG untouched.
+    fn settle_and_award(&mut self, ctx: &mut FlowCtx) {
+        let animated = crate::award::animated_count(ctx.roster);
+        let party_size = if ctx.state.party_size == 0 {
+            ctx.roster.members.len() as u8
+        } else {
+            ctx.state.party_size
+        };
+        let outcome = crate::award::calc_battle_exp(
+            &self.state,
+            &mut ctx.state.pooled_money,
+            &mut ctx.state.treasure_items,
+            party_size,
+            animated,
+            false,
+        );
+        // `:249-253` — only a won battle pays.
+        if self.outcome == Some(CombatOutcome::PartyWins) {
+            crate::award::add_exp(ctx.roster, outcome.exp_each);
+            ctx.state.exp_to_add = outcome.exp_each;
+        } else {
+            ctx.state.exp_to_add = 0;
+        }
+        crate::award::settle_survivors(ctx.roster);
+        self.npc_share =
+            crate::award::distribute_npc_treasure(ctx.roster, &mut ctx.state.pooled_money);
+        self.award = Some(outcome);
+        ctx.vm_memory
+            .transcript
+            .push(crate::vmhost::TranscriptEntry::Request(format!(
+                "award: {} xp each, pool {} gp, {} item(s)",
+                ctx.state.exp_to_add,
+                ctx.state.pooled_money.gold_worth(),
+                ctx.state.treasure_items.len()
+            )));
+    }
+
+    /// `displayCombatResults` (`ovr006.cs:381-440`): the outer frame, the
+    /// headline at row 3, the two experience lines at rows 5 and 7, and
+    /// `displayInput`'s colour-15 prompt.
+    fn draw_results(&mut self, ctx: &mut FlowCtx) {
+        crate::combat::scene::render::palette_normal(ctx.fb);
+        ctx.fb.clear(0);
+        let _ = crate::frames::draw_frame_outer(ctx.fb, ctx.symbols);
+        let award = self.award.unwrap_or_default();
+        let won = self.outcome == Some(CombatOutcome::PartyWins);
+        let fled = self.outcome == Some(CombatOutcome::Stalemate) && !won;
+        let headline = crate::award::results_headline(&award, fled, won);
+        crate::text::draw_string(ctx.fb, ctx.font, headline, 3, 1, 0, 10); // `:390`
+        let [line_a, line_b] = crate::award::results_exp_lines(ctx.state.exp_to_add);
+        crate::text::draw_string(ctx.fb, ctx.font, &line_a, 5, 1, 0, 10); // `:436`
+        crate::text::draw_string(ctx.fb, ctx.font, &line_b, 7, 1, 0, 10); // `:437`
+        for (i, line) in self.npc_share.iter().enumerate() {
+            // `distributeNpcTreasure`'s own lines (`ovr006.cs:752`).
+            crate::text::draw_string(ctx.fb, ctx.font, line, 9 + i * 2, 2, 0, 10);
+        }
+        crate::combat::scene::render::draw_prompt(
+            ctx.fb,
+            ctx.font,
+            "press <enter>/<return> to continue",
+        );
+    }
+
+    fn drain_results_input(&mut self, ctx: &mut FlowCtx) {
+        if ctx.input.read_key().is_some() {
+            let (items, money) = crate::award::treasure_on_ground(
+                &ctx.state.pooled_money,
+                &ctx.state.treasure_items,
+            );
+            self.stage = if items || money {
+                self.draw_treasure(ctx);
+                Stage::Treasure
+            } else {
+                // `distributeCombatTreasure`'s Exit arm with an empty ground
+                // (`ovr006.cs:656-659`) — nothing to claim, so it closes.
+                Stage::Restore
+            };
+        }
+    }
+
+    /// `distributeCombatTreasure`'s menu line (`ovr006.cs:577-607`), composed
+    /// from what is actually on the ground. Detect is omitted (its spell scan
+    /// belongs to G7); View is the mid-combat sheet, already docketed.
+    fn draw_treasure(&mut self, ctx: &mut FlowCtx) {
+        let _ = crate::frames::draw_frame_outer(ctx.fb, ctx.symbols);
+        let (items, money) =
+            crate::award::treasure_on_ground(&ctx.state.pooled_money, &ctx.state.treasure_items);
+        let line = if money {
+            "View Take Pool Share Exit"
+        } else if items {
+            "View Take Pool Exit"
+        } else {
+            "View Pool Exit"
+        };
+        let summary = format!(
+            "Treasure: {} gp worth, {} item(s)",
+            ctx.state.pooled_money.gold_worth(),
+            ctx.state.treasure_items.len()
+        );
+        crate::text::draw_string(ctx.fb, ctx.font, &summary, 3, 1, 0, 10);
+        crate::combat::scene::render::draw_prompt(ctx.fb, ctx.font, line);
+    }
+
+    /// The pool screen's keys. `S`/`P` are `share_pooled`/`poolMoney`
+    /// verbatim; `T` takes one pooled item per press onto the selected member
+    /// (the original opens `sl_select_item`'s scrolling list here — that
+    /// widget is the named residual, not the arithmetic); `E`/Esc leaves,
+    /// with the original's own "There is still treasure left" note in the
+    /// transcript rather than a second modal.
+    fn drain_treasure_input(&mut self, ctx: &mut FlowCtx) {
+        while let Some(event) = ctx.input.read_key() {
+            let key = match event {
+                crate::input::InputEvent::Char(k) => k.to_ascii_uppercase(),
+                crate::input::InputEvent::Escape => b'E',
+                _ => continue,
+            };
+            match key {
+                b'S' => crate::award::share_pooled(ctx.roster, &mut ctx.state.pooled_money),
+                b'P' => crate::award::pool_money(ctx.roster, &mut ctx.state.pooled_money),
+                b'T' => {
+                    let member = ctx.state.selected_player as usize;
+                    crate::award::take_item(ctx.roster, member, &mut ctx.state.treasure_items, 0);
+                }
+                b'E' => {
+                    let (items, money) = crate::award::treasure_on_ground(
+                        &ctx.state.pooled_money,
+                        &ctx.state.treasure_items,
+                    );
+                    if items || money {
+                        ctx.vm_memory
+                            .transcript
+                            .push(crate::vmhost::TranscriptEntry::Request(
+                                "There is still treasure left.".to_string(),
+                            ));
+                    }
+                    self.stage = Stage::Restore;
+                    return;
+                }
+                _ => continue,
+            }
+            self.draw_treasure(ctx);
         }
     }
 

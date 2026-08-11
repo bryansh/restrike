@@ -70,6 +70,12 @@ pub struct LoadedMonster {
     /// host has always recorded). Consumed at combat entry by
     /// [`crate::combat_art::load_monster_icon`].
     pub icon_block: u8,
+    /// ★ What this monster pays out when it dies (roll-credits slice 3):
+    /// purse, experience terms and carried items. **Never read by combat** —
+    /// the fight consults `attacks`/`ac`/`thac0`/`movement` and nothing here,
+    /// so carrying it is draw-neutral by construction. `items` arrives from
+    /// `MON{area}ITM.DAX`, `load_mob`'s optional companion (`ovr017.cs:861`).
+    pub award: crate::combat::MonsterAward,
 }
 
 impl LoadedMonster {
@@ -91,6 +97,15 @@ impl LoadedMonster {
             // stamps the slot and the caller supplies the CPIC block.
             icon_slot: 0,
             icon_block: 0,
+            award: crate::combat::MonsterAward {
+                money: record.record.money.into(),
+                base_exp: record.record.field_13c,
+                exp_per_hp: record.record.field_13e_140[0],
+                hit_point_rolled: record.record.hit_point_rolled,
+                // `load_mob` reads `MON{area}ITM.DAX` separately; the caller
+                // supplies it (this lift is pure over one CHA record).
+                items: Vec::new(),
+            },
         }
     }
 

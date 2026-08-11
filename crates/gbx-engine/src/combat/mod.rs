@@ -494,6 +494,38 @@ pub struct Combatant {
     /// Neither `Action.Clear` nor `CalculateInitiative` resets it: one turning
     /// per combatant per fight.
     pub has_turned_undead: bool,
+
+    // --- the post-fight award payload (roll-credits slice 3) ---------------
+    /// ★ What this combatant is WORTH when it dies — `calc_battle_exp`'s four
+    /// per-corpse reads (`ovr006.cs:29-43`). Carried on the combatant because
+    /// the award is computed from the *fight's* final roster, after
+    /// `DeallocateNonTeamMemebers` has already thrown the monster records
+    /// away in the original. Default (all zero, no purse, no items) for every
+    /// hand-built combatant, which is what keeps it invisible to the guard.
+    pub award: MonsterAward,
+}
+
+/// ★ One dead enemy's contribution to the post-fight award
+/// (`calc_battle_exp`, `ovr006.cs:19-63`). Every field is a raw
+/// `CHRDAT`-record read; the arithmetic lives in [`crate::award`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MonsterAward {
+    /// `player.Money` (@0xfb) — paid into `gbl.pooled_money` (`:29`).
+    pub money: crate::party::Money,
+    /// `player.field_13C` (@0x13c, a `short`) — the flat experience award
+    /// (`:32`).
+    pub base_exp: i16,
+    /// `player.field_13E` (@0x13e) — experience **per rolled hit point**
+    /// (`:31`, multiplied by `hit_point_rolled`).
+    pub exp_per_hp: u8,
+    /// `player.hit_point_rolled` (@0x79) — the multiplier for
+    /// [`Self::exp_per_hp`]. Note it is the ROLLED hit points, not the
+    /// current or maximum: a monster damaged to 1 hp is worth exactly as much
+    /// as an untouched one.
+    pub hit_point_rolled: u8,
+    /// `player.items` — the corpse's inventory, cloned into the treasure pool
+    /// with `readied` cleared (`:40-42`). Opaque `.swg`-shaped records.
+    pub items: Vec<Vec<u8>>,
 }
 
 /// Which item a ranged swing draws from — the `out item` of
@@ -647,6 +679,7 @@ impl Combatant {
             quick_fight: true,
             has_items: false,
             has_turned_undead: false,
+            award: MonsterAward::default(),
         }
     }
 
@@ -757,6 +790,7 @@ impl Combatant {
             quick_fight: true,
             has_items: false,
             has_turned_undead: false,
+            award: MonsterAward::default(),
         }
     }
 }

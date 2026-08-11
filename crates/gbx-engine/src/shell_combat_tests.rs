@@ -142,6 +142,11 @@ fn engine_with(data: GameData, party: Vec<crate::party::Character>) -> Engine {
 fn auto_keys(e: &Engine) -> Vec<crate::input::InputEvent> {
     match e.shell().combat_host().map(|h| h.stage()) {
         Some(Stage::ContinuePrompt) => vec![crate::input::InputEvent::Char(b'N')],
+        // ★ roll-credits slice 3: the fight now ends on `displayCombatResults`
+        // and the pool screen, both of which block on a key exactly as the
+        // original's do. Acknowledge the results, then Exit the pool.
+        Some(Stage::Results) => vec![crate::input::InputEvent::Enter],
+        Some(Stage::Treasure) => vec![crate::input::InputEvent::Char(b'E')],
         _ => Vec::new(),
     }
 }
@@ -576,6 +581,9 @@ fn a_fight_parked_on_a_players_turn_round_trips_with_its_menus() {
         let keys: Vec<crate::input::InputEvent> = match e.shell().combat_host().map(|h| h.stage()) {
             Some(Stage::PlayerTurn) => vec![crate::input::InputEvent::Char(b'Q')],
             Some(Stage::ContinuePrompt) => vec![crate::input::InputEvent::Char(b'N')],
+            // The post-fight award screens (roll-credits slice 3).
+            Some(Stage::Results) => vec![crate::input::InputEvent::Enter],
+            Some(Stage::Treasure) => vec![crate::input::InputEvent::Char(b'E')],
             _ => Vec::new(),
         };
         e.tick(&keys);
@@ -837,6 +845,9 @@ fn a_manual_fight_is_played_from_the_menus_and_won() {
         let keys: Vec<crate::input::InputEvent> = match stage {
             Some(Stage::PlayerTurn) => crate::demo::scripted_player_key(&e).into_iter().collect(),
             Some(Stage::ContinuePrompt) => vec![crate::input::InputEvent::Char(b'N')],
+            // The post-fight award screens (roll-credits slice 3).
+            Some(Stage::Results) => vec![crate::input::InputEvent::Enter],
+            Some(Stage::Treasure) => vec![crate::input::InputEvent::Char(b'E')],
             _ => Vec::new(),
         };
         e.tick(&keys);
@@ -934,6 +945,9 @@ fn space_during_a_fight_hands_the_next_turn_to_the_player() {
                 vec![crate::input::InputEvent::Char(b'Q')]
             }
             Some(Stage::ContinuePrompt) => vec![crate::input::InputEvent::Char(b'N')],
+            // The post-fight award screens (roll-credits slice 3).
+            Some(Stage::Results) => vec![crate::input::InputEvent::Enter],
+            Some(Stage::Treasure) => vec![crate::input::InputEvent::Char(b'E')],
             _ => Vec::new(),
         };
         e.tick(&input);
