@@ -372,6 +372,9 @@ impl Character {
 // actually name are declared here; combat's own copy lives in
 // `crate::combat::records`.
 pub const SKILL_CLERIC: usize = 0;
+pub const SKILL_DRUID: usize = 1;
+pub const SKILL_PALADIN: usize = 3;
+pub const SKILL_RANGER: usize = 4;
 pub const SKILL_MAGIC_USER: usize = 5;
 
 /// `Affects.haste` / `Affects.slow` (`Classes/Affect.cs:46,49`) — the two

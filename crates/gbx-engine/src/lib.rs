@@ -32,6 +32,9 @@ pub mod framebuffer;
 pub mod frames;
 pub mod import;
 pub mod input;
+/// ★ Vancian camp magic (roll-credits §8): the `SpellList` record model, the
+/// spell table's class/level/name columns, and the capacity formula.
+pub mod magic;
 pub mod money;
 pub mod monster;
 pub mod movement;
