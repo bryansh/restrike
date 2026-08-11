@@ -57,7 +57,8 @@ interpreter's dispatch table by hand — the tool does not compute implemented-n
   (34 uses) counts as implemented while its non-monster branch (`CMD_Combat`'s shop/temple/
   `AfterCombatExpAndTreasure` dispatch, `ovr003.cs:971-1029`) is a deferred stub; the spell
   tail (§2 G7) is invisible to opcode counting entirely. The dashboard says the *interpreter*
-  is nearly done; the milestone's real work is in §2.
+  is nearly done; the milestone's real work is in §2. **(Slice 6 landed the temple and
+  AfterCombat arms of that dispatch — §10.3; `CityShop` is the one still reported-not-run.)**
 
 ## 1. Decisions
 
@@ -138,7 +139,10 @@ answer is a temple service and belongs to G8.
 
 **G8 — Death recovery (D-RC6, review M4).** Temple raise-dead (the non-monster COMBAT
 branch's temple dispatch), the `stoned`/`gone` health-status decode fix, and whatever the
-poison/petrification arcs need to be survivable-and-recoverable.
+poison/petrification arcs need to be survivable-and-recoverable. **LANDED 2026-08-11 —
+see §10.** All ten temple services, the whole nine-rung `Status` ladder, the poison clock
+(tick, lapse and cure), and — outside the door's own scope — **the post-fight writeback**,
+without which every wound healed itself the moment the results screen closed.
 
 **G9 — The ending sequence (review M9).** The endgame choreography, FD-32's progressive
 fade, and the credits themselves — named deliverables with their transcription sources
@@ -172,7 +176,7 @@ owns the version-bump churn**; later slices rebase onto it and batch their enum 
 | 3 | Items/roster/mechanics tail + TREASURE/XP + PARLAY (G5) | Opus @ high | No | 1 (rebases on 2's enum batch) |
 | 4 | Vancian camp magic (G3) | Opus @ high | **Yes — short** (the SpellList staging model on the character record) | 1 |
 | 5 | Spell tail must-haves (G7) — **landed, §9** | Opus @ high | No — G7's enumeration IS the spec | 4 |
-| 6 | Death recovery + temple services (G8) | Opus @ high | No | 4 (shares the record), 5 (clerical spells) |
+| 6 | Death recovery + temple services (G8) — **landed, §10** | Opus @ high | No | 4 (shares the record), 5 (clerical spells) |
 | 7 | Wilderness/overworld (G2) | Opus @ high–xhigh | **Yes — full door** | 1 |
 | 8 | Out-of-combat item use (G6) | Opus @ high | No | 1 |
 | 9 | Ending sequence + FD-32 fade (G9) | sized during G2/G1 work | — | 7 |
@@ -964,6 +968,8 @@ the spell-book dump, the camp-cast drive and the on-screen casting beat). No
   `hit_point_current` or `health_status` — so wounds do not persist past a
   fight. This is pre-existing and outside G7, but it is on the playthrough's
   critical path and should be its own small slice before D-RC2's loop starts.
+  **CLOSED by slice 6 (§10.1)** — which also found that *spell expenditure* was
+  never written back either.
 - `gbl.damage_flags` (fire/cold/electricity/acid/magic) is not carried into
   `damage_person`. It is read only by the `resist_*` affect handlers, every one
   of which §9.1 pruned, so the visible consequence is "our fireball does not
@@ -976,7 +982,9 @@ the spell-book dump, the camp-cast drive and the on-screen casting beat). No
   the citation but not fired: the out-of-combat `remove_affect` does not run
   `CallAffectTable(Remove)` handlers. Slow Poison therefore buys its five hours
   and then simply lapses. The handler wants the same dispatch table combat has,
-  which is a G8-sized job alongside the poison arc itself.
+  which is a G8-sized job alongside the poison arc itself. **CLOSED by slice 6
+  (§10.5)** — and the same seam turned on `AffectPoisonDamage`'s ten-minute
+  re-planting tick, which is the whole poison clock.
 - The affect-effect handlers for the 77 tripwired rows remain tripwired. The
   ones **this slice's own rows plant** are all landed, because a spell whose
   affect trips `affect-effect` on every dispatch is not implemented: `cursed`
@@ -985,3 +993,287 @@ the spell-book dump, the camp-cast drive and the on-screen casting beat). No
   Bless's and Protection from Evil's, and `read_magic` 0x10 / `find_traps` 0x13
   / `slow_poison` 0x16 are explicit **no-ops** (the original's table maps the
   first two to `ovr013.empty` and the third to a timeout-only handler).
+
+## 10. Slice 6: death recovery + temple services (G8)
+
+**LANDED 2026-08-11.** Five deliverables, four commits, `SAVE_FORMAT_VERSION`
+6 → 7 (one break, budgeted).
+
+### 10.1 The post-fight writeback — and what the brief got wrong
+
+Slice 5's flagged residual, closed. In the original there is **no** post-fight
+sync function at all: `gbl.TeamList` holds the same `Player` objects the combat
+overlays mutate, so `damage_person`'s hit points, the `Status` ladder,
+`RemoveFromCombat`'s `in_combat`, the Quick word's `quick_fight`
+(`ovr009.cs:709`) and `SpellList.ClearSpell` are already on the record when
+`CleanupPlayersStateAfterCombat` (`ovr006.cs:169`) runs over it. Our split
+roster/`Combatant` model has to copy them, and until this slice it copied only
+the affect chain — so **wounds vanished after every fight**.
+
+`combat_host::carry_state_home` carries the complete set:
+
+| record cell | where combat writes it |
+|---|---|
+| `hit_point_current` @0x1A3 | `damage_person`/`heal_player` |
+| `health_status` @0x195 | the `damage_player` ladder + `KillPlayer` |
+| `in_combat` @0x196 | `RemoveFromCombat`, the ladder's non-conscious arm |
+| `quick_fight` @0x198 | the Quick menu word (`ovr009.cs:709`), SPACE's revoke (`:233`) |
+| `spell_list` @0x1E | `SpellList.ClearSpell` per cast |
+| `affects` (`.fx`) | every add/remove in the fight (slice 5) |
+
+★ **The brief assumed spell expenditure was already handled; it was not.**
+Nothing wrote the fight's `memorized_list` back, so a cleric who spent every
+Cure Light Wounds in a bar brawl walked out with them all still memorized. The
+mapping is a multiset difference against the record's own collected entry list
+(`records.rs`' non-zero sweep of `spell_list[1..]`), resolved one
+`magic::clear_spell` per spent id — `ClearSpell`'s remove-the-first-match
+semantics.
+
+★ **The roster index map has to be taken before the first write.** `party_kits`
+picks members by `hit_point_current > 0`, and the writeback is about to zero
+that predicate for a casualty; resolving lazily (as the affect-only version
+could afford to) shifts every actor past the first one who fell.
+
+**Named, not carried:** the ready/unready cells (`ac`, `hit_bonus`, the current
+attack profile, each item's `readied` flag). The original's per-turn
+`AI_items_selection` really does re-ready a weapon and `reclac_player_values`
+really does rewrite those cells; ours models the swap inside the fight's own
+`Loadout` and never touches `Character::readied_items`, so writing the derived
+cells back would desync the record from the inventory.
+
+### 10.2 The health-status ladder
+
+`decode_health_status` folded `tempgone` (2), `running` (3), **`stoned`** (7)
+and **`gone`** (8) onto `Okey`, so a petrified or disintegrated record read back
+as a healthy one. All nine `Status` values (`Classes/Enums.cs:7-18`) now
+round-trip; `HealthStatus` gained `TempGone`/`Stoned`/`Gone` (appended **last**,
+so postcard keeps every committed `.rsav`'s encoding), plus two predicates that
+turn out to be the spine of deliverables D and E:
+
+- `is_terminal` — `KillPlayer`'s refusal set `{dead, stoned, gone}`
+  (`ovr024.cs:39-42`);
+- `counts_as_alive` — `CleanupPlayersStateAfterCombat`'s liveness set
+  `{running, animated, okey}` (`:221-223`). Note what is **not** in it:
+  `unconscious` and `dying`.
+
+**A correction kept rather than smoothed:** `damage_player` has **no**
+terminal-status guard (`ovr025.cs:1183` opens straight on the arithmetic),
+unlike `KillPlayer` and the DAMAGE opcode's `sub_32200` (`ovr008.cs:1403`). The
+asymmetry is the original's. It is unreachable anyway, because `KillPlayer`
+cleared the statue's `in_combat` and every target list filters on that.
+
+**The roster tells the truth now.** The character sheet's `statusString` table
+was already all nine rows; what was missing was the byte. And `PartySummary`
+finally paints `displayPlayerName`'s three arms (`ovr025.cs:827-838`): M3 argued
+the removed-colour arm could not fire on a walk-loop roster because a live
+member's `in_combat` is true — which was only true because nothing wrote it
+back. A member who fell in the last fight is now dark red in the panel.
+
+### 10.3 The temple, and where the shipped ones are
+
+`CMD_Combat`'s non-monster branch (`ovr003.cs:974-992`) is a three-way dispatch
+on two `Area2` flags a script has just set: `EnterShop` (`0x6D8`) →
+`ovr007.CityShop()`, `EnterTemple` (`0x5C4`) → `ovr005.temple_shop()`, neither →
+`ovr006.AfterCombatExpAndTreasure()`. **That is why no opcode census could ever
+show a temple: there is no temple opcode.** The flag write is a plain
+`SAVE 1 → 0x7EE2`.
+
+A scan of every `ECL*.DAX` block for the address finds exactly four shipped
+temples, each the same three-instruction idiom:
+
+| block | address | shape |
+|---|---|---|
+| `ECL1#80` | `0x8829` | `CLEARMONSTERS; SAVE 1 → 0x7EE2; COMBAT` |
+| `ECL1#81` | `0x8677` | the same |
+| ★ `ECL2#1` | `0x91DF` | `SAVE 0xFF → 0x7EE1` (HeadBlockId); `SAVE 1 → 0x7EE2`; `CLEARMONSTERS; COMBAT` |
+| `ECL5#49` | `0x8E0C` | `CLEARMONSTERS; SAVE 1 → 0x7EE2; COMBAT` |
+
+`ECL2#1` is Tilverton — the block the playthrough opens in (§2's "where the
+playthrough begins"). `EnterShop` appears in nine places (`ECL1#80/81`,
+`ECL2#1` ×2, `ECL4#32` ×3, `ECL4#37`, `ECL5#49`); its branch is reported and
+left for the shop slice.
+
+**The service table** (`temple_sl`, `ovr005.cs:13`; `temple_heal` builds **ten**
+rows from an eleven-entry array, so the trailing `"Exit"` is never a list row
+and the `case 10` in the dispatch switch is dead code):
+
+| # | service | gp | effect |
+|---|---|---|---|
+| 0 | Cure Blindness | 1000 | `blinded` off |
+| 1 | Cure Disease | 1000 | all six `disease_types` off |
+| 2 | Cure Light Wounds | 100 | 1d8 |
+| 3 | Cure Serious Wounds | 350 | 2d8+1 |
+| 4 | Cure Critical Wounds | 600 | 3d8+3 |
+| 5 | Heal | 5000 | full **minus 1d4**, + blindness/disease/`feeblemind` |
+| 6 | Neutralize Poison | 1000 | `poisoned`/`slow_poison`/`poison_damage` off |
+| 7 | Raise Dead | 5500 | §10.4 |
+| 8 | Remove Curse | 3500 | `SpellRemoveCurse` |
+| 9 | ★ Stone to Flesh | 2000 | `stoned` → `okey`, 1 hit point |
+
+★ **Stone to Flesh is delivered here and only here** — slice 5 proved the spell
+does not exist in CotAB (§9.1), so the temple is the whole medusa answer.
+
+Three details worth keeping:
+
+- `buy_cure` charges **the selected member's own purse first** and the **pooled
+  money** second, never another member's coins (`:39-50`). `temple_shop` empties
+  the pool on entry (`:406`), so `P` is the only way to fill it — and a dead,
+  broke member can only be raised out of the pool.
+- `gbl.SelectedPlayer` is **both the payer and the patient**. `G`/`O`
+  (`scroll_team_list`, `:483-489`) is how the original picks them.
+- Raise Dead and Stone to Flesh **re-test the condition after taking the
+  money** (`:174`, `:290-291`). The temple keeps the gold either way, which is
+  why the "cast cure anyway" prompt exists at all.
+
+### 10.4 ★ Raise Dead's real mechanics, and two corrections with evidence
+
+The temple's gate is `dead || animated`, with **no elf clause and no `Con > 0`
+clause** — unlike the *spell* (`SpellRaiseDead`, `ovr023.cs:2343-2345`). So in
+CotAB **an elf who dies can be raised at a temple and never by a cleric.** Then
+`animate_dead` and `poisoned` come off under `cureSpell`, and the member stands
+at exactly one hit point.
+
+Two things the decompilation cannot be read literally on, both resolved against
+the spell — which is the same routine, hand-inlined:
+
+1. The Constitution guard reads `if (player.stats2.Con.full <= 0) {
+   player.stats2.Con.full--; }` — a branch that can never fire for any character
+   with a Constitution at all, and whose body would drive the score further
+   negative if it did. The spell is unambiguous at the same point: `Con.cur > 0`
+   as a precondition, `Con.cur--` unconditional. Read as a flipped comparison
+   (`jle` for `jg`, one bit) the two agree, and that is how it is transcribed:
+   **the raise costs a point of Constitution.**
+2. The hit-point recompute (`var_107 = hp_max − hp_rolled; … var_107 /= var_108;
+   hit_point_max = var_107`) sets a Constitution-16 fighter 5's maximum hit
+   points to **1**. Its shape is an inlined `CalcStatBonuses(Stat.CON)` —
+   `var_108`'s per-class loop is `ConHitPointBonus` (`ovr024.cs:782-831`) term
+   for term — and *that* function is readable, is what the spell calls at exactly
+   this point (`ovr023.cs:2358`), and does the job correctly. So the recompute is
+   `temple::recalc_hp_for_con`, a transcription of `ovr024.cs:1053-1105`. The
+   literal is preserved in the doc comment for a future reader with the
+   overlay's disassembly. **`ovr005` is not in `coab_new.lst`** — the C#
+   decompilation is the only source for it, which is why this is written down.
+
+The member ends at exactly one hit point either way: the temple's inline writes
+`hit_point_max` only (it has no counterpart to `CalcStatBonuses`'
+`hit_point_current` delta), and the spell reaches the same place by ordering.
+
+**The spell's own Raise Dead gained the recompute too** — slice 5 landed the
+Constitution loss without `CalcStatBonuses`, so raising cost a stat point but no
+hit points.
+
+### 10.5 ★ The poison clock
+
+Slice 5 named the seam: out-of-combat `remove_affect` never ran
+`CallAffectTable(Remove)`, so `AffectSlowPoison`'s kill-on-timeout could not
+fire. It fires now, gated on the record's own `callAffectTable` flag exactly as
+`ovr024.cs:75-79` gates it, and `CheckAffectsTimingOut` routes its expiries
+through `remove_affect` rather than dropping them in place (`ovr021.cs:79-81`).
+
+What that turns on is the whole arc, and **both handlers ignore their `Effect`
+argument**, so both run on the way *out*:
+
+1. A failed save against a spider bite is **save-or-die**: `PoisonAttack`
+   (`ovr013.cs:848-860`) plants a permanent `poisoned` and calls `KillPlayer`
+   immediately. The affect marks the corpse.
+2. **Slow Poison** (`is_affected2`, `ovr023.cs:1291-1310`) lifts a member at 0
+   hit points to 1, plants `slow_poison` for the row's timeout and
+   `poison_damage` for ten minutes — both with `callAffectTable`.
+3. Every ten minutes of **camp** time (§9.2's quirk: the clock only runs in
+   camp), `poison_damage` lapses → `AffectPoisonDamage` **re-plants it for
+   another ten minutes** and takes one hit point off anybody above 1. The tick
+   alone can never kill.
+4. When `slow_poison` finally lapses → `AffectSlowPoison` finds `poisoned` still
+   on the chain → **`KillPlayer("dies from poison")`**.
+5. **Neutralize Poison** (spell or temple) removes all three under
+   `gbl.cureSpell`.
+
+★ `cureSpell` does **not** suppress the handler — it suppresses the handler's
+*re-plant* (`ovr013.addAffect` returns `false` and adds nothing, `:25-36`). That
+one indirection is the whole difference between a cure and a slow, expensive way
+to poison somebody again.
+
+★ **The removal order inside Neutralize Poison is load-bearing.** `poisoned`
+leaves the chain **before** `slow_poison` (`ovr023.cs:2259-2261`,
+`ovr005.cs:255-257`). Reverse those two lines and the cure kills the patient,
+because `AffectSlowPoison` would still find the poison. There is a test named
+exactly that.
+
+**Petrification** needs no clock: `KillPlayer`'s guard means a `stoned` member is
+never killed again (`ovr024.cs:39-42`), so the party carries the statue — not
+dead, not walking, `in_combat == false`, dark red in the roster panel — until a
+temple pays 2000 gp for Stone to Flesh. **Nothing in the game restores `gone`**:
+Raise Dead's gate is `dead || animated`.
+
+### 10.6 The wipe check, aligned
+
+`tick_combat` keyed the game over off the fight's own
+`CountCombatTeamMembers` verdict. The original keys it off
+`CleanupPlayersStateAfterCombat`'s scan over the roster (`ovr006.cs:216-232`),
+and three cases separate them — all real:
+
+- ★ **a party that FLED is `running`** — in the liveness set, so a rout is not a
+  game over. This was a live bug: fleeing raised the death screen.
+- **a surviving joined NPC does not save the party** (`control_morale <
+  Control.NPC_Base` is part of the falsifying predicate).
+- ★ **a petrified party is a wipe** — `stoned` is not in the set. The case D-RC6
+  named, and the one §10.2's decode fix had to unblock.
+
+`battleWon` comes with it, and it is **not** "the monsters are dead": it is "at
+least one member came out `okey` or `animated`", and it is what gates the
+experience award (`:249-253`). So does the scan's own nineteen-affect strip
+(`affects_array`, `:147-167`) — a **different** table from
+`RemoveCombatAffects`': `charm_person`, `confuse`, `fumbling`, `fear` and
+`spiritual_hammer` are on this one only.
+
+### 10.7 The save break
+
+`SAVE_FORMAT_VERSION` **6 → 7**, one golden recomputed. `EngineState` gained
+`enter_temple`/`enter_shop`. They are **persisted** rather than
+`#[serde(skip)]`ped (the shape `pending_combat` takes) because the original's own
+`SaveGame` writes `area2_ptr` whole (`ovr017.cs:1109-1156`), flags included.
+`VmPhase::Temple` and the three `HealthStatus` rungs are both append-only, so
+neither moved an encoding on its own.
+
+### 10.8 Acceptance
+
+1. **The writeback**: `a_wound_survives_the_fight_and_reaches_the_roster` drives
+   a fixture fight to `FinalBeats`, snapshots the fight's own view of the party,
+   finishes, and asserts the roster matches hit point for hit point — then
+   round-trips it through `.rsav`. `the_dead_stay_dead_on_the_roster` does the
+   wiped-party case.
+2. **The temple at a shipped site**:
+   `the_enter_temple_flag_opens_the_temple_from_a_shipped_combat_opcode` drives
+   `ECL2#1`'s four instructions byte for byte through the real VM;
+   `a_petrified_member_walks_out_of_the_temple` buys Stone to Flesh with them.
+3. **The poison clock**: `the_poison_clock_ticks_and_then_kills`,
+   `neutralize_poison_saves_the_patient_because_of_the_order` and
+   `curing_in_the_wrong_order_would_kill_the_patient`.
+4. **Frames** (`slice6_a_visit_to_the_temple`, real data + the bundled slot-A
+   party): six dumped and eyeballed — the temple menu with MATHEW's name in
+   `displayPlayerName`'s removed colour, the ten services with their prices, the
+   wrapped price line, "MATHEW IS CURED.", the priest noticing the leftover pool,
+   and the rebuilt exploration screen with the script's own post-`COMBAT` PRINT
+   running. MATHEW: status `okey`, 1 hit point, Constitution 17 → 16, maximum hit
+   points 49 → 44 — a paladin 5 losing exactly `+1/level`.
+
+### 10.9 Residuals, named
+
+- **`CityShop` is still the reported-but-unwired arm.** The dispatch names it and
+  the transcript says so; nine shipped sites wait on the shop slice.
+- **The temple's View and Appraise words** report rather than act (`viewPlayer`
+  and `appraiseGemsJewels` are their own screens; the latter is the only
+  draw-bearing thing in `ovr022` the award path deliberately avoids).
+- **`Take` on the temple's menu** runs `share_pooled`, not `TakePoolMoney`'s own
+  per-member selector.
+- **The stoned state has no script route in yet.** `alter_character`'s
+  `switch_var == 0x100` arm (`ovr008.cs:622-628`: `set_value >= 0x80` clears
+  `in_combat`, `0x87` sets `Status.stoned`) is the cell a script writes; the
+  acceptance test stages the state on the record directly. The medusa's own gaze
+  is a monster special attack and arrives with the bestiary work.
+- **`CheckAffectsEffect(Death)`** is not run by the out-of-combat `KillPlayer`:
+  its only non-trivial rows are monster handlers (`troll_fire_or_acid`'s 3d6 and
+  friends), none of which a party member carries.
+- **The wiped-party arm of `CleanupPlayersStateAfterCombat`** frees every team
+  member and sets `party_size = 0` (`ovr006.cs:326-346`). Ours leaves the roster
+  intact and lets the `GameOver` flow reload a save, which is D-RC0's shape.
