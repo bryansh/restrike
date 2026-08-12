@@ -198,7 +198,12 @@ impl Hotbar {
         self.selected = Some(next);
     }
 
-    fn select_word_starting_with(&mut self, upper: u8) -> bool {
+    /// `displayInput`'s letter scan (`ovr027.cs:279-292`): move the highlight
+    /// onto the word this key starts, if any. Public because `sl_select_item`
+    /// splits the job — its **list** consumes the key while its own
+    /// `displayInput` only paints, so the screen that owns the pair has to move
+    /// the highlight itself.
+    pub fn select_word_starting_with(&mut self, upper: u8) -> bool {
         if let Some(i) = self
             .words
             .iter()
@@ -430,6 +435,27 @@ impl ListMenu {
     /// Which row sits at the top of the window (`gbl.menuScreenIndex`).
     pub fn screen_index(&self) -> usize {
         self.screen_index
+    }
+
+    /// Put the cursor back on `row` after the list was rebuilt underneath it —
+    /// the original keeps `index_ptr` in a variable that outlives its list
+    /// (`PlayerItemsMenu`'s `dummy_index`, `ovr020.cs:439`), so a Drop or a
+    /// Join leaves the highlight where it was rather than snapping home. The
+    /// row is clamped into range and then normalized off any heading exactly
+    /// the way `sl_select_item`'s own entry step does.
+    pub fn seed_cursor(&mut self, row: usize) {
+        if self.items.is_empty() {
+            self.index = 0;
+            return;
+        }
+        let row = row.min(self.items.len() - 1);
+        // Scroll the window so the row is visible, then normalize.
+        if row < self.screen_index {
+            self.screen_index = row;
+        } else if row >= self.screen_index + self.page_size {
+            self.screen_index = row + 1 - self.page_size;
+        }
+        self.index = self.skip_headings(true, row as i64);
     }
 
     /// The words `sl_select_item` appends to its caller's prompt each

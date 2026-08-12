@@ -710,7 +710,7 @@ impl CastScreen {
 
 /// `Affects.invisibility` (0x19) — `remove_invisibility(caster)`
 /// (`ovr024.cs:650-658`) runs on every successful cast, in or out of combat.
-const AFF_INVISIBILITY: u8 = 0x19;
+pub(crate) const AFF_INVISIBILITY: u8 = 0x19;
 
 fn back_to_magic(status: Option<String>) -> ScreenTransition {
     ScreenTransition::To(Screen::Magic(match status {
@@ -719,7 +719,7 @@ fn back_to_magic(status: Option<String>) -> ScreenTransition {
     }))
 }
 
-enum SelectKey {
+pub(crate) enum SelectKey {
     Next,
     Prev,
     Select,
@@ -737,7 +737,7 @@ enum SelectKey {
 ///   Through [`crate::input::ExtKey::ctrl_code`] those are End/Kp1 and
 ///   Home/Kp7 — so the comparison is written against the ctrl code, not
 ///   against a guessed arrow key.
-fn select_key(ev: crate::input::InputEvent) -> Option<SelectKey> {
+pub(crate) fn select_key(ev: crate::input::InputEvent) -> Option<SelectKey> {
     use crate::input::InputEvent;
     match ev {
         InputEvent::Enter => Some(SelectKey::Select),

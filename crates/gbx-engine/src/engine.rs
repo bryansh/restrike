@@ -544,6 +544,20 @@ impl Engine {
         ));
     }
 
+    /// Opens the character sheet on the currently-selected member
+    /// (`viewPlayer`, `ovr020.cs:236`) — the same screen camp's `View` word
+    /// reaches, as a direct entry point for a frontend, a demo, or a test that
+    /// wants the sheet's own leaves (Items since roll-credits slice 8) without
+    /// walking the camp menu to get there. Returns to the world menu on exit.
+    pub fn open_party_view(&mut self) {
+        self.shell = Shell::Screen(crate::screens::Screen::PartyView(
+            crate::screens::PartyView::from_index(
+                self.state.selected_player,
+                crate::screens::ReturnTo::World,
+            ),
+        ));
+    }
+
     /// Opens a shop screen over the given stock (M3 step 6 deliverable 5) —
     /// the entry point for stepping onto a town shop tile (the ECL
     /// `EnterShop`-flag + `TREASURE`-stock flow that populates it is M6).

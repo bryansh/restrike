@@ -70,6 +70,10 @@ pub enum Screen {
     /// same reason the four above were: postcard encodes a variant as its
     /// index, so every committed `.rsav` keeps its encoding and no golden moves.
     Cast(Box<crate::camp_cast::CastScreen>),
+    /// ★ Roll-credits slice 8 (out-of-combat item use, G6). Appended at the
+    /// end for the same postcard reason — no committed `.rsav` moves, so no
+    /// `SAVE_FORMAT_VERSION` bump.
+    Items(Box<crate::items_screen::ItemsScreen>),
 }
 
 impl Screen {
@@ -86,6 +90,7 @@ impl Screen {
             Screen::SpellEffects(s) => s.tick(ctx),
             Screen::Rest(s) => s.tick(ctx),
             Screen::Cast(s) => s.tick(ctx),
+            Screen::Items(s) => s.tick(ctx),
         }
     }
 }
@@ -153,6 +158,20 @@ impl PartyView {
         }
     }
 
+    /// [`PartyView::new`] without a [`FlowCtx`] — the bar is rebuilt on the
+    /// first tick anyway (`tick` re-derives it whenever the selection moves),
+    /// so an entry point that has only an index can open the sheet too.
+    pub fn from_index(selected_player: u8, return_to: ReturnTo) -> Self {
+        let mut hotbar = Hotbar::new("Exit");
+        hotbar.accept_ext = true;
+        hotbar.ext_scrolls_party = true;
+        PartyView {
+            selected: selected_player as usize,
+            menu: Widget::Hotbar(hotbar),
+            return_to,
+        }
+    }
+
     fn build_menu(ctx: &FlowCtx, selected: usize) -> Widget {
         let bar = ctx
             .roster
@@ -192,6 +211,21 @@ impl PartyView {
         ctx.fb.clear(0);
         render_sheet(ctx.fb, ctx.font, ctx.symbols, &view);
 
+        // ★ `viewPlayer` recomputes its bar **every loop iteration**
+        // (`ovr020.cs:252-291`), so a leaf that changes what the character has
+        // — Items dropping the last item, say — is reflected the moment the
+        // sheet comes back. Rebuild on change, carrying `gbl.menuSelectedWord`
+        // across (`ovr027.cs:142-145`'s own clamp does the rest).
+        if let Widget::Hotbar(h) = &self.menu {
+            if h.text != view.command_bar {
+                let stored = h.selected_word();
+                self.menu = Self::build_menu(ctx, self.selected);
+                if let Widget::Hotbar(h) = &mut self.menu {
+                    h.seed_selected_word(stored);
+                }
+            }
+        }
+
         match self.menu.tick(ctx.input, ctx.dt_ticks) {
             WidgetOutcome::Pending => ScreenTransition::Stay,
             WidgetOutcome::PartyScroll(code) => {
@@ -209,11 +243,20 @@ impl PartyView {
             WidgetOutcome::Hotbar(key) => match key.to_ascii_uppercase() {
                 // Exit ('E') or Escape ('\0') leaves the sheet.
                 b'E' | 0 => self.exit(ctx),
-                // Items/Spells/Trade/Drop/Heal/Cure: parked for later
-                // deliverables (item-name decode, spell casting, trade UI).
-                // Staying re-prompts, matching viewPlayer's own re-display
-                // loop rather than silently exiting. TODO(M3+/M5): wire the
-                // items list (PlayerItemsMenu) and paladin heal/cure.
+                // ★ Items is real since roll-credits slice 8 (`PlayerItemsMenu`,
+                // `ovr020.cs:300`). `viewPlayer` keeps `gbl.SelectedPlayer`
+                // pointing at whoever the sheet is showing, and the items menu
+                // reads the same cell — so the scroll keys above have to have
+                // written it, which they do.
+                b'I' => {
+                    ctx.state.selected_player = self.selected as u8;
+                    crate::items_screen::ItemsScreen::open(ctx, self.return_to)
+                }
+                // Spells/Trade/Drop/Heal/Cure: parked for later deliverables
+                // (the memorized-spell viewer, the coin trade/drop UI, and
+                // paladin heal/cure's `CanCastHeal` gates). Staying re-prompts,
+                // matching viewPlayer's own re-display loop rather than
+                // silently exiting.
                 _ => ScreenTransition::Stay,
             },
             _ => ScreenTransition::Stay,

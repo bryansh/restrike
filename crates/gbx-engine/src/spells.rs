@@ -224,6 +224,24 @@ pub const AFF_PARALYZE: u8 = 0x34;
 /// `is_affected2` both clear (`ovr024.cs:1360`, `ovr023.cs:1303`).
 pub const AFF_4E: u8 = 0x4E;
 
+// --- the affects the §12.1 item rows plant ---------------------------------
+
+/// `Affects.strength` (0x26) — the Potion of Giant Strength's plant.
+pub const AFF_STRENGTH: u8 = 0x26;
+/// `Affects.haste` (0x27) — the Potion of Speed's.
+pub const AFF_HASTE: u8 = 0x27;
+/// `Affects.invisible` (0x47) — the Dust of Disappearance's (distinct from
+/// `invisibility` 0x19, which is the *spell's*).
+pub const AFF_INVISIBLE: u8 = 0x47;
+/// `Affects.invisibility` (0x19) — the Potion of Invisibility's.
+pub const AFF_INVISIBILITY: u8 = 0x19;
+/// `Affects.prot_drag_breath` (0x49).
+pub const AFF_PROT_DRAGON_BREATH: u8 = 0x49;
+/// `Affects.resist_paralyze` (0x6D).
+pub const AFF_RESIST_PARALYZE: u8 = 0x6D;
+/// `Affects.slow` (0x2A) — what `cast_speed` tries to cure before it hastes.
+pub const AFF_SLOW: u8 = 0x2A;
+
 // --- the 23 must-have rows (§9.1) ------------------------------------------
 
 /// `gbl.spellCastingTable[id]` for the §9.1 must-have set. Any other id
@@ -649,14 +667,57 @@ pub fn spell_entry(id: u8) -> Option<SpellEntry> {
             0,
             0,
         ),
+        // ★ Roll-credits slice 8 (§12): the **item** rows — `SpellClass.Monster`
+        // level-6 entries with no presentable name, reached only through a
+        // potion, a dust or a protection scroll, never through a spell book.
+        // Sized from the shipped item set (§12.1): these seven are exactly the
+        // ids the shipped consumables carry whose `targetType` is not `Combat`,
+        // so they are exactly the ones a party can use outside a fight.
+        // `Potion of Speed` — `cast_speed`; the affect is `haste` (0x27).
+        0x39 => row(
+            0x39, Monster, 6, 0, 0, 0, 0, 0, Self_, Normal, SV_SPELL, AFF_HASTE, Both, 0, 3, 0, 0,
+        ),
+        // `Potion of Giant Strength` — `cast_strength`; affect `strength` (0x26).
+        0x3B => row(
+            0x3B, Monster, 6, 0, 0, 0, 0, 0, Self_, Normal, SV_SPELL, AFF_STRENGTH, Both, 0, 1, 0,
+            0,
+        ),
+        // `Dust of Disappearance` — `cast_invisible`; affect `invisible` (0x47),
+        // and the one `WholeParty` row in the item set.
+        0x3F => row(
+            0x3F, Monster, 6, 0, 0, 0, 0, 7, WholeParty, Normal, SV_SPELL, AFF_INVISIBLE, Both, 0,
+            2, 0, 0,
+        ),
+        // `Scroll of Prot. Dragon Breath` — `sub_616CC`, a silent affect plant.
+        0x5F => row(
+            0x5F, Monster, 6, 0, 0, 0, 0, 0, Self_, Normal, SV_SPELL, AFF_PROT_DRAGON_BREATH, Both,
+            10, 1, 0, 0,
+        ),
+        // `Scroll of Prot. Paralyzation` — `sub_616CC`.
+        0x60 => row(
+            0x60, Monster, 6, 0, 0, 0, 0, 0, Self_, Normal, SV_SPELL, AFF_RESIST_PARALYZE, Both,
+            10, 1, 0, 0,
+        ),
+        // `Potion of Invisibility` — `sub_616CC`; affect `invisibility` (0x19),
+        // the same one every successful cast strips off its caster.
+        0x61 => row(
+            0x61, Monster, 6, 0, 0, 0, 0, 0, Self_, Normal, SV_SPELL, AFF_INVISIBILITY, Both, 0, 1,
+            0, 0,
+        ),
+        // `Potion of Extra Healing` — `cast_heal2`, **2d4+2** and no affect at
+        // all. The one item row with a real effect rather than a plant.
+        0x63 => row(
+            0x63, Monster, 6, 0, 0, 0, 0, 0, Self_, Normal, SV_SPELL, 0, Both, 0, 1, 0, 0,
+        ),
         _ => return None,
     })
 }
 
-/// Every id [`spell_entry`] answers for, ascending — §9.1's implemented set.
-pub const MUST_HAVE_IDS: [u8; 23] = [
+/// Every id [`spell_entry`] answers for, ascending — §9.1's must-have set plus
+/// §12.1's seven item rows.
+pub const MUST_HAVE_IDS: [u8; 30] = [
     0x01, 0x02, 0x03, 0x06, 0x07, 0x0F, 0x12, 0x15, 0x16, 0x17, 0x1A, 0x25, 0x27, 0x29, 0x2A, 0x2B,
-    0x2E, 0x2F, 0x3A, 0x43, 0x45, 0x47, 0x4B,
+    0x2E, 0x2F, 0x39, 0x3A, 0x3B, 0x3F, 0x43, 0x45, 0x47, 0x4B, 0x5F, 0x60, 0x61, 0x63,
 ];
 
 /// The three rows that existed before slice 5 — the only ids any pinned
@@ -667,17 +728,48 @@ pub const PRE_SLICE5_IDS: [u8; 3] = [0x03, 0x0F, 0x17];
 /// affect's lifetime in **minutes**.
 ///
 /// The common arm is `fixedDuration + perLvlDuration × castingLvl`; five ids
-/// override it, and four of those five **draw**. Of the must-have set only
-/// `neutralize_poison` (0x43) takes an override, and it is the one constant
-/// (`1440` — a full day), so **this function never draws for any implemented
-/// row**. The four draw-bearing arms are cited and left to the ids that need
-/// them (`cause_disease` 0x28, `spell_39`/`spell_3d`, `spell_3b`, `spell_3f`),
-/// all of which are tripwired.
+/// override it, and four of those five **draw**. This function answers the
+/// **non-drawing** arms only: `neutralize_poison` (0x43, the one constant —
+/// `1440`, a full day) and the common formula.
+///
+/// ★ Slice 8 made three of the drawing arms reachable — `spell_39` (0x39),
+/// `spell_3b` (0x3B) and `spell_3f` (0x3F), the Potion of Speed, the Potion of
+/// Giant Strength and the Dust of Disappearance. Rather than thread an RNG
+/// through every caller of a function that is draw-free for all 27 other
+/// implemented rows, those three are computed at the one call site that holds
+/// an RNG — [`spell_affect_timeout_drawing`] — and this function's answer for
+/// them (their zero `fixedDuration`) is never used.
+/// [`SPELL_TIMEOUT_DRAWS`] names them so the split is checkable.
 pub fn spell_affect_timeout(entry: &SpellEntry, casting_lvl: i32) -> u16 {
     if entry.id == 0x43 {
         return 1440; // `ovr023.cs:562` — neutralize poison, one day flat.
     }
     (entry.fixed_duration + entry.per_lvl_duration * casting_lvl).max(0) as u16
+}
+
+/// The ids whose `GetSpellAffectTimeout` arm **draws** and that this engine can
+/// reach (`ovr023.cs:543-561`). `cause_disease` (0x28) and `spell_3d` (0x3D) are
+/// the two that draw and are still tripwired.
+pub const SPELL_TIMEOUT_DRAWS: [u8; 3] = [0x39, 0x3B, 0x3F];
+
+/// `GetSpellAffectTimeout`'s drawing arms (`ovr023.cs:543-561`), for the caller
+/// that holds an RNG. Out of combat only — `spell_3f`'s own arm forks on
+/// `game_state == Combat` and this is the non-combat side (`:553-560`).
+///
+/// - `0x39` (and the tripwired `0x3D`): `roll_dice(4, 5)` — five d4s;
+/// - `0x3B`: `roll_dice(4, 1) * 10 + 40`;
+/// - `0x3F`: `(roll_dice(10, 1) + 10) * 10` out of combat.
+pub fn spell_affect_timeout_drawing(
+    entry: &SpellEntry,
+    casting_lvl: i32,
+    rng: &mut crate::rng::EngineRng,
+) -> u16 {
+    match entry.id {
+        0x39 => u16::from(crate::rest::roll_dice(rng, 4, 5)),
+        0x3B => u16::from(crate::rest::roll_dice(rng, 4, 1)) * 10 + 40,
+        0x3F => (u16::from(crate::rest::roll_dice(rng, 10, 1)) + 10) * 10,
+        _ => spell_affect_timeout(entry, casting_lvl),
+    }
 }
 
 #[cfg(test)]

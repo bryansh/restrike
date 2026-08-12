@@ -227,6 +227,50 @@ pub fn party_has_detect_magic(party: &crate::party::Party) -> bool {
 // Slot classification
 // ---------------------------------------------------------------------------
 
+/// The resident `ITEMS` table (`gbl.ItemDataTable`), or an all-zero one when
+/// the data set has no `ITEMS` file — which is every synthetic fixture engine
+/// (D10). A zero table means every slot reads `0`, so nothing is a scroll and
+/// nothing has hands, and the items screen still opens and still lists.
+pub fn load_table(data: &gbx_formats::game_data::GameData) -> ItemDataTable {
+    data.raw_file(crate::combat_host::ITEMS_FILE)
+        .and_then(|b| ItemDataTable::parse(b).ok())
+        .unwrap_or_else(|| ItemDataTable::parse(&[0, 0]).expect("a bare header parses"))
+}
+
+/// ★ `scroll_5C912`'s **unhide half** (`ovr023.cs:349-356`), which slice 4
+/// named and deferred: a scroll's `hidden_names_flag` is cleared — permanently,
+/// in the record — the moment either condition holds.
+///
+/// 1. the reader carries a `read_magic` affect; or
+/// 2. the reader is a cleric (`cleric_lvl > 0`, or a dual-class whose old
+///    cleric level exceeds `multiclassLevel`) **and** the scroll sits in the
+///    clerical scroll slot (`ItemSlot.Quarrel`, 12).
+///
+/// The original runs this per-scroll from inside the list builder, so every
+/// scroll the character carries is visited on the way to any scroll list; this
+/// does the same sweep up front, which is observationally identical and keeps
+/// `build_spell_list` reading `&Character`. Returns how many scrolls it opened.
+pub fn apply_read_magic(ch: &mut Character, table: &ItemDataTable) -> usize {
+    let has_read_magic = ch.has_affect(crate::spells::AFF_READ_MAGIC);
+    let cleric = ch.class_level[crate::party::SKILL_CLERIC] > 0
+        || ch.class_levels_old[crate::party::SKILL_CLERIC] > ch.multiclass_level;
+    let mut opened = 0;
+    for item in ch.items.iter_mut() {
+        let slot = table.get(rec::item_type(item)).item_slot;
+        if !(SLOT_SCROLL_FIRST..=SLOT_SCROLL_LAST).contains(&slot) {
+            continue;
+        }
+        if rec::item_hidden_names_flag(item) == 0 {
+            continue;
+        }
+        if has_read_magic || (cleric && slot == SLOT_CLERIC_SCROLL) {
+            rec::set_item_hidden_names_flag(item, 0);
+            opened += 1;
+        }
+    }
+    opened
+}
+
 /// `gbl.ItemDataTable[item.type].item_slot`.
 pub fn slot_of(table: &ItemDataTable, record: &[u8]) -> u8 {
     table.get(rec::item_type(record)).item_slot
@@ -891,6 +935,62 @@ fn joinable(a: &[u8], b: &[u8]) -> bool {
         && rec::item_affect(a, 3) == rec::item_affect(b, 3)
 }
 
+/// `remove_spell_from_scroll` / `sub_623FF` (`ovr023.cs:3090-3111`): blank the
+/// affect byte holding `spell_id`, decrement `namenum2`, and **drop the whole
+/// scroll** once `namenum2` falls below `0xD2`.
+///
+/// `namenum2` is the "With N Spells" word index — `0xD2` is `"With 1 Spell"`,
+/// so a three-spell scroll counts down 0xD4 → 0xD3 → 0xD2 and is gone on the
+/// fourth. The name and the charge counter are the same byte, which is why a
+/// half-used scroll renames itself as you read it. Returns `true` when the
+/// scroll was consumed entirely.
+pub fn remove_spell_from_scroll(ch: &mut Character, idx: usize, spell_id: u8) -> bool {
+    let Some(item) = ch.items.get_mut(idx) else {
+        return false;
+    };
+    let mut affect_index = 0;
+    for i in 1..=3 {
+        if rec::item_affect(item, i) & 0x7F == spell_id {
+            affect_index = i;
+        }
+    }
+    if affect_index == 0 {
+        return false;
+    }
+    rec::set_item_affect(item, affect_index, 0);
+    let namenum2 = rec::item_namenum(item, 2).wrapping_sub(1);
+    rec::set_item_namenum(item, 2, namenum2);
+    if namenum2 < 0xD2 {
+        lose_item(ch, idx);
+        return true;
+    }
+    false
+}
+
+/// `UseMagicItem`'s charge half (`ovr020.cs:1070-1084`): a stack of more than
+/// one loses a unit; otherwise `affect_1` — the charge count — drops by one and
+/// the item goes when it reaches zero. Returns `true` when the item was lost.
+pub fn consume_charge(ch: &mut Character, idx: usize) -> bool {
+    let Some(item) = ch.items.get_mut(idx) else {
+        return false;
+    };
+    if rec::item_affect(item, 1) == 0 {
+        return false;
+    }
+    let count = rec::item_count(item);
+    if count > 1 {
+        rec::set_item_count(item, count - 1);
+        return false;
+    }
+    let charges = rec::item_affect(item, 1).wrapping_sub(1);
+    rec::set_item_affect(item, 1, charges);
+    if charges == 0 {
+        lose_item(ch, idx);
+        return true;
+    }
+    false
+}
+
 /// `lose_item` (`ovr025.cs:766-772`) — removing an item shifts every later
 /// index, so the readied set is rebuilt rather than patched.
 pub fn lose_item(ch: &mut Character, idx: usize) -> Option<Vec<u8>> {
@@ -935,6 +1035,20 @@ pub struct ItemsMenuWords {
 /// `Control.NPC_Base` (`Classes/Control.cs:322`) — the threshold above which a
 /// roster member is an NPC whose gear the party may not take.
 pub const NPC_BASE: u8 = 0x80;
+
+/// ★ `gbl.area_ptr.field_1CA != 0` — the per-area item ban, and the one input
+/// to [`items_menu_words`] this engine does not model.
+///
+/// `field_1CA` (`Classes/Area1.cs:63-64`, DataOffset `0x1CA`) has **exactly one
+/// reader in the whole of coab** — `PlayerItemsMenu`'s Use condition
+/// (`ovr020.cs:457`) — and **no writer at all**: no engine path assigns it, so
+/// the only thing that could set it is a script `SAVE` into the Area window
+/// (`0x1CA / 2 + 0x4B00 == 0x4BE5`), which is still raw+logged rather than
+/// named. It boots zero and this returns its boot value, with the address
+/// recorded so a future ScriptMemory naming pass has somewhere to hook.
+pub fn area_bans_items(_state: &crate::shell::EngineState) -> bool {
+    false
+}
 
 /// `PlayerItemsMenu`'s bar conditions (`ovr020.cs:449-494`), evaluated for one
 /// character out of combat on a normal (non-shop) screen.
