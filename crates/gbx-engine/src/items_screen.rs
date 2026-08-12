@@ -121,8 +121,8 @@ impl ItemsScreen {
     /// opening) when the member carries nothing, which is also the condition
     /// the sheet's own bar uses to hide the word.
     pub fn open(ctx: &mut FlowCtx, return_to: ReturnTo) -> ScreenTransition {
-        let member = (ctx.state.selected_player as usize)
-            .min(ctx.roster.members.len().saturating_sub(1));
+        let member =
+            (ctx.state.selected_player as usize).min(ctx.roster.members.len().saturating_sub(1));
         let Some(ch) = ctx.roster.members.get(member) else {
             return ScreenTransition::Exit;
         };
@@ -452,7 +452,10 @@ impl ItemsScreen {
         let Some(entry) = spells::spell_entry(spell) else {
             // §9.1's lazy-transcription rule: a pruned row is a loud refusal,
             // and nothing is consumed.
-            self.status = Some(format!("{} is not implemented yet", magic::spell_name(spell)));
+            self.status = Some(format!(
+                "{} is not implemented yet",
+                magic::spell_name(spell)
+            ));
             self.stage = Stage::Browse;
             self.rebuild(ctx);
             return ScreenTransition::Stay;
@@ -503,12 +506,7 @@ impl ItemsScreen {
         false
     }
 
-    fn tick_combat_only(
-        &mut self,
-        ctx: &mut FlowCtx,
-        item: usize,
-        _spell: u8,
-    ) -> ScreenTransition {
+    fn tick_combat_only(&mut self, ctx: &mut FlowCtx, item: usize, _spell: u8) -> ScreenTransition {
         let Some(confirm) = &mut self.confirm else {
             self.stage = Stage::Browse;
             return ScreenTransition::Stay;
@@ -589,14 +587,7 @@ impl ItemsScreen {
             &mut ctx.roster.members[self.member],
             camp_cast::AFF_INVISIBILITY,
         );
-        let reports = camp_cast::cast(
-            ctx.roster,
-            ctx.rng,
-            ctx.rules,
-            self.member,
-            spell,
-            targets,
-        );
+        let reports = camp_cast::cast(ctx.roster, ctx.rng, ctx.rules, self.member, spell, targets);
         let item_name = ctx.roster.members[self.member]
             .items
             .get(item)
@@ -630,12 +621,7 @@ impl ItemsScreen {
 
     // --- Trade / Drop ----------------------------------------------------
 
-    fn tick_scribed(
-        &mut self,
-        ctx: &mut FlowCtx,
-        item: usize,
-        then: Disposal,
-    ) -> ScreenTransition {
+    fn tick_scribed(&mut self, ctx: &mut FlowCtx, item: usize, then: Disposal) -> ScreenTransition {
         let Some(confirm) = &mut self.confirm else {
             self.stage = Stage::Browse;
             return ScreenTransition::Stay;

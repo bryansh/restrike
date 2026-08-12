@@ -2,12 +2,14 @@
 //! (roll-credits §12, G6). Everything here is D10 synthetic — a hand-built
 //! `ITEMS` table plus hand-built item records — so it all runs in CI.
 
-use crate::combat_wiring::{combat_game_data, party_member, synthetic_font, synthetic_set4, open_geo};
+use crate::combat_wiring::{
+    combat_game_data, open_geo, party_member, synthetic_font, synthetic_set4,
+};
 use crate::engine::Engine;
 use crate::input::InputEvent;
 use crate::items;
 use crate::party::Character;
-use crate::screens::{Screen, ReturnTo};
+use crate::screens::{ReturnTo, Screen};
 use crate::shell::Shell;
 use gbx_formats::game_data::GameData;
 use gbx_formats::save_orig as rec;
@@ -273,11 +275,14 @@ fn trade_hands_the_item_to_another_member() {
     });
     let mut e = engine_with(vec![
         carrier("RAVD", vec![sword]),
-        carrier("ILMA", vec![record(Item {
-            item_type: 71,
-            nn: [0, 0, 64],
-            ..Default::default()
-        })]),
+        carrier(
+            "ILMA",
+            vec![record(Item {
+                item_type: 71,
+                nn: [0, 0, 64],
+                ..Default::default()
+            })],
+        ),
     ]);
     open_items(&mut e);
     e.tick(&[InputEvent::Char(b'T')]);
@@ -379,15 +384,18 @@ fn a_combat_only_item_offers_to_burn_a_charge_and_does() {
 /// counts `namenum2` down.
 #[test]
 fn a_readied_scroll_lists_its_spells_casts_one_and_loses_it() {
-    // An MU Scroll With 3 Spells whose three affects are Bless (0x01),
-    // Protection from Evil (0x06) and Find Traps (0x16) — three §9.1 rows that
-    // are castable out of combat, so the drive stays inside the implemented set.
+    // An `MU Scroll With 1 Spell` (`namenum2 = 0xD2`) carrying Bless — a §9.1
+    // row that is castable out of combat, so the drive stays inside the
+    // implemented set. One spell keeps the picker single-level: a *multi*-level
+    // scroll list opens on the last row, not the first, because
+    // `sl_select_item`'s entry step wraps backwards off the leading heading
+    // (the slice-4 finding, `roll-credits.md` §8.1).
     let scroll = record(Item {
         item_type: 61,
-        nn: [0, 0xD4, 209],
+        nn: [0, 0xD2, 209],
         readied: true,
         hidden: 0,
-        affects: [0x01, 0x06, 0x16],
+        affects: [0x01, 0, 0],
         ..Default::default()
     });
     let mut caster = carrier("SHARA", vec![scroll]);
@@ -407,17 +415,35 @@ fn a_readied_scroll_lists_its_spells_casts_one_and_loses_it() {
         e.party().members[0].has_affect(crate::spells::AFF_BLESS),
         "the scroll's Bless landed"
     );
-    let item = &e.party().members[0].items[0];
-    assert_eq!(
-        rec::item_affect(item, 1),
-        0,
-        "the spell was scraped off the scroll"
+    // `namenum2` counts down past `"With 1 Spell"` (0xD2), so the whole scroll
+    // goes — and with the last item gone, `PlayerItemsMenu`'s loop ends.
+    assert!(
+        e.party().members[0].items.is_empty(),
+        "a one-spell scroll is consumed entirely"
     );
-    assert_eq!(
-        rec::item_namenum(item, 2),
-        0xD3,
-        "namenum2 counts down — the scroll renames itself as it is read"
+    assert!(matches!(e.shell(), Shell::Screen(Screen::PartyView(_))));
+}
+
+/// The countdown itself, on a three-spell scroll: the affect byte is blanked
+/// and `namenum2` drops one — the scroll renames itself as it is read.
+#[test]
+fn reading_one_spell_off_a_three_spell_scroll_renames_it() {
+    let mut ch = carrier(
+        "SHARA",
+        vec![record(Item {
+            item_type: 61,
+            nn: [0, 0xD4, 209],
+            affects: [0x01, 0x06, 0x16],
+            ..Default::default()
+        })],
     );
+    assert!(!items::remove_spell_from_scroll(&mut ch, 0, 0x06));
+    assert_eq!(rec::item_affect(&ch.items[0], 2), 0);
+    assert_eq!(rec::item_namenum(&ch.items[0], 2), 0xD3);
+    assert!(!items::remove_spell_from_scroll(&mut ch, 0, 0x01));
+    assert_eq!(rec::item_namenum(&ch.items[0], 2), 0xD2);
+    assert!(items::remove_spell_from_scroll(&mut ch, 0, 0x16));
+    assert!(ch.items.is_empty(), "the third reading uses it up");
 }
 
 /// A scroll nobody can read: no cleric, no magic-user, no thief above 9 →
@@ -466,26 +492,33 @@ fn read_magic_opens_a_hidden_scroll_permanently() {
 
     // A cleric opens a *clerical* scroll (slot 12) without Read Magic — and
     // only a clerical one.
-    let mut cleric = carrier("SHARA", vec![
-        record(Item {
-            item_type: 61, // MU scroll, slot 11
-            nn: [0, 0xD4, 209],
-            hidden: 6,
-            affects: [0x01, 0, 0],
-            ..Default::default()
-        }),
-        record(Item {
-            item_type: 62, // cleric scroll, slot 12
-            nn: [0, 0xD4, 208],
-            hidden: 6,
-            affects: [0x01, 0, 0],
-            ..Default::default()
-        }),
-    ]);
+    let mut cleric = carrier(
+        "SHARA",
+        vec![
+            record(Item {
+                item_type: 61, // MU scroll, slot 11
+                nn: [0, 0xD4, 209],
+                hidden: 6,
+                affects: [0x01, 0, 0],
+                ..Default::default()
+            }),
+            record(Item {
+                item_type: 62, // cleric scroll, slot 12
+                nn: [0, 0xD4, 208],
+                hidden: 6,
+                affects: [0x01, 0, 0],
+                ..Default::default()
+            }),
+        ],
+    );
     cleric.class_level = [0; 8];
     cleric.class_level[crate::party::SKILL_CLERIC] = 5;
     assert_eq!(items::apply_read_magic(&mut cleric, &table), 1);
-    assert_eq!(rec::item_hidden_names_flag(&cleric.items[0]), 6, "the MU scroll stays shut");
+    assert_eq!(
+        rec::item_hidden_names_flag(&cleric.items[0]),
+        6,
+        "the MU scroll stays shut"
+    );
     assert_eq!(rec::item_hidden_names_flag(&cleric.items[1]), 0);
 }
 

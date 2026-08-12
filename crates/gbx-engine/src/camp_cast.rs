@@ -247,6 +247,83 @@ pub fn cast(
                 out.push(report(party, t, text));
             }
         }
+        // ===================================================================
+        // ★ Roll-credits slice 8 (§12.2): the **item** rows. These seven are
+        // reached only through a potion, a dust or a protection scroll —
+        // `crate::items_screen`'s Use verb — never through a spell book.
+        // ===================================================================
+        // `cast_speed` (`ovr023.cs:2168-2174`) — the Potion of Speed. It tries
+        // to CURE `slow` first, and only hastes when there was no slow to lift.
+        0x39 => {
+            if let Some(&t) = targets.first() {
+                if affects::cure_affect(&mut party.members[t], spells::AFF_SLOW) {
+                    // The slow came off; nothing else happens.
+                } else {
+                    let minutes = spells::spell_affect_timeout_drawing(&entry, casting_lvl, rng);
+                    plant(party, t, &entry, minutes, casting_lvl as u8, false);
+                    out.push(report(party, t, "is Speedy"));
+                }
+            }
+        }
+        // `cast_strength` (`:2187-2199`) — the Potion of Giant Strength. Note
+        // it plants `strength_spell` (0x92) rather than the row's own
+        // `strength` (0x26), carries the *encoded* strength as the affect data,
+        // and rolls its own `d4 × 10 + 40` minutes rather than going through
+        // `GetSpellAffectTimeout`.
+        //
+        // ★ **Named residual:** `CalcStatBonuses(Stat.STR, target)` (`:2198`)
+        // is the stat-affect recompute this engine does not have yet — the same
+        // machinery `calc_items_effects`' Ioun-stone/gauntlet arms need
+        // (§12.3). The affect is planted and visible in Magic ▸ Display; the
+        // *score* does not move until that lands.
+        0x3B => {
+            if let Some(&t) = targets.first() {
+                const STRENGTH_SPELL: u8 = 0x92;
+                const GIANT_STR: u8 = 0x15; // the potion's own 21
+                let ch = &mut party.members[t];
+                let encoded = try_encode_strength(ch, 0, GIANT_STR);
+                let minutes = u16::from(crate::rest::roll_dice(rng, 4, 1)) * 10 + 40;
+                if encoded.is_some() {
+                    out.push(report(party, t, "is stronger"));
+                }
+                affects::add_affect(
+                    &mut party.members[t],
+                    STRENGTH_SPELL,
+                    minutes,
+                    encoded.unwrap_or(0),
+                    true,
+                );
+            }
+        }
+        // `cast_invisible` (`:2224-2227`) — the Dust of Disappearance, the one
+        // `WholeParty` row in the item set (so the caster is in `targets`
+        // twice, per [`whole_party_targets`]).
+        0x3F => {
+            for &t in targets {
+                let minutes = spells::spell_affect_timeout_drawing(&entry, casting_lvl, rng);
+                plant(party, t, &entry, minutes, casting_lvl as u8, false);
+                out.push(report(party, t, "is invisible"));
+            }
+        }
+        // `sub_616CC` (`:2783-2786`) — the two protection scrolls and the
+        // Potion of Invisibility: `DoSpellCastingWork("")`, a **silent** affect
+        // plant. Their rows carry `fixedDuration = perLvlDuration = 0`, so the
+        // common timeout arm really does compute zero; transcribed as written.
+        0x5F..=0x61 => {
+            if let Some(&t) = targets.first() {
+                plant(party, t, &entry, minutes, casting_lvl as u8, false);
+            }
+        }
+        // `cast_heal2` (`:2804-2810`) — the Potion of Extra Healing, **2d4+2**,
+        // the one item row with a real effect instead of a plant.
+        0x63 => {
+            if let Some(&t) = targets.first() {
+                let heal = i32::from(crate::rest::roll_dice(rng, 4, 2)) + 2;
+                if crate::rest::heal_player(0, heal, &mut party.members[t]) {
+                    out.push(report(party, t, "is Healed"));
+                }
+            }
+        }
         // --- `SpellRaiseDead` (`cast_raise`, `:2341-2365`) ------------------
         0x4B => {
             if let Some(&t) = targets.first() {
@@ -293,6 +370,23 @@ fn plant(
         affects::remove_affect(ch, entry.affect_id);
     }
     affects::add_affect(ch, entry.affect_id, minutes, data, call_affect_table);
+}
+
+/// `TryEncodeStrength` + `encode_strength` (`ovr024.cs:721-768`): the potion's
+/// strength only takes if it beats the drinker's current score, and the value
+/// stored in the affect is `str + 100` (or `str_00 + 1` for an 18). `None` when
+/// the drinker is already at least that strong.
+fn try_encode_strength(ch: &Character, str_100: u8, str_score: u8) -> Option<u8> {
+    let beats = str_score > ch.stats.str_score.current
+        || (str_score == 18 && str_100 > ch.stats.str_exceptional.original);
+    if !beats {
+        return None;
+    }
+    Some(if str_score == 18 {
+        str_100.wrapping_add(1)
+    } else {
+        str_score.wrapping_add(100)
+    })
 }
 
 fn report(party: &Party, member: usize, text: impl Into<String>) -> CastReport {

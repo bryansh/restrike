@@ -679,30 +679,105 @@ pub fn spell_entry(id: u8) -> Option<SpellEntry> {
         ),
         // `Potion of Giant Strength` — `cast_strength`; affect `strength` (0x26).
         0x3B => row(
-            0x3B, Monster, 6, 0, 0, 0, 0, 0, Self_, Normal, SV_SPELL, AFF_STRENGTH, Both, 0, 1, 0,
+            0x3B,
+            Monster,
+            6,
+            0,
+            0,
+            0,
+            0,
+            0,
+            Self_,
+            Normal,
+            SV_SPELL,
+            AFF_STRENGTH,
+            Both,
+            0,
+            1,
+            0,
             0,
         ),
         // `Dust of Disappearance` — `cast_invisible`; affect `invisible` (0x47),
         // and the one `WholeParty` row in the item set.
         0x3F => row(
-            0x3F, Monster, 6, 0, 0, 0, 0, 7, WholeParty, Normal, SV_SPELL, AFF_INVISIBLE, Both, 0,
-            2, 0, 0,
+            0x3F,
+            Monster,
+            6,
+            0,
+            0,
+            0,
+            0,
+            7,
+            WholeParty,
+            Normal,
+            SV_SPELL,
+            AFF_INVISIBLE,
+            Both,
+            0,
+            2,
+            0,
+            0,
         ),
         // `Scroll of Prot. Dragon Breath` — `sub_616CC`, a silent affect plant.
         0x5F => row(
-            0x5F, Monster, 6, 0, 0, 0, 0, 0, Self_, Normal, SV_SPELL, AFF_PROT_DRAGON_BREATH, Both,
-            10, 1, 0, 0,
+            0x5F,
+            Monster,
+            6,
+            0,
+            0,
+            0,
+            0,
+            0,
+            Self_,
+            Normal,
+            SV_SPELL,
+            AFF_PROT_DRAGON_BREATH,
+            Both,
+            10,
+            1,
+            0,
+            0,
         ),
         // `Scroll of Prot. Paralyzation` — `sub_616CC`.
         0x60 => row(
-            0x60, Monster, 6, 0, 0, 0, 0, 0, Self_, Normal, SV_SPELL, AFF_RESIST_PARALYZE, Both,
-            10, 1, 0, 0,
+            0x60,
+            Monster,
+            6,
+            0,
+            0,
+            0,
+            0,
+            0,
+            Self_,
+            Normal,
+            SV_SPELL,
+            AFF_RESIST_PARALYZE,
+            Both,
+            10,
+            1,
+            0,
+            0,
         ),
         // `Potion of Invisibility` — `sub_616CC`; affect `invisibility` (0x19),
         // the same one every successful cast strips off its caster.
         0x61 => row(
-            0x61, Monster, 6, 0, 0, 0, 0, 0, Self_, Normal, SV_SPELL, AFF_INVISIBILITY, Both, 0, 1,
-            0, 0,
+            0x61,
+            Monster,
+            6,
+            0,
+            0,
+            0,
+            0,
+            0,
+            Self_,
+            Normal,
+            SV_SPELL,
+            AFF_INVISIBILITY,
+            Both,
+            0,
+            1,
+            0,
+            0,
         ),
         // `Potion of Extra Healing` — `cast_heal2`, **2d4+2** and no affect at
         // all. The one item row with a real effect rather than a plant.
@@ -786,7 +861,58 @@ mod tests {
                 "id {id:#04x}: §9.1 says implemented={want}"
             );
         }
-        assert_eq!(MUST_HAVE_IDS.len(), 23, "§9.1's implemented count");
+        // §9.1's 23 must-haves plus §12.1's seven item rows.
+        assert_eq!(MUST_HAVE_IDS.len(), 30, "the implemented count");
+    }
+
+    /// ★ §12.1's seven item rows are exactly the shipped consumables' spell ids
+    /// whose `targetType` is not `Combat` — the ones a party can use outside a
+    /// fight. Every shipped **wand** is a `Combat` row and stays out.
+    #[test]
+    fn the_item_rows_are_the_camp_usable_half_of_the_shipped_consumables() {
+        let item_rows: Vec<u8> = MUST_HAVE_IDS
+            .iter()
+            .copied()
+            .filter(|id| matches!(id, 0x39 | 0x3B | 0x3F | 0x5F | 0x60 | 0x61 | 0x63))
+            .collect();
+        assert_eq!(item_rows, vec![0x39, 0x3B, 0x3F, 0x5F, 0x60, 0x61, 0x63]);
+        for id in item_rows {
+            let e = spell_entry(id).expect("an item row");
+            assert_eq!(e.spell_class, SpellClass::Monster, "{id:#04x}");
+            assert_eq!(e.spell_level, 6, "{id:#04x}");
+            assert_ne!(
+                e.target_type,
+                SpellTargets::Combat,
+                "{id:#04x} must be camp-usable"
+            );
+            assert_eq!(e.when_cast as u8, SpellWhen::Both as u8, "{id:#04x}");
+        }
+        // The wand/necklace ids the shipped set carries, all `Combat` rows and
+        // all still tripwired: Wand of Paralyzation 0x3D, Necklace of Missiles
+        // 0x40, Wand of Magic Missiles 0x41, Wand of Defoliation 0x62.
+        for id in [0x3Du8, 0x40, 0x41, 0x62] {
+            assert!(spell_entry(id).is_none(), "{id:#04x} stays tripwired");
+        }
+        // Fireball (0x2F) and Lightning Bolt (0x33) — the two wand spells that
+        // DO have rows, both `Combat`, so a wand still refuses out of combat.
+        assert_eq!(spell_entry(0x2F).unwrap().target_type, SpellTargets::Combat);
+    }
+
+    /// The three drawing timeout arms slice 8 made reachable
+    /// (`ovr023.cs:543-561`), out of combat.
+    #[test]
+    fn the_item_rows_timeouts_draw_their_own_dice() {
+        let mut rng = crate::rng::EngineRng::new(0x0C0F_FEE0);
+        for id in SPELL_TIMEOUT_DRAWS {
+            let e = spell_entry(id).expect("a drawing row");
+            let minutes = spell_affect_timeout_drawing(&e, 5, &mut rng);
+            let range = match id {
+                0x39 => 5..=20,  // roll_dice(4, 5)
+                0x3B => 50..=80, // d4 × 10 + 40
+                _ => 110..=200,  // (d10 + 10) × 10
+            };
+            assert!(range.contains(&minutes), "{id:#04x} → {minutes}");
+        }
     }
 
     /// ★ The draw-neutrality pin: the three rows a pinned capture can reach
