@@ -127,7 +127,12 @@ Resolve before slice 3's spec is final.
 
 **G6 — Out-of-combat item use (review M5).** Potions/scrolls/wands: combat `UseItem` is a
 tripwire and the character sheet has no Use verb at all. The standard Gold Box survival
-mechanism; must exist before the deep dungeons.
+mechanism; must exist before the deep dungeons. **LANDED 2026-08-11 — see §12.**
+The whole Items leaf, `reclac_player_values`, and Use for the seven camp-usable
+consumable rows. Two Task-0 surprises: the bundled slot-A party carries **no items at
+all**, and an item's name is *generated* from `namenum1/2/3` every draw — the stored name
+field is a stale snapshot. **Every wand CotAB ships is a `SpellTargets.Combat` row**, so
+out of combat they reach the charge-burn, not a cast; in-combat `UseItem` stays tripwired.
 
 **G7 — The spell tail (review M3).** Three effects exist; Bless/Protection are
 imported-affect handlers with no casting path. Slice = enumerate the must-have set for a
@@ -136,7 +141,8 @@ Flesh, and G8's clerical services), implement those, and leave the exotic remain
 D-RC7's tripwires with the count stated. **LANDED 2026-08-11 — see §9.**
 **23 implemented, 77 tripwired**; the set was sized from the slot-A party's own two
 spell books (§9.1), and *Stone to Flesh does not exist in CotAB* — the medusa
-answer is a temple service and belongs to G8.
+answer is a temple service and belongs to G8. (Slice 8 added the seven **item**
+rows the shipped consumables carry — **30 implemented, 70 tripwired**; §12.1.)
 
 **G8 — Death recovery (D-RC6, review M4).** Temple raise-dead (the non-monster COMBAT
 branch's temple dispatch), the `stoned`/`gone` health-status decode fix, and whatever the
@@ -179,7 +185,7 @@ owns the version-bump churn**; later slices rebase onto it and batch their enum 
 | 5 | Spell tail must-haves (G7) — **landed, §9** | Opus @ high | No — G7's enumeration IS the spec | 4 |
 | 6 | Death recovery + temple services (G8) — **landed, §10** | Opus @ high | No | 4 (shares the record), 5 (clerical spells) |
 | 7 | Wilderness/overworld (G2) — **landed, §11.1** | Opus @ high–xhigh | **Yes — full door** | 1 |
-| 8 | Out-of-combat item use (G6) | Opus @ high | No | 1 |
+| 8 | Out-of-combat item use (G6) — **landed, §12** | Opus @ high | No | 1 |
 | 9 | Ending sequence + FD-32 fade (G9) | sized during G2/G1 work | — | 7 |
 | 10+ | D-RC2's playthrough loop | as shaped | per item | rolling |
 
@@ -1512,3 +1518,212 @@ block id that arm loads is the hardcoded `0x79`, never the operand.
   flag, and inventing one for a spell no capture casts belongs elsewhere.
 - `CMD_Picture`'s `0xFF` arm still mutates its flags at presentation time
   (slice 2's residual, unchanged).
+
+## 12. Slice 8: out-of-combat item use (G6) — LANDED 2026-08-11
+
+The gap this closes: combat `UseItem` was a tripwire and the character sheet's
+whole command bar (`Items Spells Trade Drop … Exit`) was `ScreenTransition::Stay`
+stubs, so there was no path in the engine to drink a potion, read a scroll or
+ready a sword. Now the sheet's **Items** word opens `PlayerItemsMenu`
+(`ovr020.cs:432-623`) for real.
+
+### 12.1 ★ Task 0 answered twice, and both answers were surprises
+
+**(a) The slot-A party carries nothing.** `~/goldbox-data/cotab/SAVE/` holds
+`CHRDATA1..6.SAV` and **no `CHRDATA*.SWG` at all**. The GOG-bundled save's six
+characters have empty inventories — there is no shipped item on them to ready,
+drop or drink, and no character-sheet bar in that save has ever shown the word
+`Items`. The acceptance drive therefore hands them authored records out of
+`ITEM2.DAX` block 2 and `ITEM5.DAX` block 49, which is precisely
+`CMD_Treasure`'s own table arm (`ovr003.cs:1083-1099`, "every `Item.StructSize`
+record in that block"). Real bytes, real path, nothing synthesized.
+
+**(b) An item's name is not stored — it is generated, every draw.**
+`ItemDisplayNameBuild` opens with `item.name = string.Empty` and rebuilds the
+whole string from `namenum1/2/3` (`ovr025.cs:172`). The 0x2A-byte name field an
+item record carries is a *snapshot*, and the shipped ones are **stale**:
+
+| record | `namenum` | field says | the game says |
+|---|---|---|---|
+| `ITEM1.DAX#5[0]` (type 101) | `(0, 47, 159)` | `Small Raft Sling` | `Staff Sling` |
+| `ITEM2.DAX#2[5]` (type 70) | `(0, 116, 108)` | `Instrument Maul` | `Ioun Stone Deep Red` |
+| `ITEM2.DAX#3[5]` (type 95) | `(0, 48, 82)` | `Broom Mail` | `Elfin Chain Mail` |
+
+The authoring tool's word table and the game's are not the same table. This has
+a live consequence for code already in the tree: `combat_host::weapon_display_names`
+reads `save_orig::item_name` and therefore builds an **empty** map for every
+staging save (whose name fields are all-zero) and a *wrong* name for anything
+DAX-authored. Named here; the combat panel's weapon line is not this slice's.
+
+So [`crate::items::ITEM_NAMES`] carries the word table — and it is
+**evidence-verified, not merely transcribed from coab**. All 256 entries were
+checked in order against the length-prefixed string heap inside the shipped
+`START.EXE` (the run beginning `0a "Battle Axe"` at file offset `0xB521`): every
+non-empty entry appears there as `<len><chars>`, ascending, **zero mismatches**,
+including the three empty slots at 62, 63 and 144. Same class of functional
+interface vocabulary as `magic::SPELL_TABLE`'s spell names, on the same D10
+clarification.
+
+**The shipped consumable set**, enumerated from `ITEM{1..6}.DAX` +
+`MON{1..6}ITM.DAX` (every record that is a scroll, or has `affect_2 > 0 &&
+affect_3 < 0x80`):
+
+| item | spell | `targetType` | usable in camp? |
+|---|---|---|---|
+| Potion of Speed | `0x39` | Self | ✔ |
+| Potion of Giant Strength | `0x3B` | Self | ✔ |
+| Dust of Disappearance | `0x3F` | WholeParty | ✔ |
+| Scroll of Prot. Dragon Breath | `0x5F` | Self | ✔ |
+| Scroll of Prot. Paralyzation | `0x60` | Self | ✔ |
+| Potion of Invisibility | `0x61` | Self | ✔ |
+| Potion of Extra Healing | `0x63` | Self | ✔ |
+| Wand of Paralyzation | `0x3D` | **Combat** | ✘ |
+| Necklace of Missiles | `0x40` | **Combat** | ✘ |
+| Wand of Magic Missiles | `0x41` | **Combat** | ✘ |
+| Wand of Defoliation | `0x62` | **Combat** | ✘ |
+| Wand of Fireballs | `0x2F` | **Combat** | ✘ |
+| Wand of Lightning | `0x33` | **Combat** | ✘ |
+| MU / Clrc scrolls | (their own spells) | per row | per row |
+
+★ **Every wand CotAB ships is a `SpellTargets.Combat` row.** The brief asked
+whether any shipped item reaches the wand path out of combat: none do as a
+*cast*. What they reach instead is §12.2's charge-burn.
+
+The seven camp-usable ids are now rows in `crate::spells` (23 → **30**
+implemented, 77 → **70** tripwired), each with its `gbl.spellTable` handler in
+`camp_cast::cast`: `cast_speed`, `cast_strength`, `cast_invisible`, `sub_616CC`
+×3, `cast_heal2`.
+
+### 12.2 The verb/condition table, as transcribed
+
+`PlayerItemsMenu` composes its bar fresh every iteration (`ovr020.cs:449-494`):
+
+| word | condition | source |
+|---|---|---|
+| `Ready` | always | `:449` |
+| `View` | `Cheats.view_item_stats` — a debug flag, never on in a shipped build | `:451-454` |
+| `Use` | `in_combat && area_ptr.field_1CA == 0 && (state ∈ {Camping, Wilderness, Dungeon, Combat} ∥ actions.can_use)` | `:456-463` |
+| `Trade` | `(control_morale < NPC_Base ∥ !in_combat ∥ health_status == animated) && state != Combat` | `:465-473` |
+| `Drop` | always | `:475` |
+| `Halve` | `items.Count < Player.MaxItems` (16) | `:477-480` |
+| `Join` | always | `:482` |
+| `Sell` | shop only, and the same NPC test as Trade | `:484-491` |
+| `Id` | shop only | `:493` |
+
+Out of combat the game state is always one of the four `Use` lists, so only
+`in_combat` and the area ban decide it. `field_1CA` is modelled as its boot zero
+with the address recorded (`items::area_bans_items`): it has **exactly one
+reader in the whole of coab** and **no writer at all**, so only a script `SAVE`
+into the Area window (`0x1CA / 2 + 0x4B00 == 0x4BE5`) could ever set it.
+
+`sl_select_item` opens with `gbl.menuSelectedWord = 1` (`ovr027.cs:548`) — the
+**second** word, which on this bar is `Use`. Visible in the acceptance frames.
+
+**Three behaviours worth naming:**
+
+1. ★ **`ready_Item` throws its own verdict away.** It computes a `Weld` result
+   from four tests — hands, occupied slot, ammo pointers, class mask — and then
+   `ovr020.cs:860` is a bare, unconditional `result = Weld.Ok;` sitting between
+   the last test and the `switch`. Three of its four refusal strings (`"Wrong
+   Class"`, `"already using X"`, `"Your hands are full!"`) are dead code in the
+   shipped build, and *anything* can be readied by *anyone*. Not a coab
+   transcription slip: the assignment carries no condition. Reproduced as
+   written, with the discarded verdict exposed as `items::weld_verdict` so the
+   dead branch is pinned rather than merely asserted about.
+2. ★ **A wand in camp burns a charge for nothing.** Out of combat with
+   `gbl.spell_from_item` set, `sub_5D2E1`'s first branch is *not* the familiar
+   `"can't be cast here…" / "Lose it?"` — it is `"That Item"` /
+   `"is a combat-only item..."` / **`"Use it? "`**, whose Yes answer sets
+   `arg_0` (`ovr023.cs:702-707`). `UseMagicItem`'s tail then reads `arg_0` and
+   spends the charge (`ovr020.cs:1064-1085`) although `stillCast` was cleared
+   and nothing was cast. `PlayerItemsMenu`'s `arg_0 = false` (`:545-548`) comes
+   *after* the return and only stops a combat turn from ending.
+3. **A scroll renames itself as it is read.** `remove_spell_from_scroll`
+   (`ovr023.cs:3090-3111`) blanks the affect byte and decrements `namenum2` —
+   which is simultaneously the charge counter and the `"With N Spells"` word
+   index — dropping the item once it falls below `0xD2` (`"With 1 Spell"`).
+
+`scroll_5C912`'s **unhide half**, which slice 4 named and deferred, also lands:
+a `read_magic` affect, or a cleric holding a *clerical* scroll (slot 12), clears
+`hidden_names_flag` **permanently** in the record (`ovr023.cs:349-356`).
+
+### 12.3 What landed, and the corrections the code forced
+
+- `crate::items` (≈1,100 lines + tests): `ITEM_NAMES`, `generate_name`,
+  `display_name`, `reclac_player_values` with its five helpers
+  (`CalculateAttackValues`, `CalcArmorWeightEffect`, `sub_662A6`,
+  `calc_movement`, `canCarry`), `ready_item`/`weld_verdict`, `halve_items`,
+  `join_items`, `dispose_check`, `lose_item`, `remove_spell_from_scroll`,
+  `consume_charge`, `apply_read_magic`, and the bar conditions.
+- `crate::items_screen`: `PlayerItemsMenu` + `UseMagicItem` as a parked state
+  machine, appended to `Screen` as the **last** variant so postcard's
+  variant-index encoding is unchanged — **no `SAVE_FORMAT_VERSION` bump, no
+  golden moved**.
+- `Flavor::max_encumbrance` — the third strength-group ladder
+  (`ovr025.cs:709-758`), transcribed with its two gaps (groups `8..=11` and
+  `>30` carry 0; there is no interpolation between `6|7 → -150` and
+  `12|13 → 100`).
+- `spells::spell_affect_timeout_drawing` — `GetSpellAffectTimeout`'s three
+  drawing arms (`0x39`, `0x3B`, `0x3F`) became reachable, so they are computed
+  at the one call site that holds an RNG rather than threading one through a
+  function that is draw-free for the other 27 rows.
+- `viewPlayer` now recomputes its bar every tick, as the original's own loop
+  does (`ovr020.cs:252-291`) — so dropping a last item takes `Items` off the
+  sheet immediately.
+- `Engine::open_party_view` — the sheet as a direct entry point.
+
+**Draw-neutrality.** Nothing here is reachable from a capture: no `.gbxtrace`
+opens the character sheet, in-combat `UseItem` is untouched, and the seven new
+spell rows can only be reached through a memorized list (every capture memorizes
+exactly `{0x03, 0x0F, 0x17}`) or a use the player issues. Guard 16/16 and reel
+16/16 held at every commit.
+
+### 12.4 Acceptance
+
+`slice8_the_items_screen_and_a_use_beat` (local-tier, `GBX_DATA_DIR`), on the
+bundled slot-A party. Five frames, all eyeballed:
+
+1. the character sheet, bar `"Items Trade Drop Exit"`;
+2. the Items list — `NO   BANDED MAIL` / `NO   POTION` / `NO   MU SCROLL` /
+   `NO   WAND`, the `READY ITEM` column heading, and the verb bar
+   `READY USE TRADE DROP HALVE JOIN EXIT` with **USE** inverted;
+3. after `Ready` on the Banded Mail +1 — the row flips to `YES`, and AC moves
+   **7 → 0** (stored 53 → 60) through `sub_662A6`'s fourth arm;
+4. the Wand of Fireballs' `USE IT? YES NO` prompt, and Yes taking its charges
+   **12 → 11** with nothing cast;
+5. the Potion of Extra Healing: `MATHEW IS HEALED`, hit points **10 → 15**
+   (2d4+2), one of its three charges gone.
+
+### 12.5 Residuals, named
+
+- **In-combat `UseItem` stays a tripwire.** Item use inside a fight is its own
+  beast — it ends the turn (`arg_0`), needs `clear_actions`, the combat redraw
+  and the missile choreography, and it is the only item path a future capture
+  could ever reach. The boundary is deliberate: `crate::items` is where its
+  effects will come from when it lands.
+- **`calc_items_effects` (`ovr020.cs:640-777`) is not wired.** Readying an item
+  with `affect_3 > 0x7F` reports `"… magic-item effect N not wired"` and does
+  everything else (the flag, the reclac, so the item's `plus` still reaches AC
+  and to-hit). The shipped set reaches arms 0, 1, 2, 5, 6, 8, 10, 11, 12 and 13
+  — Ring of Wizardry's doubled slots, the Ioun Stones, Gauntlets of Dexterity,
+  the Girdle — all of which need `CallAffectTable`/`CalcStatBonuses`/
+  `reclac_thief_skills`, i.e. the stat-affect subsystem. That subsystem is one
+  slice, shared with the Potion of Giant Strength's own
+  `CalcStatBonuses(Stat.STR)` (`ovr023.cs:2198`): the affect is planted and
+  shows in Magic ▸ Display, but the *score* does not move yet.
+- **Four of the six shipped wands carry tripwired spell ids** (`0x3D`, `0x41`,
+  `0x62`, `0x33`), and `spell_entry`'s refusal fires *before* the combat-only
+  branch — so those four show `"<spell> is not implemented yet"` rather than
+  `"Use it? "`. Correct under the lazy-transcription rule, and the reason the
+  acceptance drive uses the Wand of Fireballs.
+- **`Sell`/`Id`** are transcribed as bar conditions but have no shop screen
+  behind them yet (`ShopSellItem`/`IdentifyItem`, `ovr020.cs:1089-1204`); the
+  shop's own body is still the M3 placeholder listing.
+- **The status line sits on row `0x17`, not the prompt row.** `string_print01`
+  draws on `0x18` and clears it after a `GameDelay`; this shell has no blocking
+  delay to hang that on, so the line goes one row up and the bar stays legible.
+  A placement divergence, flagged.
+- **The multi-level scroll picker opens on its last row**, not its first — the
+  `sl_select_item` entry-step wrap recorded in §8.1, inherited unchanged.
+- The character sheet's `Spells`, `Trade`, `Drop`, `Heal` and `Cure` words are
+  still `Stay` stubs; only `Items` is live.
