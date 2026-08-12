@@ -3852,3 +3852,185 @@ fn slice7_the_overland_and_a_wilderness_fight() {
     assert!(!engine.vm_memory().in_dungeon());
     eprintln!("  halts: {:?}", engine.vm_memory().halts);
 }
+
+/// ★ **Roll-credits slice 8's acceptance drive** (`roll-credits.md` §12): the
+/// Items screen and a Use beat, on the bundled slot-A party.
+///
+/// ★ **The slot-A party carries nothing.** `~/goldbox-data/cotab/SAVE/` has
+/// `CHRDATA1..6.SAV` and **no `CHRDATA*.SWG` at all** — the GOG-bundled save's
+/// six characters have empty inventories, so there is no shipped item on them
+/// to Ready or drink. The drive therefore hands them real records the same way
+/// the game would: `ITEM2.DAX` block 2 is the authored treasure block whose ten
+/// records include the Potion of Extra Healing, two MU scrolls and a Banded
+/// Mail +1, and `CMD_Treasure`'s table arm (`ovr003.cs:1083-1099`) is exactly
+/// "every `Item.StructSize` record in that block". Nothing is synthesized; the
+/// bytes are the user's own game data.
+///
+/// Dumps:
+/// 1. the character sheet with `Items` on its bar;
+/// 2. the Items list — generated names, the Yes/No readied column, and the verb
+///    bar with the highlight on `Use` (`sl_select_item`'s `menuSelectedWord = 1`);
+/// 3. the same list after Ready, with the sheet's numbers moved;
+/// 4. the wand's `"is a combat-only item..."` / `"Use it? "` beat;
+/// 5. the potion's heal.
+///
+/// Run: `GBX_DATA_DIR=~/goldbox-data/cotab cargo test -p gbx-engine --release \
+///   -- --nocapture --ignored slice8_the_items_screen_and_a_use_beat`
+#[test]
+#[ignore = "local-only demo (writes frames); run explicitly"]
+fn slice8_the_items_screen_and_a_use_beat() {
+    use crate::engine::Engine;
+    use crate::screens::Screen;
+    use crate::shell::Shell;
+
+    let Some(root) = std::env::var_os("GBX_DATA_DIR") else {
+        eprintln!("SKIPPED: needs GBX_DATA_DIR (slice8 items)");
+        return;
+    };
+    let root = std::path::Path::new(&root);
+    let data = load_dir(root).expect("GBX_DATA_DIR must be readable");
+    let saves = load_dir(&root.join("SAVE")).expect("GBX_DATA_DIR/SAVE must be readable");
+    let master = saves.raw_file("SAVGAMA.DAT").expect("slot A must exist");
+    let set = gbx_formats::save_orig::load_from_lookup(master, 'A', |n| saves.raw_file(n))
+        .expect("slot A must parse");
+
+    // The census the drive is built on: what does the bundled party carry?
+    let carried: usize = set.chars.iter().map(|c| c.items.len()).sum();
+    eprintln!(
+        "  slot-A party: {} members, {carried} items",
+        set.chars.len()
+    );
+
+    // `ITEM2.DAX` block 2 — the authored treasure block (`CMD_Treasure`'s own
+    // table arm). Ten records; the drive uses three of them.
+    let block = data.block("ITEM2.DAX", 2).expect("ITEM2.DAX block 2");
+    let treasure: Vec<Vec<u8>> = block
+        .chunks_exact(gbx_formats::save_orig::ITEM_RECORD_SIZE)
+        .map(<[u8]>::to_vec)
+        .collect();
+    eprintln!("  ITEM2.DAX#2 holds {} authored records:", treasure.len());
+    for r in &treasure {
+        eprintln!(
+            "    {:34} type={:3} aff1={:3} spell={:#04x}",
+            crate::items::display_name(r, false, false),
+            gbx_formats::save_orig::item_type(r),
+            gbx_formats::save_orig::item_affect(r, 1),
+            gbx_formats::save_orig::item_affect(r, 2),
+        );
+    }
+
+    // ★ The Wand of **Fireballs** (`ITEM5.DAX` block 49), read before the data
+    // set moves into the engine. Four of the six shipped wands carry spell ids
+    // that are still tripwired (§12.4), and a tripwired id is refused by
+    // `spell_entry` *before* the combat-only branch can fire — so the beat that
+    // shows the charge-burn has to be one of the two whose row exists. Fireball
+    // (`0x2F`) is §9.1's; Lightning Bolt (`0x33`) is not.
+    let wand = data
+        .block("ITEM5.DAX", 49)
+        .expect("ITEM5.DAX block 49")
+        .chunks_exact(gbx_formats::save_orig::ITEM_RECORD_SIZE)
+        .find(|r| {
+            matches!(gbx_formats::save_orig::item_type(r), 78 | 79)
+                && gbx_formats::save_orig::item_affect(r, 2) & 0x7F == 0x2F
+        })
+        .expect("the Wand of Fireballs")
+        .to_vec();
+
+    let mut engine = crate::import::import_original(&set, data, 1).expect("slot A must import");
+    let out_dir = std::env::temp_dir();
+    let dump = |engine: &mut Engine, name: &str| {
+        let f = engine.tick(&[]);
+        let path = out_dir.join(format!("restrike-{name}.ppm"));
+        write_ppm_pixels(f.pixels, &path);
+        eprintln!("  {name} -> {}", path.display());
+    };
+
+    for _ in 0..300 {
+        engine.tick(&[]);
+        if matches!(engine.shell(), Shell::WorldMenu { .. }) {
+            break;
+        }
+        if engine.shell().gate_open() {
+            engine.tick(&[InputEvent::Enter]);
+        }
+    }
+    assert!(matches!(engine.shell(), Shell::WorldMenu { .. }));
+
+    // Hand the first member the Banded Mail +1, the Potion of Extra Healing and
+    // one of the block's MU scrolls, plus a wand from `ITEM3.DAX` block 17 (the
+    // Wand of Lightning) for the combat-only beat.
+    let find = |pred: &dyn Fn(&[u8]) -> bool| {
+        treasure
+            .iter()
+            .find(|r| pred(r))
+            .cloned()
+            .expect("the block carries it")
+    };
+    let mail = find(&|r| gbx_formats::save_orig::item_type(r) == 57);
+    let potion = find(&|r| {
+        gbx_formats::save_orig::item_type(r) == 71
+            && gbx_formats::save_orig::item_affect(r, 2) == 0x63
+    });
+    let scroll = find(&|r| gbx_formats::save_orig::item_type(r) == 61);
+    engine.party.members[0].items = vec![mail, potion, scroll, wand];
+    engine.party.members[0].hit_point_current = 10;
+    engine.state.selected_player = 0;
+    let name = engine.party().members[0].name.clone();
+    eprintln!("  {name} now carries:");
+    for r in &engine.party().members[0].items {
+        eprintln!("    {}", crate::items::display_name(r, false, true));
+    }
+
+    engine.open_party_view();
+    dump(&mut engine, "slice8-1-character-sheet");
+    let bar = crate::charsheet::sheet_view(&engine.party().members[0]).command_bar;
+    eprintln!("  sheet bar: {bar:?}");
+    assert!(bar.starts_with("Items"), "the sheet offers Items");
+
+    engine.tick(&[InputEvent::Char(b'I')]);
+    dump(&mut engine, "slice8-2-items-list");
+    assert!(matches!(engine.shell(), Shell::Screen(Screen::Items(_))));
+
+    // (1) **Ready** the mail (row 0) and watch AC move.
+    let ac_before = engine.party().members[0].combat.ac;
+    engine.tick(&[InputEvent::Char(b'R')]);
+    dump(&mut engine, "slice8-3-readied");
+    let ac_after = engine.party().members[0].combat.ac;
+    eprintln!(
+        "  AC (stored) {ac_before} -> {ac_after}  (display {} -> {})",
+        0x3C - ac_before as i32,
+        0x3C - ac_after as i32
+    );
+
+    // (2) **The wand** — row 3, readied, then Use: a combat-only item out of
+    // combat, which offers to burn a charge for nothing.
+    for _ in 0..3 {
+        engine.tick(&[InputEvent::Ext(ExtKey::End)]);
+        engine.tick(&[]);
+    }
+    engine.tick(&[InputEvent::Char(b'R')]);
+    engine.tick(&[]);
+    engine.tick(&[InputEvent::Char(b'U')]);
+    dump(&mut engine, "slice8-4-combat-only-item");
+    let charges_before =
+        gbx_formats::save_orig::item_affect(&engine.party().members[0].items[3], 1);
+    engine.tick(&[InputEvent::Char(b'Y')]);
+    engine.tick(&[]);
+    let charges_after = gbx_formats::save_orig::item_affect(&engine.party().members[0].items[3], 1);
+    eprintln!("  wand charges {charges_before} -> {charges_after} (spent for nothing)");
+    assert_eq!(charges_after + 1, charges_before);
+
+    // (3) **The potion** — row 1: ready it, drink it, and watch the record heal.
+    for _ in 0..2 {
+        engine.tick(&[InputEvent::Ext(ExtKey::Home)]);
+        engine.tick(&[]);
+    }
+    engine.tick(&[InputEvent::Char(b'R')]);
+    engine.tick(&[]);
+    let hp_before = engine.party().members[0].hit_point_current;
+    engine.tick(&[InputEvent::Char(b'U')]);
+    dump(&mut engine, "slice8-5-potion-drunk");
+    let hp_after = engine.party().members[0].hit_point_current;
+    eprintln!("  {name} hp {hp_before} -> {hp_after} (Potion of Extra Healing, 2d4+2)");
+    assert!(hp_after > hp_before, "the potion healed through the record");
+}

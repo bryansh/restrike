@@ -786,8 +786,15 @@ impl ItemsScreen {
                 );
             }
         }
+        // `string_print01` puts its line on the prompt row itself
+        // (`ovr025.cs:775-784`: `ClearPromptAreaNoUpdate`, draw at `0x18`,
+        // `GameDelay`, clear again) — a *transient* the bar reappears behind.
+        // This shell has no blocking delay to hang that on, so the line goes on
+        // row `0x17`, the free row directly above the bar, and the bar stays
+        // legible. Flagged rather than absorbed: it is a placement divergence,
+        // not a behavioural one.
         if let Some(s) = &self.status {
-            crate::text::draw_string(ctx.fb, ctx.font, s, 0x18, 0, 0, 10);
+            crate::text::draw_string(ctx.fb, ctx.font, s, 0x17, 1, 0, 10);
         }
         if let Some(confirm) = &self.confirm {
             let confirm = confirm.clone();
