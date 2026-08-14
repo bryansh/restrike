@@ -1727,3 +1727,39 @@ bundled slot-A party. Five frames, all eyeballed:
   `sl_select_item` entry-step wrap recorded in §8.1, inherited unchanged.
 - The character sheet's `Spells`, `Trade`, `Drop`, `Heal` and `Cure` words are
   still `Stay` stubs; only `Items` is live.
+
+## 13. Post-foundation queue amendment (Fable, 2026-08-14 — Bryan's front-door call)
+
+The foundation (slices 0-8) is merged. Bryan's review of the state flagged the missing
+front door: the title screen, the Play-Demo prompt, and `startGameMenu` — absent by the
+ratified imported-party scope cut (v3's M8 note), now promoted to planned work. The
+amended queue, in order:
+
+**Slice 9a — the visible tail** (evidence-based, not discovery: the corrected census
+shows shipped sites): ROB (10 uses), WHO (7), INPUT STRING (5), SPELL (2); CityShop's
+nine report-only sites become the real shop screen (Buy exists from M3 — the rest of the
+verbs + the shop item list); in-combat `UseItem` (slice 8's deliberate boundary opens:
+the looted wands want it; the combat-only item set is enumerated); a drive through
+`ECL1#51` (three journey routes chain into it, nothing has run it). INPUT STRING is the
+gating dependency for slice 9c.
+
+**Slice 9b — the front door + copy protection (D-RC4 folds in)**: `title_screen()`'s
+TITLE.DAX art flow, the "Play Demo" prompt with its 30s timeout (the attract mode itself
+stays deferred — the prompt's timeout path lands as a documented stub), the boot
+copy-protection prompt with the answer shown (docs/copy-protection.md; the 6th-journey
+bridge-keeper's PROTECTION op shares the table), and `startGameMenu` with every verb but
+Create/Modify wired to existing machinery (Load/View/Train/Drop/Remove/Save/Begin —
+ovr018's own conditional-word table transcribed). Boot lands at the start menu instead
+of auto-importing; `--slot` becomes the power-user shortcut.
+
+**Slice 9c — character creation**: `createPlayer`/`modifyPlayer` (stat rolling per the
+rules pack, race/class/alignment gates, name entry via INPUT STRING, the icon picker;
+`ovr018`/`ovr026` are the sites), and the fresh-party Begin posture (`sub_29758`'s
+`LastEclBlockId == 0` arm — already transcribed in shell.rs — with `PartySummary`'s
+fresh-game paint). Not required by the exit gate (the imported-party run stands) but
+required by the front door being honest.
+
+**Slice 9d — the ending** (the former slice 9, unchanged): the area-6 finale, FD-32's
+fade, the credits.
+
+The loop (10+) runs around these as Bryan plays.
