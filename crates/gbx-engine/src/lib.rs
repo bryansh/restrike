@@ -94,6 +94,10 @@ mod save_roundtrip_tests;
 /// The M6 slice-6 state-chart tests (`combat-visualizer.md` §8.5).
 #[cfg(test)]
 mod shell_combat_tests;
+/// Roll-credits slice 9a's acceptance suite (`roll-credits.md` §13): the
+/// visible tail's four opcodes, each at a shipped site on real data.
+#[cfg(test)]
+mod tail_ops_tests;
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]

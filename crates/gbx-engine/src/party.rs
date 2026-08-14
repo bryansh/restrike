@@ -193,6 +193,29 @@ impl Money {
             _ => {}
         }
     }
+
+    /// ★ `sub_31DEF` (`ovr008:1DEF-1F19`) — ROB's money scale: every one of
+    /// the **seven** denominations multiplied by `scale` and truncated toward
+    /// zero.
+    ///
+    /// **Correction to coab.** coab's `RobMoney` is
+    /// `player.Money.ScaleAll(scale)` (`ovr008.cs:1348`) and `ScaleAll` loops
+    /// `Copper..=Platinum` (`MoneySet.cs:153`), stopping five denominations
+    /// in. The binary open-codes seven `Real(coin) * scale → Trunc` pairs
+    /// over the `charStruct` money run — `copper 0xFB`, `electrum 0xFD`,
+    /// `silver 0xFF`, `gold 0x101`, `platinum 0x103`, `field_105` (gems) and
+    /// `field_107` (jewelry). So the thief takes the jewelry as well.
+    ///
+    /// The original multiplies in Turbo Pascal's 6-byte `Real` (40-bit
+    /// significand) and `Trunc`s; `f64` is strictly more precise, and both
+    /// round the exact product back to an exactly-representable integer for
+    /// every shipped operand (see `party::tests`).
+    pub fn scale_all(&mut self, scale: f64) {
+        for coin in 0..7 {
+            let scaled = f64::from(self.get_coin(coin)) * scale;
+            self.set_coin(coin, scaled.trunc() as i16);
+        }
+    }
 }
 
 impl From<[i16; 7]> for Money {

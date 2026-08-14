@@ -462,12 +462,12 @@ impl EngineServices for TestHost {
         self.calls.push(RecordedCall::DestroyItems { item_type });
     }
 
-    fn rob_money(&mut self, pct: u8) {
-        self.calls.push(RecordedCall::RobMoney { pct });
+    fn rob_money(&mut self, player: PlayerId, scale: f64) {
+        self.calls.push(RecordedCall::RobMoney { player, scale });
     }
 
-    fn rob_items(&mut self, chance: u8) {
-        self.calls.push(RecordedCall::RobItems { chance });
+    fn rob_items(&mut self, player: PlayerId, chance: u8) {
+        self.calls.push(RecordedCall::RobItems { player, chance });
     }
 
     fn party_surprise_check(&mut self) -> (u8, u8) {

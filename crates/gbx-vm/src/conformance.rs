@@ -8,7 +8,7 @@
 //! ordering, `ChainTo`, `VmError` legality) each get their own module.
 
 use crate::dialect::COTAB;
-use crate::host::{MissingData, MonsterHandle, RecordedCall};
+use crate::host::{MissingData, MonsterHandle, PlayerId, RecordedCall};
 use crate::test_support::{EclBuilder, TestHost};
 use crate::{BlockId, EclMachine, Effect, Exit, Reply, Request, VmError, VmStep, VmString};
 
@@ -2050,6 +2050,137 @@ mod opcodes {
         assert!(h
             .calls
             .contains(&RecordedCall::DestroyItems { item_type: 0x60 }));
+    }
+
+    /// ★ ROB (0x28), `CMD_Rob` (`ovr003.cs:1202-1225`) with `allParty == 0`:
+    /// the two halves fire once, against `gbl.SelectedPlayer`, and the scale
+    /// is the fraction KEPT.
+    #[test]
+    fn rob_with_all_party_clear_hits_only_the_selected_player() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        // `ECL3#16 @0x93AC` verbatim: ROB 0x00, 0x14, 0x00 — take 20%.
+        b.op(0x28).imm_byte(0x00).imm_byte(0x14).imm_byte(0x00);
+        b.label("after");
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let after = b.addr_of("after");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+        h.selected_player = PlayerId(2);
+        h.team_size_replies.push_back(6);
+
+        assert_continue(m.step(&mut h));
+        assert_eq!(m.current_pc(), Some(after));
+
+        let rob_calls: Vec<_> = h
+            .calls
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    RecordedCall::RobMoney { .. } | RecordedCall::RobItems { .. }
+                )
+            })
+            .cloned()
+            .collect();
+        assert_eq!(
+            rob_calls,
+            vec![
+                RecordedCall::RobMoney {
+                    player: PlayerId(2),
+                    scale: 0.8,
+                },
+                RecordedCall::RobItems {
+                    player: PlayerId(2),
+                    chance: 0,
+                },
+            ]
+        );
+        // `team_size` is never consulted on this arm.
+        assert!(!h.calls.contains(&RecordedCall::TeamSize));
+    }
+
+    /// ★ The all-party arm walks `TeamList` and **interleaves** the two
+    /// halves per member (`ovr003.cs:1216-1222`) — which is the draw order,
+    /// since `rob_items` rolls once per item.
+    #[test]
+    fn rob_with_all_party_set_interleaves_money_and_items_per_member() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        // `ECL5#51 @0x8B55` verbatim: ROB 0x01, 0x28, 0x7D.
+        b.op(0x28).imm_byte(0x01).imm_byte(0x28).imm_byte(0x7D);
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+        h.team_size_replies.push_back(3);
+
+        assert_continue(m.step(&mut h));
+
+        let rob_calls: Vec<_> = h
+            .calls
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    RecordedCall::RobMoney { .. } | RecordedCall::RobItems { .. }
+                )
+            })
+            .cloned()
+            .collect();
+        assert_eq!(
+            rob_calls,
+            vec![
+                RecordedCall::RobMoney {
+                    player: PlayerId(0),
+                    scale: 0.6,
+                },
+                RecordedCall::RobItems {
+                    player: PlayerId(0),
+                    chance: 0x7D,
+                },
+                RecordedCall::RobMoney {
+                    player: PlayerId(1),
+                    scale: 0.6,
+                },
+                RecordedCall::RobItems {
+                    player: PlayerId(1),
+                    chance: 0x7D,
+                },
+                RecordedCall::RobMoney {
+                    player: PlayerId(2),
+                    scale: 0.6,
+                },
+                RecordedCall::RobItems {
+                    player: PlayerId(2),
+                    chance: 0x7D,
+                },
+            ]
+        );
+    }
+
+    /// ROB is three operand batches wide (`vm_LoadCmdSets(3)`), so an `IF`
+    /// skipping over one lands on the instruction after it.
+    #[test]
+    fn rob_consumes_three_operand_batches() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x28).mem(0x7F79).imm_byte(0x4B).imm_byte(0x00);
+        b.label("after");
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let after = b.addr_of("after");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+        h.set_word(0x7F79, 0);
+        h.team_size_replies.push_back(1);
+
+        assert_continue(m.step(&mut h));
+        assert_eq!(m.current_pc(), Some(after));
     }
 
     /// ★ SAVE TABLE's operand roles are NOT GETTABLE's mirror image

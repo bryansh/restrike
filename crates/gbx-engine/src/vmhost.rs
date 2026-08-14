@@ -1396,12 +1396,61 @@ impl gbx_vm::EngineServices for EngineVmHost<'_> {
         }
     }
 
-    fn rob_money(&mut self, pct: u8) {
-        self.vm.calls.push(RecordedCall::RobMoney { pct });
+    /// ★ ROB's money half (`sub_31DEF`, `ovr008:1DEF-1F19`) — all seven
+    /// denominations scaled and truncated; see [`crate::party::Money::scale_all`]
+    /// for the coab correction. Draw-free.
+    fn rob_money(&mut self, player: PlayerId, scale: f64) {
+        self.vm.calls.push(RecordedCall::RobMoney { player, scale });
+        if let Some(member) = self.roster.members.get_mut(player.0 as usize) {
+            member.money.scale_all(scale);
+        }
     }
 
-    fn rob_items(&mut self, chance: u8) {
-        self.vm.calls.push(RecordedCall::RobItems { chance });
+    /// ★ ROB's item half (`sub_31F1C`, `ovr008:1F1C-1FCF`).
+    ///
+    /// Walks the item list front to back. Per item: the weight ladder
+    /// reduces `chance` **in place** (`> 255` → `-90`, else `> 24` → `-50`,
+    /// clamped at 0 — and the write-back at `ovr008:1F59`/`:1F7C` is what
+    /// makes the reduction cumulative down the list), then one
+    /// `roll_dice(100, 1)` is drawn **whatever the chance is** and the item
+    /// is lost on `roll <= chance`. The weight test is the unsigned word
+    /// compare the binary uses (`jbe`).
+    fn rob_items(&mut self, player: PlayerId, chance: u8) {
+        self.vm
+            .calls
+            .push(RecordedCall::RobItems { player, chance });
+        let Some(member) = self.roster.members.get(player.0 as usize) else {
+            return;
+        };
+        let weights: Vec<u16> = member
+            .items
+            .iter()
+            .map(|it| gbx_formats::save_orig::item_weight(it) as u16)
+            .collect();
+        let mut chance = chance;
+        let mut lost = Vec::new();
+        for (index, weight) in weights.iter().enumerate() {
+            // `cmp [bp+arg_4], 90 / jbe` — at exactly 90 the original stores
+            // 0, which is what `saturating_sub` gives too.
+            if *weight > 255 {
+                chance = chance.saturating_sub(90);
+            } else if *weight > 24 {
+                chance = chance.saturating_sub(50);
+            }
+            // `roll_dice(100, 1)` — drawn for every item, before the compare.
+            let roll = 1 + self.rng.random(100) as u8;
+            if roll <= chance {
+                lost.push(index);
+            }
+        }
+        let Some(member) = self.roster.members.get_mut(player.0 as usize) else {
+            return;
+        };
+        // `lose_item` per hit, back to front so the surviving indices stay
+        // valid (the original walks a linked list and cannot be confused).
+        for index in lost.into_iter().rev() {
+            crate::items::lose_item(member, index);
+        }
     }
 
     fn party_surprise_check(&mut self) -> (u8, u8) {
@@ -2082,6 +2131,137 @@ mod tests {
         let mut h = f.host();
         assert!(h.party_has_item(0x5E));
         assert!(!h.party_has_item(0x5F));
+    }
+
+    /// An item record carrying a weight, for ROB's weight ladder
+    /// (`Classes/Item.cs` `weight` @0x37).
+    fn item_weighing(weight: i16) -> Vec<u8> {
+        let mut rec = vec![0u8; gbx_formats::save_orig::ITEM_RECORD_SIZE];
+        rec[0x37..0x39].copy_from_slice(&weight.to_le_bytes());
+        rec
+    }
+
+    /// ★ ROB's money half scales **all seven** denominations (`sub_31DEF`,
+    /// `ovr008:1DEF-1F19`) — coab's `MoneySet.ScaleAll` stops at platinum.
+    #[test]
+    fn rob_money_scales_gems_and_jewelry_too() {
+        let mut f = Fixture::new();
+        let mut m = member("A", 10);
+        m.money = crate::party::Money {
+            copper: 100,
+            silver: 50,
+            electrum: 33,
+            gold: 20,
+            platinum: 7,
+            gems: 9,
+            jewelry: 3,
+        };
+        f.roster.members.push(m);
+
+        let mut h = f.host();
+        h.rob_money(PlayerId(0), 0.25); // ROB ..., 0x4B — 75% taken
+
+        let money = f.roster.members[0].money;
+        assert_eq!(money.copper, 25);
+        assert_eq!(money.silver, 12, "50 * 0.25 = 12.5, truncated");
+        assert_eq!(money.electrum, 8, "33 * 0.25 = 8.25");
+        assert_eq!(money.gold, 5);
+        assert_eq!(money.platinum, 1, "7 * 0.25 = 1.75");
+        assert_eq!(money.gems, 2, "★ coab's ScaleAll would have left this 9");
+        assert_eq!(money.jewelry, 0, "★ and this 3");
+    }
+
+    /// The six scales the shipped ROB operands produce, each against a value
+    /// whose exact product is a whole number — the `f64`-for-`Real`
+    /// substitution has to land on the same integer.
+    #[test]
+    fn the_shipped_rob_scales_truncate_exactly() {
+        // (percent taken, coins in, coins out) — the exact rational answer.
+        for (taken, coins, expect) in [
+            (0x4Bu8, 40i16, 10i16), // 0.25
+            (0x32, 41, 20),         // 0.5
+            (0x14, 5, 4),           // 0.8  — exact product 4
+            (0x5F, 20, 1),          // 0.05 — exact product 1
+            (0x28, 5, 3),           // 0.6  — exact product 3
+            (0x0A, 10, 9),          // 0.9  — exact product 9
+        ] {
+            let mut money = crate::party::Money {
+                gold: coins,
+                ..Default::default()
+            };
+            money.scale_all(f64::from(100 - taken) / 100.0);
+            assert_eq!(money.gold, expect, "{taken:#04X} on {coins} coins");
+        }
+    }
+
+    /// ★ ROB's item half: one d100 per item **whatever the chance**, the
+    /// weight ladder reducing the chance **cumulatively** down the list
+    /// (`ovr008:1F59`/`:1F7C` write the reduced value back to the parameter).
+    #[test]
+    fn rob_items_burns_one_roll_per_item_and_the_weight_ladder_is_cumulative() {
+        let mut f = Fixture::new();
+        let mut m = member("A", 10);
+        // A heavy item (-90) followed by two featherweights: after the first,
+        // the chance is 125-90 = 35 for the REST of the list too.
+        m.items = vec![
+            item_weighing(300),
+            item_weighing(1),
+            item_weighing(1),
+            item_weighing(1),
+        ];
+        f.roster.members.push(m);
+
+        // Predict the four `roll_dice(100, 1)` draws off a reference PRNG on
+        // the same seed, and the chance ladder by hand.
+        let mut reference = EngineRng::new(1);
+        let rolls: Vec<u8> = (0..4).map(|_| 1 + reference.random(100) as u8).collect();
+        let weights = [300i16, 1, 1, 1];
+        // 125 - 90 at item 0, and the reduction STAYS for the rest of the list.
+        let chances = [35u8, 35, 35, 35];
+        let survivors: Vec<i16> = (0..4)
+            .filter(|&i| rolls[i] > chances[i])
+            .map(|i| weights[i])
+            .collect();
+
+        let mut h = f.host();
+        h.rob_items(PlayerId(0), 0x7D);
+
+        assert_eq!(
+            f.rng.state(),
+            reference.state(),
+            "exactly one roll per item, chance never short-circuits"
+        );
+        assert_eq!(
+            f.roster.members[0]
+                .items
+                .iter()
+                .map(|it| gbx_formats::save_orig::item_weight(it))
+                .collect::<Vec<_>>(),
+            survivors,
+            "the ladder demoted a certainty to 35% for the whole rest of the list"
+        );
+        assert!(
+            !survivors.is_empty(),
+            "chance 125 unreduced would have taken every item"
+        );
+    }
+
+    /// Chance 0 still draws once per item and takes nothing (`roll >= 1`).
+    #[test]
+    fn rob_items_with_chance_zero_draws_but_never_takes() {
+        let mut f = Fixture::new();
+        let mut m = member("A", 10);
+        m.items = vec![item_weighing(1), item_weighing(1)];
+        f.roster.members.push(m);
+
+        let mut reference = EngineRng::new(1);
+        reference.random(100);
+        reference.random(100);
+
+        let mut h = f.host();
+        h.rob_items(PlayerId(0), 0);
+        assert_eq!(f.rng.state(), reference.state(), "two draws, both wasted");
+        assert_eq!(f.roster.members[0].items.len(), 2);
     }
 
     /// DESTROY ITEMS removes by type across the whole roster **and** rebuilds

@@ -178,8 +178,36 @@ pub trait EngineServices {
     fn party_has_item(&mut self, item_type: u8) -> bool;
     fn find_special(&mut self, affect_type: u8) -> bool;
     fn destroy_items(&mut self, item_type: u8);
-    fn rob_money(&mut self, pct: u8);
-    fn rob_items(&mut self, chance: u8);
+    /// ★ ROB (0x28)'s money half — `sub_31DEF` (`ovr008:1DEF-1F19`), called
+    /// from `CMD_Rob` at `sub_27F76+6E`. `scale` is the **fraction kept**,
+    /// which `CMD_Rob` computes as `(100 - operand2) / 100.0`
+    /// (`ovr003.cs:1206`); each denomination is multiplied by it and
+    /// truncated toward zero.
+    ///
+    /// **Correction to coab** (`ovr003.cs:1211`/`MoneySet.cs:150-160`): coab
+    /// routes this through `MoneySet.ScaleAll`, whose loop runs
+    /// `Copper..=Platinum` — five denominations. The binary's `sub_31DEF` has
+    /// **seven** inline `Real` multiply/`Trunc` pairs, one per word of the
+    /// `charStruct` money run (`copper 0xFB`, `electrum 0xFD`, `silver 0xFF`,
+    /// `gold 0x101`, `platinum 0x103`, `field_105` = gems, `field_107` =
+    /// jewelry). A robbed party loses its gems and jewelry too.
+    ///
+    /// Target-explicit like [`EngineServices::roll_saving_throw`]: `CMD_Rob`
+    /// passes `gbl.SelectedPlayer` or each `TeamList` member in turn, never
+    /// by implication.
+    fn rob_money(&mut self, player: PlayerId, scale: f64);
+    /// ★ ROB (0x28)'s item half — `sub_31F1C` (`ovr008:1F1C-1FCF`), called
+    /// from `CMD_Rob` at `sub_27F76+7F`.
+    ///
+    /// Walks the member's item list; for each item, `chance` is first
+    /// **reduced in place** by the weight ladder (`weight > 255` → `-90`,
+    /// else `weight > 24` → `-50`, each clamped at 0 — `ovr008:1F43-1F81`),
+    /// then `roll_dice(100, 1)` is drawn **unconditionally** and the item is
+    /// lost when the roll is `<= chance`. The reduction is written back to
+    /// the stack parameter (`mov [bp+arg_4], al`), so it is **cumulative down
+    /// the list** within one member's call and resets for the next member —
+    /// coab's closure-capturing `RemoveAll` lambda reproduces this exactly.
+    fn rob_items(&mut self, player: PlayerId, chance: u8);
     fn party_surprise_check(&mut self) -> (u8, u8);
 
     // --- Monsters / NPCs / combat setup ---
@@ -579,9 +607,11 @@ pub enum RecordedCall {
         item_type: u8,
     },
     RobMoney {
-        pct: u8,
+        player: PlayerId,
+        scale: f64,
     },
     RobItems {
+        player: PlayerId,
         chance: u8,
     },
     PartySurpriseCheck,

@@ -520,12 +520,12 @@ impl EngineServices for CliHost {
         eprintln!("svc: destroy_items(item_type={item_type:#04X})");
     }
 
-    fn rob_money(&mut self, pct: u8) {
-        eprintln!("svc: rob_money(pct={pct})");
+    fn rob_money(&mut self, player: PlayerId, scale: f64) {
+        eprintln!("svc: rob_money(player={}, scale={scale})", player.0);
     }
 
-    fn rob_items(&mut self, chance: u8) {
-        eprintln!("svc: rob_items(chance={chance})");
+    fn rob_items(&mut self, player: PlayerId, chance: u8) {
+        eprintln!("svc: rob_items(player={}, chance={chance})", player.0);
     }
 
     fn party_surprise_check(&mut self) -> (u8, u8) {

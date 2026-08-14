@@ -818,6 +818,7 @@ impl EclMachine {
             0x24 => self.op_combat(activation),
             0x25 => self.op_on_goto(activation, host, pc, opcode),
             0x26 => self.op_on_gosub(activation, host, pc, opcode),
+            0x28 => self.op_rob(activation, host, pc, opcode),
             0x29 => self.op_encounter_menu(activation, host, pc, opcode),
             0x2A => self.op_gettable(activation, host, pc, opcode),
             0x2B => self.op_horizontal_menu(activation, host, pc, opcode),
@@ -2472,6 +2473,58 @@ impl EclMachine {
             },
             Completion::WriteToneOutcomeThenAdvance { dest, values, next },
         ))
+    }
+
+    /// ★ ROB (0x28), `CMD_Rob` (`sub_27F76`, `ovr003.cs:1202-1225`) — the
+    /// shakedown the game runs ten times, from the Tilverton thieves' guild
+    /// to the sixth journey's bridge keeper.
+    ///
+    /// | operand | name | meaning |
+    /// |---|---|---|
+    /// | 1 | `allParty` | `0` = `SelectedPlayer` only, anything else = every `TeamList` member |
+    /// | 2 | `var_2` | the **percentage taken**; the handler turns it into the fraction KEPT, `(100 - var_2) / 100.0` |
+    /// | 3 | `robChance` | the per-item d100 threshold, before the weight ladder |
+    ///
+    /// The two halves interleave **per member** — `RobMoney(p); RobItems(p)`
+    /// then the next member (`ovr003.cs:1214-1223`) — which is the draw order,
+    /// because `rob_items` rolls `roll_dice(100, 1)` once per item.
+    ///
+    /// **Draw-bearing but capture-neutral:** ROB is an ECL opcode and every
+    /// `.gbxtrace` is a combat stream; no capture's script executes one. The
+    /// ten shipped sites are `ECL1#81 @0x89D1`, `ECL2#1 @0x8F4D`,
+    /// `ECL2#3 @0x88DB`, `ECL3#16 @0x93AC`, `ECL4#35 @0x81FB`,
+    /// `ECL5#50 @0x872E`, `ECL5#51 @0x8B55`/`@0x971E`, `ECL5#53 @0x8A0B` and
+    /// `ECL6#66 @0x850C` — operand 3 is `0x7D` (125) at three of them, i.e.
+    /// "certain, unless the item is heavy enough to buy its way out".
+    fn op_rob(
+        &mut self,
+        activation: &mut Activation,
+        host: &mut dyn VmHost,
+        pc: u16,
+        opcode: u8,
+    ) -> Result<VmStep, VmError> {
+        let (args, next) = self.load_cmd_sets(pc.wrapping_add(1), 3, host, pc);
+        let all_party = self.resolve_numeric(&args[0], pc, opcode, host)? as u8;
+        let taken_pct = self.resolve_numeric(&args[1], pc, opcode, host)? as u8;
+        let rob_chance = self.resolve_numeric(&args[2], pc, opcode, host)? as u8;
+        // `:1206` — `(100 - var_2) / 100.0`, the fraction kept. A `var_2`
+        // above 100 would underflow the byte subtraction in the original;
+        // every shipped operand is `<= 100`, and `saturating_sub` keeps a
+        // hypothetical one at "keep nothing" instead of a huge scale.
+        let scale = f64::from(100u8.saturating_sub(taken_pct)) / 100.0;
+        if all_party == 0 {
+            let player = host.selected_player();
+            host.rob_money(player, scale);
+            host.rob_items(player, rob_chance);
+        } else {
+            for index in 0..host.team_size() {
+                let player = PlayerId(index);
+                host.rob_money(player, scale);
+                host.rob_items(player, rob_chance);
+            }
+        }
+        activation.pc = next;
+        Ok(VmStep::Continue)
     }
 
     /// ★ DAMAGE (0x2E), `CMD_Damage` (`sub_28958`, `ovr003:2958-2CB5`) — the
