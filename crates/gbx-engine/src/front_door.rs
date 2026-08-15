@@ -367,6 +367,14 @@ impl CopyProtection {
         if !self.painted {
             self.paint(ctx);
             self.painted = true;
+            // ★ `Load24x24Set` ends with `seg043.clear_keyboard()`
+            // (`ovr034.cs`), and `copy_protection` calls it twice before it
+            // draws anything — so a key already in the buffer when the
+            // challenge is posed does NOT answer it. Load-bearing here: the
+            // bridge keeper's `PROTECTION` is reached with the player leaning
+            // on Enter through two joke questions, and without this the
+            // challenge would be answered on the tick it appeared.
+            ctx.input.clear();
         }
         // The prompt row is repainted every tick: it carries the live edit
         // buffer, which is the one thing on this screen that moves.

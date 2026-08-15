@@ -88,6 +88,11 @@ pub enum VmPhase {
     /// `EnterShop` arm (`ovr003.cs:978-982`) and `ovr007.CityShop()` is on
     /// screen. Appended last, same postcard reason as `Temple`.
     Shop(Box<crate::shop_screen::ShopHost>),
+    /// ★ **Roll-credits slice 9b**: the `PROTECTION` opcode (0x3C) posed the
+    /// copy-protection challenge — the sixth journey's bridge keeper. The same
+    /// screen the boot prompt shows, because it is the same `copy_protection()`.
+    /// Appended last, same postcard reason as the two above.
+    Protection(Box<crate::front_door::CopyProtection>),
 }
 
 impl VmPhase {
@@ -109,6 +114,7 @@ impl VmPhase {
             VmPhase::Combat(h) => format!("combat({:?})", h.stage()),
             VmPhase::Temple(_) => "temple".to_string(),
             VmPhase::Shop(h) => format!("shop({})", h.stage_name()),
+            VmPhase::Protection(_) => "copy-protection".to_string(),
         }
     }
 }
@@ -199,6 +205,7 @@ impl Clone for VmPhase {
             VmPhase::Combat(h) => VmPhase::Combat(h.clone()),
             VmPhase::Temple(h) => VmPhase::Temple(h.clone()),
             VmPhase::Shop(h) => VmPhase::Shop(h.clone()),
+            VmPhase::Protection(p) => VmPhase::Protection(p.clone()),
         }
     }
 }
@@ -212,6 +219,7 @@ impl PartialEq for VmPhase {
             (VmPhase::Combat(_), VmPhase::Combat(_)) => true,
             (VmPhase::Temple(_), VmPhase::Temple(_)) => true,
             (VmPhase::Shop(_), VmPhase::Shop(_)) => true,
+            (VmPhase::Protection(_), VmPhase::Protection(_)) => true,
             _ => false,
         }
     }
@@ -539,6 +547,12 @@ fn widget_for_request(request: &Request, menu_selected_word: usize) -> Widget {
         Request::InputString { max_len } => {
             Widget::TextEntry(crate::widgets::TextEntry::new("", *max_len as usize, false))
         }
+        // ★ PROTECTION (0x3C) never reaches here: it parks a whole screen
+        // (`VmPhase::Protection`), not a prompt-row widget — same as COMBAT's
+        // monster branch and the two shop branches. The arm exists because
+        // `widget_for_request` is total; a `PressAnyKey` is the harmless
+        // fallback if a future path ever does route one through.
+        Request::CopyProtection => Widget::PressAnyKey(PressAnyKey),
     }
 }
 
@@ -639,6 +653,7 @@ fn describe_request(request: &Request) -> String {
             format!("who: {}", String::from_utf8_lossy(&prompt.0))
         }
         Request::InputString { max_len } => format!("input string (max {max_len})"),
+        Request::CopyProtection => "copy protection (the code wheel)".to_string(),
     }
 }
 
@@ -806,6 +821,11 @@ impl VectorRun {
                         return RunTick::Working; // the shop is still on screen
                     }
                 }
+                VmPhase::Protection(_) => {
+                    if !self.tick_protection(ctx) {
+                        return RunTick::Working; // the challenge is still up
+                    }
+                }
                 VmPhase::Gate(_) => {
                     if !self.tick_gate(ctx) {
                         return RunTick::Working; // still gated, or paginating
@@ -944,6 +964,25 @@ impl VectorRun {
                     // handler clears the flag it found, exactly here, so the
                     // NEXT flagless `COMBAT` in the same block takes the
                     // AfterCombat arm rather than re-entering.
+                    // ★ PROTECTION (0x3C): `CMD_Protection`'s pre-prompt
+                    // bookkeeping (`ovr003.cs:1993-1996`), then the same
+                    // screen the boot prompt shows.
+                    if matches!(request, Request::CopyProtection) {
+                        ctx.state.encounter_flags = [false; 2];
+                        ctx.vm_memory.sprite_changed = false;
+                        ctx.vm_memory
+                            .transcript
+                            .push(crate::vmhost::TranscriptEntry::Request(describe_request(
+                                &request,
+                            )));
+                        self.pending = Some(PendingOutcome::Request(request));
+                        self.phase =
+                            VmPhase::Protection(Box::new(crate::front_door::CopyProtection::pose(
+                                ctx.rng,
+                                ctx.state.copy_protection_faithful,
+                            )));
+                        return PresentTick::OpenedGate;
+                    }
                     if matches!(request, Request::Combat) {
                         let branch = combat_branch(ctx);
                         ctx.vm_memory
@@ -1168,6 +1207,45 @@ impl VectorRun {
         self.pending_reply = Some(Reply::Combat);
         self.phase = VmPhase::Pump;
         true
+    }
+
+    /// ★ PROTECTION (0x3C)'s parked screen (roll-credits slice 9b).
+    ///
+    /// `CMD_Protection`'s own bookkeeping is here rather than in the VM
+    /// (`ovr003.cs:1993-2003`): the two `encounter_flags` and `spriteChanged`
+    /// are cleared BEFORE the prompt (so a sprite on screen is forgotten
+    /// while the runes own the display), and `LoadPic()` rebuilds the scene
+    /// AFTER it. The bridge keeper stands in the wilderness, so that rebuild
+    /// is `LoadPic`'s `WildernessMap` arm — the same fork every other
+    /// full-screen exit takes ([`Shell::rebuild_exploration_screen`]).
+    ///
+    /// A third failure is `print_and_exit()`: the request is raised for the
+    /// host and the script is left parked, because there is nothing sensible
+    /// to resume into.
+    fn tick_protection(&mut self, ctx: &mut FlowCtx) -> bool {
+        let VmPhase::Protection(prot) = &mut self.phase else {
+            unreachable!("tick_protection called outside Protection phase")
+        };
+        match prot.tick(ctx) {
+            None => false,
+            Some(crate::front_door::ProtectionOutcome::Ejected) => {
+                *ctx.quit_requested = true;
+                false
+            }
+            Some(crate::front_door::ProtectionOutcome::Passed) => {
+                ctx.vm_memory
+                    .transcript
+                    .push(crate::vmhost::TranscriptEntry::Request(
+                        "copy protection: passed".to_string(),
+                    ));
+                // `ovr025.LoadPic()` (`ovr003.cs:2003`).
+                Shell::rebuild_exploration_screen(ctx);
+                crate::corridor::redraw_view(ctx);
+                self.pending_reply = Some(Reply::CopyProtection);
+                self.phase = VmPhase::Pump;
+                true
+            }
+        }
     }
 
     fn tick_combat(&mut self, ctx: &mut FlowCtx) -> bool {
@@ -2800,6 +2878,7 @@ impl Shell {
                     | Some(VmPhase::Combat(_))
                     | Some(VmPhase::Temple(_))
                     | Some(VmPhase::Shop(_))
+                    | Some(VmPhase::Protection(_))
             )
         }
         fn run_gated(run: &Option<VectorRun>) -> bool {

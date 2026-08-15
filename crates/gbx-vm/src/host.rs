@@ -581,6 +581,25 @@ pub enum Request {
     /// `.ToUpper()`ed, and an empty one becomes a single space `" "`
     /// (`ovr003.cs:379-382`, `ovr003:09EF-0A05`) before it is written.
     InputString { max_len: u8 },
+    /// ★ PROTECTION (0x3C), `CMD_Protection` (`sub_2923F`,
+    /// `ovr003.cs:1990-2004`) — the copy-protection challenge, posed mid-script.
+    ///
+    /// Its **one shipped use** is `ECL1` block `0x50` `@0x9B6F`, inside the
+    /// sixth journey's bridge-keeper subroutine (`L9A92`): two `INPUT STRING`s
+    /// of Monty Python, then "WHAT DOES THIS MEAN?" and the two runes. The
+    /// census never reported it because its flow-follower drops the false arm
+    /// of the `IF <cmp>` + `GOTO` idiom the subroutine's counter is built from.
+    ///
+    /// The handler's own bookkeeping — `encounter_flags[0..1] = false`,
+    /// `spriteChanged = false`, `vm_LoadCmdSets(1)`, and the trailing
+    /// `LoadPic()` — is engine state, done on the engine side of the reply.
+    /// The single operand is decoded and **never read** (FD-12): at the only
+    /// site it is `[0x7F79]`, the block's scratch cell, and nothing in
+    /// `copy_protection()` looks at it.
+    ///
+    /// Appended last so the existing variant indices — which postcard encodes
+    /// positionally inside `SaveState` — are untouched.
+    CopyProtection,
 }
 
 /// Replies to a suspended `Request`. `resume()` checks the reply kind
@@ -604,6 +623,10 @@ pub enum Reply {
     /// substitution is the **opcode's**, not the editor's, so it happens on
     /// this side of the boundary (`ovr003.cs:379-382`).
     Text(VmString),
+    /// Acknowledges a [`Request::CopyProtection`]. Carries nothing:
+    /// `copy_protection()` either returns (passed) or ends the process, and
+    /// writes no memory either way.
+    CopyProtection,
 }
 
 impl Reply {
@@ -618,6 +641,7 @@ impl Reply {
                 | (Reply::PressAnyKey, Request::PressAnyKey { .. })
                 | (Reply::PlayerSelected, Request::SelectPlayer { .. })
                 | (Reply::Text(_), Request::InputString { .. })
+                | (Reply::CopyProtection, Request::CopyProtection)
         )
     }
 }

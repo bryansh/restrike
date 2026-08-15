@@ -237,6 +237,7 @@ fn describe_request(request: &Request) -> String {
             format!("SelectPlayer({})", vm_string_to_display(prompt))
         }
         Request::InputString { max_len } => format!("InputString(max={max_len})"),
+        Request::CopyProtection => "CopyProtection".to_string(),
     }
 }
 
@@ -248,6 +249,7 @@ fn describe_reply(reply: &Reply) -> String {
         Reply::PressAnyKey => "PressAnyKey".to_string(),
         Reply::PlayerSelected => "PlayerSelected".to_string(),
         Reply::Text(s) => format!("Text({})", vm_string_to_display(s)),
+        Reply::CopyProtection => "CopyProtection".to_string(),
     }
 }
 
@@ -364,6 +366,10 @@ impl ReplyPolicy {
             // The diagnostic host types nothing; the opcode's own
             // empty-string rule then substitutes a single space.
             Request::InputString { .. } => Reply::Text(VmString::default()),
+            // The diagnostic host has no screen to pose the wheel on; it
+            // answers as a player who got it right, which is what the shipped
+            // site (`ECL1#0x50 @0x9B6F`) needs in order to keep going.
+            Request::CopyProtection => Reply::CopyProtection,
         }
     }
 }

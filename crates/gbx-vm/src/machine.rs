@@ -873,6 +873,7 @@ impl EclMachine {
             0x39 => self.op_who(activation, host, pc),
             0x3A => self.op_delay(activation),
             0x3B => self.op_spell(activation, host, pc, opcode),
+            0x3C => self.op_protection(activation, host, pc),
             0x3D => self.op_clear_box(activation, pc),
             0x3E => self.op_dump(activation, host, pc),
             0x3F => self.op_find_special(activation, host, pc, opcode),
@@ -2321,6 +2322,35 @@ impl EclMachine {
             pc,
             Effect::PartySummary,
             pc.wrapping_add(1),
+        ))
+    }
+
+    /// ★ PROTECTION (0x3C), `CMD_Protection` (`sub_2923F`,
+    /// `ovr003.cs:1990-2004`) — the copy-protection challenge posed by a
+    /// script. See [`Request::CopyProtection`] for the one shipped site.
+    ///
+    /// `vm_LoadCmdSets(1)` loads one operand and the handler never reads it
+    /// (FD-12): the load is transcribed because it MOVES THE PC, which is the
+    /// only observable thing about it. Everything else `CMD_Protection` does
+    /// — clearing `encounter_flags[0..1]` and `spriteChanged`, and the
+    /// trailing `LoadPic()` — is engine state, handled where the request is
+    /// answered.
+    ///
+    /// Draw-free at this level: `copy_protection()` does draw four
+    /// `seg051.Random` values, but on the engine's PRNG at the moment the
+    /// prompt is posed, not here.
+    fn op_protection(
+        &mut self,
+        activation: &mut Activation,
+        host: &mut dyn VmHost,
+        pc: u16,
+    ) -> Result<VmStep, VmError> {
+        let (_args, next) = self.load_cmd_sets(pc.wrapping_add(1), 1, host, pc);
+        Ok(Self::yield_request(
+            activation,
+            pc,
+            Request::CopyProtection,
+            Completion::Advance(next),
         ))
     }
 

@@ -397,9 +397,129 @@ fn exit_to_dos_raises_the_quit_request() {
     };
     skip_title(&mut engine);
     press(&mut engine, b'P');
+    // The challenge's first tick paints and flushes the keyboard
+    // (`Load24x24Set`'s `clear_keyboard`), so the accept comes after it.
+    engine.tick(&[]);
     engine.tick(&[InputEvent::Enter]);
     assert_eq!(engine.probe(), "front-door/start-menu");
     assert!(!engine.quit_requested());
     press(&mut engine, b'E');
     assert!(engine.quit_requested(), "the host is asked to quit");
+}
+
+// --- PROTECTION (0x3C) at its one shipped site ---------------------------
+
+/// ★ **The sixth journey's bridge keeper**, driven live: `ECL1` block `0x50`
+/// subroutine `L9A92`, the only `PROTECTION` (0x3C) in the shipped game.
+///
+/// ```text
+/// 0x9A92  COMPARE [0x4CA3], #0x06     ; the every-6th-journey counter
+/// 0x9A98  IF <>  -> ADD #1,[0x4CA3]
+/// 0x9AA2  IF <>  -> RETURN
+/// 0x9AA4  SAVE #0x00 -> [0x4CA3]
+/// 0x9AAA  PRINTCLEAR "YOUR WAY IS BLOCKED BY AN IMPASSABLE CHASM. A "
+/// 0x9AD0  PRINT      "NARROW BRIDGE IS GUARDED BY AN OLD MAN. HE CACKLES, '"
+/// 0x9AFB  PRINT      "YOU MUST ANSWER ME BEFORE THE OTHER SIDE YE SEE.'"
+/// 0x9B23  GOSUB 0x9B85                ; "PRESS BUTTON OR RETURN TO CONTINUE."
+/// 0x9B27  PRINTCLEAR "WHAT IS YOUR QUEST?"
+/// 0x9B39  INPUT STRING #0x2D -> str[0x7B00]
+/// 0x9B3F  PRINTCLEAR "WHAT IS YOUR FAVORITE FRUIT?"
+/// 0x9B57  INPUT STRING #0x2D -> str[0x7B00]
+/// 0x9B5D  PRINTCLEAR "WHAT DOES THIS MEAN?"
+/// 0x9B6F  PROTECTION [0x7F79]         ; <- here
+/// 0x9B73  PRINTCLEAR "YOU MAY PASS."
+/// 0x9B80  GOSUB 0x9B85
+/// 0x9B84  RETURN
+/// ```
+///
+/// Neither `INPUT STRING`'s answer is ever read — the joke is the point. The
+/// counter is seeded to 6 so the subroutine fires on entry instead of
+/// bumping and returning.
+#[test]
+fn the_bridge_keeper_poses_the_copy_wheel() {
+    use crate::area_transition_tests::real_data_engine;
+
+    let Some(mut engine) = real_data_engine(1, 0x50, 0x50, false) else {
+        eprintln!(
+            "SKIPPED: local tier needs GBX_DATA_DIR \
+             (front_door_tests::the_bridge_keeper_poses_the_copy_wheel)"
+        );
+        return;
+    };
+    // `[0x4CA3]` — the journey counter, in the Area1 window's raw store.
+    engine.vm_memory.set_raw_word(0x4CA3, 6);
+    engine.shell = crate::shell::boot_at_address(&mut engine.machine, 0x9A92);
+
+    // Answer whatever the script asks until the runes are on screen: the
+    // press-a-key menu and the two joke questions all take Enter.
+    // Enter answers the press-a-key menu and both joke questions; the
+    // challenge itself flushes the keyboard as it paints
+    // (`Load24x24Set`'s `clear_keyboard`), so leaning on Enter cannot skip it.
+    let mut reached = false;
+    for _ in 0..4000 {
+        if engine.probe().contains("copy-protection") {
+            reached = true;
+            break;
+        }
+        engine.tick(&[InputEvent::Enter]);
+    }
+    assert!(
+        reached,
+        "PROTECTION never posed; probe={} halts={:?}",
+        engine.probe(),
+        engine.vm_memory().halts
+    );
+    dump(&mut engine, "12-bridge-keeper");
+
+    // The counter was reset on the way in (`SAVE #0 -> [0x4CA3]`).
+    assert_eq!(engine.vm_memory().raw_word(0x4CA3), Some(0));
+
+    // Accept the shown answer; the script continues to "YOU MAY PASS."
+    engine.tick(&[InputEvent::Enter]);
+    let mut passed = false;
+    for _ in 0..2000 {
+        let notes = engine.take_transcript();
+        if notes
+            .iter()
+            .any(|n| format!("{n:?}").to_uppercase().contains("YOU MAY PASS"))
+        {
+            passed = true;
+            break;
+        }
+        engine.tick(&[InputEvent::Enter]);
+    }
+    assert!(
+        passed,
+        "the keeper never let the party by; probe={}",
+        engine.probe()
+    );
+}
+
+/// The counter arm: on any journey but the sixth, the subroutine bumps
+/// `[0x4CA3]` and returns without a challenge (`ovr003`-side, `L9A92`).
+#[test]
+fn the_bridge_keeper_only_appears_on_the_sixth_journey() {
+    use crate::area_transition_tests::real_data_engine;
+
+    let Some(mut engine) = real_data_engine(1, 0x50, 0x50, false) else {
+        eprintln!(
+            "SKIPPED: local tier needs GBX_DATA_DIR \
+             (front_door_tests::the_bridge_keeper_only_appears_on_the_sixth_journey)"
+        );
+        return;
+    };
+    engine.vm_memory.set_raw_word(0x4CA3, 2);
+    engine.shell = crate::shell::boot_at_address(&mut engine.machine, 0x9A92);
+    for _ in 0..400 {
+        engine.tick(&[]);
+        assert!(
+            !engine.probe().contains("copy-protection"),
+            "journey 3 must not meet the keeper"
+        );
+    }
+    assert_eq!(
+        engine.vm_memory().raw_word(0x4CA3),
+        Some(3),
+        "the counter was bumped instead"
+    );
 }
