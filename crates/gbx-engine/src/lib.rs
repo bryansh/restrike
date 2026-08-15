@@ -23,6 +23,10 @@ pub mod charsheet;
 pub mod combat;
 pub mod combat_art;
 pub mod combat_host;
+/// ★ Roll-credits slice 9b (D-RC4): the CotAB code wheel — the copy-protection
+/// algorithm and its 6×36 table, shared by the boot prompt and the sixth
+/// journey's bridge keeper.
+pub mod copy_wheel;
 pub mod corridor;
 /// The `RESTRIKE_DEBUG_LOG` replay pipeline (host-side: filesystem + save
 /// slots), shared by `examples/replay_debug_log` and `restrike replay`.

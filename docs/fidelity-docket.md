@@ -300,12 +300,18 @@ source document (§5 "New docket candidates").
   dialect actually read it (making it a real per-dialect parameter rather
   than dead code)?
 - **Evidence so far:** Confirmed dead in coab's CotAB transliteration
-  (opcode-classification.md item 13, `ovr003.cs:1997`). Not implemented in
-  `EclMachine` (never observed in the census, `cotab-v1.3.md` §8's
-  "never appear" list — copy-protection scripts are presumably outside the
-  6 shipped `ECLn.DAX` area files, e.g. a startup-specific block).
-- **Settled by:** Deferred — revisit only if a Buck Rogers or other-title
-  census (M7/M9) shows the operand actually consumed.
+  (opcode-classification.md item 13, `ovr003.cs:1997`). ★ **The census's
+  "never appears" was wrong** — it appears exactly once, and the flow-follower
+  simply never reached it: `ECL1` block `0x50` `@0x9B6F`, `PROTECTION [0x7F79]`,
+  inside the sixth journey's bridge-keeper subroutine (`L9A92`; see
+  `docs/copy-protection.md`). Slice 9b implements the opcode and the prompt;
+  the operand is decoded (`vm_LoadCmdSets(1)`) and discarded, faithfully, and
+  `[0x7F79]` is that block's general scratch cell — written and re-read by a
+  dozen unrelated instructions in the same block, so the *value* there at the
+  moment `PROTECTION` runs carries no meaning either.
+- **Settled by:** CotAB half **closed** (vestigial at the one shipped site,
+  now transcribed as such). The cross-title half stays open: revisit only if a
+  Buck Rogers or other-title census (M7/M9) shows the operand consumed.
 
 ### FD-13: SURPRISE's `0x2CB` hard-coded cell
 
