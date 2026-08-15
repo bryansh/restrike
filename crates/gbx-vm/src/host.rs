@@ -513,6 +513,29 @@ pub enum Request {
     /// 15), which is distinct from the death screen's own prompt (colour 13,
     /// different words) — that one belongs to the wipe flow, not the opcode.
     PressAnyKey { text: VmString, color: u8 },
+    /// ★ WHO (0x39), `CMD_Who` (`sub_28D7F`, `ovr003.cs:1757-1765`): the
+    /// "who does this?" picker. The handler clears the bottom text region and
+    /// calls `selectAPlayer(ref gbl.SelectedPlayer, showExit: false, prompt)`
+    /// (`ovr025.cs:1527-1567`), whose loop re-prompts until the key is one of
+    /// `{0x0D, 0x1B, 'E', 'S'}` — the four bits set in the Pascal set
+    /// `unk_68DFA` (`ovr025:2DFA`, bytes `00 20 00 08 … 20 … 08`, i.e.
+    /// elements 13, 27, 69 and 83).
+    ///
+    /// `showExit == false` means there is **no cancel**: the picker cannot
+    /// return "nobody", it can only leave `SelectedPlayer` where the last
+    /// `G`/`O` scroll put it. Whatever the script tests afterwards, it tests
+    /// through `0x7D00` (`in_combat`), not through a returned index — which
+    /// is why the reply carries nothing.
+    ///
+    /// `prompt` is string register 1, taken **unconditionally**
+    /// (`gbl.unk_1D972[1]`, `:1759`) with no `Code < 0x80` guard, exactly as
+    /// the handler reads it. Presented as `displayInput`'s
+    /// `displayExtraString` — drawn at row `0x18` column 0 with the word
+    /// `Select` starting at column `prompt.len()` (`ovr027.cs:155-163`).
+    ///
+    /// Appended last so the existing variant indices — which postcard
+    /// encodes positionally inside `SaveState` — are untouched.
+    SelectPlayer { prompt: VmString },
 }
 
 /// Replies to a suspended `Request`. `resume()` checks the reply kind
@@ -527,6 +550,10 @@ pub enum Reply {
     /// Acknowledges a [`Request::PressAnyKey`]. Carries no key: the original's
     /// `DisplayAndPause` discards whatever was pressed.
     PressAnyKey,
+    /// Acknowledges a [`Request::SelectPlayer`]. Carries nothing: `CMD_Who`
+    /// writes no memory and `selectAPlayer` has already moved
+    /// `gbl.SelectedPlayer` — engine state the VM does not own.
+    PlayerSelected,
 }
 
 impl Reply {
@@ -539,6 +566,7 @@ impl Reply {
                 | (Reply::Delay, Request::Delay)
                 | (Reply::Combat, Request::Combat)
                 | (Reply::PressAnyKey, Request::PressAnyKey { .. })
+                | (Reply::PlayerSelected, Request::SelectPlayer { .. })
         )
     }
 }

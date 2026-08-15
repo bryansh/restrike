@@ -22,6 +22,17 @@ fn step_past(engine: &mut Engine, from: u16) -> bool {
     run_until(engine, 200, |e| e.machine.current_pc() != Some(from))
 }
 
+/// Ticks until the run parks on a gate (or gives up).
+fn run_to_gate(engine: &mut Engine, max: u32) -> bool {
+    for _ in 0..max {
+        if engine.shell().gate_open() {
+            return true;
+        }
+        engine.tick(&[]);
+    }
+    engine.shell().gate_open()
+}
+
 fn item_weighing(weight: i16) -> Vec<u8> {
     let mut rec = vec![0u8; gbx_formats::save_orig::ITEM_RECORD_SIZE];
     rec[0x37..0x39].copy_from_slice(&weight.to_le_bytes());
@@ -96,4 +107,107 @@ fn the_shipped_ecl2_rob_takes_three_quarters_and_the_light_items() {
         "no halt: {:?}",
         engine.vm_memory().halts
     );
+}
+
+// --- WHO (0x39) ----------------------------------------------------------
+
+/// ★ **The shipped WHO, driven live.** `ECL4#35 @0x8A15` — the shortest of
+/// the seven prompts, followed by `SAVE [0x7EB1], [0x7F7A]` and
+/// `SAVE [0x7EB1], [0x7F7B]`, which only mean anything once somebody is
+/// selected.
+///
+/// `CMD_Who` (`ovr003.cs:1757-1765`) calls `selectAPlayer(ref SelectedPlayer,
+/// showExit: false, prompt)`, whose loop only ends on one of the four
+/// elements of `unk_68DFA` — `{0x0D, 0x1B, 'E', 'S'}`. The drive proves both
+/// halves: a letter outside the set re-prompts, and Enter commits.
+#[test]
+fn the_shipped_ecl4_who_reprompts_on_a_stray_key_and_commits_on_enter() {
+    const SITE: u16 = 0x8A15;
+    // `GEO4.DAX` holds {32, 33, 37}; block 35 is an ECL id with no map of its
+    // own, so the drive boots on the area's first real one.
+    let Some(mut engine) = real_data_engine(4, 35, 33, true) else {
+        eprintln!(
+            "SKIPPED: local tier needs GBX_DATA_DIR \
+             (tail_ops_tests::the_shipped_ecl4_who_reprompts_on_a_stray_key_and_commits_on_enter)"
+        );
+        return;
+    };
+
+    engine.shell = crate::shell::boot_at_address(&mut engine.machine, SITE);
+    assert!(run_to_gate(&mut engine, 100), "WHO opened a gate");
+    let line = engine
+        .vm_memory()
+        .transcript
+        .iter()
+        .map(|e| format!("{e:?}"))
+        .find(|s| s.contains("who:"))
+        .expect("the transcript names the picker");
+    eprintln!("  {line}");
+
+    // A key outside `unk_68DFA` re-prompts: the gate stays open and the pc
+    // has not moved.
+    engine.tick(&[crate::input::InputEvent::Char(b'X')]);
+    assert!(engine.shell().gate_open(), "'X' re-prompted");
+    assert_eq!(engine.machine.current_pc(), Some(SITE));
+
+    // Enter resolves on the highlighted word, `Select`.
+    assert!(
+        run_until(&mut engine, 200, |e| e.machine.current_pc() != Some(SITE)),
+        "Enter committed the pick"
+    );
+    assert_eq!(engine.state().selected_player, 0);
+    assert!(
+        engine.vm_memory().halts.is_empty(),
+        "no halt: {:?}",
+        engine.vm_memory().halts
+    );
+}
+
+/// ★ The cell every WHO site tests on its very next instruction:
+/// `COMPARE [0x7D00], 1` (`ECL2#3 @0x952A`, `ECL4#32 @0x8B3A`,
+/// `ECL5#50 @0x8394`, `ECL5#51 @0x8C67`/`@0x91C4`).
+///
+/// `ECL5#50 @0x8388` is the drive:
+///
+/// ```text
+/// 0x8388  WHO "<9 chars>"
+/// 0x8394  COMPARE [0x7D00], 1
+/// 0x839A  IF =
+/// 0x839B  GOTO 0x83BE          <- the selected member is there: get on with it
+/// 0x839F  PRINTCLEAR "<24 chars>"
+/// 0x83BA  GOTO 0x8388          <- they are not: say so and ASK AGAIN
+/// ```
+///
+/// The drive starts on the COMPARE, so the very next gate names the arm: the
+/// equal arm runs into `@0x83C2 DAMAGE`, whose closing `press_any_key` is a
+/// `pause:` in the transcript, while the not-equal arm prints its refusal and
+/// comes straight back to the `who:` picker.
+#[test]
+fn the_shipped_ecl5_who_gates_on_the_selected_players_state_cell() {
+    const COMPARE_SITE: u16 = 0x8394;
+    for (in_combat, expect_first_gate) in [(true, "pause:"), (false, "who:")] {
+        let Some(mut engine) = real_data_engine(5, 50, 50, true) else {
+            eprintln!(
+                "SKIPPED: local tier needs GBX_DATA_DIR \
+                 (tail_ops_tests::the_shipped_ecl5_who_gates_on_the_selected_players_state_cell)"
+            );
+            return;
+        };
+        engine.party.members[0].status.in_combat = in_combat;
+        engine.shell = crate::shell::boot_at_address(&mut engine.machine, COMPARE_SITE);
+        assert!(run_to_gate(&mut engine, 400), "the arm reached a gate");
+        let first = engine
+            .vm_memory()
+            .transcript
+            .iter()
+            .map(|e| format!("{e:?}"))
+            .find(|s| s.contains("who:") || s.contains("pause:"))
+            .unwrap_or_default();
+        eprintln!("  in_combat={in_combat} -> first gate {first}");
+        assert!(
+            first.contains(expect_first_gate),
+            "in_combat={in_combat}: [0x7D00] reads {}, expected {expect_first_gate}, got {first}",
+            if in_combat { 1 } else { 0x80 }
+        );
+    }
 }

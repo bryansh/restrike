@@ -2183,6 +2183,82 @@ mod opcodes {
         assert_eq!(m.current_pc(), Some(after));
     }
 
+    /// ★ WHO (0x39), `CMD_Who` (`ovr003.cs:1757-1765`): one operand batch,
+    /// the picker's prompt taken from string register 1, and a reply that
+    /// carries nothing (`selectAPlayer` mutates `gbl.SelectedPlayer`, not
+    /// memory).
+    #[test]
+    fn who_opens_a_player_picker_with_the_inline_prompt() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x39).inline_str(b"WHO PICKS?");
+        b.label("after");
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let after = b.addr_of("after");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+
+        let step = m.step(&mut h).expect("WHO decodes");
+        let VmStep::Request(Request::SelectPlayer { prompt }) = step else {
+            panic!("expected the picker, got {step:?}");
+        };
+        assert_eq!(prompt, VmString::from_bytes(&b"WHO PICKS?"[..]));
+
+        m.resume(Reply::PlayerSelected, &mut h)
+            .expect("the picker resumes");
+        assert_eq!(m.current_pc(), Some(after));
+    }
+
+    /// The reply kind is checked: a menu selection is not an answer to a
+    /// player picker.
+    #[test]
+    fn who_rejects_a_mismatched_reply() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x39).inline_str(b"WHO?");
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+        assert!(matches!(
+            m.step(&mut h),
+            Ok(VmStep::Request(Request::SelectPlayer { .. }))
+        ));
+        assert!(matches!(
+            m.resume(Reply::Selection(0), &mut h),
+            Err(VmError::ReplyMismatch)
+        ));
+    }
+
+    /// ★ `CMD_Who` reads `gbl.unk_1D972[1]` with no `Code < 0x80` guard
+    /// (`ovr003.cs:1759`), so a numeric operand leaves the register holding
+    /// whatever the last string-mode operand put there. Transcribed, not
+    /// corrected — no shipped site does it.
+    #[test]
+    fn who_with_a_numeric_operand_presents_the_stale_string_register() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x11).inline_str(b"EARLIER"); // PRINT fills register 1
+        b.op(0x39).imm_byte(0x07); // WHO, numeric operand
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+
+        let prompt = loop {
+            match m.step(&mut h).expect("the fixture runs") {
+                VmStep::Request(Request::SelectPlayer { prompt }) => break prompt,
+                VmStep::Continue | VmStep::Effect(Effect::Print { .. }) => continue,
+                other => panic!("expected the picker, got {other:?}"),
+            }
+        };
+        assert_eq!(prompt, VmString::from_bytes(&b"EARLIER"[..]));
+    }
+
     /// ★ SAVE TABLE's operand roles are NOT GETTABLE's mirror image
     /// (`ovr003.cs:651-660` against `:635-647`): the value comes first, the
     /// table base second (raw, never dereferenced) and the index third.

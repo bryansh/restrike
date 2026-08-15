@@ -359,6 +359,25 @@ const GAME_AREA_ADDR: u16 = 0x7F12;
 const ENTER_TEMPLE_ADDR: u16 = 0x7EE2;
 const ENTER_SHOP_ADDR: u16 = 0x7F6C;
 
+/// ★ `get_player_values`' `arg_4 == 0x100` case (`ovr008.cs:424-441`) — the
+/// **only** cell a script uses to ask "is the selected character actually
+/// there?", and the one every WHO (0x39) site tests on the very next
+/// instruction (`COMPARE [0x7D00], 1`).
+///
+/// Under the Party window's `switch_var = addr - 0x7C00` mapping it is
+/// `0x7C00 + 0x100`. Three answers, in the original's own order:
+///
+/// - `1` — `SelectedPlayer.in_combat` (alive, conscious, on the board);
+/// - `0x80` — a member who is not;
+/// - `0` — `gbl.player_not_found`, which **overrides both** and is
+///   **cleared by the read** (`:436-440`). A one-shot: LOAD CHARACTER's
+///   out-of-range arm arms it, the next read of this cell consumes it.
+///
+/// `alter_character`'s write side (`:618-632`) is the mirror: `>= 0x80`
+/// clears `in_combat` (and `0x87` specifically means petrified), `0` arms
+/// `redrawPartySummary1`.
+const SELECTED_PLAYER_STATE_ADDR: u16 = 0x7D00;
+
 /// One access kind, for the unknown-access log's `(addr, kind)` dedup key
 /// (D-VM5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -964,6 +983,9 @@ impl ScriptMemory for EngineVmHost<'_> {
         if addr == ENTER_SHOP_ADDR {
             return self.state.enter_shop;
         }
+        if addr == SELECTED_PLAYER_STATE_ADDR {
+            return self.read_selected_player_state();
+        }
         if TABLE_WINDOW.contains(&addr) || PARTY_WINDOW.contains(&addr) {
             self.vm.unknown_log.record(addr, AccessKind::Read, origin);
             return self.vm.raw_words.get(&addr).copied().unwrap_or(0);
@@ -1040,6 +1062,21 @@ impl ScriptMemory for EngineVmHost<'_> {
 }
 
 impl EngineVmHost<'_> {
+    /// [`SELECTED_PLAYER_STATE_ADDR`]'s read, `get_player_values`'
+    /// `arg_4 == 0x100` case verbatim (`ovr008.cs:424-441`) — including the
+    /// **read-clears** of `player_not_found`.
+    fn read_selected_player_state(&mut self) -> u16 {
+        let mut value = match self.roster.members.get(self.state.selected_player as usize) {
+            Some(member) if member.status.in_combat => 1,
+            _ => 0x80,
+        };
+        if self.state.player_not_found {
+            value = 0;
+        }
+        self.state.player_not_found = false;
+        value
+    }
+
     /// The Area window (`0x4B00..=0x4EFF`): the ECL clock cluster + the two
     /// named flags, everything else raw+logged (research §1.5).
     fn read_area(&mut self, addr: u16, origin: Origin) -> u16 {
@@ -2131,6 +2168,39 @@ mod tests {
         let mut h = f.host();
         assert!(h.party_has_item(0x5E));
         assert!(!h.party_has_item(0x5F));
+    }
+
+    /// ★ `[0x7D00]` — `get_player_values`' `arg_4 == 0x100` case
+    /// (`ovr008.cs:424-441`): `1` when the selected member is `in_combat`,
+    /// `0x80` when not, `0` when `player_not_found` — and the read **clears**
+    /// the flag, so the next one answers normally.
+    #[test]
+    fn the_selected_player_state_cell_answers_three_ways_and_clears_the_flag() {
+        let mut f = Fixture::new();
+        let mut down = member("B", 10);
+        down.status.in_combat = false;
+        f.roster.members.push(member("A", 10));
+        f.roster.members.push(down);
+        let origin = Origin { pc: 0x8000 };
+
+        let mut h = f.host();
+        assert_eq!(h.read(0x7D00, origin), 1, "member 0 is in_combat");
+
+        f.state.selected_player = 1;
+        let mut h = f.host();
+        assert_eq!(h.read(0x7D00, origin), 0x80, "member 1 is not");
+
+        // LOAD CHARACTER's out-of-range arm arms the flag; the first read of
+        // this cell consumes it, the second reads through.
+        f.state.selected_player = 0;
+        let mut h = f.host();
+        h.retarget_selected_player(9);
+        assert!(f.state.player_not_found);
+        let mut h = f.host();
+        assert_eq!(h.read(0x7D00, origin), 0, "not-found overrides in_combat");
+        assert!(!f.state.player_not_found, "★ the read cleared it");
+        let mut h = f.host();
+        assert_eq!(h.read(0x7D00, origin), 1, "and the next read is normal");
     }
 
     /// An item record carrying a weight, for ROB's weight ladder

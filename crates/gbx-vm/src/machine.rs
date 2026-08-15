@@ -836,6 +836,7 @@ impl EclMachine {
             0x36 => self.op_add_npc(activation, host, pc, opcode),
             0x37 => self.op_load_files(activation, host, pc, opcode, true),
             0x38 => self.op_program(activation, host, pc, opcode),
+            0x39 => self.op_who(activation, host, pc),
             0x3A => self.op_delay(activation),
             0x3D => self.op_clear_box(activation, pc),
             0x3E => self.op_dump(activation, host, pc),
@@ -2472,6 +2473,34 @@ impl EclMachine {
                     .collect(),
             },
             Completion::WriteToneOutcomeThenAdvance { dest, values, next },
+        ))
+    }
+
+    /// ★ WHO (0x39), `CMD_Who` (`sub_28D7F`, `ovr003.cs:1757-1765`) — one
+    /// operand batch, whose string register 1 is the picker's prompt.
+    ///
+    /// The handler reads `gbl.unk_1D972[1]` **directly**, with no
+    /// `Code < 0x80` test, so a numeric operand here would present the
+    /// *previous* instruction's register content. Every shipped site
+    /// (`ECL2#3 @0x951B`, `ECL4#32 @0x8B1C`, `ECL4#33 @0x8EC7`,
+    /// `ECL4#35 @0x8A15`, `ECL5#50 @0x8388`, `ECL5#51 @0x8C52`/`@0x91AF`)
+    /// passes an inline string, so the distinction never fires in practice —
+    /// but it is transcribed rather than "fixed".
+    ///
+    /// Draw-free: `selectAPlayer` is a menu wait.
+    fn op_who(
+        &mut self,
+        activation: &mut Activation,
+        host: &mut dyn VmHost,
+        pc: u16,
+    ) -> Result<VmStep, VmError> {
+        let (_args, next) = self.load_cmd_sets(pc.wrapping_add(1), 1, host, pc);
+        let prompt = self.strings.get(1).clone();
+        Ok(Self::yield_request(
+            activation,
+            pc,
+            Request::SelectPlayer { prompt },
+            Completion::Advance(next),
         ))
     }
 

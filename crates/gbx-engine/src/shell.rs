@@ -504,8 +504,32 @@ fn widget_for_request(request: &Request, menu_selected_word: usize) -> Widget {
         // (which owns the framebuffer at that point); the widget is the
         // blocking `GetInputKey` that follows it.
         Request::PressAnyKey { .. } => Widget::PressAnyKey(PressAnyKey),
+        // ★ WHO (0x39) — `selectAPlayer(ref SelectedPlayer, showExit: false,
+        // prompt)` (`ovr025.cs:1527-1567`). One word, `"Select"`, because
+        // `showExit` is false; `G`/`O` scroll the roster and re-prompt
+        // (`:1543-1557`); and the loop only ends on one of the four elements
+        // of `unk_68DFA` — `{0x0D, 0x1B, 'E', 'S'}` — so any other letter
+        // re-prompts rather than resolving.
+        Request::SelectPlayer { .. } => {
+            let mut hotbar = Hotbar::new("Select");
+            hotbar.accept_ext = true;
+            hotbar.ext_scrolls_party = true;
+            hotbar.valid_keys = Some(SELECT_A_PLAYER_KEYS.to_vec());
+            // `displayInput`'s open-time clamp still runs, and `"Select"` has
+            // exactly one highlightable word — so the persistent global is
+            // clamped to 0 here whatever it held.
+            hotbar.seed_selected_word(menu_selected_word);
+            Widget::Hotbar(hotbar)
+        }
     }
 }
+
+/// ★ `unk_68DFA` (`ovr025:2DFA`) — the Pascal set `selectAPlayer`'s loop
+/// tests `input_key` against (`ovr025.cs:1532`). Its 32 bytes are
+/// `00 20 00 08 00 00 00 00 20 00 08 00 …`, and `Set@MemberOf`'s
+/// `ptr[c/8] & (1 << (c & 7))` decodes them as elements **13** (`\r`), **27**
+/// (Esc), **69** (`'E'`) and **83** (`'S'`). Everything else re-prompts.
+const SELECT_A_PLAYER_KEYS: [u8; 4] = [0x0D, 0x1B, b'E', b'S'];
 
 /// ★ Which arm `CMD_Combat`'s non-monster branch takes (`ovr003.cs:974-992`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -592,6 +616,9 @@ fn describe_request(request: &Request) -> String {
         Request::Combat => "combat (non-combat branch: deferred)".to_string(),
         Request::PressAnyKey { text, .. } => {
             format!("pause: {}", String::from_utf8_lossy(&text.0))
+        }
+        Request::SelectPlayer { prompt } => {
+            format!("who: {}", String::from_utf8_lossy(&prompt.0))
         }
     }
 }
@@ -697,6 +724,24 @@ pub(crate) fn boot_at_address(machine: &mut EclMachine, addr: u16) -> Shell {
 }
 
 impl VectorRun {
+    /// The `displayExtraString` the suspended request wants in front of its
+    /// menu words, if any (see [`Shell::parked_prompt`]).
+    fn gate_prompt(&self) -> Option<String> {
+        if !matches!(self.phase, VmPhase::Gate(_)) {
+            return None;
+        }
+        match &self.pending {
+            // `selectAPlayer(..., prompt)` -> `displayInput(..., "Select",
+            // prompt + " ")` (`ovr025.cs:1539`) — the trailing space is the
+            // original's, and it is what puts one column between the two.
+            Some(PendingOutcome::Request(Request::SelectPlayer { prompt })) => Some(format!(
+                "{} ",
+                String::from_utf8_lossy(&prompt.0).into_owned()
+            )),
+            _ => None,
+        }
+    }
+
     /// Advances by one tick — internally loops through phase transitions
     /// (Pump -> Present -> Gate -> Pump -> ...) making maximal progress,
     /// per D-UI1's "bounded state advance" model: a tick only *actually*
@@ -1218,6 +1263,11 @@ impl VectorRun {
             (Request::Delay, _) => Reply::Delay,
             (Request::Combat, _) => Reply::Combat,
             (Request::PressAnyKey { .. }, _) => Reply::PressAnyKey,
+            // ★ WHO's picker: any of the four terminator keys ends it, and
+            // none of them says anything the VM needs — `selectAPlayer` has
+            // already left `gbl.SelectedPlayer` wherever `G`/`O` put it (the
+            // `PartyScroll` arm above, consumed before this match).
+            (Request::SelectPlayer { .. }, _) => Reply::PlayerSelected,
             // Unreachable: Hotbar yields only Hotbar(key)/PartyScroll (both
             // handled), the list arm is exhaustive above. Kept as a quiet
             // fallback, not a panic — but note option 0 is NOT "safe" at a
@@ -2425,6 +2475,29 @@ impl Shell {
         }
     }
 
+    /// ★ `displayInput`'s `displayExtraString` (`ovr027.cs:155-163`): the
+    /// prompt drawn at row `0x18` column 0, with the menu words starting at
+    /// `displayInputXOffset = displayExtraString.Length`.
+    ///
+    /// Only WHO's picker has one today (`selectAPlayer` passes `prompt + " "`,
+    /// `ovr025.cs:1539`), and it lives on the suspended `Request` rather than
+    /// on the `Hotbar` — which keeps `Widget`'s postcard shape, and therefore
+    /// `SAVE_FORMAT_VERSION`, untouched.
+    fn parked_prompt(&self) -> Option<String> {
+        fn from_run(run: &Option<VectorRun>, chain: &Option<ChainRunner>) -> Option<String> {
+            run.as_ref()
+                .and_then(VectorRun::gate_prompt)
+                .or_else(|| chain.as_ref().and_then(|c| c.run.gate_prompt()))
+        }
+        match self {
+            Shell::Boot(f) => from_run(&f.run, &f.chain),
+            Shell::Look(f) => from_run(&f.run, &f.chain),
+            Shell::Step(f) => from_run(&f.run, &f.chain),
+            Shell::CampInterrupt(f) => from_run(&f.run, &f.chain),
+            Shell::WorldMenu { .. } | Shell::GameOver(_) | Shell::Screen(_) => None,
+        }
+    }
+
     /// [`Shell::parked_widget`] as a test seam (which widget currently holds
     /// the keyboard, and in what state).
     #[cfg(test)]
@@ -2450,8 +2523,24 @@ impl Shell {
         let Some(widget) = self.parked_widget() else {
             return;
         };
+        let prompt = self.parked_prompt();
         match widget {
-            Widget::Hotbar(h) => draw_hotbar_prompt(ctx.fb, ctx.font, h),
+            Widget::Hotbar(h) => match &prompt {
+                // `displayString(displayExtraString, 0, colors.prompt, 0x18, 0)`
+                // then the menu at `displayInputXOffset` (`ovr027.cs:155-163`).
+                Some(p) => {
+                    crate::combat::scene::render::clear_prompt_line(ctx.fb);
+                    crate::text::draw_string(ctx.fb, ctx.font, p, 0x18, 0, 0, 13);
+                    crate::combat::scene::render::draw_menu_line_at(
+                        ctx.fb,
+                        ctx.font,
+                        &h.text,
+                        h.selected_span(),
+                        p.len(),
+                    );
+                }
+                None => draw_hotbar_prompt(ctx.fb, ctx.font, h),
+            },
             // A VERTICAL MENU's list paints its own box AND its prompt row.
             Widget::ListMenu(l) if l.layout.is_some() => draw_list_menu(ctx.fb, ctx.font, l),
             other => {

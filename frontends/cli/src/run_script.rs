@@ -233,6 +233,9 @@ fn describe_request(request: &Request) -> String {
         Request::PressAnyKey { text, color } => {
             format!("PressAnyKey({}, color={color})", vm_string_to_display(text))
         }
+        Request::SelectPlayer { prompt } => {
+            format!("SelectPlayer({})", vm_string_to_display(prompt))
+        }
     }
 }
 
@@ -242,6 +245,7 @@ fn describe_reply(reply: &Reply) -> String {
         Reply::Delay => "Delay".to_string(),
         Reply::Combat => "Combat".to_string(),
         Reply::PressAnyKey => "PressAnyKey".to_string(),
+        Reply::PlayerSelected => "PlayerSelected".to_string(),
     }
 }
 
@@ -354,6 +358,7 @@ impl ReplyPolicy {
             Request::Delay => Reply::Delay,
             Request::Combat => Reply::Combat,
             Request::PressAnyKey { .. } => Reply::PressAnyKey,
+            Request::SelectPlayer { .. } => Reply::PlayerSelected,
         }
     }
 }

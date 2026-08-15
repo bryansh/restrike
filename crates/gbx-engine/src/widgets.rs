@@ -242,10 +242,16 @@ impl Hotbar {
             InputEvent::Escape => {
                 // sub_317AA menus (`valid_keys` set) never exit on Esc
                 // (`ovr008.cs:1176-1190`); ordinary Hotbars return '\0'.
-                if self.valid_keys.is_some() {
-                    WidgetOutcome::Pending
-                } else {
-                    WidgetOutcome::Hotbar(0)
+                //
+                // ★ Unless the key set names Esc itself: `selectAPlayer`'s
+                // terminator set `unk_68DFA` (`ovr025:2DFA`) has element 27
+                // in it, so WHO's picker DOES end on Esc — it simply keeps
+                // whoever was highlighted, since `showExit == false` gives it
+                // no way to answer "nobody". No shipped `sub_317AA` key set
+                // contains `0x1B`, so that family is unaffected.
+                match &self.valid_keys {
+                    Some(valid) if !valid.contains(&0x1B) => WidgetOutcome::Pending,
+                    _ => WidgetOutcome::Hotbar(0),
                 }
             }
             InputEvent::Enter => {
