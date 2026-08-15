@@ -233,6 +233,18 @@ isn't "never shipped anywhere in the game" (character-file-driven or
 training-hall-only scripts, if any exist outside these blocks, aren't
 covered here).
 
+> ⚠ **"Never appear" was a coverage artifact, not a fact.** This census's
+> flow-follower silently drops the false arm of the shipped `IF <cmp>` +
+> `GOTO` idiom (`roll-credits.md` §0's warning box: 3,582 reached instructions
+> against the corrected 14,183), so a subroutine reached only through such an
+> arm is invisible to it. At least four of the thirteen above are shipped and
+> now driven at real sites: `0x28` ROB (10 uses), `0x39` WHO (7), `0x10` INPUT
+> STRING (5) and `0x34` ECL CLOCK — see `roll-credits.md` §13's slice 9a — and
+> **`0x3C` PROTECTION appears once**, at `ECL1` block `0x50` `@0x9B6F`, inside
+> the sixth journey's bridge-keeper subroutine (`docs/copy-protection.md`;
+> roll-credits §14). Treat the list as "not reached by this tool", never as
+> "not in the game".
+
 Top 25 by frequency (marked `*`), the recommended interpreter build order
 per `vm-scriptmemory.md` §6 item 3 ("the ~15–25 most frequent opcodes"):
 

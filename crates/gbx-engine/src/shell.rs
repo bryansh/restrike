@@ -3951,6 +3951,38 @@ mod tests {
 
         let boot = Shell::boot(&mut h.machine, &mut h.state, &mut h.vm_memory);
         assert!(matches!(round_trip_shell(&boot), Shell::Boot(_)));
+
+        // ★ Slice 9b: the front door's five stages. A `.rsav` taken on the
+        // start menu is the ordinary case (that is where a load returns);
+        // the rest round-trip because the variant does, not because anyone
+        // saves mid-title.
+        for door in [
+            crate::front_door::FrontDoor::new(),
+            crate::front_door::FrontDoor::start_menu(),
+        ] {
+            let shell = Shell::FrontDoor(Box::new(door));
+            assert!(matches!(round_trip_shell(&shell), Shell::FrontDoor(_)));
+        }
+        let posed = Shell::FrontDoor(Box::new(crate::front_door::FrontDoor::Protection(
+            Box::new(crate::front_door::CopyProtection::pose(&mut h.rng, false)),
+        )));
+        let Shell::FrontDoor(back) = round_trip_shell(&posed) else {
+            panic!("the front door must round-trip");
+        };
+        let crate::front_door::FrontDoor::Protection(prot) = *back else {
+            panic!("with its posed challenge intact");
+        };
+        let crate::front_door::FrontDoor::Protection(before) = *(match &posed {
+            Shell::FrontDoor(d) => d.clone(),
+            _ => unreachable!(),
+        }) else {
+            unreachable!()
+        };
+        assert_eq!(
+            prot.challenge(),
+            before.challenge(),
+            "a save taken at the copy-protection prompt keeps the same runes"
+        );
     }
 
     #[test]

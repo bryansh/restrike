@@ -306,7 +306,12 @@ fixed-arity mismatch).
     despite its name it isn't confined to the Table window — can address any
     window depending on script-supplied values.
 13. **PROTECTION (0x3C) decodes an operand it never reads** (ovr003.cs:1997) —
-    vestigial, or read by a dialect variant we haven't seen?
+    vestigial, or read by a dialect variant we haven't seen? ★ **Settled for
+    CotAB (slice 9b):** the opcode's one shipped site is `ECL1` block `0x50`
+    `@0x9B6F` and its operand there is `[0x7F79]`, the block's general scratch
+    cell, written and re-read by a dozen unrelated instructions — so even the
+    *value* carries no meaning. Vestigial. The cross-title question stays open
+    (FD-12).
 14. **SPELL (0x3B)'s not-found sentinel is a deliberate byte underflow**
     (`player_index=0; player_index--` → `0xFF`, paired with `spell_index=
     0x0FF`) — must be replicated exactly, not "fixed."

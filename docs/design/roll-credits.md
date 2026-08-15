@@ -1763,3 +1763,194 @@ required by the front door being honest.
 fade, the credits.
 
 The loop (10+) runs around these as Bryan plays.
+
+## 14. Slice 9b: the front door + copy protection — LANDED 2026-08-15
+
+`seg001.PROGRAM`'s whole preamble is now one `Shell::FrontDoor` state
+(`crates/gbx-engine/src/front_door.rs`), appended last in the enum so no
+committed `.rsav` moves and `SAVE_FORMAT_VERSION` stays at 9.
+
+### 14.1 The title sequence, as transcribed
+
+`ovr002.title_screen` (`:69-97`) is four beats, `delay_or_key`'s wait after
+each — any key ends a beat early, and `delay_or_key` flushes the keyboard at
+both ends (`:10,20`), so a key cannot skip two:
+
+| beat | what | `draw_picture(dax, rowY, colX)` | wait |
+|---|---|---|---|
+| 1 | `TITLE.DAX` 1 — the SSI / AD&D product screen (320×200) | `(0, 0)` | 5 s |
+| 2 | `TITLE.DAX` 2, the cover art (320×200), **then** block 3, the "CURSE of the AZURE BONDS" logo (240×112) | `(0, 0)` then `(0x0B, 6)` | 10 s |
+| 3 | `sound_d`, then `TITLE.DAX` 4 — "A FORGOTTEN REALMS Fantasy Role-Playing Epic Vol. II" (320×112) | `(0x0B, 0)` | 10 s |
+| 4 | `ClearScreen()`, then `credits()` — `draw8x8_02`'s two rules at rows 3 and 8, and 34 `displayString` lines | — | 10 s |
+
+then a final `ClearScreen()`. Blocks 2 and 3 are **one beat**: the original
+draws the art and the logo with no delay between them (`:78-83`), which is why
+the cover is never seen without its title. `draw8x8_02` (`seg037.cs:57-70`)
+had never been transcribed — it is `DrawFrame_Outer` plus `draw8x8_03`'s
+horizontal divider at rows 3 and 8, and the credits screen is its only caller
+in the shipped game.
+
+### 14.2 The Play-Demo prompt
+
+`displayInput(false, 0, defaultMenuColors, "Play Demo", "Curse of the Azure
+Bonds v1.3 ")` with `displayInputSecondsToWait = 30` and
+`displayInputTimeoutValue = 'D'` (`seg001.cs:114-125`). Three things the code
+settles that the brief could not:
+
+- **The timeout draws nothing.** `displayInput`'s wait loop compares wall time
+  against `displayInputSecondsToWait` and resolves silently (`ovr027.cs:201-206`)
+  — there is no countdown on screen. Ours has none either.
+- **`<Enter>` also picks Demo.** `InitFirst` leaves `gbl.menuSelectedWord = 1`
+  (`seg001.cs:297`) and `BuildInputKeys("Play Demo")` yields two words, so the
+  highlighted word at this prompt is **Demo**. Enter, the timeout and `D` all
+  agree; only another key starts the game.
+- **The second prompt is 10 seconds, not 30** (`:159`) — the one the demo loop
+  returns to. Ours uses 30 on the first pass and 10 on every pass after the
+  title sequence replays, which is the same rule.
+
+The demo itself stays deferred (G10). Choosing it lands on a loud,
+acknowledged refusal that names the scope decision on screen and in the
+transcript, then returns to the title — where the original's demo loop returns
+too.
+
+### 14.3 Copy protection: the presentation decision
+
+**The answer is pre-filled into the input line.** The screen is otherwise
+byte-faithful — `DrawFrame_Outer`, the three instruction lines at rows 2-4
+column 3 in colour 10, the two 24×24 runes at cells (4, 0x12) and (8, 0x12),
+the "Type the character in box number N" / "under the `<path>` path." sentence
+at rows 12-13, and `getUserInputString(1, 0, 13, "type character and press
+return: ")`'s own two-tone prompt row. The neutralization is exactly one
+character sitting in the editor, so `<Enter>` accepts it and a player with the
+wheel can backspace and answer for themselves. Chosen over printing the answer
+beside the prompt because it leaves the screen unaltered and puts the QoL in
+the one place the original leaves empty.
+`Engine::set_copy_protection_faithful(true)` (desktop:
+`RESTRIKE_COPY_PROTECTION=faithful`) takes the prefill away — D4's
+faithful-optional.
+
+Everything else is transcribed as written: three attempts, a re-rolled
+challenge after each miss ("Sorry, that's incorrect." in colour 14), and the
+third failure's message + `SysDelay(1000)` + `print_and_exit()` — which the
+core raises as `Engine::quit_requested()` for the host, since D8 forbids the
+tick core ending a process.
+
+**Two `docs/copy-protection.md` open items closed** — see that file: row 0 is
+36 characters (the published table's 35 was a copy artifact), and there is no
+wheel geometry to calibrate, because the runes are `TILES.DAX` tile indices
+and the arithmetic consumes the same numbers the art is drawn from.
+
+### 14.4 `startGameMenu`'s word table
+
+Twelve strings, twelve flags (`ovr018.cs:24-67`), recomputed on every
+`reclac_menus` pass (`:80-114`). The visible menu is a **vertical list** from
+row 12: the hotkey letter at column 2 in colour 15, the rest at column 3 in
+colour 10. The prompt row shows only `Choose a function` — the key string
+`"C D M T H V A R L S B E J"` is handed to `displayInput` with
+`MenuColorSet(0, 0, 13)`, i.e. highlight 0 and foreground 0, so
+`display_highlighed_text` draws every one of those letters in colour 0. It is
+real input and completely invisible.
+
+| key | string | with a party | party-less | wired to |
+|---|---|---|---|---|
+| C | Create New Character | ✔ | ✔ | reports slice 9c |
+| D | Drop Character | ✔ | — | roster remove |
+| M | Modify Character | ✔ | — | reports slice 9c |
+| T | Train Character | `training_class_mask > 0` | — | the training screen |
+| H | Human Change Classes | mask **and** `CanDuelClass()` | — | reports slice 9c |
+| V | View Character | ✔ | — | the character sheet |
+| A | Add Character to Party | ✔ | ✔ | reports slice 9c (`.CHR` files) |
+| R | Remove Character from Party | ✔ | — | roster remove (the `.CHR` write is 9c) |
+| L | Load Saved Game | **—** | ✔ | `loadGameMenu`'s slot picker |
+| S | Save Current Game | ✔ | — | `SaveGame`'s slot picker |
+| B | BEGIN Adventuring | ✔ | — | `BootFlow` |
+| E | Exit to DOS | ✔ | ✔ | the host quit request |
+
+`G`/`O` (the control keys) scroll the party panel rather than resolving
+(`:138-151` → `scroll_team_list`). `Load` is **false** with a party — the
+original will not let you load over a living party from this menu — and
+`BEGIN`/`Save` are false without one, which is what makes the party-less
+column the wipe-recovery column.
+
+Two cells were named for this: `area2_ptr.training_class_mask` (DataOffset
+`0x550` → `0x7EA8`), which gates Train/Dual-class and which `BEGIN` spends
+(`:269`); and `area_ptr.field_3FA` (`0x3FA` → `0x4CFD`), the **game-won
+latch**, whose only writer is `CMD_Program`'s `var_1 == 8` arm
+(`ovr003.cs:1953`) and whose only reader is `BEGIN`'s guard (`:243`). After
+the ending, BEGIN stops working and the menu's job becomes the post-victory
+save prompt.
+
+### 14.5 What the boot path does now
+
+- No `--slot`: **the front door**. Title → prompt → protection → start menu.
+- `--slot X`: the **power-user shortcut** — import that original save and
+  start playing, skipping the preamble entirely. Every capture/demo flow and
+  most development launches want this, and it is the path every existing
+  golden, walk trace and test already takes.
+- `--slot none`: the bare boot (no party), unchanged, for fixtures.
+
+`BEGIN` hands off to `BootFlow::start` — the same call `import_original`'s
+engines have always begun from — so nothing downstream can tell which door the
+session came through. `saveload_fs::fulfill` carries the "this load came from
+the start menu" bit across the engine replacement, so a load returns to the
+menu with the party in front of the player, as `loadGameMenu` does.
+
+### 14.6 The wipe recovery, reconciled
+
+Slice 0 opened the load list straight from the death screen and kept the dead
+roster (its stated reason: a failed load would otherwise be unrecoverable).
+With a start menu in the tree the original's own path is available and is what
+we do: `InitAgain()` clears `TeamList` (`seg001.cs:364`) and `startGameMenu`
+re-opens on its party-less column, where Load is the only verb that leads
+anywhere. A failed load leaves the player on the menu, which is recoverable by
+definition.
+
+### 14.7 Acceptance
+
+`crates/gbx-engine/src/front_door_tests.rs`, all against real CotAB data with
+frame dumps (`RESTRIKE_FRONT_DOOR_DUMP=<dir>`):
+
+1. The full boot sequence, beat by beat, with dumps of the four title screens,
+   the prompt, the challenge (answer visible), and both start menus.
+2. The shown answer **is** the wheel's, and typing it by hand passes too.
+3. Three misses re-roll the challenge and eject the session.
+4. Demo → the loud stub → back to the title; and the prompt times out into it.
+5. **The digest compare**: `park_at_start_menu()` + `B` reaches the Tilverton
+   intro with a state digest (D-RC3) identical to today's `--slot A` boot's.
+   The front door changed presentation, not state.
+6. The wipe recovery lands on the party-less start menu, and `L` → a slot →
+   the state that was saved before the party died (`save_roundtrip_tests`).
+7. **`PROTECTION` at its one shipped site**, driven live: `ECL1#0x50 @0x9B6F`
+   inside `L9A92`, counter seeded to 6, through both joke questions to the
+   runes and out the far side at "YOU MAY PASS." — plus the counter arm, which
+   must *not* pose it on any other journey.
+
+Gates green throughout: guard 16/16, reel smoke 16/16 (62,108 draws), 1,725
+workspace tests, clippy 0, fmt clean, no golden moved.
+
+### 14.8 Corrections and residuals
+
+- ★ **`PROTECTION` is not "never reached"** — `cotab-v1.3.md` §8 and FD-12
+  both said the opcode never appears in the shipped scripts. It appears once,
+  at `ECL1#0x50 @0x9B6F`; the census's flow-follower simply never got there
+  (it drops the false arm of the `IF <cmp>` + `GOTO` idiom the journey counter
+  is built from — the same blindness §7 already recorded). FD-12's CotAB half
+  is now closed: the operand is vestigial at the only site that exists.
+- ★ **`Load24x24Set` ends with `clear_keyboard()`** (`ovr034.cs`), and
+  `copy_protection` calls it twice before drawing anything — so a key already
+  in the buffer cannot answer the challenge. Load-bearing at the bridge
+  keeper, where the player arrives leaning on Enter through two questions.
+- **Residual — the attract mode** (G10): still deferred, now behind a screen
+  that says so. `ECL1#82`'s `ADD NPC`/`CLEAR BOX`/`PROGRAM` uses are reachable
+  only through it.
+- **Residual — Create/Modify/Add/Human** present per the flag table and report
+  slice 9c. `Remove` drops the member but writes no `.CHR` file, and says so.
+- **Residual — `PROGRAM 0` opens the start menu mid-game**
+  (`ovr003.cs:1940-1948`: `startGameMenu()` then a conditional `LoadPic()`).
+  The opcode is implemented but its `var_1 == 0` arm does not open the menu
+  yet; no shipped script uses it (the one `PROGRAM` use is `ECL1#82`'s).
+  Small, and it belongs with 9c's `PartySummary` work.
+- **Residual — the post-victory prompt** (`ovr003.cs:1964-1971`): `BEGIN` is
+  correctly refused once `field_3FA` is set, but the "You've won. Save before
+  quitting?" flow that replaces it is slice 9d's, with the ending that sets
+  the latch.

@@ -393,7 +393,7 @@ Walk around Tilverton, looking right.
 ### M6 — Roll credits (3–6 weekends) — CotAB completable
 - Opcode census → 100% of opcodes *used by CotAB* implemented (or consciously no-op'd with
   rationale); overworld travel, random encounters, Parlay dialogue system, traps/locks/secret
-  doors, temples, vault, copy-protection prompt neutralized (answer shown, faithful-optional; algorithm+table captured in docs/copy-protection.md).
+  doors, temples, vault, copy-protection prompt neutralized (answer shown, faithful-optional; algorithm+table captured in docs/copy-protection.md). ★ **The copy-protection half is DONE** (roll-credits slice 9b, 2026-08-15): the boot prompt and the sixth journey's bridge-keeper `PROTECTION` opcode both pose the real challenge with the answer pre-filled, `RESTRIKE_COPY_PROTECTION=faithful` opting out — landed alongside the whole front door (title screens, Play-Demo prompt, `startGameMenu`).
 - **H5:** full-playthrough input trace with checkpoint hashes; runs locally in CI wrapper.
 - **Exit gate: finish Curse of the Azure Bonds start-to-end in our engine**, importing a fresh
   party, with the fidelity docket either resolved or documented per item. The "it's real" moment —
