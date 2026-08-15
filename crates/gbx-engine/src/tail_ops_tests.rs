@@ -212,6 +212,73 @@ fn the_shipped_ecl5_who_gates_on_the_selected_players_state_cell() {
     }
 }
 
+// --- SPELL (0x3B) --------------------------------------------------------
+
+/// ★ **The shipped SPELL, driven live.** `ECL4#34 @0x879F` —
+/// `SPELL 0x16, [0x7F79], [0x7F7A]`, then `COMPARE [0x7F79], 0xFF` and
+/// `IF <>`: "does anybody have spell 0x16 memorised?" The found arm's very
+/// next instruction is `LOAD CHARACTER [0x7F7A]`, which is what makes the
+/// second cell's value load-bearing.
+///
+/// Both arms are driven, and each is identified by the line it prints.
+#[test]
+fn the_shipped_ecl4_spell_probe_reads_both_ways() {
+    const SITE: u16 = 0x879F;
+    let Some(miss_line) = inline_string("ECL4.DAX", 34, 0x87B3, 0) else {
+        eprintln!(
+            "SKIPPED: local tier needs GBX_DATA_DIR \
+             (tail_ops_tests::the_shipped_ecl4_spell_probe_reads_both_ways)"
+        );
+        return;
+    };
+    let hit_line = inline_string("ECL4.DAX", 34, 0x87DE, 0).expect("the found line");
+    eprintln!("  not found: {miss_line:?}\n  found:     {hit_line:?}");
+
+    for memorised in [false, true] {
+        let mut engine = real_data_engine(4, 34, 33, true).expect("data is present");
+        engine.party.members[0].magic.spell_list = vec![0u8; 84];
+        engine.party.members[0].magic.spell_book = vec![0u8; 100];
+        // Keep the overrun out of it: the synthetic walker's max hit points
+        // are 20, not 0x16.
+        assert_ne!(engine.party.members[0].hit_point_max, 0x16);
+        if memorised {
+            engine.party.members[0].magic.spell_list[9] = 0x16;
+        }
+
+        engine.shell = crate::shell::boot_at_address(&mut engine.machine, SITE);
+        assert!(step_past(&mut engine, SITE), "the SPELL executed");
+        assert_eq!(
+            engine.vm_memory().raw_word(0x7F79),
+            Some(if memorised { 9 } else { 0xFF }),
+            "the slot cell"
+        );
+        if !memorised {
+            // ★ Not-found leaves the index on the LAST member (here, the only
+            // one) — the value coab's `player_index--` reaches by a route the
+            // binary does not take. Checked only on this arm: the found arm's
+            // own `@0x87F8 ADD [0x7F7A], 0x80` has already moved the cell by
+            // the time the tick that ran the SPELL comes to rest.
+            assert_eq!(engine.vm_memory().raw_word(0x7F7A), Some(0));
+        }
+
+        for _ in 0..200 {
+            engine.tick(&[crate::input::InputEvent::Enter]);
+        }
+        let printed: Vec<String> = engine
+            .vm_memory()
+            .transcript
+            .iter()
+            .filter_map(|e| match e {
+                crate::vmhost::TranscriptEntry::Print { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        eprintln!("  memorised={memorised} -> printed {printed:?}");
+        assert_eq!(printed.contains(&miss_line), !memorised);
+        assert_eq!(printed.contains(&hit_line), memorised);
+    }
+}
+
 // --- INPUT STRING (0x10) -------------------------------------------------
 
 /// Reads an inline-string operand straight out of a shipped block — the

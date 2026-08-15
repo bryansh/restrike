@@ -321,8 +321,36 @@ pub trait EngineServices {
     /// TREASURE (0x27)'s first seven operands (`ovr003.cs:1076-1079`):
     /// `gbl.pooled_money.SetCoins(coin, value)` — an assignment, not an add.
     fn set_pooled_coin(&mut self, coin: u8, value: u16);
-    /// SPELL (0x3B)'s not-found sentinel is a deliberate byte-underflow pair
-    /// in the original (`0xFF`, `0xFF`) — replicate exactly, don't "fix" it.
+    /// ★ SPELL (0x3B), `CMD_Spell` (`sub_28E33`, `ovr003:2E33-2F22`): "who in
+    /// the party has spell `spell_id` memorised?", answered as
+    /// `(spell_index, player_index)`.
+    ///
+    /// **Three corrections to coab** (`ovr003.cs:1785-1830`), all from the
+    /// listing:
+    ///
+    /// 1. **The not-found pair is `(0xFF, TeamList.Count - 1)`, not
+    ///    `(0xFF, 0xFF)`.** There is no post-loop decrement in the binary at
+    ///    all: `player_index` (`var_3`) is incremented at the BOTTOM of the
+    ///    outer body and only when the *next* cursor is non-null
+    ///    (`ovr003:2EE6-2EF4`), so running off the end of the roster leaves it
+    ///    on the last member. coab's `player_index--` (`:1822`) reaches the
+    ///    same number by a route the binary does not take — and the previous
+    ///    doc comment here read that as an underflow to `0xFF`, which the
+    ///    original never produces from a non-empty roster.
+    /// 2. **The sentinel is a value test, not a flag test**: `cmp var_2, 100 /
+    ///    jbe` (`ovr003:2EF9-2EFF`). `spell_index` becomes `0xFF` because the
+    ///    exhausted scan left it at **101**, not because `spell_found` is
+    ///    false. A match found at slot 101 is therefore reported as
+    ///    not-found — with the finder's `player_index` still written.
+    /// 3. ★ **The scan runs 1..=101 over an 84-byte array, and starts at 1.**
+    ///    The read is `es:[player + var_2 + 0x1E]` (`ovr003:2EA0-2EA5`) with
+    ///    `var_2` seeded to **1**, so `spell_list[0]` is never examined and
+    ///    slots 84..=101 walk 18 bytes PAST the list: `spell_to_learn_count`
+    ///    (`0x72`), `thac0_base`, `race`, `class`, `age` (two bytes),
+    ///    `hit_point_max` (`0x78`) and `spellBook[0..=10]`. Every not-found
+    ///    scan reaches them, so a character whose max hit points happen to
+    ///    equal the queried spell id really does "have" it, at slot 90. coab's
+    ///    `foreach (int id in player.spellList.IdList())` shows none of this.
     fn find_spell_in_party(&mut self, spell_id: u8) -> (u8, u8);
 
     // --- Combat math ---

@@ -2183,6 +2183,64 @@ mod opcodes {
         assert_eq!(m.current_pc(), Some(after));
     }
 
+    /// ★ SPELL (0x3B), `CMD_Spell` (`ovr003:2E33-2F22`): three operands, and
+    /// the two results are written **spell index first, player index second**
+    /// (`ovr003:2F03-2F1A`).
+    #[test]
+    fn spell_writes_the_slot_then_the_player_to_its_two_destinations() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        // `ECL4#34 @0x879F` verbatim: SPELL 0x16, [0x7F79], [0x7F7A].
+        b.op(0x3B).imm_byte(0x16).mem(0x7F79).mem(0x7F7A);
+        b.label("after");
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let after = b.addr_of("after");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+        h.find_spell_in_party_replies.push_back((7, 2));
+
+        assert_continue(m.step(&mut h));
+        assert_eq!(m.current_pc(), Some(after));
+        assert!(h
+            .calls
+            .contains(&RecordedCall::FindSpellInParty { spell_id: 0x16 }));
+        assert_eq!(h.word(0x7F79), Some(7), "slot into the FIRST cell");
+        assert_eq!(h.word(0x7F7A), Some(2), "player into the SECOND");
+    }
+
+    /// The not-found answer reaches the cells unchanged — `0xFF` is what the
+    /// shipped `COMPARE <cell>, 0xFF` right after each site tests.
+    #[test]
+    fn spell_passes_the_not_found_sentinel_straight_through() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x3B).imm_byte(0x16).mem(0x7F79).mem(0x7F7A);
+        b.op(0x03).mem(0x7F79).imm_byte(0xFF); // COMPARE [0x7F79], 0xFF
+        b.op(0x17); // IF <>
+        b.op(0x00); // (skipped when equal)
+        b.label("not_taken");
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let not_taken = b.addr_of("not_taken");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+        // ★ (0xFF, Count - 1), not (0xFF, 0xFF).
+        h.find_spell_in_party_replies.push_back((0xFF, 5));
+
+        assert_continue(m.step(&mut h)); // SPELL
+        assert_continue(m.step(&mut h)); // COMPARE
+        assert_continue(m.step(&mut h)); // IF <> -> false, skip the EXIT
+        assert_eq!(m.current_pc(), Some(not_taken));
+        assert_eq!(
+            h.word(0x7F7A),
+            Some(5),
+            "the finder's index is still written"
+        );
+    }
+
     /// ★ INPUT STRING (0x10), `CMD_InputString` (`ovr003.cs:372-388`): two
     /// operand batches, the destination is the SECOND, and the typed line
     /// lands there.

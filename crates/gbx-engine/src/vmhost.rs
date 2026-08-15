@@ -378,6 +378,49 @@ const ENTER_SHOP_ADDR: u16 = 0x7F6C;
 /// `redrawPartySummary1`.
 const SELECTED_PLAYER_STATE_ADDR: u16 = 0x7D00;
 
+/// ★ `CMD_Spell`'s per-slot read, `es:[player_ptr + index + 0x1E]`
+/// (`ovr003:2EA0-2EA5`) — the byte at `charStruct` offset `0x1E + index`.
+///
+/// `spell_list` is 84 bytes at `0x1E`, so `index` in `1..=83` reads it (slot
+/// **0 is never examined**, because `CMD_Spell` seeds its cursor at 1) and
+/// `84..=101` walks off the end into the fields that follow. Those are named
+/// here rather than clamped, because every not-found scan reaches all
+/// eighteen of them and the comparison against them is real: a character
+/// whose `hit_point_max` equals the queried spell id answers "found, slot
+/// 90".
+///
+/// | index | `charStruct` | field |
+/// |---|---|---|
+/// | 84 | `0x72` | `spell_to_learn_count` |
+/// | 85 | `0x73` | `thac0_base` |
+/// | 86 | `0x74` | `race` |
+/// | 87 | `0x75` | `class` |
+/// | 88, 89 | `0x76`, `0x77` | `age`, low then high byte |
+/// | 90 | `0x78` | `hit_point_max` |
+/// | 91..=101 | `0x79`..=`0x83` | `spellBook[0..=10]` |
+fn char_scan_byte(member: &crate::party::Character, index: u8) -> u8 {
+    let i = index as usize;
+    if i < 84 {
+        return member.magic.spell_list.get(i).copied().unwrap_or(0);
+    }
+    match i {
+        84 => member.magic.spell_to_learn_count,
+        85 => member.combat.thac0_base as u8,
+        86 => member.race,
+        87 => member.class_id,
+        88 => member.age.to_le_bytes()[0],
+        89 => member.age.to_le_bytes()[1],
+        90 => member.hit_point_max,
+        91..=101 => member
+            .magic
+            .spell_book
+            .get(i - 91)
+            .copied()
+            .unwrap_or_default(),
+        _ => 0,
+    }
+}
+
 /// One access kind, for the unknown-access log's `(addr, kind)` dedup key
 /// (D-VM5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -1738,11 +1781,53 @@ impl gbx_vm::EngineServices for EngineVmHost<'_> {
         self.state.pooled_money.set(coin as usize, value as i32);
     }
 
+    /// ★ SPELL (0x3B)'s scan, `sub_28E33` (`ovr003:2E33-2F22`) verbatim —
+    /// including the 18-byte overrun past `spell_list`. See
+    /// [`EngineServices::find_spell_in_party`] for the three corrections to
+    /// coab; [`char_scan_byte`] is the read.
+    ///
+    /// Draw-free.
     fn find_spell_in_party(&mut self, spell_id: u8) -> (u8, u8) {
         self.vm
             .calls
             .push(RecordedCall::FindSpellInParty { spell_id });
-        (0xFF, 0xFF) // the original's own not-found sentinel (byte underflow), replicated verbatim
+
+        let count = self.roster.members.len();
+        let mut spell_index: u8 = 1;
+        let mut player_index: u8 = 0;
+        let mut found = false;
+        for (i, member) in self.roster.members.iter().enumerate() {
+            // `mov [bp+var_2], 1` at the head of every outer iteration
+            // (`ovr003:2E97`).
+            spell_index = 1;
+            loop {
+                if char_scan_byte(member, spell_index) == spell_id {
+                    found = true;
+                    break;
+                }
+                // `cmp var_2, 100 / ja` — the increment stops at 101, and the
+                // byte at 101 has already been compared by then.
+                if spell_index > 100 {
+                    break;
+                }
+                spell_index += 1;
+            }
+            if found {
+                break;
+            }
+            // `ovr003:2EE6-2EF4` — the increment is at the BOTTOM and gated on
+            // the NEXT cursor being non-null, so an exhausted scan leaves
+            // `player_index` on the LAST member, never one past it.
+            if i + 1 < count {
+                player_index += 1;
+            }
+        }
+        // `cmp var_2, 100 / jbe / mov var_2, 0xFF` (`ovr003:2EF9-2EFF`): a
+        // value test, not a `found` test.
+        if spell_index > 100 {
+            spell_index = 0xFF;
+        }
+        (spell_index, player_index)
     }
 
     fn roll(&mut self, max: u8) -> u8 {
@@ -2168,6 +2253,98 @@ mod tests {
         let mut h = f.host();
         assert!(h.party_has_item(0x5E));
         assert!(!h.party_has_item(0x5F));
+    }
+
+    // --- roll-credits slice 9a: SPELL (0x3B)'s scan ----------------------
+
+    fn caster(name: &str, slots: &[(usize, u8)]) -> crate::party::Character {
+        let mut ch = member(name, 10);
+        ch.magic.spell_list = vec![0u8; 84];
+        for (slot, id) in slots {
+            ch.magic.spell_list[*slot] = *id;
+        }
+        ch.magic.spell_book = vec![0u8; 100];
+        ch
+    }
+
+    /// A hit reports the slot index and the member who had it.
+    #[test]
+    fn find_spell_in_party_reports_the_slot_and_the_holder() {
+        let mut f = Fixture::new();
+        f.roster.members.push(caster("A", &[(1, 0x03)]));
+        f.roster.members.push(caster("B", &[(4, 0x16)]));
+        f.roster.members.push(caster("C", &[]));
+
+        let mut h = f.host();
+        assert_eq!(h.find_spell_in_party(0x16), (4, 1));
+    }
+
+    /// ★ **The scan starts at slot 1**: `var_2` is seeded to 1 and the read is
+    /// `[player + var_2 + 0x1E]` (`ovr003:2E74`, `:2EA0-2EA5`), so
+    /// `spell_list[0]` is never examined.
+    #[test]
+    fn find_spell_in_party_never_examines_slot_zero() {
+        let mut f = Fixture::new();
+        f.roster.members.push(caster("A", &[(0, 0x16)]));
+
+        let mut h = f.host();
+        assert_eq!(
+            h.find_spell_in_party(0x16),
+            (0xFF, 0),
+            "the only copy sits in the one slot the original skips"
+        );
+    }
+
+    /// ★ **The not-found pair is `(0xFF, Count - 1)`**, not `(0xFF, 0xFF)`:
+    /// `player_index` is incremented at the bottom of the outer body and only
+    /// when the next cursor is non-null (`ovr003:2EE6-2EF4`).
+    #[test]
+    fn find_spell_in_party_not_found_leaves_the_index_on_the_last_member() {
+        let mut f = Fixture::new();
+        for name in ["A", "B", "C", "D"] {
+            f.roster.members.push(caster(name, &[]));
+        }
+
+        let mut h = f.host();
+        assert_eq!(h.find_spell_in_party(0x16), (0xFF, 3));
+    }
+
+    /// ★ **The scan overruns `spell_list` by eighteen bytes.** Slot 90 is
+    /// `charStruct 0x78`, `hit_point_max` — so a character with 22 maximum hit
+    /// points "has" spell `0x16`, which is the id both shipped sites ask for.
+    #[test]
+    fn find_spell_in_party_walks_past_the_list_into_hit_point_max() {
+        let mut f = Fixture::new();
+        let mut ch = caster("A", &[]);
+        ch.hit_point_max = 0x16;
+        f.roster.members.push(ch);
+
+        let mut h = f.host();
+        assert_eq!(
+            h.find_spell_in_party(0x16),
+            (90, 0),
+            "★ the original's own overrun, reproduced"
+        );
+    }
+
+    /// The same overrun reaches `race` (slot 86) and `spellBook[0]` (slot 91).
+    #[test]
+    fn find_spell_in_party_overrun_covers_the_whole_eighteen_byte_tail() {
+        type SetField = fn(&mut crate::party::Character, u8);
+        let cases: [(u8, SetField); 4] = [
+            (84, |c, v| c.magic.spell_to_learn_count = v),
+            (86, |c, v| c.race = v),
+            (90, |c, v| c.hit_point_max = v),
+            (91, |c, v| c.magic.spell_book[0] = v),
+        ];
+        for (slot, set) in cases {
+            let mut f = Fixture::new();
+            let mut ch = caster("A", &[]);
+            set(&mut ch, 0x33);
+            f.roster.members.push(ch);
+            let mut h = f.host();
+            assert_eq!(h.find_spell_in_party(0x33), (slot, 0), "slot {slot}");
+        }
     }
 
     /// ★ `[0x7D00]` — `get_player_values`' `arg_4 == 0x100` case

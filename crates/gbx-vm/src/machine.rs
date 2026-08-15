@@ -872,6 +872,7 @@ impl EclMachine {
             0x38 => self.op_program(activation, host, pc, opcode),
             0x39 => self.op_who(activation, host, pc),
             0x3A => self.op_delay(activation),
+            0x3B => self.op_spell(activation, host, pc, opcode),
             0x3D => self.op_clear_box(activation, pc),
             0x3E => self.op_dump(activation, host, pc),
             0x3F => self.op_find_special(activation, host, pc, opcode),
@@ -2508,6 +2509,38 @@ impl EclMachine {
             },
             Completion::WriteToneOutcomeThenAdvance { dest, values, next },
         ))
+    }
+
+    /// ★ SPELL (0x3B), `CMD_Spell` (`sub_28E33`, `ovr003:2E33-2F22`) — three
+    /// operands: the spell id, then two destination cells for
+    /// `(spell_index, player_index)`, written in that order
+    /// (`ovr003:2F03-2F1A`).
+    ///
+    /// Both shipped sites (`ECL4#33 @0x8E2A`, `ECL4#34 @0x879F`) ask for id
+    /// `0x16` and immediately `COMPARE <spell cell>, 0xFF` — so only the
+    /// FIRST cell's sentinel is ever tested. The second is fed straight to a
+    /// `LOAD CHARACTER` (`ECL4#33 @0x8E5C`), which is what makes the
+    /// not-found value matter: see [`EngineServices::find_spell_in_party`]
+    /// for the three corrections to coab that pin it.
+    ///
+    /// Draw-free.
+    fn op_spell(
+        &mut self,
+        activation: &mut Activation,
+        host: &mut dyn VmHost,
+        pc: u16,
+        opcode: u8,
+    ) -> Result<VmStep, VmError> {
+        let (args, next) = self.load_cmd_sets(pc.wrapping_add(1), 3, host, pc);
+        let spell_id = self.resolve_numeric(&args[0], pc, opcode, host)? as u8;
+        let spell_cell = self.resolve_target(&args[1], pc, opcode)?;
+        let player_cell = self.resolve_target(&args[2], pc, opcode)?;
+        let (spell_index, player_index) = host.find_spell_in_party(spell_id);
+        let origin = Origin { pc };
+        self.mem_write(spell_cell, spell_index as u16, host, origin);
+        self.mem_write(player_cell, player_index as u16, host, origin);
+        activation.pc = next;
+        Ok(VmStep::Continue)
     }
 
     /// ★ INPUT STRING (0x10), `CMD_InputString` (`sub_269A4`,
