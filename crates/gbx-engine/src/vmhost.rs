@@ -803,6 +803,13 @@ impl VmMemoryState {
         self.raw_words.get(&addr).copied()
     }
 
+    /// Seeds a raw window cell — the seam a drive that wants to start
+    /// mid-script uses to put the script's own bookkeeping where the
+    /// instructions upstream of it would have left it.
+    pub fn set_raw_word(&mut self, addr: u16, value: u16) {
+        self.raw_words.insert(addr, value);
+    }
+
     /// ★ `gbl.area_ptr.inDungeon`, read from the RAW cell exactly as
     /// `field_6A00_Get`'s `case 0x1CC` does (`Classes/Area1.cs:495-496`) —
     /// **not** derived from `game_state`. FD-37 established why: `vm_init_ecl`

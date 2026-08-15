@@ -544,3 +544,155 @@ fn the_shipped_input_string_commits_on_escape_and_an_empty_line_becomes_a_space(
         "the empty line became a single space"
     );
 }
+
+// --- ECL1 block 81 (0x51), the second overland block ----------------------
+
+/// ★ **`ECL1#51` driven, at last.** Three `NEWECL 0x51` sites chain into
+/// `ECL1` block **81** — `0x51` is the doc's hex for the same decimal id —
+/// from `ECL1#80 @0x90E7`/`@0x90F1`/`@0x90FB`, each gated on the journey
+/// route `[0x4C9D]` being 7, `0x0D` or `0x12`. Nothing had ever run it.
+///
+/// **What it contains.** It is the overland's *other half*, and it has two
+/// jobs:
+///
+/// 1. **The journey-leg encounters.** Arriving from block 80 (`[0x4BF2] ==
+///    0x50` sets `[0x7F80]`, so the entry vector's `@0x814B` jumps to
+///    `@0x8DB3`) it reads two tables off `[0x4C9D]` and fans out through a
+///    **fourteen-way** `ON GOTO` (`@0x8DCD`) — one arm per leg, each a
+///    printed scene with its own `HORIZONTAL MENU`.
+/// 2. **A second city block**, structurally block 80's twin: the same
+///    "arrive / travel menu" loop at `@0x8180`, a shop (`SAVE 1 → 0x7F6C`
+///    at `@0x863D`), a temple (`SAVE 1 → 0x7EE2` at `@0x8677`), and the area
+///    exits into 3 and 4 (`SAVE 3 → 0x7F12; NEWECL 0x10` at `@0x82C5`,
+///    `SAVE 4 → 0x7F12; NEWECL 0x20` at `@0x8382`).
+///
+/// The drive starts at `ECL1#80 @0x90E0`, the journey tail itself, with
+/// `[0x4C9D]` seeded the way the leg upstream of it would have left it.
+#[test]
+fn the_three_journey_routes_chain_into_ecl1_block_81_and_it_runs() {
+    // `@0x90E0`'s three `COMPARE [0x4C9D], n / IF = / NEWECL 0x51` pairs.
+    for route in [0x07u16, 0x0D, 0x12] {
+        let Some(mut engine) = real_data_engine(5, 48, 50, true) else {
+            eprintln!(
+                "SKIPPED: local tier needs GBX_DATA_DIR \
+                 (tail_ops_tests::the_three_journey_routes_chain_into_ecl1_block_81_and_it_runs)"
+            );
+            return;
+        };
+        // Cross into area 1 with `ECL1#80` resident — slice 1's own door.
+        engine.shell = crate::shell::boot_at_address(&mut engine.machine, 0x8086);
+        let mut arrived = false;
+        for _ in 0..4000 {
+            if engine.state().game_area == 1 && engine.state().ecl_block_id == 80 {
+                arrived = true;
+                break;
+            }
+            engine.tick(&[]);
+        }
+        assert!(arrived, "the overland exit crossed into ECL1#80");
+
+        // The journey tail, with the route the legs upstream would have left.
+        engine.vm_memory.set_raw_word(0x4C9D, route);
+        engine.shell = crate::shell::boot_at_address(&mut engine.machine, 0x90E0);
+
+        let mut chained = false;
+        for _ in 0..4000 {
+            if engine.state().ecl_block_id == 81 {
+                chained = true;
+                break;
+            }
+            engine.tick(&[]);
+        }
+        assert!(
+            chained,
+            "route {route:#04X}: NEWECL 0x51 chained; block={} halts={:?}",
+            engine.state().ecl_block_id,
+            engine.vm_memory().halts
+        );
+
+        // Run the block's own entry until it parks on something the player
+        // would answer, feeding nothing (so a menu is REACHED, not answered).
+        let mut parked = false;
+        for _ in 0..4000 {
+            if engine.shell().gate_open() {
+                parked = true;
+                break;
+            }
+            engine.tick(&[]);
+        }
+        let printed: Vec<String> = engine
+            .vm_memory()
+            .transcript
+            .iter()
+            .filter_map(|e| match e {
+                crate::vmhost::TranscriptEntry::Print { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        eprintln!(
+            "  route {route:#04X}: block {} parked={parked} line={:?}",
+            engine.state().ecl_block_id,
+            engine
+                .shell()
+                .parked_widget_for_tests()
+                .and_then(|w| w.display_line())
+        );
+        for line in printed.iter().rev().take(3).rev() {
+            eprintln!("      {line:?}");
+        }
+        assert!(parked, "route {route:#04X}: the leg reached an interaction");
+        assert!(
+            engine.vm_memory().halts.is_empty(),
+            "route {route:#04X}: no halt: {:?}",
+            engine.vm_memory().halts
+        );
+        assert_eq!(engine.state().game_area, 1, "still on the overland");
+    }
+}
+
+/// ★ Each of the three legs, driven **into its fight**: the menus answered,
+/// the ambush joined, and the whole thing halt-free. `Q` hands each manual
+/// turn to the AI (the bundled save ships `quick_fight = 0`), which is what
+/// makes a leg finish inside a bounded tick budget.
+#[test]
+fn every_ecl1_81_journey_leg_runs_into_a_live_fight_without_halting() {
+    for route in [0x07u16, 0x0D, 0x12] {
+        let Some(mut engine) = real_data_engine(5, 48, 50, true) else {
+            return;
+        };
+        engine.shell = crate::shell::boot_at_address(&mut engine.machine, 0x8086);
+        for _ in 0..4000 {
+            if engine.state().game_area == 1 && engine.state().ecl_block_id == 80 {
+                break;
+            }
+            engine.tick(&[]);
+        }
+        engine.vm_memory.set_raw_word(0x4C9D, route);
+        engine.shell = crate::shell::boot_at_address(&mut engine.machine, 0x90E0);
+        let mut fought = false;
+        for i in 0..4000 {
+            if engine.shell().combat_host().is_some() {
+                fought = true;
+            }
+            // Enter answers the prose and the menus; `Q` hands a manual turn
+            // to the AI.
+            engine.tick(&[if i % 2 == 0 {
+                crate::input::InputEvent::Enter
+            } else {
+                crate::input::InputEvent::Char(b'Q')
+            }]);
+        }
+        eprintln!(
+            "  route {route:#04X}: block {} area {} fought={fought} probe {}",
+            engine.state().ecl_block_id,
+            engine.state().game_area,
+            engine.shell().probe(),
+        );
+        assert!(fought, "route {route:#04X}: the leg reached its fight");
+        assert!(
+            engine.vm_memory().halts.is_empty(),
+            "route {route:#04X}: halts {:?}",
+            engine.vm_memory().halts
+        );
+    }
+}
