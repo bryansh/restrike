@@ -332,6 +332,14 @@ pub struct FlowCtx<'a> {
     /// Where the save/load screen deposits its chosen action for the host to
     /// fulfill after the tick (D8: the core does no file I/O itself).
     pub io_request: &'a mut Option<crate::saveload::SaveLoadRequest>,
+    /// ★ Host-injected view of the save directory's `.guy` character files
+    /// (roll-credits slice 9c) — `Add Character to Party` renders from this,
+    /// exactly as the save/load screen renders from [`Self::slots`].
+    pub char_files: &'a crate::chr_file::CharFileDirectory,
+    /// ★ Where creation/Remove/Add deposit their character-file action for
+    /// the host (D8's second slot — [`Self::io_request`] is `Copy` and save
+    /// slots only).
+    pub char_io_request: &'a mut Option<crate::chr_file::CharFileRequest>,
     /// ★ `seg043.print_and_exit()` (roll-credits slice 9b): the start menu's
     /// `Exit to DOS` and copy protection's third failure both end the process
     /// in the original. The core cannot (D8), so it raises this and the host
@@ -3051,6 +3059,44 @@ impl Shell {
                             ReturnTo::StartMenu,
                         )))
                     }
+                    // ★ Slice 9c: the four character verbs.
+                    FrontDoorTick::OpenCreate => {
+                        *self = Shell::Screen(Screen::CreateCharacter(Box::new(
+                            crate::create_screen::CreateCharacter::new(ReturnTo::StartMenu),
+                        )))
+                    }
+                    FrontDoorTick::OpenAdd => {
+                        *self = Shell::Screen(Screen::AddCharacter(Box::new(
+                            crate::create_screen::AddCharacter::new(ReturnTo::StartMenu),
+                        )))
+                    }
+                    FrontDoorTick::OpenModify => {
+                        let index = (ctx.state.selected_player as usize)
+                            .min(ctx.roster.members.len().saturating_sub(1));
+                        if let Some(ch) = ctx.roster.members.get(index) {
+                            *self = Shell::Screen(Screen::ModifyCharacter(Box::new(
+                                crate::modify_screen::ModifyCharacter::new(
+                                    index,
+                                    ch,
+                                    ReturnTo::StartMenu,
+                                ),
+                            )));
+                        }
+                    }
+                    FrontDoorTick::OpenDualClass => {
+                        let index = (ctx.state.selected_player as usize)
+                            .min(ctx.roster.members.len().saturating_sub(1));
+                        if let Some(ch) = ctx.roster.members.get(index) {
+                            *self = Shell::Screen(Screen::DualClass(Box::new(
+                                crate::modify_screen::DualClass::new(
+                                    index,
+                                    ch,
+                                    ctx.rules,
+                                    ReturnTo::StartMenu,
+                                ),
+                            )));
+                        }
+                    }
                     // `print_and_exit()` (`ovr018.cs:296`) — the core cannot
                     // exit a process (D8), so it asks the host to.
                     FrontDoorTick::Quit => *ctx.quit_requested = true,
@@ -3308,6 +3354,8 @@ mod tests {
         rules: gbx_rules::pack::RuleSet,
         slots: crate::saveload::SlotDirectory,
         io_request: Option<crate::saveload::SaveLoadRequest>,
+        char_files: crate::chr_file::CharFileDirectory,
+        char_io_request: Option<crate::chr_file::CharFileRequest>,
         quit_requested: bool,
         rng: EngineRng,
         fb: Framebuffer,
@@ -3344,6 +3392,8 @@ mod tests {
                 rules: gbx_rules::pack::RuleSet::load(),
                 slots: crate::saveload::SlotDirectory::new(),
                 io_request: None,
+                char_files: crate::chr_file::CharFileDirectory::new(),
+                char_io_request: None,
                 quit_requested: false,
                 rng: EngineRng::new(1),
                 fb: Framebuffer::new(),
@@ -3376,6 +3426,8 @@ mod tests {
                 rules: &self.rules,
                 slots: &self.slots,
                 io_request: &mut self.io_request,
+                char_files: &self.char_files,
+                char_io_request: &mut self.char_io_request,
                 quit_requested: &mut self.quit_requested,
                 rng: &mut self.rng,
                 fb: &mut self.fb,

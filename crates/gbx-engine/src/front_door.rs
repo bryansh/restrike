@@ -550,6 +550,15 @@ pub enum FrontDoorTick {
     OpenView,
     /// `Train Character` — the training hall, returning here.
     OpenTrain,
+    /// ★ Slice 9c. `Create New Character` — `createPlayer`.
+    OpenCreate,
+    /// ★ Slice 9c. `Modify Character` — `modifyPlayer`, for the selected
+    /// member.
+    OpenModify,
+    /// ★ Slice 9c. `Human Change Classes` — `DuelClass`.
+    OpenDualClass,
+    /// ★ Slice 9c. `Add Character to Party` — `AddPlayer`'s `.guy` picker.
+    OpenAdd,
     /// `Exit to DOS` — the host is asked to quit (`print_and_exit`).
     Quit,
 }
@@ -861,7 +870,13 @@ impl StartMenu {
         // `area2_ptr.training_class_mask > 0` (`ovr018.cs:86`): the town ECL
         // writes it at a training hall. Nothing else in the menu reads it.
         let training = crate::vmhost::training_class_mask(ctx.vm_memory) > 0;
-        MenuFlags::compute(has_party, training, false)
+        // ★ Slice 9c: `gbl.SelectedPlayer.CanDuelClass()` (`ovr018.cs:95`) —
+        // live, per selected member, which is why `'G'`/`'O'` recompute the
+        // flag table when the answer changes (`:142-149`).
+        let duel_class = selected_index(ctx)
+            .map(|i| crate::modify_screen::can_dual_class(&ctx.roster.members[i]))
+            .unwrap_or(false);
+        MenuFlags::compute(has_party, training, duel_class)
     }
 
     fn render(&self, ctx: &mut FlowCtx, flags: MenuFlags) {
@@ -925,21 +940,22 @@ impl StartMenu {
     fn dispatch(&mut self, key: u8, ctx: &mut FlowCtx, flags: MenuFlags) -> FrontDoorTick {
         self.status = None;
         match key {
-            b'C' if flags.allows(ALLOW_CREATE) => {
-                self.status = Some("Create New Character: slice 9c.".to_string());
-                FrontDoorTick::Stay
-            }
+            b'C' if flags.allows(ALLOW_CREATE) => FrontDoorTick::OpenCreate,
             b'M' if flags.allows(ALLOW_MODIFY) => {
-                self.status = Some("Modify Character: slice 9c.".to_string());
-                FrontDoorTick::Stay
+                // ★ `modifyPlayer`'s own gate is checked here so the refusal
+                // reads on the menu the player is standing on
+                // (`ovr018.cs:1004-1013` prints it and returns immediately).
+                let index = selected_index(ctx);
+                match index.map(|i| &ctx.roster.members[i]) {
+                    Some(ch) if !crate::modify_screen::can_modify(ch) => {
+                        self.status = Some(format!("{} can't be modified.", ch.name));
+                        FrontDoorTick::Stay
+                    }
+                    Some(_) => FrontDoorTick::OpenModify,
+                    None => FrontDoorTick::Stay,
+                }
             }
-            b'A' if flags.allows(ALLOW_ADD) => {
-                // `AddPlayer()` reads a saved character file from disk — the
-                // same .CHR machinery character creation writes, so it lands
-                // with slice 9c rather than half-existing here.
-                self.status = Some("Add Character to Party: slice 9c.".to_string());
-                FrontDoorTick::Stay
-            }
+            b'A' if flags.allows(ALLOW_ADD) => FrontDoorTick::OpenAdd,
             b'D' if flags.allows(ALLOW_DROP) => {
                 self.drop_selected(ctx, true);
                 FrontDoorTick::Stay
@@ -952,10 +968,7 @@ impl StartMenu {
             }
             b'V' if flags.allows(ALLOW_VIEW) => FrontDoorTick::OpenView,
             b'T' if flags.allows(ALLOW_TRAINING) => FrontDoorTick::OpenTrain,
-            b'H' if flags.allows(ALLOW_DUELCLASS) => {
-                self.status = Some("Human Change Classes: slice 9c.".to_string());
-                FrontDoorTick::Stay
-            }
+            b'H' if flags.allows(ALLOW_DUELCLASS) => FrontDoorTick::OpenDualClass,
             b'L' if flags.allows(ALLOW_LOAD) => FrontDoorTick::OpenLoad,
             // `case 'S'`: `menuFlags[allow_save] && gbl.TeamList.Count > 0`
             // (`ovr018.cs:230-236`).
@@ -1001,8 +1014,12 @@ impl StartMenu {
 
     /// `dropPlayer`/the `'R'` arm's `FreeCurrentPlayer` (`ovr018.cs:207-221`)
     /// — both remove the selected member from the roster; Drop discards the
-    /// character, Remove saves it out first (a `.CHR` write we have no
-    /// machinery for yet, so Remove reports that half and does the rest).
+    /// character, Remove **saves it out first**.
+    ///
+    /// ★ Slice 9c closes §14.8's residual: Remove now emits the
+    /// `SavePlayer(string.Empty, player)` the original makes (`:213`), which
+    /// the host turns into the `<name>.guy`/`.swg`/`.fx` trio. An NPC is
+    /// dropped outright instead (`:216-219`), never written.
     fn drop_selected(&mut self, ctx: &mut FlowCtx, discard: bool) {
         let count = ctx.roster.members.len();
         if count == 0 {
@@ -1010,6 +1027,12 @@ impl StartMenu {
         }
         let index = (ctx.state.selected_player as usize).min(count - 1);
         let name = ctx.roster.members[index].name.clone();
+        let is_npc = ctx.roster.members[index].is_npc();
+        if !discard && !is_npc {
+            *ctx.char_io_request = Some(crate::chr_file::CharFileRequest::Save(Box::new(
+                ctx.roster.members[index].clone(),
+            )));
+        }
         ctx.roster.members.remove(index);
         ctx.state.selected_player = ctx
             .state
@@ -1018,12 +1041,18 @@ impl StartMenu {
         // `area2_ptr.party_size` is the count of real (non-NPC) members
         // (`Area2.field_67C`), which is what the roster length tracks here.
         ctx.state.party_size = ctx.roster.members.len() as u8;
-        self.status = Some(if discard {
+        self.status = Some(if discard || is_npc {
             format!("{name} dropped.")
         } else {
-            format!("{name} removed from the party (no .CHR file written: slice 9c).")
+            format!("{name} removed and saved.")
         });
     }
+}
+
+/// `gbl.SelectedPlayer`'s roster index, clamped — `None` for an empty party.
+fn selected_index(ctx: &FlowCtx) -> Option<usize> {
+    let count = ctx.roster.members.len();
+    (count > 0).then(|| (ctx.state.selected_player as usize).min(count - 1))
 }
 
 /// The refusal line for a key the flag table does not currently allow — named,

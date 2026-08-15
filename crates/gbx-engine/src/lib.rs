@@ -20,14 +20,20 @@ pub mod boot;
 pub mod camp_cast;
 pub mod camp_magic;
 pub mod charsheet;
-pub mod combat;
-pub mod combat_art;
-pub mod combat_host;
 /// ★ Roll-credits slice 9b (D-RC4): the CotAB code wheel — the copy-protection
 /// algorithm and its 6×36 table, shared by the boot prompt and the sixth
 /// journey's bridge keeper.
+/// ★ Roll-credits slice 9c: the `.guy`/`.swg`/`.fx` character files
+/// `SavePlayer`/`AddPlayer` write and read, and the party-join legality gate.
+pub mod chr_file;
+pub mod combat;
+pub mod combat_art;
+pub mod combat_host;
 pub mod copy_wheel;
 pub mod corridor;
+/// ★ Roll-credits slice 9c: `startGameMenu`'s Create and Add verbs as parked
+/// screens, including the shipped icon editor.
+pub mod create_screen;
 /// ★ Roll-credits slice 9c: `createPlayer`'s record building — the picks, the
 /// stat roll, the derived-field recompute and `SilentTrainPlayer`.
 pub mod creation;
@@ -57,6 +63,9 @@ pub mod items_screen;
 /// spell table's class/level/name columns, and the capacity formula.
 pub mod magic;
 pub mod mapcursor;
+/// ★ Roll-credits slice 9c: `startGameMenu`'s Modify and Human Change Classes
+/// verbs.
+pub mod modify_screen;
 pub mod money;
 pub mod monster;
 pub mod movement;

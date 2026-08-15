@@ -153,6 +153,12 @@ pub struct Engine {
     /// The save/load screen's pending action, taken by the host after a tick
     /// (D8: the core never does file I/O). Transient, not saved.
     io_request: Option<crate::saveload::SaveLoadRequest>,
+    /// ★ Host-injected list of `.guy` character files (roll-credits slice 9c),
+    /// the `Add Character to Party` picker's source. Transient, not saved.
+    char_files: crate::chr_file::CharFileDirectory,
+    /// ★ The character-file action creation/Remove/Add left for the host.
+    /// Transient, not saved.
+    char_io_request: Option<crate::chr_file::CharFileRequest>,
     /// **Watch mode** (`combat-visualizer.md` D-CV1 item 2): when set by
     /// [`Engine::new_reel`], every tick advances the captured fight's playback
     /// instead of the UI shell. `None` for a normally-booted engine, which is
@@ -444,6 +450,8 @@ impl Engine {
             rules,
             slots: crate::saveload::SlotDirectory::new(),
             io_request: None,
+            char_files: crate::chr_file::CharFileDirectory::new(),
+            char_io_request: None,
             reel: None,
             host_notice: None,
             quit_requested: false,
@@ -506,6 +514,8 @@ impl Engine {
             rules: RuleSet::load(),
             slots: crate::saveload::SlotDirectory::new(),
             io_request: None,
+            char_files: crate::chr_file::CharFileDirectory::new(),
+            char_io_request: None,
             reel: None,
             host_notice: None,
             quit_requested: false,
@@ -641,6 +651,38 @@ impl Engine {
         self.io_request.take()
     }
 
+    /// ★ Injects the host's view of the save directory's `.guy` character
+    /// files (roll-credits slice 9c) — `Add Character to Party` renders from
+    /// this, exactly as the save/load screen renders from the slot directory.
+    pub fn set_char_file_directory(&mut self, files: crate::chr_file::CharFileDirectory) {
+        self.char_files = files;
+    }
+
+    pub fn char_file_directory(&self) -> &crate::chr_file::CharFileDirectory {
+        &self.char_files
+    }
+
+    /// ★ Takes the pending character-file action (write a `.guy`, or load
+    /// one), if any — the host fulfills it via
+    /// [`crate::saveload_fs::fulfill_char_file`]. Clears it, so it fires once.
+    pub fn take_char_file_request(&mut self) -> Option<crate::chr_file::CharFileRequest> {
+        self.char_io_request.take()
+    }
+
+    /// ★ `AddPlayer`'s join step (`ovr018.cs:1488-1548`): applies the party
+    /// legality gate, and on success assigns the icon slot and appends the
+    /// member. `Err` carries the original's own refusal words, which the
+    /// caller is expected to show.
+    pub fn add_character(&mut self, mut ch: crate::party::Character) -> Result<(), &'static str> {
+        if let Some(why) = crate::chr_file::join_refusal(&self.party, &ch) {
+            return Err(why);
+        }
+        crate::chr_file::assign_icon_id(&self.party, &mut ch);
+        self.party.members.push(ch);
+        self.state.party_size = self.party.members.len() as u8;
+        Ok(())
+    }
+
     /// ★ Shows a host-authored line to the **player** for
     /// [`HOST_NOTICE_TICKS`] ticks (or until the next keypress).
     ///
@@ -710,6 +752,8 @@ impl Engine {
             rules: &self.rules,
             slots: &self.slots,
             io_request: &mut self.io_request,
+            char_files: &self.char_files,
+            char_io_request: &mut self.char_io_request,
             quit_requested: &mut self.quit_requested,
             rng: &mut self.rng,
             fb: &mut self.fb,
@@ -858,6 +902,8 @@ impl Engine {
                 rules: &self.rules,
                 slots: &self.slots,
                 io_request: &mut self.io_request,
+                char_files: &self.char_files,
+                char_io_request: &mut self.char_io_request,
                 quit_requested: &mut self.quit_requested,
                 rng: &mut self.rng,
                 fb: &mut self.fb,

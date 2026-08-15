@@ -540,6 +540,100 @@ pub fn character_from_record(
     }
 }
 
+/// ★ The inverse of [`character_from_record`] (roll-credits slice 9c) — what
+/// `SavePlayer` needs to write a `.guy`.
+///
+/// Every field maps straight back. [`Character::readied_items`] is **not**
+/// written anywhere: it is a reconstruction of the items' own `readied` flags
+/// (§1.7 item 3), which travel in the `.swg` records themselves, and the
+/// record's `activeItems` pointer array is D-SAVE6 garbage the encoder zeroes.
+pub fn record_from_character(ch: &Character) -> gbx_formats::save_orig::CharRecord {
+    use gbx_formats::save_orig::{CharRecord, RawStat, RawStatBlock};
+    let stat = |p: AbilityScorePair| RawStat {
+        current: p.current,
+        original: p.original,
+    };
+    CharRecord {
+        name: ch.name.clone(),
+        stats: RawStatBlock {
+            str: stat(ch.stats.str_score),
+            int: stat(ch.stats.int),
+            wis: stat(ch.stats.wis),
+            dex: stat(ch.stats.dex),
+            con: stat(ch.stats.con),
+            cha: stat(ch.stats.cha),
+            str_exceptional: stat(ch.stats.str_exceptional),
+        },
+        spell_list: ch.magic.spell_list.clone(),
+        spell_to_learn_count: ch.magic.spell_to_learn_count,
+        thac0_base: ch.combat.thac0_base,
+        race: ch.race,
+        class: ch.class_id,
+        age: ch.age,
+        hit_point_max: ch.hit_point_max,
+        spell_book: ch.magic.spell_book.clone(),
+        attack_level: ch.combat.attack_level,
+        field_de: ch.opaque.field_de,
+        save_verse: ch.skills.save_verse,
+        base_movement: ch.combat.base_movement,
+        hit_dice: ch.hit_dice,
+        multiclass_level: ch.multiclass_level,
+        lost_lvls: ch.lost_levels,
+        lost_hp: ch.lost_hp,
+        field_e9: ch.skills.turn_undead_type,
+        thief_skills: ch.skills.thief_skills,
+        field_f6: ch.opaque.field_f6,
+        control_morale: ch.control_morale,
+        npc_treasure_share_count: ch.status.npc_treasure_share_count,
+        field_f9_fa: ch.opaque.field_f9_fa,
+        money: [
+            ch.money.copper,
+            ch.money.silver,
+            ch.money.electrum,
+            ch.money.gold,
+            ch.money.platinum,
+            ch.money.gems,
+            ch.money.jewelry,
+        ],
+        class_level: ch.class_level,
+        class_levels_old: ch.class_levels_old,
+        sex: ch.sex,
+        monster_type: ch.monster_type,
+        alignment: ch.alignment,
+        attack_profile_base: ch.combat.attacks.base,
+        base_ac: ch.combat.base_ac,
+        field_125: ch.opaque.field_125,
+        mod_id: ch.monster_index,
+        exp: ch.exp,
+        class_flags: ch.skills.class_flags,
+        hit_point_rolled: ch.hit_point_rolled,
+        spell_cast_count: ch.magic.cast_count,
+        field_13c: ch.opaque.field_13c,
+        field_13e_140: ch.opaque.field_13e_140,
+        head_icon: ch.icon.head_icon,
+        weapon_icon: ch.icon.weapon_icon,
+        icon_id: ch.icon.icon_id,
+        icon_size: ch.icon.icon_size,
+        icon_colours: ch.icon.colours,
+        field_14b: ch.opaque.field_14b,
+        weapons_hands_used: ch.combat.weapons_hands_used,
+        field_186: ch.status.save_bonus,
+        weight: ch.combat.weight,
+        paladin_cures_left: ch.status.paladin_cures_left,
+        field_192_194: ch.opaque.field_192_194,
+        health_status: ch.status.health_status,
+        in_combat: ch.status.in_combat,
+        combat_team: ch.status.combat_team,
+        quick_fight: ch.status.quick_fight,
+        hit_bonus: ch.combat.thac0_current,
+        ac: ch.combat.ac,
+        ac_behind: ch.combat.ac_behind,
+        attack_profile_current: ch.combat.attacks.current,
+        hit_point_current: ch.hit_point_current,
+        movement: ch.combat.movement,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -557,6 +651,44 @@ mod tests {
         bytes[0x109 + 3] = 5; // class_level[3] (fighter-ish slot) = 5
         bytes[0x127..0x12b].copy_from_slice(&999i32.to_le_bytes());
         decode_char_record(&bytes).unwrap()
+    }
+
+    /// ★ [`record_from_character`] is [`character_from_record`]'s inverse:
+    /// decode → model → encode → decode must land on the same record, and on
+    /// the same bytes. Run over the bundle's real character files, which is
+    /// what proves a `.guy` we write is a `.guy` the original could read.
+    #[test]
+    fn record_from_character_round_trips_every_real_character_file() {
+        let Some(dir) = std::env::var_os("GBX_DATA_DIR") else {
+            return;
+        };
+        let save_dir = std::path::Path::new(&dir).join("SAVE");
+        let Ok(entries) = std::fs::read_dir(&save_dir) else {
+            return;
+        };
+        let mut checked = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path
+                .extension()
+                .is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case("guy"))
+            {
+                continue;
+            }
+            let bytes = std::fs::read(&path).unwrap();
+            let record = decode_char_record(&bytes).unwrap();
+            let items = vec![vec![0u8; ITEM_RECORD_SIZE]];
+            let ch = character_from_record(&record, items, vec![]);
+            let again = record_from_character(&ch);
+            assert_eq!(
+                again,
+                record,
+                "{} did not survive the model",
+                path.display()
+            );
+            checked += 1;
+        }
+        assert!(checked >= 3, "expected the bundle's .GUY files");
     }
 
     #[test]

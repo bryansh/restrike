@@ -89,6 +89,13 @@ pub enum Screen {
     /// end for the same postcard reason — no committed `.rsav` moves, so no
     /// `SAVE_FORMAT_VERSION` bump.
     Items(Box<crate::items_screen::ItemsScreen>),
+    /// ★ Roll-credits slice 9c: `startGameMenu`'s four character verbs.
+    /// Appended at the end, for the same postcard reason every variant above
+    /// them was — no committed `.rsav` moves.
+    CreateCharacter(Box<crate::create_screen::CreateCharacter>),
+    ModifyCharacter(Box<crate::modify_screen::ModifyCharacter>),
+    DualClass(Box<crate::modify_screen::DualClass>),
+    AddCharacter(Box<crate::create_screen::AddCharacter>),
 }
 
 impl Screen {
@@ -106,6 +113,10 @@ impl Screen {
             Screen::Rest(s) => s.tick(ctx),
             Screen::Cast(s) => s.tick(ctx),
             Screen::Items(s) => s.tick(ctx),
+            Screen::CreateCharacter(s) => s.tick(ctx),
+            Screen::ModifyCharacter(s) => s.tick(ctx),
+            Screen::DualClass(s) => s.tick(ctx),
+            Screen::AddCharacter(s) => s.tick(ctx),
         }
     }
 }

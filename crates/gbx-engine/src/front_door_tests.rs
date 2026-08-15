@@ -382,10 +382,14 @@ fn the_start_menu_with_a_party_offers_the_party_column() {
         "the save request reaches the host"
     );
 
-    // Create/Modify present but report the slice that owns them.
+    // ★ Slice 9c: Create now opens `createPlayer`'s own first picker, and
+    // Exit from it returns to the menu (`ovr018.cs:371-375`'s `return`).
     engine.park_at_start_menu();
     engine.tick(&[]);
     press(&mut engine, b'C');
+    assert_eq!(engine.probe(), "screen");
+    press(&mut engine, b'E');
+    engine.tick(&[]);
     assert_eq!(engine.probe(), "front-door/start-menu");
 }
 
