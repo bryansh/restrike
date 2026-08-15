@@ -9,11 +9,20 @@
 //! captured stays replayable.
 //!
 //! What lives here is the part a replay has to get right to be the same run:
-//! the input schedule, the boot posture (an imported slot by default — a
-//! recorded session had a party), and the **host's D8 obligations**, which
-//! since roll-credits slice 0 include fulfilling the save/load screen's
-//! requests. A replay that skipped those would diverge the instant a session
-//! saved.
+//! the input schedule, the **boot posture**, and the **host's D8
+//! obligations**, which since roll-credits slice 0 include fulfilling the
+//! save/load screen's requests. A replay that skipped those would diverge the
+//! instant a session saved.
+//!
+//! ★ **The boot posture tracks the desktop's default, whatever that is**
+//! (roll-credits slice 9b). It moved once already — from the front door to an
+//! imported slot A when slice 0 gave the desktop a party by default, and back
+//! to the front door when slice 9b gave it a title screen — and each move is a
+//! silent tick-0 divergence for any log recorded without flags. Two things
+//! keep that honest: [`Boot::default`] is defined as "whatever
+//! `restrike-desktop` does with no arguments", and [`Session::probes`] lets a
+//! replay *check* rather than assume, by comparing the log's own probe line
+//! against the engine's at the same tick ([`Session::probe_at`]).
 
 use std::path::{Path, PathBuf};
 
@@ -56,6 +65,12 @@ pub struct Session {
     /// surfaced rather than swallowed, because a silently dropped key is a
     /// replay that quietly stops being the recorded run.
     pub unrecognized: Vec<String>,
+    /// ★ Every `tick N | … | <probe>` line's probe, in order — the recorded
+    /// run's own account of what state it was in. A replay compares its engine
+    /// against these ([`Session::probe_at`]): a wrong boot posture, a changed
+    /// flow, a dropped key all show up as the first mismatch, at the tick it
+    /// happened, instead of as a digest that quietly means something else.
+    pub probes: Vec<(u64, String)>,
 }
 
 impl Session {
@@ -71,15 +86,18 @@ impl Session {
             let Some((tick, sent)) = rest.split_once(" | sent [") else {
                 continue;
             };
-            let Some((events, _)) = sent.split_once(']') else {
+            let Some((events, tail)) = sent.split_once(']') else {
                 continue;
             };
-            if events.is_empty() {
-                continue;
-            }
             let Ok(tick) = tick.trim().parse::<u64>() else {
                 continue;
             };
+            if let Some(probe) = tail.strip_prefix(" | ") {
+                session.probes.push((tick, probe.trim().to_string()));
+            }
+            if events.is_empty() {
+                continue;
+            }
             let mut parsed = Vec::new();
             for piece in events.split(',') {
                 match parse_event(piece) {
@@ -92,6 +110,20 @@ impl Session {
             }
         }
         session
+    }
+
+    /// The probe the recorded session reported at `tick`, if it logged one.
+    pub fn probe_at(&self, tick: u64) -> Option<&str> {
+        match self.probes.binary_search_by_key(&tick, |(t, _)| *t) {
+            Ok(i) => Some(self.probes[i].1.as_str()),
+            Err(_) => None,
+        }
+    }
+
+    /// The first probe the log carries, with its tick — the earliest point a
+    /// replay can tell whether it booted the way the recording did.
+    pub fn first_probe(&self) -> Option<(u64, &str)> {
+        self.probes.first().map(|(t, p)| (*t, p.as_str()))
     }
 
     /// The last tick carrying input (0 for an inputless log).
@@ -110,17 +142,29 @@ impl Session {
 
 /// How a replay boots — it must match the desktop that wrote the log, or the
 /// run is a different run.
+///
+/// The three variants are exactly the desktop's three `--slot` postures
+/// (`frontends/desktop/src/main.rs`'s `SlotArg`), deliberately: "same flags on
+/// both sides ⇒ same run" is only true if the two flag sets are the same set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Boot {
     /// The desktop default: import `savgam{letter}.dat` from `<data>/SAVE`.
     ImportedSlot(char),
     /// `--slot none`: no party (engine archaeology only).
     Bare,
+    /// ★ No `--slot` at all (roll-credits slice 9b): the **front door** —
+    /// title screens, the Play-Demo prompt, copy protection, `startGameMenu`.
+    FrontDoor,
 }
 
 impl Default for Boot {
+    /// **Whatever `restrike-desktop` does with no arguments.** Since slice 9b
+    /// that is the front door; before it, an imported slot A. Defined by that
+    /// sentence rather than by a fixed variant, because a log recorded with no
+    /// flags must replay with no flags — and the two defaults drifting apart
+    /// is a tick-0 divergence nothing else would report.
     fn default() -> Self {
-        Boot::ImportedSlot('A')
+        Boot::FrontDoor
     }
 }
 
@@ -130,6 +174,9 @@ pub fn boot(data_dir: &Path, boot: Boot, seed: u32) -> Result<Engine, String> {
     let data = load_dir(data_dir).map_err(|e| format!("{} unreadable: {e}", data_dir.display()))?;
     match boot {
         Boot::Bare => Engine::new(data, seed).map_err(|e| format!("bare boot failed: {e:?}")),
+        Boot::FrontDoor => {
+            Engine::new_front_door(data, seed).map_err(|e| format!("front-door boot failed: {e:?}"))
+        }
         Boot::ImportedSlot(letter) => {
             let save_dir = data_dir.join("SAVE");
             let saves = load_dir(&save_dir)
@@ -182,6 +229,22 @@ pub fn sandbox_path(tag: &str) -> PathBuf {
 /// tidiness — a replay whose host behaviour differs from the desktop's by one
 /// missing step is not the recorded run, and nothing would say so.
 ///
+/// ★ **The posture/flow referee** (roll-credits slice 9b): compares the live
+/// engine against what the recording said it was doing at this tick.
+///
+/// Both replay fronts call this every tick. It answers `Some(recorded)` only
+/// when the log logged a probe at `tick` **and** the engine disagrees — so a
+/// caller can report the FIRST divergence loudly and keep going. The common
+/// cause is a boot-posture mismatch, which shows up at the very first logged
+/// tick (`front-door/title` against `boot/present`, say) rather than as a
+/// digest that quietly means something else; but it catches any drift, which
+/// is the point.
+pub fn probe_divergence(session: &Session, tick: u64, engine: &Engine) -> Option<String> {
+    let recorded = session.probe_at(tick)?;
+    let live = engine.probe();
+    (recorded != live).then_some(recorded.to_string())
+}
+
 /// Returns `None` when the tick asked for nothing.
 pub fn fulfill_pending_io(
     engine: &mut Engine,
@@ -360,8 +423,9 @@ tick 11 | sent [Ext(Up), Char('b')] | step/gate(hotbar)
     }
 
     /// The same round trip over a **real imported boot** (local tier,
-    /// `GBX_DATA_DIR`): the posture an actual playthrough trace is recorded
-    /// from — GOG's bundled slot A, the intro running, real scripts.
+    /// `GBX_DATA_DIR`): `Boot::ImportedSlot('A')` explicitly, because this is
+    /// about the imported posture specifically — `Boot::default()` tracks the
+    /// desktop, which since slice 9b opens on the front door instead.
     #[test]
     fn a_real_imported_boot_replays_to_identical_digests() {
         let Some(dir) = std::env::var_os("GBX_DATA_DIR") else {
@@ -383,7 +447,7 @@ tick 11 | sent [Ext(Up), Char('b')] | step/gate(hotbar)
         let run = |tag: &str| -> Vec<(u64, String)> {
             let saves = std::env::temp_dir().join(format!("restrike-h5-{tag}-{pid}"));
             sandbox_saves(&dir.join("SAVE"), &saves).expect("saves sandbox");
-            let mut engine = boot(&dir, Boot::default(), 1).expect("slot A boots");
+            let mut engine = boot(&dir, Boot::ImportedSlot('A'), 1).expect("slot A boots");
             engine.set_slot_directory(crate::saveload_fs::scan_slot_directory(&saves));
             let mut digests = Vec::new();
             for tick in 1..=300u64 {
@@ -412,7 +476,7 @@ tick 11 | sent [Ext(Up), Char('b')] | step/gate(hotbar)
 
         let saves = std::env::temp_dir().join(format!("restrike-h5-real-b-{pid}"));
         sandbox_saves(&dir.join("SAVE"), &saves).expect("saves sandbox");
-        let mut engine = boot(&dir, Boot::default(), 1).expect("slot A boots");
+        let mut engine = boot(&dir, Boot::ImportedSlot('A'), 1).expect("slot A boots");
         engine.set_slot_directory(crate::saveload_fs::scan_slot_directory(&saves));
         let mut second = Vec::new();
         for tick in 1..=300u64 {
@@ -429,5 +493,91 @@ tick 11 | sent [Ext(Up), Char('b')] | step/gate(hotbar)
         for (tick, digest) in &first {
             eprintln!("    {tick}\t{digest}");
         }
+    }
+
+    /// ★ **The front-door posture replays** (roll-credits slice 9b, local
+    /// tier): a session recorded from a default-launch desktop — title beats
+    /// skipped with keys, the demo declined, the challenge accepted, the start
+    /// menu reached — replays to identical digests through `Boot::default()`.
+    ///
+    /// This is the case the desktop's default now produces, and the one that
+    /// had no posture at all until this test existed: a log written by a
+    /// no-flag desktop and replayed by a no-flag replayer.
+    #[test]
+    fn a_front_door_session_replays_to_identical_digests() {
+        let Some(dir) = std::env::var_os("GBX_DATA_DIR") else {
+            eprintln!("GBX_DATA_DIR not set — skipping (local tier)");
+            return;
+        };
+        let dir = PathBuf::from(dir);
+
+        // Space walks the four title beats (each key ends one, and the paint
+        // tick flushes the buffer, so they are spread out); `P` declines the
+        // demo; Enter accepts the pre-filled copy-protection answer.
+        let script = |tick: u64| -> &'static [InputEvent] {
+            match tick {
+                10 | 20 | 30 | 40 | 50 | 60 | 70 | 80 => &[InputEvent::Char(b' ')],
+                100 => &[InputEvent::Char(b'P')],
+                140 => &[InputEvent::Enter],
+                _ => &[],
+            }
+        };
+
+        let run = |posture: Boot| -> (Vec<(u64, String)>, String) {
+            let mut engine = boot(&dir, posture, 1).expect("the posture boots");
+            let mut digests = Vec::new();
+            for tick in 1..=200u64 {
+                engine.tick(script(tick));
+                if tick % 25 == 0 {
+                    digests.push((tick, engine.state_digest()));
+                }
+            }
+            (digests, engine.probe())
+        };
+
+        let (recorded, ended_at) = run(Boot::default());
+        assert_eq!(
+            ended_at, "front-door/start-menu",
+            "the scripted session reaches `startGameMenu`"
+        );
+
+        // The log a desktop would have written for that session, replayed.
+        let log: String = (1..=200u64)
+            .filter(|t| !script(*t).is_empty())
+            .map(|t| format!("tick {t} | sent {:?} | front-door/title\n", script(t)))
+            .collect();
+        let session = Session::parse(&log);
+        assert_eq!(session.schedule.len(), 10);
+        assert_eq!(session.probes.len(), 10, "probe lines are parsed too");
+
+        let mut engine = boot(&dir, Boot::default(), 1).expect("the default posture boots");
+        let mut replayed = Vec::new();
+        for tick in 1..=200u64 {
+            engine.tick(session.inputs_at(tick));
+            if tick % 25 == 0 {
+                replayed.push((tick, engine.state_digest()));
+            }
+        }
+        assert_eq!(recorded, replayed, "the front-door replay diverged");
+
+        // ★ And the referee works: replaying the same log against the WRONG
+        // posture is caught, at the first logged tick, instead of silently
+        // producing a different run's digests.
+        let mut wrong = boot(&dir, Boot::ImportedSlot('A'), 1).expect("slot A boots");
+        let mut caught = None;
+        for tick in 1..=200u64 {
+            wrong.tick(session.inputs_at(tick));
+            if caught.is_none() {
+                caught = probe_divergence(&session, tick, &wrong).map(|r| (tick, r));
+            }
+        }
+        let (tick, recorded_probe) = caught.expect("a wrong boot posture must be reported");
+        assert_eq!(tick, 10, "reported at the first tick the log recorded one");
+        assert_eq!(recorded_probe, "front-door/title");
+        assert_ne!(
+            wrong.state_digest(),
+            engine.state_digest(),
+            "the wrong posture really is a different run"
+        );
     }
 }

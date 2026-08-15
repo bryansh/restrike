@@ -1,5 +1,6 @@
-//! `restrike replay <session.log> [--slot X|--bare] [--checkpoint-every N]
-//! [--digests-out FILE] [--verify FILE]` — the **H5 capture vehicle**
+//! `restrike replay <session.log> [--slot X|--bare|--front-door]
+//! [--checkpoint-every N] [--digests-out FILE] [--verify FILE]` — the **H5
+//! capture vehicle**
 //! (`docs/design/roll-credits.md` D-RC3).
 //!
 //! ## Why this exists next to `restrike walk`
@@ -18,10 +19,19 @@
 //! `RESTRIKE_DEBUG_LOG=/path/session.log restrike-desktop`. Nothing new to
 //! learn, and every log ever captured is already a valid input here.
 //!
-//! **Replay** with this, which boots the way that desktop booted (imported
-//! slot A by default), feeds the recorded input schedule tick for tick, plays
-//! the host's part for save/load — against a *copy* of the saves directory,
-//! never the real one — and emits `tick<TAB>digest` lines.
+//! **Replay** with this, which boots the way that desktop booted, feeds the
+//! recorded input schedule tick for tick, plays the host's part for save/load
+//! — against a *copy* of the saves directory, never the real one — and emits
+//! `tick<TAB>digest` lines.
+//!
+//! ★ **The boot posture must match the flags the recording desktop ran with**,
+//! and the default here tracks the desktop's own default: since roll-credits
+//! slice 9b that is the **front door** (`--front-door`, the no-flag case).
+//! `--slot X` replays a `restrike-desktop --slot X` session and `--bare` a
+//! `--slot none` one. An H5 trace recorded before slice 9b was recorded from a
+//! slot-A desktop and wants `--slot A` explicitly — the run prints its posture,
+//! and the probe check below reports a mismatch at the tick it happens rather
+//! than letting the digests quietly mean something else.
 //!
 //! **Verify** by re-running against a previously emitted file: the first
 //! differing checkpoint is reported with both digests and the run fails. That
@@ -131,9 +141,18 @@ pub fn cmd_replay(args: Vec<String>) -> ExitCode {
 
     let mut checkpoints = 0u64;
     let mut mismatch: Option<(u64, String, String)> = None;
+    let mut probe_drift: Option<(u64, String, String)> = None;
     for tick in 1..=last_tick {
         let batch: Vec<InputEvent> = session.inputs_at(tick).to_vec();
         engine.tick(&batch);
+        // ★ Slice 9b: the recording's own probe line, checked. A boot-posture
+        // mismatch shows up here at the first logged tick — the failure mode
+        // that made the desktop's default moving to the front door dangerous.
+        if let Some(recorded) = debug_log::probe_divergence(&session, tick, &engine) {
+            if probe_drift.is_none() {
+                probe_drift = Some((tick, recorded, engine.probe()));
+            }
+        }
         if let Some((request, outcome)) =
             debug_log::fulfill_pending_io(&mut engine, &saves_dir, opts.seed)
         {
@@ -169,6 +188,20 @@ pub fn cmd_replay(args: Vec<String>) -> ExitCode {
     let _ = std::fs::remove_dir_all(&saves_dir);
 
     eprintln!("-- replay: {checkpoints} checkpoint(s) over {last_tick} tick(s) --");
+    match &probe_drift {
+        Some((tick, want, got)) => {
+            eprintln!("★ PROBE DRIFT at tick {tick}: log says {want:?}, this run is {got:?}");
+            eprintln!(
+                "  the recording's boot posture is probably not {:?} — see --slot/--bare/--front-door",
+                opts.boot
+            );
+        }
+        None if session.probes.is_empty() => {}
+        None => eprintln!(
+            "   {} probe checkpoint(s) matched the recording",
+            session.probes.len()
+        ),
+    }
     match (mismatch, &opts.verify) {
         (Some((tick, want, got)), _) => {
             eprintln!("DIVERGED at tick {tick}");
@@ -241,6 +274,7 @@ impl Args {
                     boot = Boot::ImportedSlot(letter);
                 }
                 "--bare" => boot = Boot::Bare,
+                "--front-door" => boot = Boot::FrontDoor,
                 "--checkpoint-every" => {
                     let v = next_val(&mut iter, "--checkpoint-every")?;
                     every = v
@@ -292,16 +326,19 @@ fn next_val(
 
 pub fn print_usage() {
     eprintln!(
-        "usage: restrike replay <session.log> [DIR] [--slot X|--bare] [--checkpoint-every N] \
-         [--tail N] [--seed N] [--digests-out FILE] [--verify FILE]"
+        "usage: restrike replay <session.log> [DIR] [--slot X|--bare|--front-door] \
+         [--checkpoint-every N] [--tail N] [--seed N] [--digests-out FILE] [--verify FILE]"
     );
     eprintln!();
     eprintln!(
         "Replays a RESTRIKE_DEBUG_LOG recorded by the desktop and emits H5 state-digest \
          checkpoints (roll-credits D-RC3) as 'tick<TAB>digest' lines — to --digests-out, else \
-         stdout. Boots from an imported save slot (default A, the desktop's own default); \
-         --bare boots partyless. Save/load requests the session made are fulfilled against a \
-         throwaway COPY of DIR/SAVE, so a replay never writes over real saves."
+         stdout. The boot posture must match the flags the recording desktop ran with: the \
+         default is the FRONT DOOR (the desktop's own no-flag default since slice 9b), \
+         --slot X replays a '--slot X' session and --bare a '--slot none' one. A log recorded \
+         before slice 9b wants --slot A. The run reports any probe drift against the \
+         recording's own log lines. Save/load requests the session made are fulfilled against \
+         a throwaway COPY of DIR/SAVE, so a replay never writes over real saves."
     );
     eprintln!();
     eprintln!(
@@ -326,7 +363,12 @@ mod tests {
     fn the_defaults_are_the_desktops_own() {
         let a = parse(&["session.log"]).expect("a bare log path is enough");
         assert_eq!(a.log, PathBuf::from("session.log"));
-        assert_eq!(a.boot, Boot::ImportedSlot('A'));
+        // ★ Slice 9b: the desktop's no-flag launch is the front door, so this
+        // one is too. The whole point of `Boot::default()` being *defined* as
+        // the desktop's default is that these two move together — a log
+        // recorded with no flags must replay with no flags.
+        assert_eq!(a.boot, Boot::FrontDoor);
+        assert_eq!(a.boot, Boot::default());
         assert_eq!(a.seed, DEFAULT_SEED);
         assert_eq!(a.every, DEFAULT_CHECKPOINT_EVERY);
         assert!(a.digests_out.is_none() && a.verify.is_none());
@@ -358,6 +400,10 @@ mod tests {
         assert_eq!(a.verify, Some(PathBuf::from("want.tsv")));
 
         assert_eq!(parse(&["s.log", "--bare"]).unwrap().boot, Boot::Bare);
+        assert_eq!(
+            parse(&["s.log", "--front-door"]).unwrap().boot,
+            Boot::FrontDoor
+        );
     }
 
     #[test]

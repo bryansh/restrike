@@ -1928,6 +1928,34 @@ frame dumps (`RESTRIKE_FRONT_DOOR_DUMP=<dir>`):
 Gates green throughout: guard 16/16, reel smoke 16/16 (62,108 draws), 1,725
 workspace tests, clippy 0, fmt clean, no golden moved.
 
+### 14.7a The forensics posture (audit finding, folded)
+
+Moving the desktop's default from "import slot A" to "the front door" moves
+what a `RESTRIKE_DEBUG_LOG` recorded with no flags means — and a replay that
+booted the old way would diverge at tick 0 with nothing saying so. That is the
+exact failure the 2026-08-03 invisible-menu arc built this pipeline to prevent,
+so it is closed two ways:
+
+1. **`Boot::default()` is *defined* as "whatever `restrike-desktop` does with
+   no arguments"**, and now returns `Boot::FrontDoor`. Both replay fronts
+   follow it, so the no-flag log ↔ no-flag replay case is right by
+   construction. The other two postures are selected exactly as the desktop
+   selects them — `restrike replay --slot X` / `--bare` / `--front-door`, and
+   `RESTRIKE_REPLAY_SLOT=A` / `RESTRIKE_REPLAY_BARE=1` for the example. Sites
+   that *mean* "an imported party" (the camp save/load exercise, the real-boot
+   digest round trip) now say `Boot::ImportedSlot('A')` explicitly instead of
+   riding the default. **An H5 trace recorded before this slice wants
+   `--slot A`.**
+2. **The replay checks rather than assumes.** `Session` now parses the probe
+   off every `tick N | sent … | <probe>` line, and both fronts compare it
+   against the live engine each tick (`debug_log::probe_divergence`), reporting
+   the FIRST disagreement with both sides and the tick it happened. A posture
+   mismatch surfaces at the first logged tick (`front-door/title` against
+   `boot/present`); anything else that drifts surfaces where it drifts. Pinned
+   by `a_front_door_session_replays_to_identical_digests`, which replays a
+   scripted front-door session to identical digests **and** asserts that
+   replaying the same log against `ImportedSlot('A')` is caught at tick 10.
+
 ### 14.8 Corrections and residuals
 
 - ★ **`PROTECTION` is not "never reached"** — `cotab-v1.3.md` §8 and FD-12

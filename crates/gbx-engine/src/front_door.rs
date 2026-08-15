@@ -625,7 +625,20 @@ impl FrontDoor {
                     ctx.fb.clear(0);
                     let _ = crate::frames::draw_frame_outer(ctx.fb, ctx.symbols);
                     for (i, line) in DEMO_STUB_TEXT.iter().enumerate() {
-                        crate::text::draw_string(ctx.fb, ctx.font, line, 8 + i, 3, 0, 15);
+                        // `draw_char` drops columns past 40 in silence, so an
+                        // over-long line loses its tail rather than complaining
+                        // (the audit caught exactly that here). Loud in debug,
+                        // pinned by `the_demo_stub_text_fits_inside_the_frame`.
+                        debug_assert!(line.len() <= DEMO_STUB_WIDTH);
+                        crate::text::draw_string(
+                            ctx.fb,
+                            ctx.font,
+                            line,
+                            8 + i,
+                            DEMO_STUB_COL,
+                            0,
+                            15,
+                        );
                     }
                     crate::combat::scene::render::draw_prompt(
                         ctx.fb,
@@ -694,11 +707,24 @@ impl Default for FrontDoor {
 
 /// The deferred-demo screen's words — loud on purpose (the M6 forensics rule:
 /// a deferral the player cannot see is a silent failure).
-const DEMO_STUB_TEXT: [&str; 3] = [
-    "The demo (attract mode) is not implemented.",
-    "ECL1 block 82 is out of scope for this",
-    "milestone. Returning to the title screen.",
+///
+/// This is OUR screen, not a transcription, so its layout is ours to get
+/// right: the lines start at column [`DEMO_STUB_COL`] inside
+/// `DrawFrame_Outer`'s border, and [`DEMO_STUB_WIDTH`] is what fits before the
+/// right edge. `draw_char` drops anything past column 40 silently, so a line
+/// that overflows simply loses its tail — the test below is what keeps that
+/// from happening again.
+const DEMO_STUB_TEXT: [&str; 4] = [
+    "The demo (attract mode) is deferred.",
+    "ECL1 block 82 is out of scope for",
+    "this milestone (roll-credits G10).",
+    "Returning to the title screen.",
 ];
+/// The stub text's left column, inside the outer frame.
+const DEMO_STUB_COL: usize = 3;
+/// Columns available from [`DEMO_STUB_COL`] to the frame's right edge
+/// inclusive (`DrawFrame_Outer` owns columns 0 and 0x27 and clears 1..=0x26).
+const DEMO_STUB_WIDTH: usize = 0x26 - DEMO_STUB_COL + 1;
 
 // --- startGameMenu (ovr018.cs:69-306) ---
 
@@ -1082,6 +1108,20 @@ mod tests {
         }
         assert_eq!(beats, 4);
         assert_eq!(total, 35 * TICK_HZ);
+    }
+
+    /// Our own deferral screen has to fit inside its own frame: `draw_char`
+    /// drops columns past 40 without a word, so an over-long line loses its
+    /// tail and the message stops making sense ("...IS NOT IMPLE").
+    #[test]
+    fn the_demo_stub_text_fits_inside_the_frame() {
+        for line in DEMO_STUB_TEXT {
+            assert!(
+                line.len() <= DEMO_STUB_WIDTH,
+                "{line:?} is {} columns, {DEMO_STUB_WIDTH} available",
+                line.len()
+            );
+        }
     }
 
     /// The credits table is the original's, in its own draw order.

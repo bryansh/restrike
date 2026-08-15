@@ -2551,7 +2551,10 @@ fn a_session_survives_a_save_quit_relaunch_load() {
     debug_log::sandbox_saves(&dir.join("SAVE"), &saves).expect("saves sandbox");
 
     // --- session 1: boot, play, save from inside the game ---
-    let mut engine = debug_log::boot(&dir, Boot::default(), 1).expect("slot A boots");
+    // Explicitly slot A, not `Boot::default()`: this exercise is about camp's
+    // Save screen and needs a party in the world from tick 1. The default
+    // tracks the DESKTOP's default, which since slice 9b is the front door.
+    let mut engine = debug_log::boot(&dir, Boot::ImportedSlot('A'), 1).expect("slot A boots");
     engine.set_slot_directory(scan_slot_directory(&saves));
     for tick in 1..=300u64 {
         engine.tick(if tick % 30 == 0 {
@@ -2581,7 +2584,7 @@ fn a_session_survives_a_save_quit_relaunch_load() {
     drop(engine);
 
     // --- session 2: relaunch, load ---
-    let mut engine = debug_log::boot(&dir, Boot::default(), 1).expect("slot A boots again");
+    let mut engine = debug_log::boot(&dir, Boot::ImportedSlot('A'), 1).expect("slot A boots again");
     engine.set_slot_directory(scan_slot_directory(&saves));
     assert_eq!(
         engine.slot_directory().status('J'),
