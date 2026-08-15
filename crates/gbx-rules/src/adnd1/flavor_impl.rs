@@ -117,13 +117,23 @@ impl<'a> Flavor for Adnd1<'a> {
         v
     }
 
-    /// Best-of-6 rerolls of `3d6+1` (`ovr018.cs:675-683`, exact).
-    fn roll_ability_score(&self, roller: &mut dyn Roller) -> u8 {
-        let mut best = 0u32;
+    /// Best-of-6 rerolls of `3d6+1`, the six stats **interleaved within each
+    /// iteration** (`ovr018.cs:675-683`, exact — six passes, and each pass
+    /// rolls str, int, wis, dex, con, cha in that order before the next pass
+    /// starts). 36 draws of `roll(6, 3)`, in that order; the `+1` is the
+    /// original's own (`Math.Max(prev, roll_dice(6,3) + 1)`), so a stat's
+    /// domain here is `4..=19`, not textbook `3..=18`.
+    ///
+    /// ★ **FD-30 closed.** The interleave is the whole reason this method is
+    /// plural — see [`Flavor::roll_ability_scores`].
+    fn roll_ability_scores(&self, roller: &mut dyn Roller) -> [u8; 6] {
+        let mut best = [0u32; 6];
         for _ in 0..6 {
-            best = best.max(roller.roll(6, 3) + 1);
+            for stat in best.iter_mut() {
+                *stat = (*stat).max(roller.roll(6, 3) + 1);
+            }
         }
-        best as u8
+        best.map(|v| v as u8)
     }
 
     /// `ovr018.cs:699-701`'s gate: any of fighter, ranger, or paladin among
@@ -764,13 +774,60 @@ mod tests {
     }
 
     #[test]
-    fn roll_ability_score_takes_the_best_of_six_3d6_plus_1() {
+    fn roll_ability_scores_takes_the_best_of_six_3d6_plus_1_per_stat() {
         let rules = RuleSet::load();
         let flavor = Adnd1::new(&rules);
-        // six rolls of 3d6 (roller returns the pre-summed total per call)
-        // -- best-of-6 must pick 15, then +1 = 16.
-        let mut roller = FixedRolls::new([10, 15, 8, 12, 9, 14]);
-        assert_eq!(flavor.roll_ability_score(&mut roller), 16);
+        // 36 draws, consumed in the original's order: iteration-major, stat
+        // -minor. Give STR the sequence 10,15,8,12,9,14 (best 15 -> 16) and
+        // every other stat a flat 9 (-> 10); the STR values must land in the
+        // 1st, 7th, 13th, 19th, 25th and 31st draws for that to come out.
+        let mut draws = Vec::new();
+        for pass in 0..6 {
+            draws.push([10, 15, 8, 12, 9, 14][pass]);
+            draws.extend([9, 9, 9, 9, 9]);
+        }
+        let mut roller = FixedRolls::new(draws);
+        assert_eq!(
+            flavor.roll_ability_scores(&mut roller),
+            [16, 10, 10, 10, 10, 10]
+        );
+    }
+
+    /// ★ FD-30's actual content: the DRAW ORDER, not just the result. A
+    /// per-stat API would consume `str×6, int×6, …`; the original consumes
+    /// one pass of all six, six times over. This roller records the order it
+    /// was asked in and the test reads it back.
+    #[test]
+    fn roll_ability_scores_interleaves_the_six_stats_within_each_pass() {
+        struct Tagged {
+            next: u32,
+            seen: Vec<u32>,
+        }
+        impl Roller for Tagged {
+            fn roll(&mut self, size: u32, count: u32) -> u32 {
+                assert_eq!((size, count), (6, 3), "the creation die is 3d6");
+                self.next += 1;
+                self.seen.push(self.next);
+                // Ascending draws: the LAST pass wins every stat, so the
+                // returned scores are draws 31..=36 (+1).
+                self.next
+            }
+        }
+        let rules = RuleSet::load();
+        let flavor = Adnd1::new(&rules);
+        let mut roller = Tagged {
+            next: 0,
+            seen: Vec::new(),
+        };
+        let scores = flavor.roll_ability_scores(&mut roller);
+        assert_eq!(roller.seen.len(), 36, "six passes over six stats");
+        assert_eq!(
+            scores,
+            [32, 33, 34, 35, 36, 37],
+            "each stat keeps its own LAST (largest) draw, so the six results \
+             are the final pass's six consecutive draws +1 — only possible if \
+             the passes interleave"
+        );
     }
 
     #[test]

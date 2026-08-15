@@ -676,6 +676,128 @@ pub fn decode_char_record(bytes: &[u8]) -> Result<CharRecord, SaveParseError> {
     })
 }
 
+fn write_stat(out: &mut [u8], offset: usize, stat: RawStat) {
+    let (a, b) = match STAT_BYTE_ORDER {
+        StatByteOrder::CoabCurFull => (stat.current, stat.original),
+        StatByteOrder::GbcOriginalCurrent => (stat.original, stat.current),
+    };
+    out[offset] = a;
+    out[offset + 1] = b;
+}
+
+/// A Pascal string: a length byte then `cap` payload bytes, zero-padded
+/// (`Sys.StringToArray`, and what every real `.guy`/`CHRDAT` record on disk
+/// holds). An over-long name is truncated to `cap`, never panicked over.
+fn write_pstring(out: &mut [u8], offset: usize, cap: usize, text: &str) {
+    let bytes: Vec<u8> = text.bytes().take(cap).collect();
+    out[offset] = bytes.len() as u8;
+    out[offset + 1..offset + 1 + cap].fill(0);
+    out[offset + 1..offset + 1 + bytes.len()].copy_from_slice(&bytes);
+}
+
+/// ★ **The inverse of [`decode_char_record`]** — `Player.ToByteArray()`
+/// (`Classes/Player.cs:750-774`), the write half `SavePlayer` needs
+/// (`ovr017.cs:180`) and roll-credits slice 9c's `.guy` writer.
+///
+/// Every offset is the same one [`decode_char_record`] reads, so the two are
+/// exact mutual inverses over the fields `CharRecord` carries. The five
+/// **pointer runs** D-SAVE6 refuses to model (affects-list @0xf2, items-list
+/// @0x14d, `activeItems` @0x151, next-char @0x189, actions @0x18d) — plus the
+/// unread item-count cell @0x14c — are written as **zeros**, which is exactly
+/// what the original itself leaves there: every real `.GUY`/`CHRDAT*.SAV` in
+/// the shipped save set has those runs zeroed (verified against the bundle,
+/// see this module's tests). So `encode(decode(bytes)) == bytes` holds
+/// byte-for-byte on real data, not just on data we produced.
+pub fn encode_char_record(rec: &CharRecord) -> [u8; CHAR_RECORD_SIZE] {
+    let mut out = [0u8; CHAR_RECORD_SIZE];
+
+    write_pstring(&mut out, 0x00, 15, &rec.name);
+
+    write_stat(&mut out, 0x10, rec.stats.str);
+    write_stat(&mut out, 0x12, rec.stats.int);
+    write_stat(&mut out, 0x14, rec.stats.wis);
+    write_stat(&mut out, 0x16, rec.stats.dex);
+    write_stat(&mut out, 0x18, rec.stats.con);
+    write_stat(&mut out, 0x1a, rec.stats.cha);
+    write_stat(&mut out, 0x1c, rec.stats.str_exceptional);
+
+    let copy = |out: &mut [u8], offset: usize, src: &[u8], cap: usize| {
+        let n = src.len().min(cap);
+        out[offset..offset + n].copy_from_slice(&src[..n]);
+    };
+    copy(&mut out, 0x1e, &rec.spell_list, 84);
+    out[0x72] = rec.spell_to_learn_count;
+    out[0x73] = rec.thac0_base as u8;
+    out[0x74] = rec.race;
+    out[0x75] = rec.class;
+    out[0x76..0x78].copy_from_slice(&rec.age.to_le_bytes());
+    out[0x78] = rec.hit_point_max;
+    copy(&mut out, 0x79, &rec.spell_book, 100);
+    out[0xdd] = rec.attack_level;
+    out[0xde] = rec.field_de;
+    out[0xdf..0xe4].copy_from_slice(&rec.save_verse);
+    out[0xe4] = rec.base_movement;
+    out[0xe5] = rec.hit_dice;
+    out[0xe6] = rec.multiclass_level;
+    out[0xe7] = rec.lost_lvls;
+    out[0xe8] = rec.lost_hp;
+    out[0xe9] = rec.field_e9;
+    out[0xea..0xf2].copy_from_slice(&rec.thief_skills);
+    // 0xf2..0xf6 — affects-list pointer (D-SAVE6): zeroed, as on disk.
+    out[0xf6] = rec.field_f6;
+    out[0xf7] = rec.control_morale;
+    out[0xf8] = rec.npc_treasure_share_count;
+    out[0xf9..0xfb].copy_from_slice(&rec.field_f9_fa);
+    for (i, v) in rec.money.iter().enumerate() {
+        out[0xfb + i * 2..0xfd + i * 2].copy_from_slice(&v.to_le_bytes());
+    }
+    out[0x109..0x111].copy_from_slice(&rec.class_level);
+    out[0x111..0x119].copy_from_slice(&rec.class_levels_old);
+    out[0x119] = rec.sex;
+    out[0x11a] = rec.monster_type;
+    out[0x11b] = rec.alignment;
+    out[0x11c..0x124].copy_from_slice(&rec.attack_profile_base);
+    out[0x124] = rec.base_ac as u8;
+    out[0x125] = rec.field_125;
+    out[0x126] = rec.mod_id;
+    out[0x127..0x12b].copy_from_slice(&rec.exp.to_le_bytes());
+    out[0x12b] = rec.class_flags;
+    out[0x12c] = rec.hit_point_rolled;
+    for (i, row) in rec.spell_cast_count.iter().enumerate() {
+        for (j, cell) in row.iter().enumerate() {
+            out[0x12d + j + i * SPELL_CAST_COUNT_STRIDE] = *cell;
+        }
+    }
+    out[0x13c..0x13e].copy_from_slice(&rec.field_13c.to_le_bytes());
+    out[0x13e..0x141].copy_from_slice(&rec.field_13e_140);
+    out[0x141] = rec.head_icon;
+    out[0x142] = rec.weapon_icon;
+    out[0x143] = rec.icon_id;
+    out[0x144] = rec.icon_size;
+    out[0x145..0x14b].copy_from_slice(&rec.icon_colours);
+    out[0x14b] = rec.field_14b;
+    // 0x14c item-count cell + 0x14d..0x185 the items/activeItems pointer runs
+    // (D-SAVE6): zeroed, as on disk.
+    out[0x185] = rec.weapons_hands_used;
+    out[0x186] = rec.field_186 as u8;
+    out[0x187..0x189].copy_from_slice(&rec.weight.to_le_bytes());
+    // 0x189..0x191 — next-char + actions pointers (D-SAVE6): zeroed.
+    out[0x191] = rec.paladin_cures_left;
+    out[0x192..0x195].copy_from_slice(&rec.field_192_194);
+    out[0x195] = rec.health_status;
+    out[0x196] = u8::from(rec.in_combat);
+    out[0x197] = rec.combat_team;
+    out[0x198] = rec.quick_fight;
+    out[0x199] = rec.hit_bonus;
+    out[0x19a] = rec.ac as u8;
+    out[0x19b] = rec.ac_behind as u8;
+    out[0x19c..0x1a4].copy_from_slice(&rec.attack_profile_current);
+    out[0x1a4] = rec.hit_point_current;
+    out[0x1a5] = rec.movement;
+
+    out
+}
+
 // ---------------------------------------------------------------------
 // `.swg` (items) / `.fx` (affects) sized-blob readers — opaque per §5.5
 // ---------------------------------------------------------------------
@@ -1260,5 +1382,136 @@ mod tests {
         let master_bytes = synthetic_master_bytes(1);
         let err = load_from_lookup(&master_bytes, 'A', |_| None).unwrap_err();
         assert_eq!(err, ImportSetError::MissingFile("CHRDATA1.SAV".to_string()));
+    }
+
+    /// [`encode_char_record`] is [`decode_char_record`]'s exact inverse over
+    /// every field the record carries.
+    #[test]
+    fn encode_char_record_round_trips_a_synthetic_record() {
+        let bytes = synthetic_char_bytes("Solo");
+        let rec = decode_char_record(&bytes).unwrap();
+        let again = encode_char_record(&rec);
+        assert_eq!(
+            decode_char_record(&again).unwrap(),
+            rec,
+            "decode(encode(rec)) must be rec"
+        );
+        assert_eq!(&again[..], &bytes[..], "and the bytes must match too");
+    }
+
+    /// A name longer than the 15-char Pascal-string payload is truncated, not
+    /// a panic (the creation screen caps at 15, but a `.guy` from elsewhere
+    /// is untrusted user data).
+    #[test]
+    fn encode_char_record_truncates_an_over_long_name() {
+        let mut rec = decode_char_record(&synthetic_char_bytes("Solo")).unwrap();
+        rec.name = "ABCDEFGHIJKLMNOPQRSTUV".to_string();
+        let bytes = encode_char_record(&rec);
+        assert_eq!(bytes[0], 15);
+        assert_eq!(decode_char_record(&bytes).unwrap().name, "ABCDEFGHIJKLMNO");
+    }
+
+    /// The six byte runs [`encode_char_record`] deliberately zeroes: the five
+    /// D-SAVE6 pointer runs and the unread item-count cell.
+    const POINTER_RUNS: [std::ops::Range<usize>; 6] = [
+        0xf2..0xf6,   // affects list
+        0x14c..0x14d, // item count (coab comments it out)
+        0x14d..0x151, // items list
+        0x151..0x185, // activeItems (13 pointers)
+        0x189..0x18d, // next character
+        0x18d..0x191, // actions
+    ];
+
+    /// ★ **Real-data pin (local tier, `GBX_DATA_DIR`).** The bundle's own
+    /// `SAVE/` directory carries three `.GUY` files the ORIGINAL wrote —
+    /// characters made in DOSBox with `createPlayer` — plus the whole
+    /// `CHRDAT*.SAV` set.
+    ///
+    /// The claim: `encode(decode(bytes))` reproduces every one of them
+    /// **byte for byte outside [`POINTER_RUNS`], and differs nowhere else**.
+    /// The second half is the sharper one — it measures D-SAVE6's refusal
+    /// list rather than assuming it: if any modeled field were missing or
+    /// mis-offset, the difference would land outside the runs and this fails.
+    ///
+    /// What the real files show about those runs:
+    ///
+    /// - the **next-character pointer** (`0x189`) is live in a `CHRDAT*.SAV`
+    ///   — the in-game party is a linked list — and null in a `.GUY`;
+    /// - the **affects-list pointer** (`0xf2`) is live in any character that
+    ///   owns a `.fx` file, `.GUY` included (`PHIL.GUY`/`STEVE.GUY` carry a
+    ///   segment word there; `JOE.GUY`, who has no affects, is all zeros and
+    ///   round-trips byte-identically).
+    ///
+    /// Writing zeros for both is safe in the original's own terms: it reloads
+    /// the sibling `.swg`/`.fx` **by filename** (`ovr017.cs:536-566`) and
+    /// never dereferences what the record stored.
+    #[test]
+    fn encode_char_record_reproduces_every_real_character_file() {
+        let Some(dir) = std::env::var_os("GBX_DATA_DIR") else {
+            return;
+        };
+        let save_dir = std::path::Path::new(&dir).join("SAVE");
+        let Ok(entries) = std::fs::read_dir(&save_dir) else {
+            return;
+        };
+        let (mut guys, mut savs) = (0usize, 0usize);
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let ext = path
+                .extension()
+                .map(|e| e.to_string_lossy().to_ascii_uppercase())
+                .unwrap_or_default();
+            if ext != "GUY" && ext != "SAV" {
+                continue;
+            }
+            let bytes = std::fs::read(&path).expect("readable");
+            if bytes.len() != CHAR_RECORD_SIZE {
+                continue; // SAVGAM*.DAT masters live in this directory too
+            }
+            let rec =
+                decode_char_record(&bytes).unwrap_or_else(|e| panic!("{}: {e:?}", path.display()));
+            let again = encode_char_record(&rec);
+            let mut masked = bytes.clone();
+            for run in POINTER_RUNS {
+                masked[run].fill(0);
+            }
+            // ★ The name's tail past its Pascal length byte is in-memory
+            // leftovers too — `CHRDATF3.SAV` stores `06 "TRAVIS" 20 ...`, a
+            // space the declared length excludes. Turbo Pascal writes the raw
+            // `string[15]` field without clearing it; coab's own
+            // `Sys.StringToArray` zero-pads (`Classes/Sys.cs:68-82`), and so
+            // do we.
+            let name_len = (masked[0] as usize).min(15);
+            masked[1 + name_len..0x10].fill(0);
+            assert_eq!(
+                &again[..],
+                &masked[..],
+                "{} differs outside the D-SAVE6 pointer runs",
+                path.display()
+            );
+            if ext == "GUY" {
+                guys += 1
+            } else {
+                savs += 1
+            }
+        }
+        assert!(guys >= 3, "expected the bundle's .GUY files, found {guys}");
+        assert!(savs >= 6, "expected the CHRDAT*.SAV set, found {savs}");
+    }
+
+    /// The affects-pointer finding above, stated as its own pin: a `.GUY`
+    /// with no `.fx` sibling is *entirely* zero in the pointer runs, so our
+    /// encoder reproduces it with no masking at all.
+    #[test]
+    fn a_character_file_with_no_affects_round_trips_with_no_masking() {
+        let Some(dir) = std::env::var_os("GBX_DATA_DIR") else {
+            return;
+        };
+        let path = std::path::Path::new(&dir).join("SAVE").join("JOE.GUY");
+        let Ok(bytes) = std::fs::read(&path) else {
+            return;
+        };
+        let rec = decode_char_record(&bytes).unwrap();
+        assert_eq!(&encode_char_record(&rec)[..], &bytes[..]);
     }
 }

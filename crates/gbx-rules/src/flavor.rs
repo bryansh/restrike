@@ -103,9 +103,18 @@ pub trait Flavor {
         value: u8,
     ) -> u8;
 
-    /// Rolls one ability score: best-of-N rerolls of the flavor's base
-    /// dice formula.
-    fn roll_ability_score(&self, roller: &mut dyn Roller) -> u8;
+    /// Rolls **all six** ability scores at once, in [`StatBlock`]'s own
+    /// first-six order (str, int, wis, dex, con, cha).
+    ///
+    /// ★ Plural on purpose (**FD-30**, settled by roll-credits slice 9c).
+    /// A flavor is free to interleave its draws across the six stats — and
+    /// `adnd1` does: it runs N reroll iterations and inside each one rolls
+    /// str, int, wis, dex, con, cha in that order, keeping the best per stat.
+    /// A per-stat entry point could only ever produce `str×N, int×N, …`, the
+    /// same draw *multiset* in a different **order**, which against a per-draw
+    /// oracle trace is a desync. The plural signature is what makes the
+    /// original's ordering expressible at all.
+    fn roll_ability_scores(&self, roller: &mut dyn Roller) -> [u8; 6];
 
     /// True if `classes` qualifies for an exceptional (fractional-above-18)
     /// strength roll.
