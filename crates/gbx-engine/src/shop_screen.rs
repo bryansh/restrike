@@ -10,7 +10,7 @@
 //! ## The verb bar, as transcribed
 //!
 //! `CityShop` composes it fresh every iteration from **one** condition —
-//! whether there is money on the ground (`ovr007.cs:170-178`):
+//! whether there is money on the ground (`ovr007.cs:176-186`):
 //!
 //! | condition | bar |
 //! |---|---|
@@ -25,13 +25,13 @@
 //! one.
 //!
 //! Two keys are on the switch but never in the text: `'G'` and `'O'`, which
-//! `scroll_team_list` uses to move `gbl.SelectedPlayer` (`ovr007.cs:248-255`)
+//! `scroll_team_list` uses to move `gbl.SelectedPlayer` (`ovr007.cs:248-254`)
 //! — the shop's buyer, the sheet's subject, and the seller, all one cell.
-//! `'P'` additionally requires `controlKey == false` (`:203`).
+//! `'P'` additionally requires `controlKey == false` (`:206-210`).
 //!
 //! ## Entry and exit
 //!
-//! Entry (`:155-166`): `game_state = Shop`, `LoadPic`, `PartySummary`, and
+//! Entry (`:154-172`): `game_state = Shop`, `LoadPic`, `PartySummary`, and
 //! **`pooled_money.ClearAll()`** — so, as in the temple, `Pool` is the only
 //! way to get coins into the pool and `shop_buy`'s pooled-money fallback can
 //! only ever spend what this visit pooled.
@@ -62,7 +62,7 @@ use crate::widgets::{Hotbar, ListItem, ListLayout, ListMenu, Widget, WidgetOutco
 use gbx_formats::items::ItemDataTable;
 
 /// `ShopChooseItem`'s list box (`sl_select_item(…, 0x16, 0x26, 1, 1, …)`,
-/// `ovr007.cs:29-30`) — rows 1..=0x16, columns 1..=0x26.
+/// `ovr007.cs:28-29`) — rows 1..=0x16, columns 1..=0x26.
 const BUY_LAYOUT: ListLayout = ListLayout {
     start_row: 1,
     start_col: 1,
@@ -82,7 +82,7 @@ pub const PRICE_CLASS_ADDR: u16 = 0x7F6D;
 /// Where a parked shop visit is.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 enum Stage {
-    /// `CityShop`'s `displayInput` loop (`ovr007.cs:168-256`).
+    /// `CityShop`'s `displayInput` loop (`ovr007.cs:174-270`).
     Shop,
     /// `shop_buy` → `ShopChooseItem` (`:106-149`, `:8-41`).
     Buy,
@@ -100,7 +100,7 @@ enum Stage {
 pub struct ShopHost {
     stage: Stage,
     /// The stock, snapshotted from `gbl.items_pointer` on entry. Buying never
-    /// removes a row (`ovr007.cs:126` clones), so nothing here changes.
+    /// removes a row (`ovr007.cs:97` clones), so nothing here changes.
     shop: Shop,
     list: ListMenu,
     status: Option<String>,
@@ -109,7 +109,7 @@ pub struct ShopHost {
 }
 
 impl ShopHost {
-    /// `CityShop`'s entry (`ovr007.cs:155-166`): the stock comes from
+    /// `CityShop`'s entry (`ovr007.cs:154-172`): the stock comes from
     /// `gbl.items_pointer` (which the script's own `TREASURE` filled), the
     /// price class from `area2.field_6DA`, and **the pool is emptied**.
     pub fn open(ctx: &mut FlowCtx) -> Self {
@@ -161,7 +161,7 @@ impl ShopHost {
     }
 
     /// The stock as `ShopChooseItem` lists it: `gbl.items_pointer` **reversed**
-    /// (`list.Insert(0, …)`, `ovr007.cs:19`), each row
+    /// (`list.Insert(0, …)`, `ovr007.cs:20`), each row
     /// `"{name,-21}{value,9}"` with `_value` floored to 1 (`:13-16`).
     fn buy_list(shop: &Shop, roster: &crate::party::Party) -> ListMenu {
         let detect_magic = crate::items::party_has_detect_magic(roster);
@@ -210,7 +210,7 @@ impl ShopHost {
     }
 
     /// The word list `CityShop` composes from what is on the ground
-    /// (`ovr007.cs:170-178`).
+    /// (`ovr007.cs:176-186`).
     fn shop_bar(pool: &MoneySet) -> &'static str {
         if pool.any() {
             "Buy View Take Pool Share Appraise Exit"
@@ -239,7 +239,7 @@ impl ShopHost {
                     self.stage = Stage::Buy;
                 }
             }
-            // `ovr020.viewPlayer()` (`ovr007.cs:190`) — and `ReturnTo::Shop`
+            // `ovr020.viewPlayer()` (`ovr007.cs:199`) — and `ReturnTo::Shop`
             // is what puts `Sell` and `Id` on the Items leaf's bar.
             b'V' => {
                 self.status = None;
@@ -277,7 +277,7 @@ impl ShopHost {
         }
         match outcome {
             // `if (input_key != 'B' && input_key != 0x0d) return;`
-            // (`ovr007.cs:113`) — only those two keys buy.
+            // (`ovr007.cs:117-120`) — only those two keys buy.
             WidgetOutcome::ListSelected { index, key } if key == b'B' || key == b'\r' => {
                 self.buy(ctx, self.stock_index(index));
             }
@@ -338,7 +338,7 @@ impl ShopHost {
     }
 
     fn tick_leaving(&mut self, ctx: &mut FlowCtx) -> ScreenTransition {
-        // `menu_selected == 1` -> `exitShop = true` (`ovr007.cs:234-237`) and
+        // `menu_selected == 1` -> `exitShop = true` (`ovr007.cs:233-236`) and
         // `sub_317AA` returns a 0-BASED index (`ovr008.cs:1196-1206`), so 1 is
         // `No`: Yes goes back into the shop for the money.
         match self.yes_no(ctx) {
@@ -389,7 +389,7 @@ impl ShopHost {
                     self.draw_prompt(ctx, Self::shop_bar(&ctx.state.pooled_money));
                 }
                 // `PartySummary(gbl.SelectedPlayer)` at the bottom of every
-                // iteration (`ovr007.cs:267`).
+                // iteration (`ovr007.cs:268`).
                 let member = (ctx.state.selected_player as usize)
                     .min(ctx.roster.members.len().saturating_sub(1));
                 let rows: Vec<crate::charsheet::SheetView> = ctx

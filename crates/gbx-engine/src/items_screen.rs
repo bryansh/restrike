@@ -194,7 +194,7 @@ impl ItemsScreen {
     /// ★ `gbl.game_state == GameState.Shop` (`ovr020.cs:484`) — the ONE
     /// condition that puts `Sell` and `Id` on this bar. In this shell the
     /// Items leaf only ever reaches a shop through `CityShop`'s own
-    /// `viewPlayer()` call (`ovr007.cs:190`), so
+    /// `viewPlayer()` call (`ovr007.cs:199`), so
     /// [`ReturnTo::Shop`](crate::screens::ReturnTo::Shop) IS that state.
     fn in_shop(&self) -> bool {
         matches!(self.return_to, ReturnTo::Shop)

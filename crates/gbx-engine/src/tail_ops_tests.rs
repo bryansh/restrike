@@ -313,7 +313,7 @@ fn the_shipped_tilverton_shop_opens_stocked_from_its_own_treasure_block() {
     assert_eq!(
         engine.state().treasure_items.len(),
         stock,
-        "★ the stock is not consumed — shop_buy clones (ovr007.cs:126)"
+        "★ the stock is not consumed — shop_buy clones (ovr007.cs:97)"
     );
 
     // Esc out of the list, then Exit the shop: the script resumes on the

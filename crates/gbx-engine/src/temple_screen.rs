@@ -409,7 +409,7 @@ impl TempleHost {
 /// `press_any_key(..., TextRegion.NormalBottom)`'s wrap: rows `0x11..=0x16`,
 /// columns 1..=0x26 (`crate::text::NORMAL_BOTTOM`), broken on spaces. Shared
 /// with the shop, whose leaving-with-money prompt is the same code with
-/// different words (`ovr007.cs:226-231` against `ovr005.cs:461-463`).
+/// different words (`ovr007.cs:228-229` against `ovr005.cs:461-462`).
 pub(crate) fn draw_wrapped(ctx: &mut FlowCtx, text: &str) {
     let region = crate::text::NORMAL_BOTTOM;
     let width = region.x_end + 1 - region.x_start;

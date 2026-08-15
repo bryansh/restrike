@@ -564,7 +564,7 @@ impl Engine {
     /// [`ShopHost`](crate::shop_screen::ShopHost) inside the suspended vector
     /// run instead; both run the same screen.
     ///
-    /// `CityShop` empties the pool on entry (`ovr007.cs:161`), so this does
+    /// `CityShop` empties the pool on entry (`ovr007.cs:168`), so this does
     /// too.
     pub fn enter_shop(&mut self, shop: crate::shop::Shop) {
         self.state.pooled_money.clear();

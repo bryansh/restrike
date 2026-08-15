@@ -29,7 +29,7 @@ pub enum ReturnTo {
     /// has no `BEGIN Adventuring` to press (`ovr018.cs:103-114`).
     GameOver,
     /// ★ Roll-credits slice 9a: opened from inside `CityShop`'s own loop
-    /// (`ovr007.cs:190` `viewPlayer()`). Appended last, so postcard keeps the
+    /// (`ovr007.cs:199` `viewPlayer()`). Appended last, so postcard keeps the
     /// three above at their indices.
     ///
     /// Load-bearing beyond "where does Exit go": it is also this shell's

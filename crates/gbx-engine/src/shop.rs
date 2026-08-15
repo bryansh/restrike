@@ -115,7 +115,7 @@ pub enum BuyError {
     /// ★ `PlayerAddItem`'s `canCarry` refusal (`ovr007.cs:85-89`,
     /// `"Overloaded"`) — sixteen items, or over
     /// `max_encumberance + 1500`. **The money is not taken**: `shop_buy` only
-    /// pays when `PlayerAddItem` reported no overload (`:126-137`).
+    /// pays when `PlayerAddItem` reported no overload (`:126-135`).
     Overloaded,
 }
 
@@ -125,7 +125,7 @@ pub struct BuyOutcome {
     pub item_name: String,
     pub price: i64,
     /// Whether the pool paid rather than the buyer's own purse
-    /// (`ovr007.cs:139-146`).
+    /// (`ovr007.cs:136-144`).
     pub paid_from_pool: bool,
 }
 
@@ -333,7 +333,7 @@ mod tests {
         assert_eq!(shop.items.len(), 1, "★ the stock is not consumed");
     }
 
-    /// ★ `shop_buy`'s second arm (`ovr007.cs:139-146`): a purse that cannot
+    /// ★ `shop_buy`'s second arm (`ovr007.cs:136-144`): a purse that cannot
     /// cover the price falls through to the POOL before the refusal.
     #[test]
     fn a_purse_that_cannot_cover_it_falls_through_to_the_pool() {
@@ -367,7 +367,7 @@ mod tests {
         assert!(buyer.items.is_empty(), "nothing bought on refusal");
     }
 
-    /// ★ `PlayerAddItem`'s overload refusal takes NO money (`ovr007.cs:126-137`).
+    /// ★ `PlayerAddItem`'s overload refusal takes NO money (`ovr007.cs:126-135`).
     #[test]
     fn an_overloaded_buyer_keeps_their_coins() {
         let r = rules();
