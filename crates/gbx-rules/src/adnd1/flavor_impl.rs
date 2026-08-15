@@ -395,7 +395,7 @@ impl<'a> Flavor for Adnd1<'a> {
                 out[skill - 1] = 0;
                 continue;
             }
-            let mut v = base + race_adj;
+            let mut v = THIEF_SKILL_VAR_2 + base + race_adj;
             if skill < 6 {
                 v += thief_skills::dex_adj(self.rules, dex as usize, skill) as i32;
             }
@@ -685,6 +685,34 @@ impl<'a> Flavor for Adnd1<'a> {
         }
     }
 }
+
+/// ★ **`reclac_thief_skills`'s `var_2` term** (`ovr026.cs:484,539`), measured
+/// rather than derived — **7**.
+///
+/// coab declares `byte var_2 = 0; //Simeon` (its own marker for a guessed
+/// initialiser) and only ever assigns it inside the `var_A` scroll-learning
+/// branch, so on the ordinary path it contributes whatever the original's
+/// uninitialised local holds. Every character record the original itself
+/// wrote says that value is **7, uniformly**:
+///
+/// | character | thief lvl | race | DEX | measured bias |
+/// |---|---|---|---|---|
+/// | `TRAVIS` (GOG bundle, dwarf F4/T5) | 5 | dwarf | 17 | +7 on all 8 |
+/// | `TRAVIS` (later save, DEX raised) | 5 | dwarf | 18 | +7 on all 8 |
+/// | `JOE.GUY` (rolled in DOSBox) | 6 | human | 14 | +7 on all 8 |
+/// | `STEVE.GUY` (rolled in DOSBox) | 6 | gnome | 13 | +7 on all 8 |
+///
+/// Four samples across two thief levels, three races, three DEX scores and
+/// two eras (SSI's 1989 party and characters rolled in 2026), and the residue
+/// is the same constant on every one of the eight skills — including 6, 7 and
+/// 8, which take no DEX adjustment at all, so it cannot be hiding in the DEX
+/// column. The mechanism stays a hypothesis (a deterministic stack slot on
+/// the one call path creation uses); the value does not.
+///
+/// The alternative — dropping it — would leave every thief we create seven
+/// points worse at everything than the same thief in DOSBox, which is a
+/// visible, playable wrongness. Docketed as **FD-46**.
+const THIEF_SKILL_VAR_2: i32 = 7;
 
 /// `player_strength_group` (`ovr025.cs:576-625`), the 18/xx exceptional-
 /// strength band mapping shared by [`Adnd1::strength_hit_bonus`] and
@@ -1042,12 +1070,43 @@ mod tests {
         let base2 = thief_skills::base_chance(&rules, 1, 2) as i32;
         let race2 = thief_skills::race_adj(&rules, 1, 2) as i32;
         let dex2 = thief_skills::dex_adj(&rules, 20, 2) as i32;
-        assert_eq!(out[1], (base2 + race2 + dex2).max(0) as u8);
+        assert_eq!(
+            out[1],
+            (THIEF_SKILL_VAR_2 + base2 + race2 + dex2).max(0) as u8
+        );
 
         // skill 7 (>=6): no dex adjustment applied, only base + race.
         let base7 = thief_skills::base_chance(&rules, 1, 7) as i32;
         let race7 = thief_skills::race_adj(&rules, 1, 7) as i32;
-        assert_eq!(out[6], (base7 + race7).max(0) as u8);
+        assert_eq!(out[6], (THIEF_SKILL_VAR_2 + base7 + race7).max(0) as u8);
+    }
+
+    /// ★ The `var_2` term and the corrected DEX column together, against the
+    /// four real records that measured them — see [`THIEF_SKILL_VAR_2`].
+    /// `(race, dex, thief level) -> the bytes the original stored`.
+    #[test]
+    fn skill_percentages_reproduce_every_real_thief_record() {
+        let rules = RuleSet::load();
+        let flavor = Adnd1::new(&rules);
+        // TRAVIS, dwarf fighter/thief 5, at DEX 17 and again at DEX 18.
+        assert_eq!(
+            flavor.skill_percentages(1, 17, 5),
+            [62, 69, 62, 52, 43, 27, 87, 27]
+        );
+        assert_eq!(
+            flavor.skill_percentages(1, 18, 5),
+            [67, 74, 67, 57, 48, 27, 87, 27]
+        );
+        // JOE.GUY, human thief 6, DEX 14.
+        assert_eq!(
+            flavor.skill_percentages(7, 14, 6),
+            [62, 54, 52, 54, 44, 27, 99, 37]
+        );
+        // STEVE.GUY, gnome thief 6, DEX 13.
+        assert_eq!(
+            flavor.skill_percentages(3, 13, 6),
+            [62, 59, 62, 59, 49, 37, 84, 37]
+        );
     }
 
     #[test]

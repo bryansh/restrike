@@ -28,6 +28,9 @@ pub mod combat_host;
 /// journey's bridge keeper.
 pub mod copy_wheel;
 pub mod corridor;
+/// ★ Roll-credits slice 9c: `createPlayer`'s record building — the picks, the
+/// stat roll, the derived-field recompute and `SilentTrainPlayer`.
+pub mod creation;
 /// The `RESTRIKE_DEBUG_LOG` replay pipeline (host-side: filesystem + save
 /// slots), shared by `examples/replay_debug_log` and `restrike replay`.
 #[cfg(not(target_arch = "wasm32"))]

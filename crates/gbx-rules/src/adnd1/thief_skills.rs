@@ -29,13 +29,33 @@ pub fn base_chance(rules: &RuleSet, thief_level: usize, skill: usize) -> u8 {
     rows_table(rules, "thief_skill_base_chance")[thief_level - 1][skill - 1] as u8
 }
 
-/// `unk_1A243[dex, skill]` (`ovr026.cs:535-536`) — only ever consulted for
+/// ★ `unk_1A243[dex, skill]` (`ovr026.cs:535-536`) — only ever consulted for
 /// `skill` 1..=5 (`if (skill < 6)`, `ovr026.cs:535`). `dex` is the raw DEX
-/// score, `0..=21` (the image's full confirmed extent — see the pack's
-/// `notes` for the unresolved column-mapping caveat).
+/// score, `0..=21` (the image's confirmed extent).
+///
+/// **The column mapping, settled (roll-credits slice 9c).** The image stores
+/// a **5**-wide array; coab declares a **6**-wide one whose rows are an
+/// overlapping *view* of the same bytes (coab row `d` = flat `d*5 ..
+/// d*5+6`, which is why every one of coab's 22 declared rows matches the
+/// image's columns 0..=4 followed by the next row's column 0). The consuming
+/// code indexes `[dex, skill]` with `skill` 1..=5 at the array's **real**
+/// 5-byte stride, so the bytes it reads are flat `dex*5 + skill` — i.e.
+/// coab's columns 1..=5, one to the right of what this accessor used to
+/// return. The pack's own `notes` predicted exactly this ("this session's
+/// read of the consumer would predict column 0 as the dead one"); real data
+/// settles it: `TRAVIS` (the GOG bundle's dwarf fighter/thief) carries the
+/// original's own recomputed skills at **two** different DEX scores, 17 and
+/// 18, and only this reading reproduces both.
+///
+/// Past the last stored byte (`dex == 21, skill == 5`) the original reads
+/// whatever follows the array; we return 0 rather than model adjacent data.
+/// No shipped character reaches it — DEX caps at 19 in play.
 pub fn dex_adj(rules: &RuleSet, dex: usize, skill: usize) -> i8 {
     assert!((1..=5).contains(&skill), "skill must be 1..=5, got {skill}");
-    rows_table(rules, "thief_skill_dex_adj")[dex][skill - 1] as i8
+    let rows = rows_table(rules, "thief_skill_dex_adj");
+    let flat = dex * 5 + skill;
+    let (row, col) = (flat / 5, flat % 5);
+    rows.get(row).and_then(|r| r.get(col)).copied().unwrap_or(0) as i8
 }
 
 /// `unk_1A230[race, skill]` (`ovr026.cs:426-439`/`532-539`) — `coab-only`
@@ -73,13 +93,30 @@ mod tests {
         base_chance(&rules, 0, 1);
     }
 
+    /// ★ The corrected column mapping: `dex_adj(dex, skill)` reads flat
+    /// `dex*5 + skill`, which is coab's declared `[dex, skill]` — one column
+    /// right of the stored row's own index.
     #[test]
-    fn dex_adj_matches_the_confirmed_image_rows() {
+    fn dex_adj_reads_coabs_column_skill_not_column_skill_minus_one() {
         let rules = RuleSet::load();
-        // dex index 20, skill 5 (row {12,8,8,18,17}, skill5 = last col = 17).
-        assert_eq!(dex_adj(&rules, 20, 5), 17);
-        // dex index 21 (the distinctive 99-led tail row {99,0,3,18,3}).
-        assert_eq!(dex_adj(&rules, 21, 1), 99);
+        // Stored row 17 is [0,5,10,0,5] and row 18 starts [5,...]; coab's
+        // declared row 17 is {0,5,10,0,5,5}, so skills 1..=5 are 5,10,0,5,5
+        // — the last one spilling into row 18's first byte.
+        assert_eq!(
+            [1, 2, 3, 4, 5].map(|s| dex_adj(&rules, 17, s)),
+            [5, 10, 0, 5, 5]
+        );
+        // Stored row 0 is [0,5,10,5,0], row 1 starts [0,...]; coab's row 0 is
+        // {0,5,10,5,0,0}.
+        assert_eq!(
+            [1, 2, 3, 4, 5].map(|s| dex_adj(&rules, 0, s)),
+            [5, 10, 5, 0, 0]
+        );
+        // dex index 20's skill 5 spills into row 21's 99 — coab's declared
+        // row 20 is {12,8,8,18,17,99}, and its last column is that same 99.
+        assert_eq!(dex_adj(&rules, 20, 5), 99);
+        // Past the end reads 0 rather than adjacent data (see the accessor).
+        assert_eq!(dex_adj(&rules, 21, 5), 0);
     }
 
     #[test]
