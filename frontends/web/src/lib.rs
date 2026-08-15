@@ -84,8 +84,16 @@ impl App {
         seed: u32,
     ) -> Result<App, JsValue> {
         let data = GameData::from_files(builder.files);
-        let engine = Engine::new(data, seed)
-            .map_err(|err| JsValue::from_str(&format!("Engine::new failed to boot: {err:?}")))?;
+        // ★ Roll-credits slice 9b: the browser has no `--slot` shortcut and no
+        // save directory to import from, so it gets the front door — the title
+        // screens, the Play-Demo prompt, the copy-protection challenge and
+        // `startGameMenu`. `Load Saved Game` there needs a host that can
+        // fulfill a `SaveLoadRequest`, which this frontend does not have yet
+        // (D8, and browser storage is its own slice); until it does, the web
+        // build reaches the menu and stops there.
+        let engine = Engine::new_front_door(data, seed).map_err(|err| {
+            JsValue::from_str(&format!("Engine::new_front_door failed to boot: {err:?}"))
+        })?;
         log_verify_report(&engine);
         let ctx = canvas
             .get_context("2d")?
