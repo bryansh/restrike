@@ -2183,6 +2183,85 @@ mod opcodes {
         assert_eq!(m.current_pc(), Some(after));
     }
 
+    /// ★ INPUT STRING (0x10), `CMD_InputString` (`ovr003.cs:372-388`): two
+    /// operand batches, the destination is the SECOND, and the typed line
+    /// lands there.
+    #[test]
+    fn input_string_writes_the_typed_line_to_the_second_operand() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x10).imm_byte(0x0C).mem_str(0x7B90);
+        b.label("after");
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let after = b.addr_of("after");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+
+        let step = m.step(&mut h).expect("INPUT STRING decodes");
+        let VmStep::Request(Request::InputString { max_len }) = step else {
+            panic!("expected the editor, got {step:?}");
+        };
+        // ★ 40, not the operand's 12 — the handler's own hardcoded `0x28`.
+        assert_eq!(max_len, 0x28);
+
+        m.resume(Reply::Text(VmString::from_bytes(&b"PASSWORD"[..])), &mut h)
+            .expect("the editor resumes");
+        assert_eq!(m.current_pc(), Some(after));
+        assert_eq!(
+            h.string(0x7B90),
+            Some(&VmString::from_bytes(&b"PASSWORD"[..]))
+        );
+    }
+
+    /// ★ An empty line becomes a single space (`ovr003.cs:379-382`, the
+    /// `asc_269A2` literal at `ovr003:09A2`) — so a destination cell never
+    /// holds the empty string, and the shipped `COMPARE [cell], "<word>"`
+    /// gates always compare against something.
+    #[test]
+    fn input_string_substitutes_a_space_for_an_empty_line() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x10).imm_byte(0x08).mem_str(0x7F79);
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+
+        assert!(matches!(
+            m.step(&mut h),
+            Ok(VmStep::Request(Request::InputString { .. }))
+        ));
+        m.resume(Reply::Text(VmString::default()), &mut h)
+            .expect("an empty line is a legal answer");
+        assert_eq!(h.string(0x7F79), Some(&VmString::from_bytes(&b" "[..])));
+    }
+
+    /// INPUT STRING consumes two operand batches, so an `IF` skipping over
+    /// one lands on the instruction after it.
+    #[test]
+    fn input_string_consumes_two_operand_batches() {
+        let mut b = EclBuilder::new();
+        b.label("entry");
+        b.op(0x10).imm_byte(0x2D).mem_str(0x7B00);
+        b.label("after");
+        b.op(0x00);
+
+        let entry = b.addr_of("entry");
+        let after = b.addr_of("after");
+        let mut m = machine_from(&b, entry);
+        let mut h = TestHost::new();
+        assert!(matches!(
+            m.step(&mut h),
+            Ok(VmStep::Request(Request::InputString { .. }))
+        ));
+        m.resume(Reply::Text(VmString::from_bytes(&b"X"[..])), &mut h)
+            .unwrap();
+        assert_eq!(m.current_pc(), Some(after));
+    }
+
     /// ★ WHO (0x39), `CMD_Who` (`ovr003.cs:1757-1765`): one operand batch,
     /// the picker's prompt taken from string register 1, and a reply that
     /// carries nothing (`selectAPlayer` mutates `gbl.SelectedPlayer`, not

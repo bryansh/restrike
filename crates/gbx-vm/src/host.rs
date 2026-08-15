@@ -536,6 +536,23 @@ pub enum Request {
     /// Appended last so the existing variant indices — which postcard
     /// encodes positionally inside `SaveState` — are untouched.
     SelectPlayer { prompt: VmString },
+    /// ★ INPUT STRING (0x10), `CMD_InputString` (`sub_269A4`,
+    /// `ovr003.cs:372-388` / `ovr003:09A4-0A12`) — `getUserInputString`'s
+    /// line editor.
+    ///
+    /// `max_len` is **40** at every site: the handler passes the literal
+    /// `0x28` (`ovr003:09D8 mov al, 28h`), and the opcode's FIRST operand —
+    /// which reads like a length cap (`0x2D`, `0x0C`, `0x08` at the five
+    /// shipped sites) — is loaded by `vm_LoadCmdSets(2)` and then **never
+    /// read**. It is carried in the request rather than assumed by the
+    /// engine so the constant has exactly one home.
+    ///
+    /// The editor itself (`seg041.cs:234-272`): accepts `0x20..=0x7A`,
+    /// backspace deletes, and the loop ends on **CR or ESC** — Esc is not a
+    /// cancel, it commits whatever has been typed. The result is
+    /// `.ToUpper()`ed, and an empty one becomes a single space `" "`
+    /// (`ovr003.cs:379-382`, `ovr003:09EF-0A05`) before it is written.
+    InputString { max_len: u8 },
 }
 
 /// Replies to a suspended `Request`. `resume()` checks the reply kind
@@ -554,6 +571,11 @@ pub enum Reply {
     /// writes no memory and `selectAPlayer` has already moved
     /// `gbl.SelectedPlayer` — engine state the VM does not own.
     PlayerSelected,
+    /// Answers a [`Request::InputString`] with the line the player typed,
+    /// already uppercased and truncated by the editor. The empty-string
+    /// substitution is the **opcode's**, not the editor's, so it happens on
+    /// this side of the boundary (`ovr003.cs:379-382`).
+    Text(VmString),
 }
 
 impl Reply {
@@ -567,6 +589,7 @@ impl Reply {
                 | (Reply::Combat, Request::Combat)
                 | (Reply::PressAnyKey, Request::PressAnyKey { .. })
                 | (Reply::PlayerSelected, Request::SelectPlayer { .. })
+                | (Reply::Text(_), Request::InputString { .. })
         )
     }
 }

@@ -32,6 +32,11 @@ use crate::host::{Effect, Origin, PlayerId, ProgramOutcome, Reply, Request, VmHo
 /// reproduces the original's `~`-prefixed literal exactly.
 const PARLAY_TONES: [&[u8]; 5] = [b"HAUGHTY", b"SLY", b"NICE", b"MEEK", b"ABUSIVE"];
 
+/// ★ INPUT STRING (0x10)'s real length cap: the literal `0x28` the handler
+/// passes to `getUserInputString` (`ovr003:09D8`), never the opcode's own
+/// first operand. See [`EclMachine::op_input_string`].
+const INPUT_STRING_MAX_LEN: u8 = 0x28;
+
 /// Identifies a script block for `Exit::ChainTo` (NEWECL/PROGRAM-8's target).
 /// A raw `.dax`-file-relative block id, exactly as coab's `CMD_NewECL`
 /// decodes it (`(byte)ovr008.vm_GetCmdValue(1)`).
@@ -156,6 +161,13 @@ enum Completion {
     WriteToneOutcomeThenAdvance {
         dest: u16,
         values: [u8; 5],
+        next: u16,
+    },
+    /// ★ INPUT STRING (0x10)'s write (`ovr003.cs:379-386`): the **opcode**,
+    /// not the editor, substitutes a single space for an empty line, and then
+    /// `vm_WriteStringToMemory(str, loc)` lands it in the destination cell.
+    WriteStringThenAdvance {
+        dest: u16,
         next: u16,
     },
 }
@@ -525,6 +537,27 @@ impl EclMachine {
                 activation.pc = next;
                 Ok(VmStep::Continue)
             }
+            Completion::WriteStringThenAdvance { dest, next } => {
+                let mut text = match reply {
+                    Some(Reply::Text(s)) => s,
+                    _ => VmString::default(),
+                };
+                // `if (str.Length == 0) str = " ";` (`ovr003.cs:379-382`) —
+                // the `asc_269A2` one-space literal at `ovr003:09A2`. A
+                // destination cell therefore never holds an empty string,
+                // which is what makes the shipped `COMPARE [cell], "<word>"`
+                // gates safe to write.
+                if text.0.is_empty() {
+                    text = VmString::from_bytes(&b" "[..]);
+                }
+                // The handler writes memory and nothing else — the string
+                // registers are untouched, so the `COMPARE [cell], "<word>"`
+                // that follows re-reads the cell through its own `MemStr`
+                // operand.
+                host.write_string(dest, &text, Origin { pc: origin_pc });
+                activation.pc = next;
+                Ok(VmStep::Continue)
+            }
             Completion::WriteToneOutcomeThenAdvance { dest, values, next } => {
                 // `ovr003:2837-2841` — `var_2 = var_8[selection]`. A reply
                 // outside 0..5 cannot happen (the menu has five words), but
@@ -805,6 +838,7 @@ impl EclMachine {
             0x0C => self.op_setup_monster(activation, host, pc, opcode),
             0x0D => self.op_approach(activation, host, pc),
             0x0E => self.op_picture(activation, host, pc, opcode),
+            0x10 => self.op_input_string(activation, host, pc, opcode),
             0x11 => self.op_print(activation, host, pc, opcode, false),
             0x12 => self.op_print(activation, host, pc, opcode, true),
             0x13 => self.op_return(activation),
@@ -2473,6 +2507,44 @@ impl EclMachine {
                     .collect(),
             },
             Completion::WriteToneOutcomeThenAdvance { dest, values, next },
+        ))
+    }
+
+    /// ★ INPUT STRING (0x10), `CMD_InputString` (`sub_269A4`,
+    /// `ovr003.cs:372-388`) — the line editor, and the gate on slice 9c.
+    ///
+    /// ★ **The first operand is dead.** `vm_LoadCmdSets(2)` decodes it and
+    /// the handler never reads it: the length cap handed to
+    /// `getUserInputString` is the literal `0x28`
+    /// (`ovr003:09D8 mov al, 28h`), forty characters, at every site. The five
+    /// shipped operands say otherwise — `0x2D`, `0x2D`, `0x0C`, `0x08`,
+    /// `0x0C` — so `ECL6#64 @0x88A8`'s "eight characters" is authorial
+    /// intent the engine ignores. Transcribed as written; the cap travels in
+    /// the request so there is one home for the constant.
+    ///
+    /// The destination is `gbl.cmd_opps[2].Word` (`:376`), the raw word, like
+    /// every destination operand — and at all five sites it is a *string*-mode
+    /// operand (`0x81`), so `vm_LoadCmdSets` has already read the cell's old
+    /// contents into string register 1 on its way past. That read is the
+    /// original's too.
+    ///
+    /// Draw-free.
+    fn op_input_string(
+        &mut self,
+        activation: &mut Activation,
+        host: &mut dyn VmHost,
+        pc: u16,
+        opcode: u8,
+    ) -> Result<VmStep, VmError> {
+        let (args, next) = self.load_cmd_sets(pc.wrapping_add(1), 2, host, pc);
+        let dest = self.resolve_target(&args[1], pc, opcode)?;
+        Ok(Self::yield_request(
+            activation,
+            pc,
+            Request::InputString {
+                max_len: INPUT_STRING_MAX_LEN,
+            },
+            Completion::WriteStringThenAdvance { dest, next },
         ))
     }
 

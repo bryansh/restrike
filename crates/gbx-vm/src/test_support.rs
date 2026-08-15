@@ -345,6 +345,11 @@ impl TestHost {
         self.words.get(&addr).copied()
     }
 
+    /// A string cell's stored contents — INPUT STRING (0x10)'s destination.
+    pub fn string(&self, addr: u16) -> Option<&VmString> {
+        self.strings.get(&addr)
+    }
+
     fn next_or_default<T: Default>(queue: &mut VecDeque<T>) -> T {
         queue.pop_front().unwrap_or_default()
     }

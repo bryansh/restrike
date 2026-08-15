@@ -521,6 +521,12 @@ fn widget_for_request(request: &Request, menu_selected_word: usize) -> Widget {
             hotbar.seed_selected_word(menu_selected_word);
             Widget::Hotbar(hotbar)
         }
+        // ★ INPUT STRING (0x10) — `getUserInputString(0x28, 0, 10, "")`
+        // (`ovr003.cs:377`). The prompt is genuinely empty: the script printed
+        // its question with a PRINT/PRINTCLEAR of its own on the line above.
+        Request::InputString { max_len } => {
+            Widget::TextEntry(crate::widgets::TextEntry::new("", *max_len as usize, false))
+        }
     }
 }
 
@@ -620,6 +626,7 @@ fn describe_request(request: &Request) -> String {
         Request::SelectPlayer { prompt } => {
             format!("who: {}", String::from_utf8_lossy(&prompt.0))
         }
+        Request::InputString { max_len } => format!("input string (max {max_len})"),
     }
 }
 
@@ -1268,6 +1275,14 @@ impl VectorRun {
             // already left `gbl.SelectedPlayer` wherever `G`/`O` put it (the
             // `PartyScroll` arm above, consumed before this match).
             (Request::SelectPlayer { .. }, _) => Reply::PlayerSelected,
+            // ★ INPUT STRING: both Enter and Esc end `getUserInputString`'s
+            // loop with the buffer, uppercased (`seg041.cs:270-274`) — see
+            // `TextEntry::tick`. The empty-to-`" "` substitution is the
+            // opcode's, so it happens in the interpreter, not here.
+            (Request::InputString { .. }, WidgetOutcome::TextSubmitted(text)) => {
+                Reply::Text(gbx_vm::VmString::from_bytes(text.into_bytes()))
+            }
+            (Request::InputString { .. }, _) => Reply::Text(gbx_vm::VmString::default()),
             // Unreachable: Hotbar yields only Hotbar(key)/PartyScroll (both
             // handled), the list arm is exhaustive above. Kept as a quiet
             // fallback, not a panic — but note option 0 is NOT "safe" at a
@@ -2543,6 +2558,24 @@ impl Shell {
             },
             // A VERTICAL MENU's list paints its own box AND its prompt row.
             Widget::ListMenu(l) if l.layout.is_some() => draw_list_menu(ctx.fb, ctx.font, l),
+            // ★ `getUserInputString` (`seg041.cs:234-272`): the prompt at row
+            // `0x18` column 0 in `fgColor` (10 at `CMD_InputString`'s call
+            // site), then every typed character at colour 15 from column
+            // `prompt.len()` on — the editor's own two-tone line, not one
+            // flat `draw_prompt`.
+            Widget::TextEntry(t) => {
+                crate::combat::scene::render::clear_prompt_line(ctx.fb);
+                crate::text::draw_string(ctx.fb, ctx.font, &t.prompt, 0x18, 0, 0, 10);
+                crate::text::draw_string(
+                    ctx.fb,
+                    ctx.font,
+                    &String::from_utf8_lossy(&t.buf),
+                    0x18,
+                    t.prompt.len(),
+                    0,
+                    15,
+                );
+            }
             other => {
                 if let Some(line) = other.display_line() {
                     crate::combat::scene::render::draw_prompt(ctx.fb, ctx.font, &line);

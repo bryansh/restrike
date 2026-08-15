@@ -651,7 +651,19 @@ impl TextEntry {
         };
 
         match key {
-            InputEvent::Escape => WidgetOutcome::TextCancelled,
+            // ★ **Esc is not a cancel here.** `getUserInputString`'s loop is
+            // `while (ch != 0x0d && ch != 0x1B && !inDemo)` (`seg041.cs:270`)
+            // and it returns `resultString.ToUpper()` however it ended — so
+            // Esc commits exactly what has been typed, which for an untouched
+            // prompt is the empty string. `CMD_InputString`'s own
+            // `if (str.Length == 0) str = " "` (`ovr003.cs:379-382`) is what
+            // turns that into a space, on the opcode's side of the boundary.
+            //
+            // (`WidgetOutcome::TextCancelled` is left in the vocabulary for a
+            // future caller with a genuine cancel; nothing produces it today.)
+            InputEvent::Escape => WidgetOutcome::TextSubmitted(
+                String::from_utf8_lossy(&self.buf).to_ascii_uppercase(),
+            ),
             InputEvent::Backspace => {
                 self.buf.pop();
                 WidgetOutcome::Pending
@@ -1124,11 +1136,26 @@ mod tests {
         assert!(t.buf.is_empty());
     }
 
+    /// ★ CORRECTED (roll-credits slice 9a): Esc **commits**, it does not
+    /// cancel. `getUserInputString`'s loop is
+    /// `while (ch != 0x0d && ch != 0x1B && !inDemo)` (`seg041.cs:270`) and it
+    /// returns `resultString.ToUpper()` whichever key ended it — so Esc on an
+    /// untouched prompt submits the empty string, which
+    /// `CMD_InputString` then turns into a single space.
     #[test]
-    fn text_entry_esc_cancels() {
+    fn text_entry_esc_submits_whatever_has_been_typed() {
         let mut t = TextEntry::new("Name?", 10, false);
         let mut q = queue_of(&[InputEvent::Escape]);
-        assert_eq!(t.tick(&mut q), WidgetOutcome::TextCancelled);
+        assert_eq!(t.tick(&mut q), WidgetOutcome::TextSubmitted(String::new()));
+
+        let mut t = TextEntry::new("Name?", 10, false);
+        let mut q = queue_of(&[InputEvent::Char(b'a'), InputEvent::Escape]);
+        t.tick(&mut q);
+        assert_eq!(
+            t.tick(&mut q),
+            WidgetOutcome::TextSubmitted("A".to_string()),
+            "and uppercases, exactly as Enter does"
+        );
     }
 
     #[test]

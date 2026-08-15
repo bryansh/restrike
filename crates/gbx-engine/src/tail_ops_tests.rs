@@ -211,3 +211,137 @@ fn the_shipped_ecl5_who_gates_on_the_selected_players_state_cell() {
         );
     }
 }
+
+// --- INPUT STRING (0x10) -------------------------------------------------
+
+/// Reads an inline-string operand straight out of a shipped block — the
+/// password the drive below has to type.
+fn inline_string(file: &str, block_id: u8, addr: u16, operand: usize) -> Option<String> {
+    let dir = std::env::var_os("GBX_DATA_DIR")?;
+    let bytes = std::fs::read(std::path::Path::new(&dir).join(file)).ok()?;
+    let archive = gbx_formats::dax::DaxArchive::parse(&bytes).ok()?;
+    let raw = archive.block_data(block_id).ok()?;
+    let block = gbx_vm::BlockBytes::from_bytes(gbx_formats::dax::ecl_block_payload(&raw));
+    let instr = gbx_vm::decode(&block, addr, &gbx_vm::COTAB).ok()?;
+    match instr.args.get(operand)? {
+        gbx_vm::Arg::InlineStr(packed) => {
+            String::from_utf8(gbx_formats::ecl_text::decompress(packed)).ok()
+        }
+        _ => None,
+    }
+}
+
+/// ★ **The shipped INPUT STRING, driven live.** `ECL6#64 @0x8425` —
+/// `INPUT STRING 0x0C, [0x7B90]`, immediately followed by
+/// `COMPARE [0x7B90], "<9 characters>"` and `IF <>`: a password gate, and
+/// the machinery slice 9c's name entry inherits.
+///
+/// Both arms are driven, and each is identified by the line it prints:
+///
+/// ```text
+/// 0x843A  IF <>
+/// 0x843B  GOTO 0x846A          <- wrong: 0x846A's line, then the ambush
+/// 0x843F  PRINTCLEAR "<...>"   <- right: this line
+/// ```
+#[test]
+fn the_shipped_ecl6_password_gate_reads_both_ways() {
+    const SITE: u16 = 0x8425;
+    const CELL: u16 = 0x7B90;
+    let Some(answer) = inline_string("ECL6.DAX", 64, 0x842B, 1) else {
+        eprintln!(
+            "SKIPPED: local tier needs GBX_DATA_DIR \
+             (tail_ops_tests::the_shipped_ecl6_password_gate_reads_both_ways)"
+        );
+        return;
+    };
+    eprintln!("  ECL6#64's password: {answer:?}");
+    // ★ `TYRANTHRAXUS` — twelve characters, and the INPUT STRING's own
+    // (dead) first operand is `0x0C`. The authorial intent and the answer
+    // agree exactly; the engine's hardcoded 40 is simply more generous.
+    assert_eq!(answer.len(), 12);
+    let right_line = inline_string("ECL6.DAX", 64, 0x843F, 0).expect("the accept line");
+    let wrong_line = inline_string("ECL6.DAX", 64, 0x846A, 0).expect("the refuse line");
+    eprintln!("  accept: {right_line:?}\n  refuse: {wrong_line:?}");
+
+    for (typed, correct) in [(answer.clone(), true), ("WRONG".to_string(), false)] {
+        let mut engine = real_data_engine(6, 64, 64, true).expect("data is present");
+        engine.shell = crate::shell::boot_at_address(&mut engine.machine, SITE);
+        assert!(run_to_gate(&mut engine, 200), "the editor opened");
+
+        for ch in typed.bytes() {
+            engine.tick(&[crate::input::InputEvent::Char(ch)]);
+        }
+        engine.tick(&[crate::input::InputEvent::Enter]);
+        assert!(
+            run_until(&mut engine, 200, |e| e.machine.current_pc() != Some(SITE)),
+            "the entry resumed the script"
+        );
+
+        assert_eq!(
+            engine
+                .vm_memory()
+                .raw_string(CELL)
+                .map(|s| String::from_utf8_lossy(&s.0).into_owned()),
+            Some(typed.clone()),
+            "the typed line landed in the destination cell"
+        );
+
+        let printed: Vec<String> = engine
+            .vm_memory()
+            .transcript
+            .iter()
+            .filter_map(|e| match e {
+                crate::vmhost::TranscriptEntry::Print { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        eprintln!("  typed {typed:?} -> printed {printed:?}");
+        assert_eq!(
+            printed.contains(&right_line),
+            correct,
+            "typed {typed:?}: the compare took the wrong arm"
+        );
+        assert_eq!(
+            printed.contains(&wrong_line),
+            !correct,
+            "typed {typed:?}: the compare took the wrong arm"
+        );
+        assert!(
+            engine.vm_memory().halts.is_empty(),
+            "no halt: {:?}",
+            engine.vm_memory().halts
+        );
+    }
+}
+
+/// ★ Esc is not a cancel (`seg041.cs:270`) and an empty line becomes a single
+/// space (`ovr003.cs:379-382`) — driven at the same shipped site, with
+/// nothing typed.
+#[test]
+fn the_shipped_input_string_commits_on_escape_and_an_empty_line_becomes_a_space() {
+    const SITE: u16 = 0x8425;
+    const CELL: u16 = 0x7B90;
+    let Some(mut engine) = real_data_engine(6, 64, 64, true) else {
+        eprintln!(
+            "SKIPPED: local tier needs GBX_DATA_DIR (tail_ops_tests::\
+             the_shipped_input_string_commits_on_escape_and_an_empty_line_becomes_a_space)"
+        );
+        return;
+    };
+    engine.shell = crate::shell::boot_at_address(&mut engine.machine, SITE);
+    assert!(run_to_gate(&mut engine, 200), "the editor opened");
+    engine.tick(&[crate::input::InputEvent::Escape]);
+    assert!(
+        run_until(&mut engine, 200, |e| e.machine.current_pc() != Some(SITE)),
+        "Esc ended the editor rather than parking forever"
+    );
+    assert_eq!(
+        engine
+            .vm_memory()
+            .raw_string(CELL)
+            .map(|s| s.0.clone())
+            .as_deref(),
+        Some(&b" "[..]),
+        "the empty line became a single space"
+    );
+}

@@ -236,6 +236,7 @@ fn describe_request(request: &Request) -> String {
         Request::SelectPlayer { prompt } => {
             format!("SelectPlayer({})", vm_string_to_display(prompt))
         }
+        Request::InputString { max_len } => format!("InputString(max={max_len})"),
     }
 }
 
@@ -246,6 +247,7 @@ fn describe_reply(reply: &Reply) -> String {
         Reply::Combat => "Combat".to_string(),
         Reply::PressAnyKey => "PressAnyKey".to_string(),
         Reply::PlayerSelected => "PlayerSelected".to_string(),
+        Reply::Text(s) => format!("Text({})", vm_string_to_display(s)),
     }
 }
 
@@ -359,6 +361,9 @@ impl ReplyPolicy {
             Request::Combat => Reply::Combat,
             Request::PressAnyKey { .. } => Reply::PressAnyKey,
             Request::SelectPlayer { .. } => Reply::PlayerSelected,
+            // The diagnostic host types nothing; the opcode's own
+            // empty-string rule then substitutes a single space.
+            Request::InputString { .. } => Reply::Text(VmString::default()),
         }
     }
 }
