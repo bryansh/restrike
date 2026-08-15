@@ -1752,7 +1752,8 @@ Create/Modify wired to existing machinery (Load/View/Train/Drop/Remove/Save/Begi
 ovr018's own conditional-word table transcribed). Boot lands at the start menu instead
 of auto-importing; `--slot` becomes the power-user shortcut.
 
-**Slice 9c — character creation**: `createPlayer`/`modifyPlayer` (stat rolling per the
+**Slice 9c — character creation** — **LANDED 2026-08-15, see §15**:
+`createPlayer`/`modifyPlayer` (stat rolling per the
 rules pack, race/class/alignment gates, name entry via INPUT STRING, the icon picker;
 `ovr018`/`ovr026` are the sites), and the fresh-party Begin posture (`sub_29758`'s
 `LastEclBlockId == 0` arm — already transcribed in shell.rs — with `PartySummary`'s
@@ -1853,14 +1854,14 @@ real input and completely invisible.
 
 | key | string | with a party | party-less | wired to |
 |---|---|---|---|---|
-| C | Create New Character | ✔ | ✔ | reports slice 9c |
+| C | Create New Character | ✔ | ✔ | `createPlayer` (§15) |
 | D | Drop Character | ✔ | — | roster remove |
-| M | Modify Character | ✔ | — | reports slice 9c |
+| M | Modify Character | ✔ | — | `modifyPlayer` (§15.5) |
 | T | Train Character | `training_class_mask > 0` | — | the training screen |
-| H | Human Change Classes | mask **and** `CanDuelClass()` | — | reports slice 9c |
+| H | Human Change Classes | mask **and** `CanDuelClass()` | — | `DuelClass` (§15.6) |
 | V | View Character | ✔ | — | the character sheet |
-| A | Add Character to Party | ✔ | ✔ | reports slice 9c (`.CHR` files) |
-| R | Remove Character from Party | ✔ | — | roster remove (the `.CHR` write is 9c) |
+| A | Add Character to Party | ✔ | ✔ | `AddPlayer` (§15.7 — `.guy` files) |
+| R | Remove Character from Party | ✔ | — | roster remove **+ the `.guy` write** (§15.7) |
 | L | Load Saved Game | **—** | ✔ | `loadGameMenu`'s slot picker |
 | S | Save Current Game | ✔ | — | `SaveGame`'s slot picker |
 | B | BEGIN Adventuring | ✔ | — | `BootFlow` |
@@ -1971,14 +1972,395 @@ so it is closed two ways:
 - **Residual — the attract mode** (G10): still deferred, now behind a screen
   that says so. `ECL1#82`'s `ADD NPC`/`CLEAR BOX`/`PROGRAM` uses are reachable
   only through it.
-- **Residual — Create/Modify/Add/Human** present per the flag table and report
-  slice 9c. `Remove` drops the member but writes no `.CHR` file, and says so.
-- **Residual — `PROGRAM 0` opens the start menu mid-game**
-  (`ovr003.cs:1940-1948`: `startGameMenu()` then a conditional `LoadPic()`).
-  The opcode is implemented but its `var_1 == 0` arm does not open the menu
-  yet; no shipped script uses it (the one `PROGRAM` use is `ECL1#82`'s).
-  Small, and it belongs with 9c's `PartySummary` work.
+- ~~**Residual — Create/Modify/Add/Human** present per the flag table and
+  report slice 9c. `Remove` drops the member but writes no `.CHR` file, and
+  says so.~~ **CLOSED by slice 9c** (§15) — all four verbs run, `Remove`
+  writes the file, and the extension is `.guy`, not `.CHR` (§15.7).
+- ~~**Residual — `PROGRAM 0` opens the start menu mid-game**
+  (`ovr003.cs:1940-1948`).~~ **CLOSED by slice 9c** (§15.10), with its one
+  ordering deviation named.
 - **Residual — the post-victory prompt** (`ovr003.cs:1964-1971`): `BEGIN` is
   correctly refused once `field_3FA` is set, but the "You've won. Save before
   quitting?" flow that replaces it is slice 9d's, with the ending that sets
   the latch.
+
+## 15. Slice 9c: character creation — LANDED 2026-08-15
+
+`createPlayer`, `modifyPlayer`, `DuelClass` and `AddPlayer` are the four verbs
+`startGameMenu` had been reporting rather than running. All four are live, and
+the character files behind them are the original's own.
+
+### 15.0 ★ The correction the slice opens with: creation does not join the party
+
+`startGameMenu`'s `'C'` arm is a bare `createPlayer()` (`ovr018.cs:161-166`),
+and `createPlayer` has **no `TeamList.Add` anywhere in it** — it ends by
+restoring `gbl.SelectedPlayer` and offering `SavePlayer` (`:883-890`).
+Creation writes a character *file*; `Add Character to Party` is what puts one
+in a party. That is the shipped Gold Box loop, and it is why the bundle's own
+`SAVE/` directory carries `JOE.GUY`, `PHIL.GUY` and `STEVE.GUY` beside the
+save games.
+
+### 15.1 The pickers, as transcribed
+
+Four `sl_select_item` lists in a row, each in the box
+`(endY 22, endX 38, startY 2, startX 1)`, each committing on **`'S'`** alone
+(`while (input_key != 'S')`) and abandoning the whole flow on Exit/Esc
+(`if (input_key == 0) return;`).
+
+| # | heading | rows | opened at `index` |
+|---|---|---|---|
+| 1 | `Pick Race` | `raceString[1..=5]`, then `raceString[7]` | **0** (`:362`) |
+| 2 | `Pick Gender` | `Male`, `Female` | 1 (`:431`) |
+| 3 | `Pick Class` | `RaceClasses[race]` | 1 (`:466`) |
+| 4 | `Pick Alignment` | `class_alignments[class, 1..=count]` | 1 (`:599`) |
+
+★ **Half-Orc (race 6) cannot be created.** The list simply skips it, and
+`:378-381`'s `if (index == 6) index++;` is what turns the sixth *row* back
+into race id 7. `RaceClasses[6]` exists for imports only.
+
+★ **The race picker opens on `Human`.** `index = 0` versus `index = 1` is not
+cosmetic: `sl_select_item` does `index_ptr++; menu_scroll_in_page(false, ...)`
+(`ovr027.cs:573-574`), and that backward step wraps *within the page*, so
+`0` normalises onto the **last** row and `1` onto the first.
+
+**Race → class** (`RaceClasses`, `Classes/Gbl.cs:276-285`; combo `ClassId`s):
+
+| race | classes offered |
+|---|---|
+| Dwarf | Fighter, Thief, Fighter/Thief |
+| Elf | Fighter, Magic-User, Thief, F/MU, F/T, F/MU/T, MU/T |
+| Gnome | Fighter, Thief, Fighter/Thief |
+| Half-Elf | Cleric, Fighter, Magic-User, Thief, Ranger, C/F, C/R, C/F/MU, C/MU, F/MU, F/T, F/MU/T, MU/T |
+| Halfling | Fighter, Thief, Fighter/Thief |
+| Half-Orc | Cleric, Fighter, Thief, C/F, C/T, F/T — **import only** |
+| Human | Cleric, Fighter, Magic-User, Thief, Paladin, Ranger |
+
+**Class → alignment** is `class_alignments`, a count-prefixed row per class
+already embedded in the rules pack (`packs/adnd1/creation.toml`) and read
+through `creation::allowed_alignments`. The shapes worth naming: cleric takes
+all nine, paladin takes **Lawful Good only**, druid takes the five
+neutral-touching ids.
+
+### 15.2 What the record gets, in the original's order
+
+`ovr018.cs:337-651`, before a single die is rolled:
+
+- `icon_colours[i] = ((default_icon_colours[i] + 8) << 4) + default_icon_colours[i]`
+  → `91 A2 B3 C4 E6 F7`, which is what **every** real character file in the
+  bundle stores;
+- `base_ac = 50`, `thac0 = 40`, `health_status = okay`, `in_combat = true`,
+  `field_DE = 1`, `field_125 = 1`, `icon_id = 0x0A`;
+- `mod_id = Random(256)` — **the first PRNG draw of a creation**, before the
+  race picker is even shown;
+- `icon_size` = 1 for dwarf/gnome/halfling, 2 for everyone else;
+- the racial affects (`con_saving_bonus`, `dwarf_vs_orc`, `elf_resist_sleep`,
+  …), plus `protection_from_evil` for a paladin and `ranger_vs_giant` for a
+  ranger — granted at creation, not at the first fight;
+- starting XP: **25,000** single-class, 12,500 for two, 8,333 for three — with
+  `mc_mu_t`'s quirk intact (two classes, the three-class rate);
+- `age`: a single-class character rolls `base + NdS`; a multi-class one takes
+  an **un-rolled** `base + count × size` ceiling, consuming no draw.
+
+Then the reroll body (`:657-865`), which is exactly what `Reroll stats? Y`
+runs again:
+
+1. every active class back to level 1;
+2. the six stats, **interleaved**: six passes of `Str, Int, Wis, Dex, Con, Cha`,
+   best-of-six per stat, each roll `3d6 + 1` — 36 draws, domain `4..=19`;
+3. per stat, in this order: `AgeEffects` → `EnforceRaceSexLimits` →
+   `EnforceClassLimits` (`Classes/Player.cs:47-75`);
+4. exceptional strength — a single `Random(100) + 1` — only if STR landed on
+   exactly 18 **and** the character has a fighter/paladin/ranger component,
+   and only *after* the clamps;
+5. a multi-class cleric's WIS floored at 13 — applied after the class clamp,
+   and **not** a `class_stats_min` row, so it has to be applied separately or
+   it silently goes missing;
+6. the bare-handed profile: `attacksCount = 2`, `1d2`, `base_movement = 12`;
+7. spells: a cleric gets one level-1 slot and every level-1 cleric spell; a
+   magic-user gets one slot and `detect magic, read magic, enlarge, sleep`;
+8. `Money[Platinum] = 300`;
+9. hit points: roll every active class (`sub_509E0`, roll-twice-take-higher
+   below the class hit-dice cap), apply the CON adjustment, average across
+   classes;
+10. `SilentTrainPlayer` — `training_class_mask = 0xFF` and `train_player()`
+    until it says stop, with the town's real mask restored afterwards;
+11. `reclac_player_values`.
+
+Then `Character name:` (re-prompting on empty), `icon_builder()`,
+`Str00.full = Str00.cur`, and `Save <name>?`.
+
+### 15.3 The stat tables, and where they live
+
+Every table this slice needs was already embedded and image-verified by M3's
+rules-pack work (`packs/adnd1/creation.toml`): `class_alignments`,
+`starting_age`, `race_age_brackets`, `age_effect_deltas`, `class_stats_min`,
+`race_classes`, and the seven `*_race_sex_min_max` blocks. Slice 9c added no
+tables — it added the **order** they are applied in, and the callers.
+
+### 15.4 ★ The characters the original itself wrote are the acceptance material
+
+`SAVE/` carries three `.GUY` files rolled in DOSBox (`JOE`, `PHIL`, `STEVE`)
+and the GOG bundle's own starting party (`MATHEW`, `MARK`, `TRAVIS`, `LEDERA`,
+`SHARA`, `PHILIPPE`). Feed each one's four picks and its stored stats back
+into creation and **every derived field must come out**: levels, THAC0, saving
+throws, thief skills, `classFlags`, grimoire, spell slots, money, the attack
+profiles, the icon defaults, AC, encumbrance. Six of them are pinned that way
+(`crate::creation`'s tests). Three corrections fell out of it:
+
+**★ The silent trainer's level-3 magic-user grant is `charm_person`, not
+`protect_from_evil_MU`.** coab has `stinking_cloud` + `protect_from_evil_MU`
+(0x10) at `ovr018.cs:2438-2441`. `LEDERA` (fighter 4 / magic-user 4, SSI's
+own party) and `PHIL.GUY` (a fighter 4 / magic-user 4 rolled in 2026) both
+hold exactly `{0x0A, 0x0B, 0x0C, 0x0F, 0x12, 0x15, 0x1F, 0x22}`, and
+`PHILIPPE` (magic-user 5) holds that plus `0x2F` — the level-5 fireball coab
+*does* get right. Four of the eight are creation's own openers and three more
+are the level-2/4/5 grants, which leaves level 3 granting `stinking_cloud`
+(0x22) and **`charm_person`** (0x0A). `protect_from_evil_MU` appears in no
+real character file at all.
+
+**★ `thief_skills::dex_adj` read one column too far left.** The image stores a
+**5**-wide array; coab declares a **6**-wide one whose rows are an
+*overlapping view* of the same bytes (coab row `d` = flat `d*5 .. d*5+6`,
+which is exactly why all 22 of its declared rows match the image's columns
+0..=4 followed by the next row's column 0). The consumer indexes `[dex, skill]`
+with `skill` 1..=5 at the array's **real** 5-byte stride, so it reads coab's
+columns 1..=5. `TRAVIS` carries the original's recomputed skills at **two**
+different DEX scores, 17 and 18, and only this reading reproduces both. The
+pack's own `notes` had predicted the direction of this error.
+
+**★ `reclac_thief_skills`' `var_2` is 7.** coab marks its initialiser as a
+guess and never assigns it on the ordinary path. Four real records — two
+thief levels, three races, three DEX scores, two eras — all carry the same
+`+7` on all eight skills, including the three that take no DEX adjustment.
+Implemented as a named constant with the evidence table at the site; docketed
+as **FD-46**, whose settling rung is a disassembly of `ovr026`'s prologue or a
+capture of a thief recomputed down a *different* call path.
+
+Two smaller ones, same source: the poison save has a **race-gated** second CON
+ladder (a dwarf or halfling adds it — `TRAVIS`'s stored 16 where the class
+tables alone give 12, `ovr026.cs:381-405`), and the cleric grimoire loop reads
+`sp_class = (spellLevel - 1) / 5` from a **combined** 1..15 level encoding,
+which is why a cleric never learns `Restoration` (`spellLevel` 7 lands in the
+druid row) and why `SHARA`'s book stops exactly where it does.
+
+### 15.5 Modify: how permissive, and why
+
+`modifyPlayer`'s gate (`ovr018.cs:1004-1013`) is
+
+```
+exp ∉ {0, 8333, 12500, 25000}  ||  multiclassLevel != 0   →  "<name> can't be modified."
+```
+
+and those four values are precisely the XP totals `createPlayer` hands out
+(25,000 / 12,500 / 8,333, and 0 for a character who has just dual-classed). So
+the famous Gold Box permissiveness is real but bounded: **everything** is
+editable — all six stats, the hit points and the name — on a character who has
+not yet earned a single experience point, and nothing is editable after that.
+
+Eight fields (`edited_stat` 0..=7: the six stats, HP, the name). `Enter` and
+End (`'O'`) advance, Home (`'G'`) goes back, Left/Right (`'K'`/`'M'`) step the
+current field. `'K'` (Keep) is the only ordinary exit; `'E'` and Esc restore a
+whole-record backup. Two arms worth naming: **STR down spends an exceptional
+percentile before it spends the score** (`Str00.Dec(); Str.Inc();` —
+18/98 → 18/97, not 18/00 → 17), and STR up past 18 starts a percentile for a
+warrior and **zeroes** it for anyone else. CON moves re-clamp the hit points
+between `sub_506BA`'s floor and `calc_max_hp`'s ceiling.
+
+Not carried: the original's `'S'` case (delete a character from the name) is a
+Ctrl+Left scancode our `ExtKey` set does not model; Backspace does that job
+and says so at the site.
+
+### 15.6 Human Change Classes
+
+`CanDuelClass()` is human **and** nothing banked in `ClassLevelsOld`
+(`Classes/Player.cs:782-798`) — and it is live per selected member, which is
+why `'G'`/`'O'` recompute the menu's flag table when the answer changes
+(`ovr018.cs:142-149`).
+
+`SecondClassAllowed` (`ovr026.cs:558-599`): the **old** class's prime
+requisites (its `class_stats_min` columns ≥ 9) must all exceed **14**, the
+**new** class's must all exceed **16**, and the new class must accept the
+character's alignment. Only base classes are targets — `DuelClass` resolves
+its pick with `while (newClass <= 7 && ...)`.
+
+The surgery (`:642-698`): the old class is banked in `ClassLevelsOld`,
+`multiclassLevel` remembers the level reached, `HitDice` drops to 1, the new
+class starts at level 1 with **zero XP**, the spell state is wiped and
+re-seeded, and every item the new `classFlags` forbids is un-readied unless
+cursed. ★ Its magic-user grant is **three** spells — detect magic, read magic,
+sleep — where `createPlayer`'s is four; `DuelClass` leaves `enlarge` out.
+
+### 15.7 ★ The character-file format: `.guy`, not `.CHR`
+
+`SavePlayer` (`ovr017.cs:134-209`) writes three files per character into the
+save directory, beside `savgam<X>.dat`:
+
+| file | contents |
+|---|---|
+| `<stem>.guy` | the 0x1A6-byte `charStruct` — **the same record** a `CHRDAT<X><n>.SAV` holds |
+| `<stem>.swg` | the items, `Item.StructSize` (0x3F) each, concatenated |
+| `<stem>.fx` | the affects, `Affect.StructSize` (9) each |
+
+`.CHR` is another Gold Box title's convention; CotAB never uses it.
+`BuildLoadablePlayersLists` (`ovr017.cs:63-81`) confirms it from the other
+side: `"*.guy"` for a Curse character, `"*.cha"`/`"*.sav"` for a Pool of
+Radiance import, `"*.hil"` for Hillsfar.
+
+`<stem>` is `clean_string(name)` (`seg042.cs:68-78`), which is three steps and
+none of them is the obvious one: **trim** the ten-character set
+`[space . * , ? / \ : ; |]` from *both ends*, **lowercase**, truncate to **8**.
+Interior characters survive — `"Sir Robin"` becomes `sir robi`, space and all.
+
+Because the payload is exactly the `charStruct`, the format is just
+`decode_char_record` and this slice's new `encode_char_record`. Both halves
+are pinned against every real character file in the bundle: identical outside
+the D-SAVE6 pointer runs, and **different nowhere else**, so a missing or
+mis-offset field fails the test. What the real bytes settled:
+
+- the **next-character pointer** (`0x189`) is live in a `CHRDAT*.SAV` and null
+  in a `.GUY` — the in-game party is a linked list, a saved character is not;
+- the **affects-list pointer** (`0xf2`) is live in any character owning a
+  `.fx` file, `.GUY` included (`PHIL`/`STEVE` carry a segment word there;
+  `JOE`, with no affects, round-trips byte-identically with no masking);
+- a name's tail past its Pascal length byte is in-memory leftovers too
+  (`CHRDATF3.SAV` stores `06 "TRAVIS" 20`).
+
+Writing zeros for all three is safe in the original's own terms: it reloads
+the siblings **by filename** (`ovr017.cs:536-566`) and never dereferences what
+the record stored.
+
+`AddPlayer`'s join gate (`ovr018.cs:1497-1567`), in its own order and its own
+words: a duplicate (same name *and* `mod_id`) stops the scan before anything
+is counted; a **PC** needs fewer than 6 PCs present, an **NPC** fewer than 8
+bodies; `paladins do not join with evil scum`; `too many rangers in party`
+(more than three); `<paladin> will tolerate no evil!` — where evil is
+`(alignment + 1) % 3 == 0`.
+
+`Remove` (`ovr018.cs:207-221`) closes §14.8's residual: a non-NPC member is
+`SavePlayer`'d **then** freed; an NPC is dropped outright and never written.
+
+**D8 seams.** Two, mirroring the save/load pair: a host-injected
+`CharFileDirectory` the Add picker renders from (`saveload_fs::scan_char_files`),
+and a `CharFileRequest` the host fulfills after the tick
+(`saveload_fs::fulfill_char_file`). The core never touches the filesystem.
+
+### 15.8 The icon editor
+
+`icon_builder` (`ovr018.cs:1632-1977`) is five nested menus:
+
+| `var_8` | bar |
+|---|---|
+| 1 | `Parts 1st-color 2nd-color Size Exit` |
+| 2 | `Head Weapon Exit` |
+| 3 | `Weapon Body Hair|Face Shield Arm Leg Exit` |
+| 4 | `Small|Large Keep Exit` |
+| 5 | `Next Prev Keep Exit` |
+
+The rule that makes it comprehensible, stated once: **every submenu's `Keep`
+copies the live value into the backup, and its `Exit` copies the backup back
+over the live value.** The editor's tail then restores the backups
+unconditionally (`:1960-1964`), so a change survives only if it was Kept — and
+`Is this icon ok? N` starts the whole thing again from the kept state.
+
+Head cycles `0..=13`, weapon `0..=0x1F`, each colour nibble mod 16, and the
+size word offers the size it would switch *to*. The part letters map to colour
+slots `W→5, B→0, H|F→3, S→4, A→1, L→2`. The screen shows the `old` pair
+(ready/action) above the `new` pair, both drawn through the real
+`CHEAD`/`CBODY` merge with the character's own recolour.
+
+### 15.9 ★ The fresh-party `BEGIN` posture
+
+`sub_29758`'s `LastEclBlockId == 0` arm (`ovr003.cs:2243-2261`): a virgin game
+carries the `0` sentinel, and the arm reads it as *use the area's boot block* —
+`EclBlockId = 1`, `PartySummary(SelectedPlayer)` paints the roster, and
+`byte_1EE98 = false` suppresses the `LoadPic` a continuing game would take.
+`BEGIN`'s own paint agrees from the other side: with `LastEclBlockId == 0` it
+draws the exploration frame and **nothing else** (`ovr018.cs:262-266`),
+because `sub_29758` is about to paint the roster itself.
+
+We already had the sentinel (`import::resolve_block`) and a bare engine
+already sits on block 1, so this needed proving more than building. It is
+proved: a created party pressing `B` lands at **area 2, block 1** — the
+Tilverton amnesia room, frame-dumped with the created character standing in it
+at 7,13 reading *"You awaken in a small room…"* — and not where an imported
+save resumes. Digest-pinned against a twin built from the same seed.
+
+### 15.10 `PROGRAM 0` (§14.8's last residual)
+
+`CMD_Program`'s `var_1 == 0` arm is `startGameMenu()` then a conditional
+`LoadPic()` (`ovr003.cs:1941-1948`). The opcode handler raises a request; the
+shell honours it at the **walk-loop boundary** — the one place no VM run is
+mid-flight, and the same place `startGameMenu` returns to in `sub_29758` — and
+`BEGIN` there resumes the walk loop instead of re-entering the block.
+
+**The one deviation, named:** the original's menu is modal *inside* the
+instruction, so the rest of the block runs after it; ours runs the rest of the
+block first. Nothing in the block is skipped, only the modal's position
+relative to it moves. No shipped script reaches the opcode (`ECL1#82`'s use is
+inside the deferred attract mode), so the arm is implemented and observable
+rather than exercised in play.
+
+### 15.11 Acceptance
+
+`crates/gbx-engine/src/creation_tests.rs`, all against real CotAB data
+(`GBX_DATA_DIR`), frame dumps under `RESTRIKE_CREATION_DUMP`:
+
+1. **Six characters created through the real screens**, keypress by keypress —
+   four pickers (only `'S'` commits), the reroll confirmation, the name, the
+   icon editor, the save prompt — with every picker's landing asserted by race
+   and class id, one creation dumped at all eight steps, and the party
+   assembled through `Add` from the six `.guy` files creation wrote.
+2. **The stat roller** pinned against the original's arithmetic: 36 draws in
+   the interleaved order, `3d6+1`'s `4..=19` domain, a class minimum raising a
+   low roll (paladin CHA 17), a race/sex ceiling capping a high one (a female
+   dwarf's STR 17 where a male's is 18, and therefore never a percentile), and
+   the multi-class cleric WIS floor.
+3. **Round trips**: created party → Save → Load → identical; a member →
+   `Remove` (the `.guy`/`.swg`/`.fx` trio written) → `Add` → identical record,
+   readied flags included.
+4. **The fresh `BEGIN` posture**, frame-dumped and digest-pinned.
+5. **`PROGRAM 0`** opens the menu, and `BEGIN` returns to the walk loop with
+   the state digest unchanged.
+6. **Draw parity**, stated once at the top of the suite: creation is reachable
+   only from `startGameMenu`, which no capture passes through — every
+   `.gbxtrace` is a combat capture taken from an imported save (`--slot A`,
+   the shortcut that skips the whole preamble, §14.5), and the reel replays
+   them through `gbx-oracle::replay` without a shell at all. Every PRNG draw
+   creation makes happens on a path a capture cannot enter. Guard 16/16 and
+   reel smoke 16/16 are the referees.
+
+Gates green throughout: guard 16/16, reel smoke 16/16, **1,770** workspace
+tests, clippy 0, fmt clean, `SAVE_FORMAT_VERSION` unmoved at 9 (the four new
+`Screen` variants are appended, and the two new `EngineState`/`StartMenu`
+fields are `#[serde(skip)]`).
+
+### 15.12 Corrections and residuals
+
+- ★ **Creation does not add to the party** — §15.0. The brief expected it to;
+  the original does not.
+- ★ **The extension is `.guy`**, with `.swg`/`.fx` siblings — not `.CHR`.
+- ★ **`charm_person`, not `protect_from_evil_MU`**, at silent-training
+  magic-user level 3 (§15.4).
+- ★ **`dex_adj`'s column** was off by one; **`var_2` is 7** (FD-46).
+- ★ **FD-30 closed**: the flavor seam is plural and the interleave is pinned
+  by draw *order*, not just by result.
+- **Residual — Pool of Radiance and Hillsfar imports.** `AddPlayer`'s bar
+  offers `Curse Pool Hillsfar Exit`; only Curse is wired. The other two need
+  `ConvertPoolRadPlayer`/`ConvertHillsFarPlayer` (`ovr017.cs:234-459`) and
+  their own foreign record decoders — a slice of its own. Both are on the bar
+  and both say so when picked.
+- **Residual — `Exit to DOS`'s confirmations.** `ovr018.cs:276-299` asks
+  `Quit to DOS`, and then `Game not saved. Quit anyway?` with an offer to
+  save; ours raises the quit request directly. Slice 9b's, not this one's, but
+  it is still open and belongs beside 9d's post-victory prompt.
+- **Residual — the training hall does not re-learn cleric spells.**
+  `creation::reclac_class_bonuses` runs `sub_6A00F`'s grants (a cleric knows
+  every spell of every level they can cast), and creation's silent trainer
+  uses it; `training::train` still uses its own M3-era approximation. A cleric
+  who levels at a temple will not gain the new level's spells until those two
+  are unified. Named here rather than fixed, because it moves numbers on a
+  path this slice does not otherwise touch.
+- **Residual — `modifyPlayer`'s inverse-video field highlight.** The original
+  inverts the edited stat in place (`draw_highlight_stat`, `:965-996`); ours
+  names the field on a status row instead. Same information, different
+  presentation.

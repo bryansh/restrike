@@ -41,6 +41,13 @@ this session's part -- re-verified character-by-character against the \
 coab source twice). The anchor below is byte-exact against the image \
 regardless of this open question; row-by-row semantic interpretation for \
 levels 6-11 is a docket item for a future session.
+
+CONFIRMED 2026-08-15 (roll-credits slice 9c): these rows ARE the ones the \
+game reads, at this stride, with this row indexing. Two real thieves the \
+original itself wrote (JOE.GUY at thief 6, STEVE.GUY at thief 6) resolve \
+against row 6 exactly, once the corrected DEX column and the constant \
+`var_2` term (FD-46) are applied -- so coab's declaration is the thing \
+that is wrong for levels 5-11, not this transcription.
 """
 consumed_by = ["ovr026.cs:530-536 (reclac_thief_skills)"]
 anchor = { kind = "image", file = "START.EXE", offset = 0xeaa9, len = 96 }
@@ -86,6 +93,19 @@ exactly with columns 0..=4), so the image is trusted over this session's \
 incomplete reconciliation of exactly which `skill` value maps to which \
 stored column. Revisit if a future session traces the VM-level access \
 pattern directly.
+
+SETTLED 2026-08-15 (roll-credits slice 9c), and the prediction above was \
+right. The stored array is 5 wide; coab's declared 6-wide rows are an \
+OVERLAPPING VIEW of these same bytes (coab row d == flat d*5 .. d*5+6), \
+which is exactly why all 22 of its rows match columns 0..=4 followed by \
+the next row's column 0. The consumer indexes [dex, skill] at the real \
+5-byte stride, so the bytes it reads are flat `dex*5 + skill` -- coab's \
+columns 1..=5, one to the right of this table's own column indices. The \
+accessor (`adnd1::thief_skills::dex_adj`) does that flat read; the ROWS \
+here are unchanged and remain image-true. Real-data proof: TRAVIS (the \
+GOG bundle's dwarf fighter/thief) carries the original's own recomputed \
+skills at two different DEX scores, 17 and 18, and only this reading \
+reproduces both.
 """
 consumed_by = ["ovr026.cs:535-536 (reclac_thief_skills)"]
 anchor = { kind = "image", file = "START.EXE", offset = 0xeb13, len = 110 }

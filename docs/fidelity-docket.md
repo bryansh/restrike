@@ -908,8 +908,18 @@ stays the one place showing the complete open-hypothesis picture.
 
 ### FD-30: Creation-roll draw ORDER — per-stat API cannot express the original's interleave
 
-- **Status:** open (candidate, filed M4 step 1 — no production caller today,
-  so nothing is broken; a live blocker for D-OR4 part B when creation lands)
+- **Status:** RESOLVED 2026-08-15 (roll-credits slice 9c). The flavor seam is
+  now plural — `Flavor::roll_ability_scores(&mut dyn Roller) -> [u8; 6]`
+  (`crates/gbx-rules/src/flavor.rs`), and `adnd1`'s implementation runs the
+  original's six passes with the six stats interleaved *inside* each one, 36
+  `roll(6, 3)` draws in exactly the original's order. The singular
+  `roll_ability_score` is gone, so no caller can reintroduce the wrong
+  ordering. Two tests pin it: one on the returned scores, and one with a
+  recording roller that asserts the **order** (ascending draws make each
+  stat keep its last one, so the six results are the final pass's six
+  consecutive draws — only possible if the passes interleave). The `+1` is
+  the original's own (`Math.Max(prev, roll_dice(6,3) + 1)`), so a stat's
+  pre-clamp domain is `4..=19`, not textbook `3..=18` — carried as written.
 - **Question:** the original rolls the six ability scores **interleaved within
   each of six reroll iterations** — `Str, Int, Wis, Dex, Con, Cha` per
   iteration, best-of-six per stat (`ovr018.cs:675-683`, each
@@ -1429,6 +1439,59 @@ stays the one place showing the complete open-hypothesis picture.
 - **Cross-reference:** `crates/gbx-engine/src/rest.rs`,
   `crates/gbx-engine/src/shell.rs` `EngineState::rest_encounter`,
   `docs/design/roll-credits.md` G3/G4.
+
+### FD-46: `reclac_thief_skills`' `var_2` is 7, and nobody knows why
+
+- **Status:** open (measured, implemented, mechanism unexplained — filed
+  roll-credits slice 9c, 2026-08-15)
+- **Question:** `reclac_thief_skills` composes each skill as `var_2 +
+  base_chance[thiefLvl, skill] + race_adj[race, skill]` (+ the DEX column for
+  skills 1..=5) (`ovr026.cs:539-543`). coab declares `byte var_2 = 0;
+  //Simeon` — its own marker for a guessed initialiser — and assigns it only
+  inside the `var_A` scroll-learning branch, so on the ordinary path the
+  original contributes whatever its uninitialised local holds. What is that
+  value?
+- **Evidence: 7, uniformly, on every character record the original wrote.**
+
+  | character | thief lvl | race | DEX | residue on all 8 skills |
+  |---|---|---|---|---|
+  | `TRAVIS` (GOG bundle, dwarf F4/T5) | 5 | dwarf | 17 | +7 |
+  | `TRAVIS` (a later save, DEX raised) | 5 | dwarf | 18 | +7 |
+  | `JOE.GUY` (rolled in DOSBox) | 6 | human | 14 | +7 |
+  | `STEVE.GUY` (rolled in DOSBox) | 6 | gnome | 13 | +7 |
+
+  Four samples across two thief levels, three races, three DEX scores and two
+  eras (SSI's 1989 starting party, and characters rolled in 2026), and the
+  residue is the same constant on **every one of the eight skills** —
+  including 6, 7 and 8, which take no DEX adjustment at all, so it cannot be
+  hiding in the DEX column. The race deltas between the three races match
+  coab's declared `unk_1A230` rows exactly once the constant is removed,
+  which is what rules out a wrong race table; and the value is not a table
+  byte (`54`, `44`, `27`, `37` appear nowhere in `base_chance`'s verified
+  96-byte image block), which rules out a wrong base row.
+- **Hypothesis, not evidence:** a deterministic stack slot. Every one of
+  these characters reached `reclac_thief_skills` down the same call path
+  (`createPlayer` → `SilentTrainPlayer` → `train_player` →
+  `ReclacClassBonuses`), so an uninitialised local would hold the same
+  leftover each time.
+- **What we do:** implement it, as `THIEF_SKILL_VAR_2`
+  (`crates/gbx-rules/src/adnd1/flavor_impl.rs`), with the table above at the
+  constant. Dropping it would leave every thief we create seven points worse
+  at everything than the same thief in DOSBox — a visible, playable
+  wrongness, and the opposite of what the evidence says.
+- **Settled by:** a disassembly of `ovr026`'s `sub_6AAEA` prologue (the
+  overlays are absent from `coab_new.lst`, so this needs `GAME.OVR` taken
+  apart), or a DOSBox capture of a thief whose skills are recomputed down a
+  *different* call path — a training-hall level-up rather than creation. If
+  that one differs, the stack-slot hypothesis is confirmed and the constant
+  becomes path-dependent.
+- **Draw neutrality:** none of this touches the PRNG. Thief skills are
+  derived numbers; the guard and reel never recompute them.
+- **Cross-reference:** `crates/gbx-rules/src/adnd1/flavor_impl.rs`
+  (`THIEF_SKILL_VAR_2`, `skill_percentages`),
+  `crates/gbx-rules/src/adnd1/thief_skills.rs` (`dex_adj`'s column
+  correction, settled by the same records),
+  `docs/design/roll-credits.md` §15.
 
 ## 5. How new entries get added
 
