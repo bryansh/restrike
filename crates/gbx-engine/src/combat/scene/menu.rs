@@ -59,6 +59,11 @@ pub enum MenuAction {
     /// Issue this through [`CombatState::issue`], then hand the result back to
     /// [`ManualUi::note`].
     Issue(TurnCmd),
+    /// ★ `U` — open the acting combatant's item list (`PlayerItemsMenu`,
+    /// `ovr009.cs:203-211`). Roll-credits slice 9a: the picker is the host's,
+    /// because the records live on the roster; it answers with
+    /// [`ManualUi::arm_item`].
+    OpenItems,
     /// `V` — open the M3 character sheet for the acting combatant
     /// (`viewPlayer`, `ovr009.cs:197`), palette swapped back around it
     /// (`ovr020.cs:240,334`). The host issues [`TurnCmd::ViewSheet`] when the
@@ -131,6 +136,12 @@ pub struct ManualUi {
     /// original (the last-resolved word stays selected into the next menu,
     /// across turns): the host seeds it at open and persists it after keys.
     selected: usize,
+    /// ★ Roll-credits slice 9a: the item the host's picker chose and the
+    /// spell it resolved to (`item.affect_2 & 0x7F`, `ovr020.cs:993-997`),
+    /// held while the aim menu picks targets. The commit then issues
+    /// [`TurnCmd::UseItem`] instead of an attack, and the host reads the item
+    /// index back out to spend the charge.
+    pending_item: Option<(usize, u8)>,
 }
 
 impl ManualUi {
@@ -169,6 +180,7 @@ impl ManualUi {
             ally_prompt_return: Stage::Main,
             message: None,
             selected: 0,
+            pending_item: None,
         };
         ui.refresh(state);
         ui
@@ -178,6 +190,35 @@ impl ManualUi {
     /// entry step (`ovr009.cs:243-252` opens the loop *with* the direction), or
     /// the commit re-issued behind a confirmed `"Attack Ally: "`
     /// (`ovr014.cs:1725-1746`). The host issues it right behind the first.
+    /// ★ The host's item picker answering `U` (`MenuAction::OpenItems`): the
+    /// chosen record's index on the roster member and the spell it resolves
+    /// to. The UI drops straight into the aim menu, exactly as `Cast` does,
+    /// and the commit issues [`TurnCmd::UseItem`].
+    ///
+    /// A `spell_id` of 0 (`UseMagicItem`'s own "no spell" answer,
+    /// `ovr020.cs:999`) just returns to the main menu.
+    pub fn arm_item(&mut self, item: usize, spell_id: u8) {
+        if spell_id == 0 {
+            self.stage = Stage::Main;
+            self.pending_item = None;
+            return;
+        }
+        self.pending_item = Some((item, spell_id));
+        self.stage = Stage::Aim;
+        self.aim = Some(AimState {
+            list: Vec::new(),
+            index: 0,
+            cursor: None,
+            last_cell: self.actor_pos,
+        });
+    }
+
+    /// The item index a committed [`TurnCmd::UseItem`] spent, taken once —
+    /// the host's cue to burn the charge (`ovr020.cs:1064-1085`).
+    pub fn take_used_item(&mut self) -> Option<usize> {
+        self.pending_item.take().map(|(item, _)| item)
+    }
+
     pub fn take_follow_up(&mut self) -> Option<TurnCmd> {
         self.pending_retry
             .take()
@@ -540,7 +581,7 @@ impl ManualUi {
                 });
                 MenuAction::None
             }
-            b'U' if self.words.use_item => MenuAction::Issue(TurnCmd::UseItem),
+            b'U' if self.words.use_item => MenuAction::OpenItems,
             b'C' if self.words.cast => {
                 // The spell menu itself is the host's (it prints from the
                 // memorized list and then aims); the UI only opens Aim for it.
@@ -671,7 +712,7 @@ impl ManualUi {
                 MenuAction::None
             }
             b'T' if self.can_commit => match self.aim_target() {
-                Some(target) => MenuAction::Issue(TurnCmd::AttackTarget { target }),
+                Some(target) => MenuAction::Issue(self.commit_cmd(target)),
                 None => MenuAction::None,
             },
             b'C' => {
@@ -681,6 +722,7 @@ impl ManualUi {
             b'E' => {
                 self.stage = Stage::Main;
                 self.aim = None;
+                self.pending_item = None;
                 MenuAction::None
             }
             _ => MenuAction::None,
@@ -707,6 +749,7 @@ impl ManualUi {
             InputEvent::Escape => {
                 self.stage = Stage::Main;
                 self.aim = None;
+                self.pending_item = None;
                 MenuAction::None
             }
             InputEvent::Enter => self.commit_cursor(),
@@ -752,10 +795,26 @@ impl ManualUi {
         // ground is `canTargetEmptyGround == false` for a weapon
         // (`ovr014.cs:1962`).
         match (self.can_commit, self.cursor_occupant) {
-            (true, Some(target)) => MenuAction::Issue(TurnCmd::AttackTarget { target }),
+            (true, Some(target)) => MenuAction::Issue(self.commit_cmd(target)),
             // "beep and stay" (`ovr014.cs:2020-2026`): the commit is refused
             // and the cursor is right where it was.
             _ => MenuAction::None,
+        }
+    }
+
+    /// ★ What an aim commit issues: an ordinary attack, or — when the host's
+    /// item picker armed one — `UseMagicItem`'s cast
+    /// ([`ManualUi::arm_item`], roll-credits slice 9a). One pick is all the
+    /// shipped combat items need: the Wand of Fireballs' row is an AREA shape
+    /// (`field_6` nibble `8..=0xE`), which `validate_manual_targets` caps at
+    /// exactly one.
+    fn commit_cmd(&self, target: usize) -> TurnCmd {
+        match self.pending_item {
+            Some((_, spell_id)) => TurnCmd::UseItem {
+                spell_id,
+                targets: vec![target],
+            },
+            None => TurnCmd::AttackTarget { target },
         }
     }
 

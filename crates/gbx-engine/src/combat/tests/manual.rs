@@ -919,7 +919,7 @@ fn commands_without_an_open_turn_are_refused() {
 }
 
 #[test]
-fn turn_undead_and_use_item_trip_their_stubs_loudly() {
+fn turn_undead_trips_its_stub_loudly() {
     let log = ActionLog::default();
     let mut rng = EngineRng::new(SEED);
     let mut state = duel();
@@ -934,9 +934,19 @@ fn turn_undead_and_use_item_trip_their_stubs_loudly() {
             stub: "turn-undead"
         })
     );
+    // ★ Roll-credits slice 9a: an item whose spell has no transcribed row
+    // still refuses — the tripwire moved from the command to the spell.
     assert_eq!(
-        state.issue(&mut rng, TurnCmd::UseItem),
-        Err(TurnRefusal::Unmodeled { stub: "item-use" })
+        state.issue(
+            &mut rng,
+            TurnCmd::UseItem {
+                spell_id: 0x41, // the Wand of Magic Missiles' id — no row
+                targets: vec![1],
+            }
+        ),
+        Err(TurnRefusal::Unmodeled {
+            stub: "spell-entry"
+        })
     );
     let stubs: Vec<&str> = log
         .events()
@@ -946,7 +956,7 @@ fn turn_undead_and_use_item_trip_their_stubs_loudly() {
             _ => None,
         })
         .collect();
-    assert_eq!(stubs, vec!["turn-undead", "item-use"]);
+    assert_eq!(stubs, vec!["turn-undead", "spell-entry"]);
     assert!(
         state.manual_turn().is_some(),
         "a refusal never ends the turn"
@@ -1341,4 +1351,131 @@ fn a_script_that_does_not_close_the_turn_panics() {
         cmds: vec![TurnCmd::BeginMove], // opens the loop, ends nothing
     }];
     run_scripted(&mut state, &mut rng, 50, &script, |_, _| {});
+}
+
+// === roll-credits slice 9a: in-combat item use ==========================
+
+/// ★ `UseMagicItem`'s combat arm (`ovr020.cs:980-1086`): the item's spell is
+/// cast through the ordinary combat machinery and **the turn ends** —
+/// `whenCast != Camp` sets `arg_0` and runs `clear_actions` (`:1055-1060`).
+///
+/// The Wand of Fireballs' id (`0x2F`) is the one shipped combat item with a
+/// transcribed row.
+#[test]
+fn using_an_item_casts_its_spell_and_ends_the_turn() {
+    let log = ActionLog::default();
+    let mut rng = EngineRng::new(SEED);
+    let mut state = duel();
+    state.attach_action_sink(log.sink());
+    state.fighters[0].has_items = true;
+    let actor = open_manual_turn(&mut state, &mut rng);
+    assert_eq!(actor, 0);
+    log.events().clear();
+
+    let outcome = state
+        .issue(
+            &mut rng,
+            TurnCmd::UseItem {
+                spell_id: 0x2F,
+                targets: vec![1],
+            },
+        )
+        .expect("a transcribed spell id");
+    assert_eq!(outcome, TurnOutcome::TurnEnded, "the turn is spent");
+    assert!(state.manual_turn().is_none());
+    // The ordinary combat casting machinery ran: `sub_5D2E1`'s `Cast` beat
+    // with the item's own id, and the area shape gathered its blast list.
+    assert!(
+        log.events().iter().any(|e| matches!(
+            e,
+            ActionEvent::Cast {
+                caster_id: 0,
+                spell_id: 0x2F
+            }
+        )),
+        "the fireball was cast: {:?}",
+        log.events()
+    );
+    // `clear_actions` (`ovr025.cs`): moves gone, no queued cast.
+    assert_eq!(state.fighters[0].move_left, 0);
+    assert!(state.fighters[0].pending_spell.is_none());
+}
+
+/// ★ **No memorized-list test.** A Cast of the same id is refused when it is
+/// not memorized; the item carries the spell, so the Use is not.
+#[test]
+fn using_an_item_needs_no_memorized_spell() {
+    let mut rng = EngineRng::new(SEED);
+    let mut state = duel();
+    state.fighters[0].has_items = true;
+    open_manual_turn(&mut state, &mut rng);
+    assert!(state.fighters[0].memorized_list.is_empty());
+
+    assert_eq!(
+        state.issue(
+            &mut rng,
+            TurnCmd::CastSpell {
+                spell_id: 0x2F,
+                targets: vec![1],
+            }
+        ),
+        Err(TurnRefusal::WordUnavailable { word: "Cast" }),
+        "no memorized list, no Cast word"
+    );
+    assert!(state
+        .issue(
+            &mut rng,
+            TurnCmd::UseItem {
+                spell_id: 0x2F,
+                targets: vec![1],
+            }
+        )
+        .is_ok());
+}
+
+/// The two gates: no items at all, and `actions.can_use` spent
+/// (`ovr009.cs:322`, `ovr020.cs:456-463`).
+#[test]
+fn use_is_refused_without_items_or_without_can_use() {
+    let mut rng = EngineRng::new(SEED);
+    let mut state = duel();
+    open_manual_turn(&mut state, &mut rng);
+
+    let cmd = || TurnCmd::UseItem {
+        spell_id: 0x2F,
+        targets: vec![1],
+    };
+    assert_eq!(
+        state.issue(&mut rng, cmd()),
+        Err(TurnRefusal::WordUnavailable { word: "Use" }),
+        "no items"
+    );
+    state.fighters[0].has_items = true;
+    state.fighters[0].can_use = false;
+    assert_eq!(
+        state.issue(&mut rng, cmd()),
+        Err(TurnRefusal::WordUnavailable { word: "Use" }),
+        "can_use spent"
+    );
+}
+
+/// `if (spellId == 0) arg_0 = false;` (`ovr020.cs:999-1002`) — an item with no
+/// spell, or a scroll picker backed out of, does not spend the turn.
+#[test]
+fn using_an_item_with_no_spell_leaves_the_turn_open() {
+    let mut rng = EngineRng::new(SEED);
+    let mut state = duel();
+    state.fighters[0].has_items = true;
+    open_manual_turn(&mut state, &mut rng);
+    assert_eq!(
+        state.issue(
+            &mut rng,
+            TurnCmd::UseItem {
+                spell_id: 0,
+                targets: vec![],
+            }
+        ),
+        Ok(TurnOutcome::Continue)
+    );
+    assert!(state.manual_turn().is_some());
 }

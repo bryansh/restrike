@@ -380,10 +380,9 @@ fn the_main_menu_routes_its_remaining_words() {
     state.fighters[0].has_items = true;
     state.fighters[0].skill_level_cleric = 3;
     ui.refresh(&mut state);
-    assert_eq!(
-        ui.key(InputEvent::Char(b'U')),
-        MenuAction::Issue(TurnCmd::UseItem)
-    );
+    // ★ Roll-credits slice 9a: `U` opens the host's item picker; the command
+    // only exists once the picker has resolved the spell.
+    assert_eq!(ui.key(InputEvent::Char(b'U')), MenuAction::OpenItems);
     assert_eq!(
         ui.key(InputEvent::Char(b'T')),
         MenuAction::Issue(TurnCmd::TurnUndead)

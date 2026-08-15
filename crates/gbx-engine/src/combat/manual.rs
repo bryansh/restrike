@@ -75,9 +75,27 @@ pub enum TurnCmd {
     /// `V` → `viewPlayer` then `reclac_attacks` (`ovr009.cs:197-204`). The M3
     /// character sheet itself is the host's; this is the core half.
     ViewSheet,
-    /// `U` → `PlayerItemsMenu` (`ovr009.cs:208-215`). The item-use path is not
-    /// modeled: the command trips its stub and refuses (§9.1's Use row).
-    UseItem,
+    /// ★ `U` → `PlayerItemsMenu` → `UseMagicItem` (`ovr009.cs:203-211`,
+    /// `ovr020.cs:980-1086`) — roll-credits slice 9a opens slice 8's
+    /// deliberate boundary.
+    ///
+    /// The **item picker** is the host's (it owns the roster, and so the
+    /// records); by the time the command reaches the core the spell is already
+    /// resolved — `item.affect_2 & 0x7F` for a charged item, or the scroll
+    /// picker's answer (`ovr020.cs:986-997`). `targets` is the aim menu's, in
+    /// pick order, exactly as [`TurnCmd::CastSpell`]'s is.
+    ///
+    /// Three things separate it from a Cast:
+    /// - **no memorized-list test** — the item carries the spell;
+    /// - the Use word's own condition is `actions.can_use`, not
+    ///   `actions.can_cast` (`ovr020.cs:456-463`);
+    /// - **the turn always ends**: in combat, any spell whose `whenCast` is
+    ///   not `Camp` sets `arg_0` and runs `clear_actions`
+    ///   (`ovr020.cs:1055-1060`).
+    ///
+    /// The charge itself (`ovr020.cs:1064-1085`) is the host's too: it holds
+    /// the record. `TurnOutcome::TurnEnded` is its cue.
+    UseItem { spell_id: u8, targets: Vec<usize> },
     /// `C` → `spell_menu3` (`ovr009.cs:219`). `targets` is what the aim menu
     /// picked, in pick order — the manual arm of `ovr014.target`'s per-target
     /// loop (`ovr014.cs:1322-1358`), which draws nothing.
@@ -505,10 +523,7 @@ impl CombatState {
                 self.reclac_attacks(actor);
                 Ok(TurnOutcome::Continue)
             }
-            TurnCmd::UseItem => {
-                self.trip(actor, "item-use");
-                Err(TurnRefusal::Unmodeled { stub: "item-use" })
-            }
+            TurnCmd::UseItem { spell_id, targets } => self.use_item(rng, actor, spell_id, &targets),
             TurnCmd::CastSpell { spell_id, targets } => {
                 self.cast_spell(rng, actor, spell_id, &targets)
             }
@@ -1061,6 +1076,62 @@ impl CombatState {
         } else {
             TurnOutcome::Continue
         })
+    }
+
+    /// ★ `UseMagicItem`'s combat arm (`ovr020.cs:980-1086`), roll-credits
+    /// slice 9a — see [`TurnCmd::UseItem`] for the split with the host.
+    ///
+    /// An untranscribed spell id still trips `spell-entry` inside
+    /// [`Self::validate_manual_targets`], so the five wands whose ids have no
+    /// row (`0x33`, `0x3D`, `0x40`, `0x41`, `0x62`) refuse loudly rather than
+    /// guessing — only the Wand of Fireballs (`0x2F`) has one.
+    ///
+    /// **Draw-neutrality.** Nothing here can perturb a capture: every
+    /// `.gbxtrace` is either a QuickFight stream or one of the manual-bar
+    /// capture's nine hand-played turns, and none of those turns is a Use —
+    /// the reel's `ScriptedTurn` schedule cannot even name one, since
+    /// `TurnCmd::UseItem` never appears in a sidecar. The guard and the reel
+    /// both re-ran green on this change.
+    fn use_item(
+        &mut self,
+        rng: &mut EngineRng,
+        actor: usize,
+        spell_id: u8,
+        targets: &[usize],
+    ) -> Result<TurnOutcome, TurnRefusal> {
+        // `combat_menu`'s own word condition (`ovr009.cs:322`).
+        if !self.menu_words_for(actor).use_item {
+            return Err(TurnRefusal::WordUnavailable { word: "Use" });
+        }
+        // `PlayerItemsMenu`'s Use condition in combat (`ovr020.cs:456-463`):
+        // out of combat the game state satisfies the parenthesis on its own,
+        // but inside a fight `actions.can_use` is the whole of it.
+        if !self.fighters[actor].can_use {
+            return Err(TurnRefusal::WordUnavailable { word: "Use" });
+        }
+        // `if (spellId == 0) arg_0 = false;` (`ovr020.cs:999-1002`) — an item
+        // with no spell, or a scroll picker the player backed out of, is not
+        // a spent turn.
+        if spell_id == 0 {
+            return Ok(TurnOutcome::Continue);
+        }
+        self.validate_manual_targets(actor, spell_id, targets)?;
+        if targets.is_empty() {
+            return Ok(TurnOutcome::Continue);
+        }
+        self.sub_5d2e1_manual(rng, actor, spell_id, targets);
+        // `if (game_state == Combat && spellCastingTable[id].whenCast != Camp)
+        // { arg_0 = true; clear_actions(player); }` (`ovr020.cs:1055-1060`).
+        // Every combat-usable item CotAB ships is a `SpellWhen::Combat` row,
+        // so this arm is the only one a fight reaches; a hypothetical
+        // camp-only row would leave the turn open, and does here too.
+        let camp_only = super::spells::spell_entry(spell_id)
+            .is_some_and(|e| e.when_cast == crate::spells::SpellWhen::Camp);
+        if camp_only {
+            return Ok(TurnOutcome::Continue);
+        }
+        self.clear_actions(actor);
+        Ok(self.end_turn())
     }
 
     /// `combat_menu`'s pending-cast head (`ovr009.cs:155-163`): the spell queued

@@ -112,6 +112,12 @@ pub enum Stage {
     Treasure,
     /// The one-tick screen restore + the deferred writes.
     Restore,
+    /// ★ **Roll-credits slice 9a**: `combat_menu`'s `'U'` →
+    /// `PlayerItemsMenu` (`ovr009.cs:203-211`). The picker lives here rather
+    /// than in the scene because the item RECORDS are on the roster, which
+    /// only the host holds. Appended last, so postcard keeps every earlier
+    /// variant's index.
+    Items { member: usize, index: usize },
 }
 
 /// The art pins one fight draws with — enough to rebuild [`SceneArt`] after a
@@ -521,6 +527,10 @@ impl CombatHost {
                 self.render_sheet(ctx, member);
                 HostTick::Working
             }
+            Stage::Items { member, index } => {
+                self.render_items(ctx, member, index);
+                HostTick::Working
+            }
             Stage::FinalBeats { ticks_left } => {
                 let left = ticks_left.saturating_sub(ctx.dt_ticks);
                 if left > 0 {
@@ -784,6 +794,22 @@ impl CombatHost {
                 if let Some(ui) = self.manual.as_mut() {
                     ui.note(outcome);
                 }
+                // ★ `UseMagicItem`'s tail (`ovr020.cs:1064-1085`), roll-credits
+                // slice 9a: the charge is spent only when `arg_0` came back
+                // true, which in combat is exactly "the turn ended". The
+                // record lives on the roster, so the burn happens here.
+                if matches!(cmd, TurnCmd::UseItem { .. }) && outcome.turn_ended() {
+                    let spent = self
+                        .manual
+                        .as_mut()
+                        .and_then(|ui| ui.take_used_item().map(|item| (ui.actor(), item)));
+                    if let Some((actor, item)) = spent {
+                        let member = self.party_member_of(ctx, actor);
+                        if let Some(ch) = ctx.roster.members.get_mut(member) {
+                            crate::items::consume_charge(ch, item);
+                        }
+                    }
+                }
                 if outcome.turn_ended() {
                     self.close_manual_turn();
                     return;
@@ -847,6 +873,7 @@ impl CombatHost {
             Stage::PlayerTurn => self.drain_menu_input(ctx),
             Stage::ContinuePrompt => self.drain_continue_input(ctx),
             Stage::Sheet { .. } => self.drain_sheet_input(ctx),
+            Stage::Items { .. } => self.drain_items_input(ctx),
             Stage::Results => self.drain_results_input(ctx),
             Stage::Treasure => self.drain_treasure_input(ctx),
             _ => self.drain_ai_turn_input(ctx),
@@ -1094,6 +1121,13 @@ impl CombatHost {
                         ui.refresh(&mut self.state);
                     }
                 }
+                // ★ Roll-credits slice 9a: the in-combat item picker.
+                MenuAction::OpenItems => {
+                    let actor = ui.actor();
+                    let member = self.party_member_of(ctx, actor);
+                    self.stage = Stage::Items { member, index: 0 };
+                    return;
+                }
                 MenuAction::OpenSheet => {
                     let actor = ui.actor();
                     // The party member behind the roster index — the fight's
@@ -1180,6 +1214,120 @@ impl CombatHost {
                 return;
             }
         }
+    }
+
+    /// ★ The in-combat item picker's rows (roll-credits slice 9a): every item
+    /// the acting member carries, with the spell it would cast.
+    ///
+    /// `UseMagicItem`'s spell resolution (`ovr020.cs:986-997`): a scroll asks
+    /// `spell_menu2`, anything with `affect_2 > 0 && affect_3 < 0x80` casts
+    /// `affect_2 & 0x7F`, and anything else has no spell at all. **The scroll
+    /// arm is not wired here** — reading a scroll mid-fight needs the scroll's
+    /// own spell list, which is `spell_menu2`'s, not this picker's; those rows
+    /// report themselves rather than casting something unasked.
+    fn item_spells(ctx: &FlowCtx, member: usize) -> Vec<(String, u8)> {
+        let table = crate::items::load_table(ctx.data);
+        ctx.roster
+            .members
+            .get(member)
+            .map(|ch| {
+                ch.items
+                    .iter()
+                    .map(|record| {
+                        let name = crate::items::display_name(record, false, false);
+                        let spell = if crate::items::is_scroll(&table, record) {
+                            0
+                        } else if gbx_formats::save_orig::item_affect(record, 2) > 0
+                            && gbx_formats::save_orig::item_affect(record, 3) < 0x80
+                        {
+                            gbx_formats::save_orig::item_affect(record, 2) & 0x7F
+                        } else {
+                            0
+                        };
+                        (name, spell)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn drain_items_input(&mut self, ctx: &mut FlowCtx) {
+        let Stage::Items { member, mut index } = self.stage else {
+            return;
+        };
+        let rows = Self::item_spells(ctx, member);
+        while let Some(event) = ctx.input.read_key() {
+            match event {
+                crate::input::InputEvent::Escape => {
+                    self.leave_items(ctx);
+                    return;
+                }
+                crate::input::InputEvent::Ext(ext) => match ext.ctrl_code() {
+                    b'H' if index > 0 => index -= 1,
+                    b'P' if index + 1 < rows.len() => index += 1,
+                    _ => {}
+                },
+                crate::input::InputEvent::Enter => {
+                    // `sl_select_item`'s commit -> `UseMagicItem`.
+                    let spell = rows.get(index).map(|r| r.1).unwrap_or(0);
+                    self.leave_items(ctx);
+                    if let Some(ui) = self.manual.as_mut() {
+                        ui.arm_item(index, spell);
+                    }
+                    return;
+                }
+                crate::input::InputEvent::Char(key) => match key.to_ascii_uppercase() {
+                    b'E' => {
+                        self.leave_items(ctx);
+                        return;
+                    }
+                    b'U' => {
+                        let spell = rows.get(index).map(|r| r.1).unwrap_or(0);
+                        self.leave_items(ctx);
+                        if let Some(ui) = self.manual.as_mut() {
+                            ui.arm_item(index, spell);
+                        }
+                        return;
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+            self.stage = Stage::Items { member, index };
+        }
+        self.stage = Stage::Items { member, index };
+    }
+
+    /// `combat_menu`'s `'U'` tail (`ovr009.cs:206-210`): `reclac_attacks`, and
+    /// the combat screen is redrawn whenever the turn did NOT end.
+    fn leave_items(&mut self, ctx: &mut FlowCtx) {
+        self.stage = Stage::PlayerTurn;
+        crate::combat::scene::render::palette_combat(ctx.fb);
+        self.issue(ctx, TurnCmd::ViewSheet);
+    }
+
+    fn render_items(&self, ctx: &mut FlowCtx, member: usize, index: usize) {
+        crate::combat::scene::render::palette_normal(ctx.fb);
+        ctx.fb.clear(0);
+        let _ = crate::frames::draw_frame_outer(ctx.fb, ctx.symbols);
+        let name = ctx
+            .roster
+            .members
+            .get(member)
+            .map(|c| c.name.clone())
+            .unwrap_or_default();
+        crate::text::draw_string(ctx.fb, ctx.font, &name, 1, 1, 0, 0x0B);
+        crate::text::draw_string(ctx.fb, ctx.font, "Items", 1, name.len() + 4, 0, 10);
+        for (row, (label, spell)) in Self::item_spells(ctx, member).iter().enumerate() {
+            let (bg, fg) = if row == index { (15, 0) } else { (0, 10) };
+            let line = if *spell == 0 {
+                label.clone()
+            } else {
+                format!("{label}  (spell {spell:#04X})")
+            };
+            crate::text::draw_string(ctx.fb, ctx.font, &line, 3 + row, 1, bg, fg);
+        }
+        crate::combat::scene::render::draw_menu_line(ctx.fb, ctx.font, "Use Exit", None);
     }
 
     /// ★ **The post-fight member sync** (roll-credits slice 6, deliverable A) —
