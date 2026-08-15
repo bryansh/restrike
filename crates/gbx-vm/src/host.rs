@@ -565,7 +565,7 @@ pub enum Request {
     /// encodes positionally inside `SaveState` — are untouched.
     SelectPlayer { prompt: VmString },
     /// ★ INPUT STRING (0x10), `CMD_InputString` (`sub_269A4`,
-    /// `ovr003.cs:372-388` / `ovr003:09A4-0A12`) — `getUserInputString`'s
+    /// `ovr003.cs:372-388` / `ovr003:09A4-0A1B`) — `getUserInputString`'s
     /// line editor.
     ///
     /// `max_len` is **40** at every site: the handler passes the literal
