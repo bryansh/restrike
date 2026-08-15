@@ -101,7 +101,16 @@ pub const CONTAINER_VERSION: u16 = 1;
 /// `block_area_view` is a live ScriptMemory cell read at its two consumers
 /// instead. Both a payload-shape addition and a removal: reject-not-migrate,
 /// hard version bump. The committed golden was recomputed in the same commit.
-pub const SAVE_FORMAT_VERSION: u32 = 8;
+/// **v9** (roll-credits slice 9a, the visible tail — the slice's ONE break):
+/// `Screen::Shop` stopped carrying the M3 placeholder `screens::Shop` and now
+/// carries [`crate::shop_screen::ShopHost`], the real `CityShop`. Every other
+/// shape this slice needed was an APPENDED enum variant, which postcard
+/// encodes positionally and therefore costs nothing — `Request::SelectPlayer`/
+/// `InputString`, `Reply::PlayerSelected`/`Text`, `VmPhase::Shop`,
+/// `ReturnTo::Shop`, and the Items screen's four new stages. Only the payload
+/// swap is a real break: reject-not-migrate, hard version bump. The committed
+/// golden was recomputed in the same commit.
+pub const SAVE_FORMAT_VERSION: u32 = 9;
 
 /// This engine's one shipped flavor (M3's slice — `xxvc` is M7). An 8-byte
 /// ASCII tag rather than a numeric id, matching the header's own

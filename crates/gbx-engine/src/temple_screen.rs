@@ -397,30 +397,36 @@ impl TempleHost {
         }
     }
 
-    /// `press_any_key(..., TextRegion.NormalBottom)`'s wrap: rows `0x11..=0x16`,
-    /// columns 1..=0x26 (`crate::text::NORMAL_BOTTOM`), broken on spaces.
     fn draw_wrapped(ctx: &mut FlowCtx, text: &str) {
-        let region = crate::text::NORMAL_BOTTOM;
-        let width = region.x_end + 1 - region.x_start;
-        let mut row = region.y_start;
-        let mut line = String::new();
-        for word in text.split_whitespace() {
-            if !line.is_empty() && line.len() + 1 + word.len() > width {
-                crate::text::draw_string(ctx.fb, ctx.font, &line, row, region.x_start, 0, 10);
-                row += 1;
-                line.clear();
-            }
-            if !line.is_empty() {
-                line.push(' ');
-            }
-            line.push_str(word);
-        }
-        if !line.is_empty() {
-            crate::text::draw_string(ctx.fb, ctx.font, &line, row, region.x_start, 0, 10);
-        }
+        draw_wrapped(ctx, text)
     }
 
     fn draw_prompt(&self, ctx: &mut FlowCtx, text: &str) {
         crate::combat::scene::render::draw_menu_line(ctx.fb, ctx.font, text, None);
+    }
+}
+
+/// `press_any_key(..., TextRegion.NormalBottom)`'s wrap: rows `0x11..=0x16`,
+/// columns 1..=0x26 (`crate::text::NORMAL_BOTTOM`), broken on spaces. Shared
+/// with the shop, whose leaving-with-money prompt is the same code with
+/// different words (`ovr007.cs:226-231` against `ovr005.cs:461-463`).
+pub(crate) fn draw_wrapped(ctx: &mut FlowCtx, text: &str) {
+    let region = crate::text::NORMAL_BOTTOM;
+    let width = region.x_end + 1 - region.x_start;
+    let mut row = region.y_start;
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        if !line.is_empty() && line.len() + 1 + word.len() > width {
+            crate::text::draw_string(ctx.fb, ctx.font, &line, row, region.x_start, 0, 10);
+            row += 1;
+            line.clear();
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        crate::text::draw_string(ctx.fb, ctx.font, &line, row, region.x_start, 0, 10);
     }
 }

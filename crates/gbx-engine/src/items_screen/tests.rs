@@ -63,6 +63,9 @@ struct Item {
     weight: i16,
     count: u8,
     affects: [u8; 3],
+    /// `Item._value` (`Classes/Item.cs:35`, on-disk `0x3A`) — what the shop
+    /// prices Buy from and `ShopSellItem` halves.
+    value: i16,
 }
 
 fn record(it: Item) -> Vec<u8> {
@@ -76,6 +79,7 @@ fn record(it: Item) -> Vec<u8> {
     r[0x35] = it.hidden;
     r[0x37..0x39].copy_from_slice(&it.weight.to_le_bytes());
     r[0x39] = it.count;
+    r[0x3A..0x3C].copy_from_slice(&it.value.to_le_bytes());
     r[0x3C] = it.affects[0];
     r[0x3D] = it.affects[1];
     r[0x3E] = it.affects[2];
@@ -552,4 +556,120 @@ fn exit_returns_to_the_character_sheet() {
     e.tick(&[InputEvent::Escape]);
     e.tick(&[]);
     assert!(matches!(e.shell(), Shell::Screen(Screen::PartyView(_))));
+}
+
+// --- Sell / Id (shop only, roll-credits slice 9a) --------------------------
+
+/// Opens the sheet and its Items leaf **as if from inside `CityShop`** —
+/// `ReturnTo::Shop` is this shell's `gbl.game_state == GameState.Shop`.
+fn open_items_in_shop(e: &mut Engine) {
+    e.shell = Shell::Screen(Screen::PartyView(crate::screens::PartyView::from_index(
+        e.state.selected_player,
+        ReturnTo::Shop,
+    )));
+    e.tick(&[]);
+    e.tick(&[InputEvent::Char(b'I')]);
+    e.tick(&[]);
+}
+
+/// ★ `Sell` and `Id` are `PlayerItemsMenu` words gated on
+/// `gbl.game_state == GameState.Shop` (`ovr020.cs:484-493`) — NOT `CityShop`'s
+/// own bar. Out of a shop they are absent; in one they are the last two words.
+#[test]
+fn sell_and_id_appear_on_the_bar_only_inside_a_shop() {
+    let sword = record(Item {
+        item_type: 36,
+        nn: [0, 0, 36],
+        weight: 60,
+        value: 100,
+        ..Default::default()
+    });
+    let mut e = engine_with(vec![carrier("RAVD", vec![sword.clone()])]);
+    open_items(&mut e);
+    let out_of_shop = screen(&e).bar.text.clone();
+    assert!(!out_of_shop.contains("Sell"), "{out_of_shop}");
+    assert!(!out_of_shop.contains(" Id"), "{out_of_shop}");
+
+    let mut e = engine_with(vec![carrier("RAVD", vec![sword])]);
+    open_items_in_shop(&mut e);
+    let in_shop = screen(&e).bar.text.clone();
+    assert!(in_shop.ends_with("Sell Id"), "{in_shop}");
+}
+
+/// ★ `ShopSellItem` (`ovr020.cs:1089-1147`): the offer is half the value, the
+/// deal takes the item, and the payout arrives as `value / 5` platinum plus
+/// `value % 5` gold.
+#[test]
+fn selling_an_item_takes_it_and_pays_platinum_and_gold_change() {
+    let sword = record(Item {
+        item_type: 36,
+        nn: [0, 0, 36],
+        weight: 60,
+        value: 24, // -> offer 12 -> 2 platinum + 2 gold
+        ..Default::default()
+    });
+    let mut e = engine_with(vec![carrier("RAVD", vec![sword])]);
+    e.party.members[0].money = crate::party::Money::default();
+    open_items_in_shop(&mut e);
+
+    e.tick(&[InputEvent::Char(b'S')]); // the offer line
+    e.tick(&[]);
+    e.tick(&[InputEvent::Enter]); // press any key -> "Is It a Deal? "
+    e.tick(&[]);
+    e.tick(&[InputEvent::Char(b'Y')]);
+    e.tick(&[]);
+
+    assert!(
+        e.party().members[0].items.is_empty(),
+        "the item left the inventory"
+    );
+    assert_eq!(e.party().members[0].money.platinum, 2);
+    assert_eq!(e.party().members[0].money.gold, 2);
+}
+
+/// ★ `IdentifyItem` (`ovr020.cs:1153-1200`): 200 gold, then
+/// `hidden_names_flag = 0` — and the generated name grows the words the flag
+/// was hiding.
+#[test]
+fn identifying_an_item_costs_two_hundred_gold_and_reveals_its_words() {
+    // `namenum` (0, 48, 36) with `hidden_names_flag` 1 hides the third word.
+    let mut sword = record(Item {
+        item_type: 36,
+        nn: [0, 48, 36],
+        weight: 60,
+        value: 100,
+        ..Default::default()
+    });
+    rec::set_item_hidden_names_flag(&mut sword, 1);
+    let hidden = items::display_name(&sword, false, false);
+
+    let mut e = engine_with(vec![carrier("RAVD", vec![sword])]);
+    e.party.members[0].money = crate::party::Money {
+        gold: 500,
+        ..Default::default()
+    };
+    open_items_in_shop(&mut e);
+
+    e.tick(&[InputEvent::Char(b'I')]); // the offer line
+    e.tick(&[]);
+    e.tick(&[InputEvent::Enter]);
+    e.tick(&[]);
+    e.tick(&[InputEvent::Char(b'Y')]);
+    e.tick(&[]);
+    e.tick(&[InputEvent::Enter]); // the verdict's press-any-key
+    e.tick(&[]);
+
+    let after = items::display_name(&e.party().members[0].items[0], false, false);
+    assert_ne!(
+        after, hidden,
+        "the name grew a word: {hidden:?} -> {after:?}"
+    );
+    assert_eq!(
+        rec::item_hidden_names_flag(&e.party().members[0].items[0]),
+        0
+    );
+    assert!(
+        crate::money::gold_worth(&e.party().members[0].money, e.rules()) < 500,
+        "200 gold left the purse"
+    );
 }

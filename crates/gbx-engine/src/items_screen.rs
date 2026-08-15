@@ -69,6 +69,9 @@ const SL_SELECTED_WORD: usize = 1;
 enum Disposal {
     Trade,
     Drop,
+    /// ★ Roll-credits slice 9a — `CanSellDropTradeItem` serves Sell too
+    /// (`ovr020.cs:600-607`). Appended for postcard.
+    Sell,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -92,6 +95,18 @@ enum Stage {
     /// `NonCombatSpellCast`'s `SpellTargets.PartyMember` selector
     /// (`ovr023.cs:635`).
     ChooseTarget { item: usize, spell: u8 },
+    /// ★ Roll-credits slice 9a. `ShopSellItem`'s offer line
+    /// (`ovr020.cs:1113`, `press_any_key(..., 14, TextRegion.Normal2)`).
+    /// Appended after `ChooseTarget` for postcard's sake.
+    SellOffer { item: usize, value: i64 },
+    /// `ShopSellItem`'s `yes_no("Is It a Deal? ")` (`:1115`).
+    SellConfirm { item: usize, value: i64 },
+    /// `IdentifyItem`'s offer line (`:1160`).
+    IdOffer { item: usize },
+    /// `IdentifyItem`'s `yes_no("Is It a Deal? ")` (`:1162`).
+    IdConfirm { item: usize },
+    /// `IdentifyItem`'s closing `press_any_key` (`:1186`/`:1192`).
+    IdResult { line: String },
 }
 
 /// The Items screen.
@@ -170,10 +185,19 @@ impl ItemsScreen {
         self.list.seed_cursor(cursor);
         // ★ `gbl.area_ptr.field_1CA` — the per-area item ban. Threaded from the
         // resident area block the same way the combat menu's Cast word reads it.
-        let words = items::items_menu_words(ch, items::area_bans_items(ctx.state), false);
+        let words = items::items_menu_words(ch, items::area_bans_items(ctx.state), self.in_shop());
         let mut bar = Hotbar::new(words.text());
         bar.seed_selected_word(SL_SELECTED_WORD);
         self.bar = bar;
+    }
+
+    /// ★ `gbl.game_state == GameState.Shop` (`ovr020.cs:484`) — the ONE
+    /// condition that puts `Sell` and `Id` on this bar. In this shell the
+    /// Items leaf only ever reaches a shop through `CityShop`'s own
+    /// `viewPlayer()` call (`ovr007.cs:190`), so
+    /// [`ReturnTo::Shop`](crate::screens::ReturnTo::Shop) IS that state.
+    fn in_shop(&self) -> bool {
+        matches!(self.return_to, ReturnTo::Shop)
     }
 
     fn exit(&self, ctx: &FlowCtx) -> ScreenTransition {
@@ -217,7 +241,141 @@ impl ItemsScreen {
             Stage::ScrollPick { item } => self.tick_scroll_pick(ctx, item),
             Stage::CombatOnly { item, spell } => self.tick_combat_only(ctx, item, spell),
             Stage::ChooseTarget { item, spell } => self.tick_choose_target(ctx, item, spell),
+            // ★ Roll-credits slice 9a: the shop-only pair.
+            Stage::SellOffer { item, value } => {
+                // `press_any_key(offer, true, 14, TextRegion.Normal2)` (`:1113`).
+                if ctx.input.read_key().is_some() {
+                    self.stage = Stage::SellConfirm { item, value };
+                    self.confirm = Some(yes_no("Is It a Deal? "));
+                }
+                ScreenTransition::Stay
+            }
+            Stage::SellConfirm { item, value } => self.tick_sell(ctx, item, value),
+            Stage::IdOffer { item } => {
+                if ctx.input.read_key().is_some() {
+                    self.stage = Stage::IdConfirm { item };
+                    self.confirm = Some(yes_no("Is It a Deal? "));
+                }
+                ScreenTransition::Stay
+            }
+            Stage::IdConfirm { item } => self.tick_identify(ctx, item),
+            Stage::IdResult { .. } => {
+                if ctx.input.read_key().is_some() {
+                    self.stage = Stage::Browse;
+                    self.rebuild(ctx);
+                }
+                ScreenTransition::Stay
+            }
         }
+    }
+
+    // --- Sell / Id (shop only) -------------------------------------------
+
+    /// `ShopSellItem`'s offer for one row ([`crate::shop::sell_offer`]).
+    fn sell_value(&self, ctx: &FlowCtx, item: usize) -> i64 {
+        ctx.roster
+            .members
+            .get(self.member)
+            .and_then(|c| c.items.get(item))
+            .map(|r| crate::shop::sell_offer(r))
+            .unwrap_or(0)
+    }
+
+    fn begin_sell(&mut self, ctx: &mut FlowCtx, item: usize) {
+        let value = self.sell_value(ctx, item);
+        self.stage = Stage::SellOffer { item, value };
+    }
+
+    /// `ShopSellItem`'s Yes arm (`ovr020.cs:1117-1147`): `"Sold!"`, the item is
+    /// lost, and the money arrives as [`crate::shop::sell_payout`]'s
+    /// platinum-and-gold change — with the overflow pooled when it would
+    /// overload the seller.
+    fn tick_sell(&mut self, ctx: &mut FlowCtx, item: usize, value: i64) -> ScreenTransition {
+        let Some(confirm) = &mut self.confirm else {
+            self.stage = Stage::Browse;
+            return ScreenTransition::Stay;
+        };
+        match confirm.tick(ctx) {
+            None => return ScreenTransition::Stay,
+            Some(false) => {
+                self.confirm = None;
+                self.stage = Stage::Browse;
+                return ScreenTransition::Stay;
+            }
+            Some(true) => {}
+        }
+        self.confirm = None;
+        let flavor = gbx_rules::adnd1::flavor_impl::Adnd1::new(ctx.rules);
+        let overloaded = {
+            let Some(ch) = ctx.roster.members.get_mut(self.member) else {
+                self.stage = Stage::Browse;
+                return ScreenTransition::Stay;
+            };
+            items::lose_item(ch, item);
+            crate::shop::sell_payout(ch, &mut ctx.state.pooled_money, value, &flavor)
+        };
+        self.status = Some(if overloaded {
+            "Overloaded. Money will be put in pool.".into()
+        } else {
+            "Sold!".into()
+        });
+        self.stage = Stage::Browse;
+        self.reclac(ctx);
+        self.rebuild(ctx);
+        ScreenTransition::Stay
+    }
+
+    /// `IdentifyItem` (`ovr020.cs:1153-1200`): 200 gold from the purse or the
+    /// pool, then `hidden_names_flag = 0` — which is what makes the generated
+    /// name grow its `+N`/`of X` words.
+    fn tick_identify(&mut self, ctx: &mut FlowCtx, item: usize) -> ScreenTransition {
+        let Some(confirm) = &mut self.confirm else {
+            self.stage = Stage::Browse;
+            return ScreenTransition::Stay;
+        };
+        match confirm.tick(ctx) {
+            None => return ScreenTransition::Stay,
+            Some(false) => {
+                self.confirm = None;
+                self.stage = Stage::Browse;
+                return ScreenTransition::Stay;
+            }
+            Some(true) => {}
+        }
+        self.confirm = None;
+        let cost = crate::shop::IDENTIFY_COST;
+        let Some(ch) = ctx.roster.members.get_mut(self.member) else {
+            self.stage = Stage::Browse;
+            return ScreenTransition::Stay;
+        };
+        // Purse first, then the pool (`ovr020.cs:1164-1181`).
+        if crate::money::gold_worth(&ch.money, ctx.rules) >= cost {
+            crate::money::subtract_gold_worth(&mut ch.money, cost, ctx.rules);
+        } else if ctx.state.pooled_money.gold_worth() >= cost {
+            ctx.state.pooled_money.subtract_gold_worth(cost);
+        } else {
+            self.status = Some("Not Enough Money".into());
+            self.stage = Stage::Browse;
+            return ScreenTransition::Stay;
+        }
+        let Some(record) = ch.items.get_mut(item) else {
+            self.stage = Stage::Browse;
+            return ScreenTransition::Stay;
+        };
+        let line = if rec::item_hidden_names_flag(record) == 0 {
+            format!(
+                "I can't tell anything new about your {}",
+                items::display_name(record, false, false)
+            )
+        } else {
+            rec::set_item_hidden_names_flag(record, 0);
+            format!(
+                "It looks like some sort of {}",
+                items::display_name(record, false, false)
+            )
+        };
+        self.stage = Stage::IdResult { line };
+        ScreenTransition::Stay
     }
 
     fn tick_browse(&mut self, ctx: &mut FlowCtx) -> ScreenTransition {
@@ -246,7 +404,7 @@ impl ItemsScreen {
     fn dispatch(&mut self, ctx: &mut FlowCtx, item: usize, key: u8) -> ScreenTransition {
         let words = {
             let ch = &ctx.roster.members[self.member];
-            items::items_menu_words(ch, items::area_bans_items(ctx.state), false)
+            items::items_menu_words(ch, items::area_bans_items(ctx.state), self.in_shop())
         };
         self.status = None;
         match key {
@@ -293,6 +451,23 @@ impl ItemsScreen {
             }
             b'J' => {
                 items::join_items(&mut ctx.roster.members[self.member], item);
+            }
+            // ★ Shop-only, and the same `CanSellDropTradeItem` gate Trade and
+            // Drop use (`ovr020.cs:600-607`).
+            b'S' if words.sell => match self.dispose_check(ctx, item) {
+                DisposeCheck::MustBeUnreadied => {
+                    self.status = Some("Must be unreadied".into());
+                }
+                DisposeCheck::ConfirmScribedScroll => {
+                    self.stage = Stage::ScribedScroll {
+                        item,
+                        then: Disposal::Sell,
+                    };
+                }
+                DisposeCheck::Allowed => self.begin_sell(ctx, item),
+            },
+            b'I' if words.id => {
+                self.stage = Stage::IdOffer { item };
             }
             _ => {}
         }
@@ -633,6 +808,10 @@ impl ItemsScreen {
                 self.stage = match then {
                     Disposal::Trade => Stage::TradeWhom { item },
                     Disposal::Drop => Stage::DropWarn { item },
+                    Disposal::Sell => {
+                        let value = self.sell_value(ctx, item);
+                        Stage::SellOffer { item, value }
+                    }
                 };
                 ScreenTransition::Stay
             }
@@ -767,6 +946,52 @@ impl ItemsScreen {
             }
         }
 
+        // ★ Roll-credits slice 9a: the two shop-only offer lines, both
+        // `press_any_key(..., 14, TextRegion.Normal2)` (`ovr020.cs:1113`,
+        // `:1160`), plus `IdentifyItem`'s verdict (`:1186`/`:1192`).
+        let offer = match &self.stage {
+            Stage::SellOffer { item, value } | Stage::SellConfirm { item, value } => ctx
+                .roster
+                .members
+                .get(self.member)
+                .and_then(|c| c.items.get(*item))
+                .map(|r| {
+                    format!(
+                        "I'll give you {value} gold pieces for your {}",
+                        items::display_name(r, false, false)
+                    )
+                }),
+            Stage::IdOffer { item } | Stage::IdConfirm { item } => ctx
+                .roster
+                .members
+                .get(self.member)
+                .and_then(|c| c.items.get(*item))
+                .map(|r| {
+                    format!(
+                        "For {} gold pieces I'll identify your {}",
+                        crate::shop::IDENTIFY_COST,
+                        items::display_name(r, false, false)
+                    )
+                }),
+            Stage::IdResult { line } => Some(line.clone()),
+            _ => None,
+        };
+        if let Some(line) = offer {
+            crate::text::draw_string(ctx.fb, ctx.font, &line, 0x15, 1, 0, 14);
+            if matches!(self.stage, Stage::SellOffer { .. } | Stage::IdOffer { .. })
+                || matches!(self.stage, Stage::IdResult { .. })
+            {
+                crate::text::draw_string(
+                    ctx.fb,
+                    ctx.font,
+                    "press <enter>/<return> to continue",
+                    0x18,
+                    0,
+                    0,
+                    13,
+                );
+            }
+        }
         if let Stage::DropWarn { item } = &self.stage {
             let ch = &ctx.roster.members[self.member];
             if let Some(record) = ch.items.get(*item) {

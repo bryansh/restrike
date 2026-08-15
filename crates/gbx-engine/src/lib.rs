@@ -62,6 +62,8 @@ pub mod saveload_fs;
 pub mod screens;
 pub mod shell;
 pub mod shop;
+/// ★ Roll-credits slice 9a: `CityShop` on screen (`ovr007.cs:150-272`).
+pub mod shop_screen;
 pub mod spells;
 pub mod symbols;
 /// ★ Roll-credits slice 6 (G8): the temple and its ten services.

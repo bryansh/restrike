@@ -28,6 +28,14 @@ pub enum ReturnTo {
     /// screen, never into the world: the original's post-wipe `startGameMenu`
     /// has no `BEGIN Adventuring` to press (`ovr018.cs:103-114`).
     GameOver,
+    /// ★ Roll-credits slice 9a: opened from inside `CityShop`'s own loop
+    /// (`ovr007.cs:190` `viewPlayer()`). Appended last, so postcard keeps the
+    /// three above at their indices.
+    ///
+    /// Load-bearing beyond "where does Exit go": it is also this shell's
+    /// `gbl.game_state == GameState.Shop`, the condition that puts `Sell` and
+    /// `Id` on the Items leaf's bar (`ovr020.cs:484-493`).
+    Shop,
 }
 
 /// One screen's result this tick.
@@ -56,7 +64,7 @@ pub enum Screen {
     Magic(MagicMenu),
     SaveLoad(SaveLoad),
     Training(Training),
-    Shop(Shop),
+    Shop(Box<crate::shop_screen::ShopHost>),
     // ★ Roll-credits slice 4 (Vancian camp magic). Appended at the END on
     // purpose: postcard encodes an enum variant as its index, so the six
     // above keep their encodings and no committed `.rsav` moves.
@@ -195,6 +203,10 @@ impl PartyView {
             // opened from the death screen), but "back where you came from" is
             // the right answer for any screen that ever is.
             ReturnTo::GameOver => ScreenTransition::ToGameOver,
+            // ★ The shop host owns the sub-screen (`ShopHost::Stage::Sub`) and
+            // turns any exit back into `CityShop`'s own loop — `viewPlayer`
+            // returns to its caller, it does not leave the shop.
+            ReturnTo::Shop => ScreenTransition::Exit,
         }
     }
 
@@ -661,6 +673,10 @@ impl SaveLoad {
             // need the outcome of the host's I/O, which isn't known here.
             ReturnTo::Camp => ScreenTransition::To(Screen::Camp(camp_after_saveload())),
             ReturnTo::GameOver => ScreenTransition::ToGameOver,
+            // ★ The shop host owns the sub-screen (`ShopHost::Stage::Sub`) and
+            // turns any exit back into `CityShop`'s own loop — `viewPlayer`
+            // returns to its caller, it does not leave the shop.
+            ReturnTo::Shop => ScreenTransition::Exit,
         }
     }
 
@@ -804,6 +820,10 @@ impl Training {
             ReturnTo::World => ScreenTransition::Exit,
             ReturnTo::Camp => ScreenTransition::To(Screen::Camp(Camp::new(ctx))),
             ReturnTo::GameOver => ScreenTransition::ToGameOver,
+            // ★ The shop host owns the sub-screen (`ShopHost::Stage::Sub`) and
+            // turns any exit back into `CityShop`'s own loop — `viewPlayer`
+            // returns to its caller, it does not leave the shop.
+            ReturnTo::Shop => ScreenTransition::Exit,
         }
     }
 
@@ -912,141 +932,13 @@ fn train_error_text(e: crate::training::TrainError) -> String {
 }
 
 // --- Shop (ovr007.cs CityShop) ---
-
-/// The shop screen (`CityShop`, `ovr007.cs`): the command bar
-/// `Buy View Take Pool Share Appraise Exit` (`ovr007.cs:181-185`), and a Buy
-/// sub-list of stock with prices. The buyer is the currently-selected player.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Shop {
-    shop: crate::shop::Shop,
-    phase: ShopPhase,
-    menu: Widget,
-    status: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-enum ShopPhase {
-    Menu,
-    Buy,
-}
-
-impl Shop {
-    pub fn new(shop: crate::shop::Shop) -> Self {
-        Shop {
-            shop,
-            phase: ShopPhase::Menu,
-            menu: menu_bar("Buy View Take Pool Share Appraise Exit"),
-            status: None,
-        }
-    }
-
-    fn buy_list(&self) -> Widget {
-        let items: Vec<crate::widgets::ListItem> = self
-            .shop
-            .items
-            .iter()
-            .enumerate()
-            .map(|(i, it)| {
-                let price = self.shop.price(i).unwrap_or(0);
-                crate::widgets::ListItem::Entry(format!("{}  {} gp", it.name(), price))
-            })
-            .collect();
-        Widget::ListMenu(crate::widgets::ListMenu::new(items, 8))
-    }
-
-    pub fn tick(&mut self, ctx: &mut FlowCtx) -> ScreenTransition {
-        // Backdrop.
-        ctx.fb.clear(0);
-        let _ = crate::frames::draw_frame_outer(ctx.fb, ctx.symbols);
-        crate::text::draw_string(ctx.fb, ctx.font, "Shop", 1, 1, 0, 0x0F);
-        // Stock listing for context.
-        for (i, it) in self.shop.items.iter().enumerate() {
-            let price = self.shop.price(i).unwrap_or(0);
-            let line = format!("{}  {} gp", it.name(), price);
-            crate::text::draw_string(ctx.fb, ctx.font, &line, 3 + i, 2, 0, 0x0A);
-        }
-        if let Some(s) = &self.status {
-            crate::text::draw_string(ctx.fb, ctx.font, s, 22, 1, 0, 0x0E);
-        }
-        let bar = match self.phase {
-            ShopPhase::Menu => "Buy View Take Pool Share Appraise Exit",
-            ShopPhase::Buy => "Buy an item (Esc to cancel)",
-        };
-        crate::text::draw_string(ctx.fb, ctx.font, bar, 24, 1, 0, 0x0F);
-        // `LoadPic`'s Shop arm ends with `display_map_position_time()`
-        // (`ovr025.cs:1425`) — the shop is the other screen whose own layout
-        // carries the line, without camp's suffix (`game_state == Shop`).
-        // (Our shop *body* is still the M3 placeholder listing rather than the
-        // original's picture + `PartySummary` composition; the line's presence
-        // is what this arm pins.)
-        draw_position_time(ctx, false);
-
-        match self.phase {
-            ShopPhase::Menu => match self.menu.tick(ctx.input, ctx.dt_ticks) {
-                WidgetOutcome::Pending => ScreenTransition::Stay,
-                WidgetOutcome::Hotbar(key) => self.dispatch_menu(key),
-                _ => ScreenTransition::Stay,
-            },
-            ShopPhase::Buy => match self.menu.tick(ctx.input, ctx.dt_ticks) {
-                WidgetOutcome::Pending => ScreenTransition::Stay,
-                WidgetOutcome::ListSelected { index, .. } => {
-                    self.status = Some(self.buy(index, ctx));
-                    ScreenTransition::Stay
-                }
-                WidgetOutcome::ListCancelled => {
-                    self.phase = ShopPhase::Menu;
-                    self.menu = menu_bar("Buy View Take Pool Share Appraise Exit");
-                    ScreenTransition::Stay
-                }
-                _ => ScreenTransition::Stay,
-            },
-        }
-    }
-
-    fn dispatch_menu(&mut self, key: u8) -> ScreenTransition {
-        match key.to_ascii_uppercase() {
-            b'B' => {
-                if self.shop.items.is_empty() {
-                    self.status = Some("Nothing for sale.".into());
-                } else {
-                    self.phase = ShopPhase::Buy;
-                    self.menu = self.buy_list();
-                }
-                ScreenTransition::Stay
-            }
-            // View/Take/Pool/Share/Appraise: Pool/Share are trivial coin
-            // aggregation but need a multi-member select UI; Take handles
-            // on-ground treasure; Appraise runs a gem-valuation dialog. All
-            // stubbed with a status. TODO(M3+): Pool/Share coin ops;
-            // TODO(M4): View (char sheet from a shop), Take, Appraise.
-            b'V' => {
-                self.status = Some("View: character sheet — TODO".into());
-                ScreenTransition::Stay
-            }
-            b'T' | b'P' | b'S' | b'A' => {
-                self.status = Some("Take/Pool/Share/Appraise — TODO".into());
-                ScreenTransition::Stay
-            }
-            b'E' | 0 => ScreenTransition::Exit,
-            _ => ScreenTransition::Stay,
-        }
-    }
-
-    /// Buys `index` for the selected player (`shop_buy`, `ovr007.cs:106`),
-    /// returning a status line.
-    fn buy(&mut self, index: usize, ctx: &mut FlowCtx) -> String {
-        let buyer_idx =
-            (ctx.state.selected_player as usize).min(ctx.roster.members.len().saturating_sub(1));
-        let Some(buyer) = ctx.roster.members.get_mut(buyer_idx) else {
-            return "No one to buy for.".to_string();
-        };
-        match crate::shop::buy(&self.shop, index, buyer, ctx.rules) {
-            Ok(o) => format!("Bought {} for {} gp.", o.item_name, o.price),
-            Err(crate::shop::BuyError::NotEnoughMoney) => "Not enough money.".to_string(),
-            Err(crate::shop::BuyError::NoSuchItem) => "No such item.".to_string(),
-        }
-    }
-}
+//
+// ★ Roll-credits slice 9a replaced the M3 placeholder here with the real
+// thing: `crate::shop_screen::ShopHost`, which `Screen::Shop` now carries.
+// The placeholder's `Buy View Take Pool Share Appraise Exit` bar was
+// unconditional and its Buy list was a plain stock listing; the shipped
+// `CityShop` picks between two bars on `treasureOnGround` and reaches
+// Sell/Id through `viewPlayer`, not from its own bar.
 
 /// A horizontal command bar of first-letter-selectable words, extended-key
 /// aware (the M2 `displayInput`/`HorizontalMenu` vocabulary).

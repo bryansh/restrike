@@ -558,13 +558,18 @@ impl Engine {
         ));
     }
 
-    /// Opens a shop screen over the given stock (M3 step 6 deliverable 5) —
-    /// the entry point for stepping onto a town shop tile (the ECL
-    /// `EnterShop`-flag + `TREASURE`-stock flow that populates it is M6).
-    /// Returns to the walk-loop world menu on exit.
+    /// Opens `CityShop` over a caller-supplied stock — the direct entry point,
+    /// beside [`Engine::open_party_view`]. The script's own route is
+    /// `EnterShop` + `COMBAT`, which parks a
+    /// [`ShopHost`](crate::shop_screen::ShopHost) inside the suspended vector
+    /// run instead; both run the same screen.
+    ///
+    /// `CityShop` empties the pool on entry (`ovr007.cs:161`), so this does
+    /// too.
     pub fn enter_shop(&mut self, shop: crate::shop::Shop) {
-        self.shell = Shell::Screen(crate::screens::Screen::Shop(crate::screens::Shop::new(
-            shop,
+        self.state.pooled_money.clear();
+        self.shell = Shell::Screen(crate::screens::Screen::Shop(Box::new(
+            crate::shop_screen::ShopHost::new(shop, &self.party),
         )));
     }
 

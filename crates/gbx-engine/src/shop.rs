@@ -109,9 +109,14 @@ pub fn items_value(base_value: i16, price_class: u8) -> i64 {
 pub enum BuyError {
     /// No such item in the shop.
     NoSuchItem,
-    /// Neither the buyer nor pooled money covers the price (`ovr007.cs:147`
-    /// "Not enough Money.").
+    /// Neither the buyer's purse nor the pool covers the price
+    /// (`ovr007.cs:147` `"Not enough Money."`).
     NotEnoughMoney,
+    /// ★ `PlayerAddItem`'s `canCarry` refusal (`ovr007.cs:85-89`,
+    /// `"Overloaded"`) — sixteen items, or over
+    /// `max_encumberance + 1500`. **The money is not taken**: `shop_buy` only
+    /// pays when `PlayerAddItem` reported no overload (`:126-137`).
+    Overloaded,
 }
 
 /// A successful purchase.
@@ -119,43 +124,138 @@ pub enum BuyError {
 pub struct BuyOutcome {
     pub item_name: String,
     pub price: i64,
+    /// Whether the pool paid rather than the buyer's own purse
+    /// (`ovr007.cs:139-146`).
+    pub paid_from_pool: bool,
 }
 
-/// Buys `shop.items[index]` for `buyer` (`shop_buy` → `PlayerAddItem`,
-/// `ovr007.cs:106-149/85-103`): computes the price, checks affordability, adds
-/// a clone of the item to the buyer's inventory, deducts the money, and bumps
-/// encumbrance by the item's weight.
+/// ★ `shop_buy`'s transaction (`ovr007.cs:106-149`), in the original's own
+/// order: price, then **the buyer's purse**, then — only if the purse cannot
+/// cover it — **the pool**, then the refusal.
 ///
-/// **Deferrals (M4, documented not silent):** the `canCarry` overload check
-/// (`ovr020.canCarry`) needs the STR-based max-encumbrance table, and full
-/// `reclac_player_values` re-sums weight from *all* items + coins (so spending
-/// coins would also change weight). Here weight is incremented by the item's
-/// own weight — the "encumbrance updated" the deliverable asks for — with the
-/// overload cap and coin-weight delta left to M4's reclac.
+/// `PlayerAddItem` (`:85-103`) runs `canCarry` FIRST and adds a
+/// `ShallowClone`; the money is only taken when it reported no overload, so an
+/// overloaded buyer keeps their coins and gets nothing.
+///
+/// ★ **The shop never runs out.** Nothing removes the item from
+/// `gbl.items_pointer` — the clone is what the player walks away with, and the
+/// same sword can be bought all day. Transcribed, not "fixed".
 pub fn buy(
     shop: &Shop,
     index: usize,
     buyer: &mut Character,
+    pool: &mut crate::money::MoneySet,
+    table: &gbx_formats::items::ItemDataTable,
+    flavor: &dyn gbx_rules::flavor::Flavor,
     rules: &RuleSet,
 ) -> Result<BuyOutcome, BuyError> {
     let item = shop.items.get(index).ok_or(BuyError::NoSuchItem)?;
     let price = items_value(item.base_value(), shop.price_class);
 
-    if !money::can_afford(&buyer.money, price, rules) {
+    let purse_covers = money::gold_worth(&buyer.money, rules) >= price;
+    let pool_covers = pool.gold_worth() >= price;
+    if !purse_covers && !pool_covers {
         return Err(BuyError::NotEnoughMoney);
     }
 
-    // Clone the item into the buyer's inventory (ovr007.cs:97 ShallowClone).
+    // `PlayerAddItem` (`ovr007.cs:85-103`): `canCarry` then the clone, then
+    // `reclac_player_values` — which is what really re-sums the weight.
+    if crate::items::cannot_carry(buyer, &item.record, table, flavor) {
+        return Err(BuyError::Overloaded);
+    }
     buyer.items.push(item.record.clone());
-    // Encumbrance bump (the reclac weight re-sum's item contribution).
-    buyer.combat.weight = buyer.combat.weight.saturating_add(item.weight());
-    // Pay (ovr007.cs:131 SubtractGoldWorth).
-    money::subtract_gold_worth(&mut buyer.money, price, rules);
+    crate::items::reclac_player_values(buyer, table, flavor);
+
+    if purse_covers {
+        money::subtract_gold_worth(&mut buyer.money, price, rules);
+    } else {
+        pool.subtract_gold_worth(price);
+    }
 
     Ok(BuyOutcome {
-        item_name: item.name(),
+        item_name: crate::items::display_name(&item.record, false, false),
         price,
+        paid_from_pool: !purse_covers,
     })
+}
+
+/// ★ `ShopSellItem`'s offer (`ovr020.cs:1089-1110`): half the item's `_value`
+/// (integer division, and `0` for a worthless item — the shop's price class
+/// does **not** apply), then the stack adjustment.
+///
+/// A stack of more than one is worth `count * half / 20` — a *twentieth* —
+/// unless it is arrows or quarrels, which are worth `count * half`.
+pub fn sell_offer(record: &[u8]) -> i64 {
+    let base = gbx_formats::save_orig::item_value(record);
+    let mut value = if base > 0 { (base / 2) as i64 } else { 0 };
+    let count = gbx_formats::save_orig::item_count(record) as i64;
+    if count > 1 {
+        let ty = gbx_formats::save_orig::item_type(record);
+        if ty == crate::items::TYPE_ARROW || ty == crate::items::TYPE_QUARREL {
+            value *= count;
+        } else {
+            value = (count * value) / 20;
+        }
+    }
+    value
+}
+
+/// `IdentifyItem`'s fee (`ovr020.cs:1163`).
+pub const IDENTIFY_COST: i64 = 200;
+
+/// `get_max_load` (`ovr022.cs:8-11`): `1500 + max_encumberance(player)`.
+pub fn max_load(ch: &Character, flavor: &dyn gbx_rules::flavor::Flavor) -> i32 {
+    1500 + flavor.max_encumbrance(
+        ch.stats.str_score.original,
+        ch.stats.str_exceptional.current,
+    )
+}
+
+/// `willOverload` (`ovr022.cs:20-36`): `(weight, would_overload)` — the
+/// **spare capacity** when it would, `0` when it would not.
+pub fn will_overload(
+    ch: &Character,
+    added_weight: i32,
+    flavor: &dyn gbx_rules::flavor::Flavor,
+) -> (i32, bool) {
+    let max = max_load(ch, flavor);
+    if ch.combat.weight as i32 + added_weight > max {
+        (max - ch.combat.weight as i32, true)
+    } else {
+        (0, false)
+    }
+}
+
+/// ★ `ShopSellItem`'s payout (`ovr020.cs:1119-1147`): the item is lost, and
+/// the money arrives as `value / 5` **platinum** plus `value % 5` gold — the
+/// original's own change-making, which is why selling a 12-gp item hands back
+/// 2 pl + 2 gp and not 12 gp.
+///
+/// `willOverload` is tested against `plat + gold` (the *coin count*, since a
+/// coin weighs 1), and the overflow goes to the pool with the line
+/// `"Overloaded. Money will be put in pool."` — note the gold is added
+/// **unconditionally** either way (`:1141`), outside the overload branch.
+pub fn sell_payout(
+    ch: &mut Character,
+    pool: &mut crate::money::MoneySet,
+    value: i64,
+    flavor: &dyn gbx_rules::flavor::Flavor,
+) -> bool {
+    let plat = (value / 5) as i32;
+    let gold = (value % 5) as i32;
+    let (overflow, overloaded) = will_overload(ch, plat + gold, flavor);
+    if overloaded {
+        if overflow > plat {
+            ch.money.platinum = ch.money.platinum.saturating_add(plat as i16);
+        } else {
+            ch.money.platinum = ch.money.platinum.saturating_add(overflow as i16);
+            pool.add(4, plat - overflow);
+        }
+    } else {
+        ch.money.platinum = ch.money.platinum.saturating_add(plat as i16);
+    }
+    ch.money.gold = ch.money.gold.saturating_add(gold as i16);
+    overloaded
 }
 
 #[cfg(test)]
@@ -199,32 +299,87 @@ mod tests {
         assert_eq!(items_value(0, 0x00), 1);
     }
 
+    fn table() -> gbx_formats::items::ItemDataTable {
+        gbx_formats::items::ItemDataTable::parse(&[0, 0]).unwrap()
+    }
+
+    fn flavor(r: &RuleSet) -> gbx_rules::adnd1::flavor_impl::Adnd1<'_> {
+        gbx_rules::adnd1::flavor_impl::Adnd1::new(r)
+    }
+
     #[test]
     fn buying_adds_the_item_deducts_money_and_bumps_weight() {
         let r = rules();
         let shop = Shop::new(vec![ShopItem::synthetic("Dagger", 2, 10)], 0x00);
         let mut buyer = buyer_with_gold(5);
+        let mut pool = crate::money::MoneySet::default();
         let before = money::gold_worth(&buyer.money, &r);
 
-        let outcome = buy(&shop, 0, &mut buyer, &r).expect("affordable");
+        let outcome =
+            buy(&shop, 0, &mut buyer, &mut pool, &table(), &flavor(&r), &r).expect("affordable");
         assert_eq!(outcome.price, 2);
-        assert_eq!(outcome.item_name, "Dagger");
+        assert!(!outcome.paid_from_pool);
         assert_eq!(buyer.items.len(), 1, "item landed in inventory");
-        assert_eq!(buyer.combat.weight, 10, "encumbrance updated");
+        // ★ `reclac_player_values` re-sums items AND coins — and it runs
+        // inside `PlayerAddItem`, i.e. BEFORE the money is taken
+        // (`ovr007.cs:99`, `:131`). So the dagger's 10 plus the five gold
+        // pieces still in the purse at that moment.
+        assert_eq!(buyer.combat.weight, 15, "encumbrance re-summed by reclac");
         assert_eq!(
             money::gold_worth(&buyer.money, &r),
             before - 2,
             "paid exactly the price"
         );
+        assert_eq!(shop.items.len(), 1, "★ the stock is not consumed");
+    }
+
+    /// ★ `shop_buy`'s second arm (`ovr007.cs:139-146`): a purse that cannot
+    /// cover the price falls through to the POOL before the refusal.
+    #[test]
+    fn a_purse_that_cannot_cover_it_falls_through_to_the_pool() {
+        let r = rules();
+        let shop = Shop::new(vec![ShopItem::synthetic("Plate Mail", 400, 500)], 0x00);
+        let mut buyer = buyer_with_gold(50);
+        let mut pool = crate::money::MoneySet::default();
+        pool.set(3, 500); // 500 gold in the pool
+
+        let outcome = buy(&shop, 0, &mut buyer, &mut pool, &table(), &flavor(&r), &r)
+            .expect("the pool covers it");
+        assert!(outcome.paid_from_pool);
+        assert_eq!(
+            money::gold_worth(&buyer.money, &r),
+            50,
+            "the buyer's own coins are untouched"
+        );
+        assert_eq!(pool.gold_worth(), 100);
     }
 
     #[test]
-    fn buying_what_you_cannot_afford_is_refused() {
+    fn buying_what_neither_purse_nor_pool_covers_is_refused() {
         let r = rules();
         let shop = Shop::new(vec![ShopItem::synthetic("Plate Mail", 400, 500)], 0x00);
         let mut buyer = buyer_with_gold(50); // 50 gp < 400
-        assert_eq!(buy(&shop, 0, &mut buyer, &r), Err(BuyError::NotEnoughMoney));
+        let mut pool = crate::money::MoneySet::default();
+        assert_eq!(
+            buy(&shop, 0, &mut buyer, &mut pool, &table(), &flavor(&r), &r),
+            Err(BuyError::NotEnoughMoney)
+        );
         assert!(buyer.items.is_empty(), "nothing bought on refusal");
+    }
+
+    /// ★ `PlayerAddItem`'s overload refusal takes NO money (`ovr007.cs:126-137`).
+    #[test]
+    fn an_overloaded_buyer_keeps_their_coins() {
+        let r = rules();
+        let shop = Shop::new(vec![ShopItem::synthetic("Anvil", 1, 30_000)], 0x00);
+        let mut buyer = buyer_with_gold(500);
+        let mut pool = crate::money::MoneySet::default();
+        assert_eq!(
+            buy(&shop, 0, &mut buyer, &mut pool, &table(), &flavor(&r), &r),
+            Err(BuyError::Overloaded)
+        );
+        assert!(buyer.items.is_empty());
+        assert_eq!(money::gold_worth(&buyer.money, &r), 500);
     }
 
     #[test]
@@ -232,6 +387,46 @@ mod tests {
         let r = rules();
         let shop = Shop::new(vec![], 0x00);
         let mut buyer = buyer_with_gold(100);
-        assert_eq!(buy(&shop, 0, &mut buyer, &r), Err(BuyError::NoSuchItem));
+        let mut pool = crate::money::MoneySet::default();
+        assert_eq!(
+            buy(&shop, 0, &mut buyer, &mut pool, &table(), &flavor(&r), &r),
+            Err(BuyError::NoSuchItem)
+        );
+    }
+
+    /// ★ `ShopSellItem`'s offer (`ovr020.cs:1091-1110`): half the value, and a
+    /// stack of anything but arrows/quarrels is worth a TWENTIETH of that
+    /// times its count.
+    #[test]
+    fn the_sell_offer_halves_and_then_divides_a_stack_by_twenty() {
+        let mut rec = ShopItem::synthetic("Long Sword", 100, 60).record;
+        assert_eq!(sell_offer(&rec), 50, "half of 100");
+
+        gbx_formats::save_orig::set_item_count(&mut rec, 10);
+        assert_eq!(sell_offer(&rec), 25, "10 * 50 / 20");
+
+        // Arrows keep the full per-item price.
+        let mut arrows = ShopItem::synthetic("Arrow", 2, 1).record;
+        arrows[0x2E] = crate::items::TYPE_ARROW;
+        gbx_formats::save_orig::set_item_count(&mut arrows, 20);
+        assert_eq!(sell_offer(&arrows), 20, "20 * (2 / 2)");
+
+        // A worthless item is worth nothing — `ItemsValue`'s floor of 1 is a
+        // BUYING rule, not a selling one.
+        let free = ShopItem::synthetic("Rag", 0, 1).record;
+        assert_eq!(sell_offer(&free), 0);
+    }
+
+    /// ★ The payout's change-making (`ovr020.cs:1123-1147`): `value / 5`
+    /// platinum plus `value % 5` gold.
+    #[test]
+    fn the_sell_payout_is_platinum_and_gold_change() {
+        let r = rules();
+        let mut seller = buyer_with_gold(0);
+        let mut pool = crate::money::MoneySet::default();
+        let overloaded = sell_payout(&mut seller, &mut pool, 12, &flavor(&r));
+        assert!(!overloaded);
+        assert_eq!(seller.money.platinum, 2);
+        assert_eq!(seller.money.gold, 2);
     }
 }

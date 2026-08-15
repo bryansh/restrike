@@ -84,6 +84,10 @@ pub enum VmPhase {
     /// is on screen. Appended last so postcard keeps every earlier variant's
     /// index and no committed `.rsav` moves.
     Temple(Box<crate::temple_screen::TempleHost>),
+    /// ★ **Roll-credits slice 9a**: `CMD_Combat`'s non-monster branch took the
+    /// `EnterShop` arm (`ovr003.cs:978-982`) and `ovr007.CityShop()` is on
+    /// screen. Appended last, same postcard reason as `Temple`.
+    Shop(Box<crate::shop_screen::ShopHost>),
 }
 
 impl VmPhase {
@@ -104,6 +108,7 @@ impl VmPhase {
             ),
             VmPhase::Combat(h) => format!("combat({:?})", h.stage()),
             VmPhase::Temple(_) => "temple".to_string(),
+            VmPhase::Shop(h) => format!("shop({})", h.stage_name()),
         }
     }
 }
@@ -193,6 +198,7 @@ impl Clone for VmPhase {
             VmPhase::Gate(w) => VmPhase::Gate(w.clone()),
             VmPhase::Combat(h) => VmPhase::Combat(h.clone()),
             VmPhase::Temple(h) => VmPhase::Temple(h.clone()),
+            VmPhase::Shop(h) => VmPhase::Shop(h.clone()),
         }
     }
 }
@@ -205,6 +211,7 @@ impl PartialEq for VmPhase {
             (VmPhase::Gate(a), VmPhase::Gate(b)) => a == b,
             (VmPhase::Combat(_), VmPhase::Combat(_)) => true,
             (VmPhase::Temple(_), VmPhase::Temple(_)) => true,
+            (VmPhase::Shop(_), VmPhase::Shop(_)) => true,
             _ => false,
         }
     }
@@ -584,7 +591,7 @@ fn combat_branch(ctx: &mut FlowCtx) -> CombatBranch {
 /// `ECL2#1`, `ECL4#32/37` and `ECL5#49`.
 pub fn describe_combat_branch(branch: CombatBranch) -> String {
     match branch {
-        CombatBranch::Shop => "combat: EnterShop → CityShop (not wired)".to_string(),
+        CombatBranch::Shop => "combat: EnterShop → CityShop".to_string(),
         CombatBranch::Temple => "combat: EnterTemple → temple_shop".to_string(),
         CombatBranch::AfterCombat => "combat: no monsters, no shop → AfterCombat".to_string(),
     }
@@ -789,6 +796,11 @@ impl VectorRun {
                         return RunTick::Working; // the temple is still on screen
                     }
                 }
+                VmPhase::Shop(_) => {
+                    if !self.tick_shop(ctx) {
+                        return RunTick::Working; // the shop is still on screen
+                    }
+                }
                 VmPhase::Gate(_) => {
                     if !self.tick_gate(ctx) {
                         return RunTick::Working; // still gated, or paginating
@@ -938,6 +950,13 @@ impl VectorRun {
                             self.phase = VmPhase::Temple(Box::new(
                                 crate::temple_screen::TempleHost::open(ctx),
                             ));
+                            return PresentTick::OpenedGate;
+                        }
+                        // ★ Roll-credits slice 9a: the nine `EnterShop` sites
+                        // stop being report-only.
+                        if branch == CombatBranch::Shop {
+                            self.phase =
+                                VmPhase::Shop(Box::new(crate::shop_screen::ShopHost::open(ctx)));
                             return PresentTick::OpenedGate;
                         }
                     }
@@ -1112,6 +1131,32 @@ impl VectorRun {
         ctx.vm_memory.sprite_changed = false;
         // `LoadPic` (`ovr025.cs:1435-1441`) — the exploration screen comes back
         // whole, the same rebuild the fight's Restore stage performs.
+        ctx.fb.clear(0);
+        let _ = crate::frames::draw8x8_03(ctx.fb, ctx.symbols);
+        crate::corridor::redraw_view(ctx);
+        self.pending_reply = Some(Reply::Combat);
+        self.phase = VmPhase::Pump;
+        true
+    }
+
+    /// ★ Ticks the parked shop (roll-credits slice 9a). `CityShop` returns to
+    /// `CMD_Combat`, which then runs the branch's shared tail — the same tail
+    /// the temple arm runs (`ovr003.cs:1016-1026`).
+    fn tick_shop(&mut self, ctx: &mut FlowCtx) -> bool {
+        let VmPhase::Shop(host) = &mut self.phase else {
+            unreachable!("tick_shop called outside Shop phase")
+        };
+        if !matches!(host.tick(ctx), crate::screens::ScreenTransition::Exit) {
+            return false;
+        }
+        ctx.vm_memory
+            .transcript
+            .push(crate::vmhost::TranscriptEntry::Request(
+                "shop: closed".to_string(),
+            ));
+        ctx.state.search_flags &= 1;
+        ctx.state.encounter_flags = [false; 2];
+        ctx.vm_memory.sprite_changed = false;
         ctx.fb.clear(0);
         let _ = crate::frames::draw8x8_03(ctx.fb, ctx.symbols);
         crate::corridor::redraw_view(ctx);
@@ -2722,7 +2767,10 @@ impl Shell {
             // exactly as a Widget is: no vector may pump while one is running.
             matches!(
                 phase,
-                Some(VmPhase::Gate(_)) | Some(VmPhase::Combat(_)) | Some(VmPhase::Temple(_))
+                Some(VmPhase::Gate(_))
+                    | Some(VmPhase::Combat(_))
+                    | Some(VmPhase::Temple(_))
+                    | Some(VmPhase::Shop(_))
             )
         }
         fn run_gated(run: &Option<VectorRun>) -> bool {
@@ -2929,6 +2977,30 @@ impl Shell {
             Shell::Look(l) => in_run(&l.run).or_else(|| in_chain(&l.chain)),
             Shell::Step(s) => in_run(&s.run).or_else(|| in_chain(&s.chain)),
             // A camp ambush's own `COMBAT` parks here like any other.
+            Shell::CampInterrupt(c) => in_run(&c.run).or_else(|| in_chain(&c.chain)),
+            Shell::WorldMenu { .. } | Shell::GameOver(_) | Shell::Screen(_) => None,
+        }
+    }
+
+    /// ★ The shop currently on screen, if any (roll-credits slice 9a) — the
+    /// same read-only seam [`Shell::temple_host`] is, one variant over.
+    pub fn shop_host(&self) -> Option<&crate::shop_screen::ShopHost> {
+        fn in_run(run: &Option<VectorRun>) -> Option<&crate::shop_screen::ShopHost> {
+            match run.as_ref().map(|r| &r.phase) {
+                Some(VmPhase::Shop(h)) => Some(h),
+                _ => None,
+            }
+        }
+        fn in_chain(chain: &Option<ChainRunner>) -> Option<&crate::shop_screen::ShopHost> {
+            match chain.as_ref().map(|c| &c.run.phase) {
+                Some(VmPhase::Shop(h)) => Some(h),
+                _ => None,
+            }
+        }
+        match self {
+            Shell::Boot(b) => in_run(&b.run).or_else(|| in_chain(&b.chain)),
+            Shell::Look(l) => in_run(&l.run).or_else(|| in_chain(&l.chain)),
+            Shell::Step(s) => in_run(&s.run).or_else(|| in_chain(&s.chain)),
             Shell::CampInterrupt(c) => in_run(&c.run).or_else(|| in_chain(&c.chain)),
             Shell::WorldMenu { .. } | Shell::GameOver(_) | Shell::Screen(_) => None,
         }
@@ -4365,8 +4437,9 @@ mod tests {
 
     #[test]
     fn shop_screen_buys_an_item_and_updates_money_and_weight() {
-        use crate::screens::{Screen, Shop as ShopScreen};
+        use crate::screens::Screen;
         use crate::shop::{Shop, ShopItem};
+        use crate::shop_screen::ShopHost;
 
         let mut h = Harness::new();
         let mut buyer = test_char("Rich");
@@ -4381,7 +4454,7 @@ mod tests {
         });
 
         let shop = Shop::new(vec![ShopItem::synthetic("Dagger", 2, 10)], 0x00);
-        shell = Shell::Screen(Screen::Shop(ShopScreen::new(shop)));
+        shell = Shell::Screen(Screen::Shop(Box::new(ShopHost::new(shop, &h.roster))));
 
         // Buy → enter the item list.
         h.input.push_all(&[char_key(b'b')]);
@@ -4396,7 +4469,14 @@ mod tests {
             shell.tick(&mut ctx);
         }
         assert_eq!(h.roster.members[0].items.len(), 1, "item bought");
-        assert_eq!(h.roster.members[0].combat.weight, 10, "encumbrance updated");
+        // ★ The real `PlayerAddItem` ends with `reclac_player_values`
+        // (`ovr007.cs:99`), which re-sums items AND coins — 10 for the dagger
+        // plus the 100 gold pieces still in the purse when it ran. The M3
+        // placeholder this replaced only added the item's own weight.
+        assert_eq!(
+            h.roster.members[0].combat.weight, 110,
+            "encumbrance re-summed by reclac"
+        );
         assert_eq!(
             crate::money::gold_worth(&h.roster.members[0].money, &h.rules),
             98,

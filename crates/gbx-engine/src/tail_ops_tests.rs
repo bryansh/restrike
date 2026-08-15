@@ -212,6 +212,138 @@ fn the_shipped_ecl5_who_gates_on_the_selected_players_state_cell() {
     }
 }
 
+// --- CityShop ------------------------------------------------------------
+
+/// ★ **The shipped shop, driven live.** `ECL2#1 @0x83EC` — Tilverton's, and
+/// the first one a playthrough reaches:
+///
+/// ```text
+/// 0x83EC  SAVE 1, [0x7F6C]      <- EnterShop
+/// 0x83F2  SAVE 1, [0x7FF6]
+/// 0x83F8  SAVE 0x10, [0x7F6D]   <- the price class
+/// 0x83FE  CLEARMONSTERS
+/// 0x83FF  TREASURE 0,0,0,0,0,0,0, 1   <- the stock, ITEM2.DAX block 1
+/// 0x8410  COMBAT                <- CMD_Combat's non-monster branch -> CityShop
+/// ```
+///
+/// ★ Two price classes ship: `0x10` here and `0x40` at `ECL4#32 @0x955D`.
+/// `ItemsValue`'s switch has no `0x10` case (`ovr007.cs:44-82`), so Tilverton
+/// sells at **list price** through the default arm; area 4's `0x40` is a 4x
+/// markup. A bitflag with a hole in it, transcribed as written.
+#[test]
+fn the_shipped_tilverton_shop_opens_stocked_from_its_own_treasure_block() {
+    const SITE: u16 = 0x83EC;
+    let Some(mut engine) = real_data_engine(2, 1, 1, true) else {
+        eprintln!(
+            "SKIPPED: local tier needs GBX_DATA_DIR \
+             (tail_ops_tests::the_shipped_tilverton_shop_opens_stocked_from_its_own_treasure_block)"
+        );
+        return;
+    };
+    // ★ Coins weigh one unit each and `reclac_player_values` counts them, so
+    // a purse of 5000 gold is itself over `canCarry`'s
+    // `max_encumberance + 1500` ceiling and the shop answers "Overloaded"
+    // before it ever looks at the price. 200 is a shopper, not a pack mule.
+    engine.party.members[0].money = crate::party::Money {
+        gold: 200,
+        ..Default::default()
+    };
+
+    engine.shell = crate::shell::boot_at_address(&mut engine.machine, SITE);
+    // Plain ticks, no keys: `run_until` feeds an Enter every tick and this
+    // stretch has no gate to eat them, so they would still be queued when the
+    // shop's own list opens — and buy twice.
+    let mut opened = false;
+    for _ in 0..400 {
+        if engine.shell().shop_host().is_some() {
+            opened = true;
+            break;
+        }
+        engine.tick(&[]);
+    }
+    assert!(
+        opened,
+        "the COMBAT opened CityShop; shell {:?}",
+        engine.shell().probe()
+    );
+    assert_eq!(
+        engine.vm_memory().raw_word(0x7F6D),
+        Some(0x10),
+        "the script's own price class"
+    );
+    let stock = engine.state().treasure_items.len();
+    eprintln!("  ITEM2.DAX#1 stocked the shop with {stock} records:");
+    for r in &engine.state().treasure_items {
+        eprintln!(
+            "    {:24} {} gp",
+            crate::items::display_name(r, false, false),
+            crate::shop::items_value(gbx_formats::save_orig::item_value(r), 0x10)
+        );
+    }
+    assert!(stock > 0, "TREASURE filled gbl.items_pointer");
+
+    // Buy → the list → Enter buys the highlighted row.
+    let press = |engine: &mut Engine, key| {
+        engine.tick(&[key]);
+        for _ in 0..4 {
+            engine.tick(&[]);
+        }
+    };
+    press(&mut engine, crate::input::InputEvent::Char(b'B'));
+    assert_eq!(engine.shell().probe(), "boot/shop(buy)");
+    press(&mut engine, crate::input::InputEvent::Enter);
+    eprintln!(
+        "  {:?} -> {} item(s)",
+        engine.shell().shop_host().and_then(|h| h.status()),
+        engine.party().members[0].items.len()
+    );
+    let bought = engine
+        .shell()
+        .shop_host()
+        .expect("still in the shop")
+        .bought()
+        .to_vec();
+    eprintln!("  bought: {bought:?}");
+    assert_eq!(bought.len(), 1, "one purchase");
+    assert_eq!(
+        engine.party().members[0].items.len(),
+        1,
+        "and it is in the inventory"
+    );
+    assert_eq!(
+        engine.state().treasure_items.len(),
+        stock,
+        "★ the stock is not consumed — shop_buy clones (ovr007.cs:126)"
+    );
+
+    // Esc out of the list, then Exit the shop: the script resumes on the
+    // instruction after the COMBAT.
+    press(&mut engine, crate::input::InputEvent::Escape);
+    engine.tick(&[crate::input::InputEvent::Char(b'E')]);
+    let mut closed = false;
+    for _ in 0..400 {
+        if engine.shell().shop_host().is_none() {
+            closed = true;
+            break;
+        }
+        engine.tick(&[]);
+    }
+    assert!(closed, "the shop closed");
+    assert!(
+        engine
+            .vm_memory()
+            .transcript
+            .iter()
+            .any(|e| format!("{e:?}").contains("shop: closed")),
+        "the transcript records the close"
+    );
+    assert!(
+        engine.vm_memory().halts.is_empty(),
+        "no halt: {:?}",
+        engine.vm_memory().halts
+    );
+}
+
 // --- SPELL (0x3B) --------------------------------------------------------
 
 /// ★ **The shipped SPELL, driven live.** `ECL4#34 @0x879F` —
