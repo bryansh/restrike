@@ -669,6 +669,14 @@ impl Engine {
         self.char_io_request.take()
     }
 
+    /// ★ `CMD_Program`'s `var_1 == 0` arm (`ovr003.cs:1941-1948`) raised by
+    /// hand — the opcode handler sets the same flag. A test/inspection seam:
+    /// no shipped script reaches the opcode, so this is the only way to drive
+    /// the arm (the deferred attract mode owns the one `PROGRAM` use there is).
+    pub fn raise_program_start_menu(&mut self) {
+        self.state.pending_start_menu = true;
+    }
+
     /// ★ `AddPlayer`'s join step (`ovr018.cs:1488-1548`): applies the party
     /// legality gate, and on success assigns the icon slot and appends the
     /// member. `Err` carries the original's own refusal words, which the

@@ -559,6 +559,9 @@ pub enum FrontDoorTick {
     OpenDualClass,
     /// ★ Slice 9c. `Add Character to Party` — `AddPlayer`'s `.guy` picker.
     OpenAdd,
+    /// ★ Slice 9c. `BEGIN` on a `PROGRAM 0` menu: `startGameMenu` returns
+    /// into `sub_29758`'s own loop, so the walk loop resumes where it was.
+    ResumeWorld,
     /// `Exit to DOS` — the host is asked to quit (`print_and_exit`).
     Quit,
 }
@@ -839,6 +842,14 @@ pub struct StartMenu {
     menu: Widget,
     /// A one-line report under the list (a refusal, or what a verb did).
     status: Option<String>,
+    /// ★ Opened by `PROGRAM 0` mid-game (roll-credits slice 9c): `BEGIN` here
+    /// resumes the walk loop rather than re-entering the block, because the
+    /// original's `startGameMenu` simply *returns* into `sub_29758`'s own
+    /// loop. `#[serde(skip)]`, so no `SAVE_FORMAT_VERSION` bump — a restored
+    /// save that was parked on this menu re-enters the block on `BEGIN`,
+    /// which is what loading a save does anyway.
+    #[serde(skip)]
+    mid_game: bool,
 }
 
 impl Default for StartMenu {
@@ -858,6 +869,16 @@ impl StartMenu {
         StartMenu {
             menu: Widget::Hotbar(hotbar),
             status: None,
+            mid_game: false,
+        }
+    }
+
+    /// `CMD_Program`'s `var_1 == 0` menu (`ovr003.cs:1943`) — the same menu,
+    /// but `BEGIN` returns to the walk loop instead of re-entering the block.
+    pub fn mid_game() -> Self {
+        StartMenu {
+            mid_game: true,
+            ..StartMenu::new()
         }
     }
 
@@ -1009,7 +1030,11 @@ impl StartMenu {
         // `gbl.area2_ptr.training_class_mask = 0` (`ovr018.cs:269`): leaving
         // the menu spends the training permission the town script granted.
         crate::vmhost::clear_training_class_mask(ctx.vm_memory);
-        FrontDoorTick::Begin
+        if self.mid_game {
+            FrontDoorTick::ResumeWorld
+        } else {
+            FrontDoorTick::Begin
+        }
     }
 
     /// `dropPlayer`/the `'R'` arm's `FreeCurrentPlayer` (`ovr018.cs:207-221`)

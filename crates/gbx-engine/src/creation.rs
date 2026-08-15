@@ -400,6 +400,19 @@ pub fn reroll(ch: &mut Character, rules: &RuleSet, rng: &mut EngineRng) {
     // the town's real mask restored (the menu's Train flag must not change
     // because somebody rolled a character).
     silent_train(ch, rules, rng);
+
+    // ★ `reclac_player_values` (`ovr025.cs:338-495`) — the display pass that
+    // turns the stored bases into the numbers a sheet shows and a `.guy`
+    // stores: `ac` from `base_ac` + the DEX bonus, `hitBonus` from `thac0` +
+    // the STR bonus, `weight` from the coins, and the current attack profile
+    // from its `*Base` cells. Without it a fresh record saves `ac = 0`, which
+    // is not what any real character file holds.
+    //
+    // The `ItemDataTable` it consults is only indexed through *readied items*,
+    // and a brand-new character owns none — so a bare table is provably
+    // equivalent here, and creation needs no `GameData`.
+    let table = gbx_formats::items::ItemDataTable::parse(&[0, 0]).expect("a bare header parses");
+    crate::items::reclac_player_values(ch, &table, &flavor);
 }
 
 /// The four spells a brand-new magic-user starts with (`ovr018.cs:797-800`):
@@ -758,6 +771,15 @@ mod tests {
         RuleSet::load()
     }
 
+    /// Forces one stat to a stored value. Creation always writes `current`
+    /// and `original` together (a fresh character has nothing draining them),
+    /// and `reclac_player_values` reads `original` — coab's `Dex.full` — so a
+    /// test that set only one of the two would measure the wrong number.
+    fn set_stat(pair: &mut crate::party::AbilityScorePair, value: u8) {
+        pair.current = value;
+        pair.original = value;
+    }
+
     /// The bundle's own character files, if they are there. Each is a record
     /// the ORIGINAL wrote — ground truth for everything creation derives.
     fn bundled(name: &str) -> Option<gbx_formats::save_orig::CharRecord> {
@@ -1043,10 +1065,10 @@ mod tests {
         );
         // Force his rolled stats in and re-derive: the dice are his, the
         // arithmetic is ours.
-        ch.stats.str_score.current = joe.stats.str.current;
-        ch.stats.dex.current = joe.stats.dex.current;
-        ch.stats.con.current = joe.stats.con.current;
-        ch.stats.wis.current = joe.stats.wis.current;
+        set_stat(&mut ch.stats.str_score, joe.stats.str.current);
+        set_stat(&mut ch.stats.dex, joe.stats.dex.current);
+        set_stat(&mut ch.stats.con, joe.stats.con.current);
+        set_stat(&mut ch.stats.wis, joe.stats.wis.current);
         reclac_class_bonuses(&mut ch, &r);
 
         assert_eq!(ch.class_level, joe.class_level, "level 6 thief on 25000 XP");
@@ -1064,6 +1086,22 @@ mod tests {
         assert_eq!(ch.opaque.field_125, joe.field_125);
         assert_eq!(ch.exp, joe.exp);
         assert!(ch.magic.spell_book.iter().all(|&b| b == 0));
+
+        // ★ The `reclac_player_values` pass, against the same record: the
+        // displayed AC, the strength-adjusted THAC0, the coin weight and the
+        // current attack profile are all things the ORIGINAL wrote into
+        // `JOE.GUY` after its own pass.
+        let table = gbx_formats::items::ItemDataTable::parse(&[0, 0]).unwrap();
+        let flavor = Adnd1::new(&r);
+        crate::items::reclac_player_values(&mut ch, &table, &flavor);
+        assert_eq!(ch.combat.ac, joe.ac, "AC");
+        assert_eq!(ch.combat.ac_behind, joe.ac_behind, "AC from behind");
+        assert_eq!(ch.combat.thac0_current, joe.hit_bonus, "STR-adjusted THAC0");
+        assert_eq!(ch.combat.weight, joe.weight, "300 platinum weighs 300");
+        assert_eq!(
+            ch.combat.attacks.current, joe.attack_profile_current,
+            "bare-handed 1d2 plus the STR damage bonus"
+        );
     }
 
     /// The same, for a small race with a different thief-skill row —
@@ -1086,8 +1124,8 @@ mod tests {
                 alignment: steve.alignment,
             },
         );
-        ch.stats.dex.current = steve.stats.dex.current;
-        ch.stats.con.current = steve.stats.con.current;
+        set_stat(&mut ch.stats.dex, steve.stats.dex.current);
+        set_stat(&mut ch.stats.con, steve.stats.con.current);
         reclac_class_bonuses(&mut ch, &r);
         assert_eq!(ch.icon.icon_size, steve.icon_size, "gnome is a small icon");
         assert_eq!(ch.skills.thief_skills, steve.thief_skills);
@@ -1117,7 +1155,7 @@ mod tests {
                 alignment: phil.alignment,
             },
         );
-        ch.stats.wis.current = phil.stats.wis.current;
+        set_stat(&mut ch.stats.wis, phil.stats.wis.current);
         reclac_class_bonuses(&mut ch, &r);
         let ours: Vec<usize> = ch
             .magic
@@ -1158,8 +1196,8 @@ mod tests {
                 alignment: shara.alignment,
             },
         );
-        ch.stats.wis.current = shara.stats.wis.current;
-        ch.stats.con.current = shara.stats.con.current;
+        set_stat(&mut ch.stats.wis, shara.stats.wis.current);
+        set_stat(&mut ch.stats.con, shara.stats.con.current);
         reclac_class_bonuses(&mut ch, &r);
         assert_eq!(ch.class_level, shara.class_level, "cleric 5 on 25000 XP");
         assert_eq!(ch.magic.cast_count[0], shara.spell_cast_count[0]);
@@ -1188,7 +1226,7 @@ mod tests {
                 alignment: m.alignment,
             },
         );
-        ch.stats.con.current = m.stats.con.current;
+        set_stat(&mut ch.stats.con, m.stats.con.current);
         reclac_class_bonuses(&mut ch, &r);
         assert_eq!(ch.class_level, m.class_level);
         assert_eq!(ch.combat.thac0_base, m.thac0_base);
@@ -1218,8 +1256,8 @@ mod tests {
                 alignment: t.alignment,
             },
         );
-        ch.stats.dex.current = t.stats.dex.current;
-        ch.stats.con.current = t.stats.con.current;
+        set_stat(&mut ch.stats.dex, t.stats.dex.current);
+        set_stat(&mut ch.stats.con, t.stats.con.current);
         reclac_class_bonuses(&mut ch, &r);
         assert_eq!(ch.class_level, t.class_level, "fighter 4 / thief 5");
         assert_eq!(ch.combat.thac0_base, t.thac0_base);

@@ -28,19 +28,29 @@ pub const CHAR_EXT: &str = "guy";
 pub const ITEMS_EXT: &str = "swg";
 pub const AFFECTS_EXT: &str = "fx";
 
-/// `seg042.clean_string(player.name)` (`ovr017.cs:147`) — a character's name
-/// turned into a DOS 8.3 filename stem. Keeps `[A-Za-z0-9]`, uppercases, and
-/// stops at 8 characters; an empty result becomes `CHAR` so a nameless record
-/// still lands somewhere nameable.
+/// ★ `seg042.clean_string(player.name)` (`seg042.cs:68-78`, called at
+/// `ovr017.cs:147`) — a character's name turned into a DOS filename stem.
+///
+/// Exactly three steps, and each one is worth naming because none of them is
+/// what a modern reader would guess: **trim** the ten-character set
+/// `[space . * , ? / \ : ; |]` from *both ends* (`seg042.cs:66`), **lowercase**
+/// the rest, and truncate to **8** characters. Interior characters are left
+/// alone — a space inside a name survives into the filename, and so does
+/// anything else the player typed.
+///
+/// The one addition of ours: a name that trims away to nothing would give the
+/// original a bare `.guy`, so it becomes `char` here instead. Named, not
+/// silent.
 pub fn clean_stem(name: &str) -> String {
+    const TRIM: [char; 10] = [' ', '.', '*', ',', '?', '/', '\\', ':', ';', '|'];
     let stem: String = name
+        .trim_matches(|c| TRIM.contains(&c))
+        .to_lowercase()
         .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
         .take(8)
-        .collect::<String>()
-        .to_ascii_uppercase();
+        .collect();
     if stem.is_empty() {
-        "CHAR".to_string()
+        "char".to_string()
     } else {
         stem
     }
@@ -177,11 +187,18 @@ mod tests {
         ch
     }
 
+    /// `clean_string` trims only the ends, lowercases, and cuts at 8 — it
+    /// does NOT strip interior characters, which is the easy thing to assume
+    /// and the wrong thing to implement.
     #[test]
-    fn clean_stem_makes_a_dos_filename() {
-        assert_eq!(clean_stem("Sir Robin"), "SIRROBIN");
-        assert_eq!(clean_stem("a-very-long-name-indeed"), "AVERYLON");
-        assert_eq!(clean_stem("!!!"), "CHAR");
+    fn clean_stem_trims_the_ends_lowercases_and_cuts_at_eight() {
+        assert_eq!(clean_stem("Sir Robin"), "sir robi", "the space survives");
+        assert_eq!(clean_stem("  Alias.  "), "alias", "both ends trimmed");
+        assert_eq!(clean_stem("a-very-long-name"), "a-very-l");
+        assert_eq!(clean_stem("JOE"), "joe");
+        // Ours, not the original's: a name that trims to nothing would give
+        // the original a bare `.guy`.
+        assert_eq!(clean_stem("..."), "char");
     }
 
     #[test]

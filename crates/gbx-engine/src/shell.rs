@@ -1768,6 +1768,18 @@ pub struct EngineState {
     /// discovering one; FD-44 records the seam.
     #[serde(skip)]
     pub rest_encounter: crate::rest::RestEncounterSchedule,
+    /// ★ **`PROGRAM 0` asked for the start menu** (roll-credits slice 9c,
+    /// closing §14.8's residual): `CMD_Program`'s `var_1 == 0` arm is
+    /// `startGameMenu()` followed by a conditional `LoadPic()`
+    /// (`ovr003.cs:1941-1948`). The opcode handler raises this; the shell
+    /// parks on the menu at the next tick boundary and, on `BEGIN`, drops
+    /// straight back into the walk loop — the original's own "the function
+    /// returns and `sub_29758`'s loop carries on".
+    ///
+    /// `#[serde(skip)]`, so no `SAVE_FORMAT_VERSION` bump: it lives for less
+    /// than one tick, and a save cannot be taken while it is set.
+    #[serde(skip)]
+    pub pending_start_menu: bool,
 }
 
 /// `gbl.game_state`'s M2 slice (`Classes/Gbl.cs`'s `GameState` enum —
@@ -1827,6 +1839,7 @@ impl EngineState {
             menu_selected_word: 0,
             copy_protection_faithful: false,
             rest_encounter: crate::rest::RestEncounterSchedule::default(),
+            pending_start_menu: false,
         }
     }
 
@@ -2927,6 +2940,19 @@ impl Shell {
             return;
         }
 
+        // ★ `PROGRAM 0` asked for `startGameMenu` (roll-credits slice 9c,
+        // `ovr003.cs:1941-1948`). Honoured at the walk-loop boundary — the
+        // one place no VM run is mid-flight, and the same place
+        // `startGameMenu` returns to in `sub_29758`. `BEGIN` resumes the walk
+        // loop rather than re-entering the block.
+        if ctx.state.pending_start_menu && matches!(self, Shell::WorldMenu { .. }) {
+            ctx.state.pending_start_menu = false;
+            *self = Shell::FrontDoor(Box::new(crate::front_door::FrontDoor::StartMenu(Box::new(
+                crate::front_door::StartMenu::mid_game(),
+            ))));
+            return;
+        }
+
         match self {
             Shell::Boot(flow) => {
                 if flow.tick(ctx).is_some() {
@@ -3096,6 +3122,13 @@ impl Shell {
                                 ),
                             )));
                         }
+                    }
+                    // ★ Slice 9c: `PROGRAM 0`'s menu ends by returning into
+                    // `sub_29758`'s loop, not by re-entering the block.
+                    FrontDoorTick::ResumeWorld => {
+                        Self::rebuild_exploration_screen(ctx);
+                        crate::corridor::redraw_view(ctx);
+                        *self = Self::enter_world_menu(ctx);
                     }
                     // `print_and_exit()` (`ovr018.cs:296`) — the core cannot
                     // exit a process (D8), so it asks the host to.

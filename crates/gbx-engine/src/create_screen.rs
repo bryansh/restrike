@@ -32,12 +32,26 @@ const PICKER_BOX: ListLayout = ListLayout {
 const PICKER_PROMPT: &str = "Select";
 const PICKER_COMMIT: u8 = b'S';
 
-fn picker(heading: &str, rows: impl IntoIterator<Item = String>) -> Widget {
+/// A `createPlayer` picker.
+///
+/// ★ `start_index` is the original's own `index` local, and it is **not** the
+/// same at every picker: the race list is opened with `index = 0`
+/// (`ovr018.cs:362`) and the other three with `index = 1` (`:431,466,599`).
+/// `sl_select_item` then does `index_ptr++; menu_scroll_in_page(false, ...)`
+/// (`ovr027.cs:573-574`), whose backward step wraps *within the page* — so
+/// `index = 0` normalises onto the **last** row and `index = 1` onto the
+/// **first**. The race picker really does open with the cursor on `Human`.
+fn picker(heading: &str, rows: impl IntoIterator<Item = String>, start_index: usize) -> Widget {
     let mut items = vec![ListItem::Heading(heading.to_string())];
     // `var_C.Add(new MenuItem("  " + ...))` — the two-space indent is the
     // original's, and `draw_list_menu` preserves it.
     items.extend(rows.into_iter().map(|r| ListItem::Entry(format!("  {r}"))));
-    Widget::ListMenu(ListMenu::boxed(items, PICKER_BOX))
+    let mut list = ListMenu::boxed(items, PICKER_BOX);
+    // `ListMenu::new` already models `index = 0`; anything else is a seed.
+    if start_index > 0 {
+        list.seed_cursor(start_index);
+    }
+    Widget::ListMenu(list)
 }
 
 /// `sl_select_item`'s own prompt line: the caller's word, then `" Next"`/
@@ -145,6 +159,7 @@ impl CreateCharacter {
                 creation::CREATABLE_RACES
                     .iter()
                     .map(|&r| creation::RACE_NAMES[r as usize].to_string()),
+                0, // `index = 0` (`ovr018.cs:362`)
             )),
             race: 0,
             sex: 0,
@@ -198,6 +213,7 @@ impl CreateCharacter {
                             Stage::Sex(picker(
                                 "Pick Gender",
                                 creation::SEX_NAMES.iter().map(|s| s.to_string()),
+                                1, // `index = 1` (`ovr018.cs:431`)
                             )),
                             ScreenTransition::Stay,
                         )
@@ -220,6 +236,7 @@ impl CreateCharacter {
                                 classes
                                     .iter()
                                     .map(|&c| creation::CLASS_NAMES[c as usize].to_string()),
+                                1, // `index = 1` (`ovr018.cs:466`)
                             )),
                             ScreenTransition::Stay,
                         )
@@ -240,6 +257,7 @@ impl CreateCharacter {
                                 alignments
                                     .iter()
                                     .map(|&a| creation::ALIGNMENT_NAMES[a as usize].to_string()),
+                                1, // `index = 1` (`ovr018.cs:599`)
                             )),
                             ScreenTransition::Stay,
                         )

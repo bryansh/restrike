@@ -2165,6 +2165,32 @@ impl gbx_vm::EngineServices for EngineVmHost<'_> {
                 self.state.party_killed = true; // `:1984`
                 ProgramOutcome::Exit
             }
+            // ★ Roll-credits slice 9c, closing §14.8's residual: `var_1 == 0`
+            // is `startGameMenu()` and then a conditional `LoadPic()`
+            // (`ovr003.cs:1941-1948`). The menu is a whole screen, so the
+            // handler raises the request and the shell parks on it; the
+            // script resumes into the walk loop when `BEGIN` is pressed.
+            //
+            // No shipped script reaches this — the one `PROGRAM` use is
+            // `ECL1#82`'s, inside the deferred attract mode — so the arm is
+            // implemented and observable rather than exercised in play.
+            //
+            // **The one deviation, named:** the original's menu is modal
+            // *inside* the instruction, so the rest of the block runs after
+            // it. Ours runs the rest of the block first and opens the menu
+            // where the block hands the party back to the walk loop — which
+            // is the same place `startGameMenu` returns to in `sub_29758`.
+            // Nothing in the block is skipped; only the modal's position
+            // relative to it moves.
+            0 => {
+                self.state.pending_start_menu = true;
+                self.vm
+                    .transcript
+                    .push(crate::vmhost::TranscriptEntry::Request(
+                        "PROGRAM 0: startGameMenu".to_string(),
+                    ));
+                ProgramOutcome::Continue
+            }
             _ => {
                 self.vm
                     .transcript
