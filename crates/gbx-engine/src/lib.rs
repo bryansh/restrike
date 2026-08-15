@@ -39,6 +39,10 @@ pub mod draw;
 pub mod engine;
 pub mod framebuffer;
 pub mod frames;
+/// ★ Roll-credits slice 9b: the front door — `seg001.PROGRAM`'s title
+/// screens, the Play-Demo prompt, the copy-protection challenge, and
+/// `startGameMenu`.
+pub mod front_door;
 pub mod import;
 pub mod input;
 /// ★ Out-of-combat item use (roll-credits §12): the item-name word table,
@@ -88,6 +92,10 @@ mod area_transition_tests;
 mod combat_wiring;
 #[cfg(test)]
 mod demo;
+/// Roll-credits slice 9b's acceptance suite (`roll-credits.md` §13): the front
+/// door driven end to end against real CotAB data.
+#[cfg(test)]
+mod front_door_tests;
 #[cfg(test)]
 mod h2_conformance;
 #[cfg(test)]

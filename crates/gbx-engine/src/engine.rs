@@ -163,6 +163,11 @@ pub struct Engine {
     /// (D8). Transient, never serialized, and drawn only when a frontend put
     /// one here, so every committed golden is untouched by its existence.
     host_notice: Option<HostNotice>,
+    /// ★ `print_and_exit()` raised as a request (roll-credits slice 9b): the
+    /// start menu's `Exit to DOS` and copy protection's third failure. Latched
+    /// until the host reads it with [`Engine::quit_requested`]; never
+    /// serialized, and nothing in the core acts on it.
+    quit_requested: bool,
 }
 
 /// [`Engine::report_host_notice`]'s payload: the line to show and how many
@@ -242,6 +247,60 @@ impl Engine {
             data,
             seed,
         ))
+    }
+
+    /// ★ **The front door** (roll-credits slice 9b): boots to the TITLE.DAX
+    /// sequence, the Play-Demo prompt, the copy-protection challenge and
+    /// `startGameMenu` — `seg001.PROGRAM`'s own order — instead of dropping
+    /// straight into the resident block's entry vector.
+    ///
+    /// This is what a player launching the game gets. [`Engine::new`] keeps
+    /// its bare-boot meaning (`--slot none`, and every fixture in the tree),
+    /// and `import_original` keeps its straight-to-the-world meaning
+    /// (`--slot X`, the power-user shortcut) — so no existing golden, walk
+    /// trace or capture moves because this exists.
+    ///
+    /// `menuSelectedWord = 1` is `InitFirst`'s (`seg001.cs:297`), and it is
+    /// load-bearing at the very next prompt: `BuildInputKeys("Play Demo")`
+    /// yields two words, so word 1 — **Demo** — is the one `<Enter>` picks.
+    pub fn new_front_door(data: GameData, seed: u32) -> Result<Self, BootError> {
+        let mut engine = Engine::new(data, seed)?;
+        engine.state.menu_selected_word = 1;
+        // `Engine::build` paints the exploration frame for the walk loop; the
+        // title screen owns the whole display instead.
+        engine.fb.clear(0);
+        engine.shell = Shell::FrontDoor(Box::default());
+        Ok(engine)
+    }
+
+    /// Parks this engine on `startGameMenu` — where `loadGameMenu` returns
+    /// (`ovr018.cs:223-228`).
+    ///
+    /// The host calls this after replacing the engine from a load the START
+    /// MENU asked for, so the player lands back on the menu with the loaded
+    /// party in front of them rather than mid-game (`saveload_fs::fulfill`
+    /// does it automatically when the outgoing engine was on the front door).
+    pub fn park_at_start_menu(&mut self) {
+        self.shell = Shell::FrontDoor(Box::new(crate::front_door::FrontDoor::start_menu()));
+    }
+
+    /// Whether this engine is parked anywhere on the front door — the bit
+    /// `saveload_fs::fulfill` carries across an engine replacement.
+    pub fn at_front_door(&self) -> bool {
+        matches!(self.shell, Shell::FrontDoor(_))
+    }
+
+    /// `seg043.print_and_exit()` as a request (D8): `true` once `Exit to DOS`
+    /// has been confirmed, or copy protection has ejected the session. Latched
+    /// — the host decides when to act.
+    pub fn quit_requested(&self) -> bool {
+        self.quit_requested
+    }
+
+    /// D-RC4/D4: `true` restores the original copy-protection challenge (the
+    /// player answers it); the default `false` pre-fills the answer.
+    pub fn set_copy_protection_faithful(&mut self, faithful: bool) {
+        self.state.copy_protection_faithful = faithful;
     }
 
     /// ★ **Watch mode** (`combat-visualizer.md` D-CV1 item 2): boots an engine
@@ -387,6 +446,7 @@ impl Engine {
             io_request: None,
             reel: None,
             host_notice: None,
+            quit_requested: false,
         }
     }
 
@@ -448,6 +508,7 @@ impl Engine {
             io_request: None,
             reel: None,
             host_notice: None,
+            quit_requested: false,
         }
     }
 
@@ -649,6 +710,7 @@ impl Engine {
             rules: &self.rules,
             slots: &self.slots,
             io_request: &mut self.io_request,
+            quit_requested: &mut self.quit_requested,
             rng: &mut self.rng,
             fb: &mut self.fb,
             font: &self.font,
@@ -796,6 +858,7 @@ impl Engine {
                 rules: &self.rules,
                 slots: &self.slots,
                 io_request: &mut self.io_request,
+                quit_requested: &mut self.quit_requested,
                 rng: &mut self.rng,
                 fb: &mut self.fb,
                 font: &self.font,

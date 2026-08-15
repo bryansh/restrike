@@ -1,5 +1,5 @@
-//! `restrike-desktop [DIR] [--seed N] [--square-pixels] [--watch CAPTURE
-//! [--turbo N]]` -- the winit + softbuffer presenter (D-UI6). Loads
+//! `restrike-desktop [DIR] [--seed N] [--square-pixels] [--slot X|none]
+//! [--watch CAPTURE [--turbo N]]` -- the winit + softbuffer presenter (D-UI6). Loads
 //! `GBX_DATA_DIR` (or a positional dir argument) into a `GameData`, boots the
 //! `Engine`, and runs a fixed 60 Hz tick loop: `ControlFlow::WaitUntil` plus an
 //! accumulator calls `tick` regardless of display refresh rate, collecting winit
@@ -21,6 +21,18 @@
 //! `--turbo N` multiplies the reel's tick rate (D-CV3's open speed door: frames
 //! are unchanged, only wall time). The long captures want it -- sewer-fight-2 is
 //! 18,185 draws over 49 rounds.
+//!
+//! ## `--slot` -- the front door and the shortcut past it (slice 9b)
+//!
+//! With no `--slot`, launching lands where the original lands: the TITLE.DAX
+//! sequence, the 30-second "Play Demo" prompt, the copy-protection challenge
+//! (answer shown, D-RC4 -- `RESTRIKE_COPY_PROTECTION=faithful` hides it), then
+//! `startGameMenu`, where `L` loads a slot and `B` begins.
+//!
+//! `--slot X` is the **power-user shortcut**: import that original save and
+//! start playing immediately, skipping the whole preamble -- what every
+//! capture/demo flow and most development launches want. `--slot none` keeps
+//! the bare boot (no party) for engine archaeology.
 //!
 //! ## Save slots -- `--saves <DIR>` (roll-credits slice 0, G0)
 //!
@@ -74,7 +86,11 @@ fn main() {
     let mut square_pixels = false;
     let mut watch: Option<PathBuf> = None;
     let mut turbo: u32 = 1;
-    let mut slot: Option<char> = Some('A');
+    // ★ Roll-credits slice 9b: the default launch is the FRONT DOOR
+    // (`seg001.PROGRAM`'s title / Play-Demo prompt / copy protection /
+    // `startGameMenu`). `--slot X` is the power-user shortcut past all of it,
+    // straight into the imported game; `--slot none` is the bare boot.
+    let mut slot: SlotArg = SlotArg::FrontDoor;
     let mut saves_arg: Option<PathBuf> = None;
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -101,8 +117,8 @@ fn main() {
                     .next()
                     .expect("--slot requires a save letter (A-J) or 'none'");
                 slot = match v.as_str() {
-                    "none" => None,
-                    s => Some(
+                    "none" => SlotArg::Bare,
+                    s => SlotArg::Import(
                         s.chars()
                             .next()
                             .expect("--slot letter")
@@ -134,6 +150,18 @@ fn main() {
     event_loop
         .run_app(&mut app)
         .expect("the event loop exited with an error");
+}
+
+/// What `--slot` asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SlotArg {
+    /// No `--slot` at all: the front door (the default a player gets).
+    FrontDoor,
+    /// `--slot none`: bare boot, no party — engine archaeology and fixtures.
+    Bare,
+    /// `--slot X`: import that original slot and start playing immediately,
+    /// skipping the front door. The power-user shortcut.
+    Import(char),
 }
 
 /// The saves directory (module doc): `--saves DIR`, else `RESTRIKE_SAVE_DIR`,
@@ -194,12 +222,29 @@ fn open_reel(data: gbx_formats::game_data::GameData, capture: &PathBuf, turbo: u
 fn boot_with_party(
     data: gbx_formats::game_data::GameData,
     dir: &std::path::Path,
-    slot: Option<char>,
+    slot: SlotArg,
     seed: u32,
 ) -> Engine {
-    let Some(letter) = slot else {
-        eprintln!("restrike-desktop: --slot none — bare boot, NO PARTY (fights will refuse)");
-        return Engine::new(data, seed).expect("restrike-desktop: bare boot failed");
+    let letter = match slot {
+        SlotArg::FrontDoor => {
+            eprintln!(
+                "restrike-desktop: front door — title, Play Demo, copy protection, start menu \
+                 (pass --slot <letter> to skip straight into an imported game)"
+            );
+            let mut engine =
+                Engine::new_front_door(data, seed).expect("restrike-desktop: front door failed");
+            // D4/D-RC4: `RESTRIKE_COPY_PROTECTION=faithful` hides the answer.
+            if std::env::var("RESTRIKE_COPY_PROTECTION").as_deref() == Ok("faithful") {
+                engine.set_copy_protection_faithful(true);
+            }
+            apply_game_speed(&mut engine);
+            return engine;
+        }
+        SlotArg::Bare => {
+            eprintln!("restrike-desktop: --slot none — bare boot, NO PARTY (fights will refuse)");
+            return Engine::new(data, seed).expect("restrike-desktop: bare boot failed");
+        }
+        SlotArg::Import(letter) => letter,
     };
     let saves = load_dir(&dir.join("SAVE"))
         .unwrap_or_else(|e| panic!("restrike-desktop: {}/SAVE unreadable: {e}", dir.display()));
@@ -353,6 +398,13 @@ impl App {
             // D8's other half: the tick core deposited a save/load request,
             // the host performs it. Between ticks, never during one.
             self.fulfill_io();
+            // ★ `seg043.print_and_exit()` (slice 9b): `Exit to DOS`, or copy
+            // protection's third failure. The core cannot end the process, so
+            // it raises the request and this frontend honors it.
+            if self.engine.quit_requested() {
+                eprintln!("restrike-desktop: exit requested — goodbye");
+                std::process::exit(0);
+            }
             self.debug_tick += 1;
             if let Some(log) = &mut self.debug_log {
                 let probe = self.engine.probe();

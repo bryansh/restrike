@@ -359,6 +359,43 @@ const GAME_AREA_ADDR: u16 = 0x7F12;
 const ENTER_TEMPLE_ADDR: u16 = 0x7EE2;
 const ENTER_SHOP_ADDR: u16 = 0x7F6C;
 
+/// ★ `area2_ptr.training_class_mask` (`Classes/Area2.cs`, `DataOffset 0x550`;
+/// under the Area2 window's `DataOffset = (addr - 0x7C00) * 2` mapping,
+/// `0x7C00 + 0x2A8`) — the town script's training permission, and
+/// `startGameMenu`'s gate on `Train Character`/`Human Change Classes`
+/// (`ovr018.cs:86-95`). `BEGIN Adventuring` spends it (`:269`), so walking out
+/// of the menu into the world revokes it until a hall grants it again.
+///
+/// No cell of ours is written by anything yet: the shipped grant is a plain
+/// `SAVE <mask> → 0x7EA8` in a town block, so it round-trips through the raw
+/// window store exactly like every other unmodelled Area2 cell. Named here
+/// rather than open-coded so the two readers agree.
+const TRAINING_CLASS_MASK_ADDR: u16 = 0x7EA8;
+
+/// ★ `area_ptr.field_3FA` (`Classes/Area1.cs:194`, `DataOffset 0x3FA` →
+/// `0x4B00 + 0x1FD`) — the **game-won latch**. Exactly one writer exists in
+/// the whole program, `CMD_Program`'s `var_1 == 8` arm (`ovr003.cs:1953`,
+/// `field_3FA = 0xFF` right after `end_game_text()`), and exactly one reader:
+/// `startGameMenu`'s BEGIN guard (`ovr018.cs:243`). After the ending, BEGIN
+/// stops working and the menu's remaining job is the "You've won. Save before
+/// quitting?" prompt (`:1965-1971`).
+const GAME_WON_ADDR: u16 = 0x4CFD;
+
+/// [`TRAINING_CLASS_MASK_ADDR`]'s current value.
+pub fn training_class_mask(vm: &VmMemoryState) -> u16 {
+    vm.raw_word(TRAINING_CLASS_MASK_ADDR).unwrap_or(0)
+}
+
+/// `gbl.area2_ptr.training_class_mask = 0` (`ovr018.cs:269`).
+pub fn clear_training_class_mask(vm: &mut VmMemoryState) {
+    vm.set_raw_word(TRAINING_CLASS_MASK_ADDR, 0);
+}
+
+/// [`GAME_WON_ADDR`]'s current value — non-zero once the game has been won.
+pub fn game_won_flag(vm: &VmMemoryState) -> u16 {
+    vm.raw_word(GAME_WON_ADDR).unwrap_or(0)
+}
+
 /// ★ `get_player_values`' `arg_4 == 0x100` case (`ovr008.cs:424-441`) — the
 /// **only** cell a script uses to ask "is the selected character actually
 /// there?", and the one every WHO (0x39) site tests on the very next

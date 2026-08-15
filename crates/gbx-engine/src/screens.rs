@@ -36,6 +36,11 @@ pub enum ReturnTo {
     /// `gbl.game_state == GameState.Shop`, the condition that puts `Sell` and
     /// `Id` on the Items leaf's bar (`ovr020.cs:484-493`).
     Shop,
+    /// ★ Roll-credits slice 9b: opened from `startGameMenu` — its `L`, `S`,
+    /// `V` and `T` verbs all call a screen that plainly `return`s into the
+    /// menu's own `while (true)` (`ovr018.cs:193-237`). Appended last so
+    /// postcard keeps the four above at their indices.
+    StartMenu,
 }
 
 /// One screen's result this tick.
@@ -54,6 +59,8 @@ pub enum ScreenTransition {
     /// resident block's **vector 3**, `CampInterruptedAddr`
     /// (`ovr003.cs:1920`) — the block's own camp-ambush script.
     CampInterrupted,
+    /// ★ Roll-credits slice 9b: back to `startGameMenu` ([`ReturnTo::StartMenu`]).
+    ToStartMenu,
 }
 
 /// The M3 party-facing screens. `Shell::Screen` holds one of these.
@@ -207,6 +214,8 @@ impl PartyView {
             // turns any exit back into `CityShop`'s own loop — `viewPlayer`
             // returns to its caller, it does not leave the shop.
             ReturnTo::Shop => ScreenTransition::Exit,
+            // ★ Slice 9b: back into `startGameMenu`'s own loop.
+            ReturnTo::StartMenu => ScreenTransition::ToStartMenu,
         }
     }
 
@@ -653,16 +662,27 @@ impl SaveLoad {
         }
     }
 
-    /// The party-wipe recovery screen: straight into the slot list, no
-    /// chooser. The original's post-wipe `startGameMenu` disables Save
-    /// outright (`menuFlags[allow_save] = false`, `ovr018.cs:110`) and leaves
-    /// Load as the only door back into the game — offering "Save" to a party
-    /// that no longer exists would be our invention, not the original's.
-    pub fn new_recovery(ctx: &FlowCtx) -> Self {
+    /// ★ `ovr017.loadGameMenu()` (`:929`) opened **directly** — no
+    /// `Save Load Exit` chooser, because there is no chooser in the original
+    /// either: `startGameMenu`'s `'L'` arm calls `loadGameMenu` and its `'S'`
+    /// arm calls `SaveGame` (`ovr018.cs:223-237`), each of which IS a slot
+    /// picker. The chooser is our own camp-screen convenience, and the start
+    /// menu does not get it.
+    pub fn new_load(ctx: &FlowCtx, return_to: ReturnTo) -> Self {
         SaveLoad {
             phase: SlPhase::Pick(SlMode::Load),
             menu: menu_bar(&load_bar_text(ctx)),
-            return_to: ReturnTo::GameOver,
+            return_to,
+        }
+    }
+
+    /// `ovr017.SaveGame()` (`:1109`) opened directly — the ten-letter slot
+    /// picker (`ovr017.cs:1117`), no chooser. See [`SaveLoad::new_load`].
+    pub fn new_save(return_to: ReturnTo) -> Self {
+        SaveLoad {
+            phase: SlPhase::Pick(SlMode::Save),
+            menu: menu_bar("A B C D E F G H I J"),
+            return_to,
         }
     }
 
@@ -677,6 +697,8 @@ impl SaveLoad {
             // turns any exit back into `CityShop`'s own loop — `viewPlayer`
             // returns to its caller, it does not leave the shop.
             ReturnTo::Shop => ScreenTransition::Exit,
+            // ★ Slice 9b: back into `startGameMenu`'s own loop.
+            ReturnTo::StartMenu => ScreenTransition::ToStartMenu,
         }
     }
 
@@ -722,9 +744,12 @@ impl SaveLoad {
             },
             SlPhase::Pick(mode) => {
                 // Escape / null returns to the chooser rather than leaving —
-                // except on the wipe-recovery screen, which never had one.
+                // except on the screens that never had one: the wipe recovery
+                // and (slice 9b) `startGameMenu`'s own `L`/`S` verbs, which
+                // call `loadGameMenu`/`SaveGame` directly and simply `return`
+                // to the menu when the player backs out (`ovr018.cs:223-237`).
                 if key == 0 {
-                    if self.return_to == ReturnTo::GameOver {
+                    if matches!(self.return_to, ReturnTo::GameOver | ReturnTo::StartMenu) {
                         return self.exit();
                     }
                     self.phase = SlPhase::Choose;
@@ -824,6 +849,8 @@ impl Training {
             // turns any exit back into `CityShop`'s own loop — `viewPlayer`
             // returns to its caller, it does not leave the shop.
             ReturnTo::Shop => ScreenTransition::Exit,
+            // ★ Slice 9b: back into `startGameMenu`'s own loop.
+            ReturnTo::StartMenu => ScreenTransition::ToStartMenu,
         }
     }
 

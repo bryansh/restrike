@@ -324,6 +324,11 @@ pub struct FlowCtx<'a> {
     /// Where the save/load screen deposits its chosen action for the host to
     /// fulfill after the tick (D8: the core does no file I/O itself).
     pub io_request: &'a mut Option<crate::saveload::SaveLoadRequest>,
+    /// ★ `seg043.print_and_exit()` (roll-credits slice 9b): the start menu's
+    /// `Exit to DOS` and copy protection's third failure both end the process
+    /// in the original. The core cannot (D8), so it raises this and the host
+    /// honors it ([`crate::engine::Engine::quit_requested`]).
+    pub quit_requested: &'a mut bool,
     pub rng: &'a mut EngineRng,
     pub fb: &'a mut Framebuffer,
     pub font: &'a Font,
@@ -1657,6 +1662,13 @@ pub struct EngineState {
     /// (`combat_host.rs`'s `menu_selected`); unifying the two is docketed.
     #[serde(skip)]
     pub menu_selected_word: usize,
+    /// ★ D-RC4/D4: `false` (the default) shows the copy-protection answer
+    /// pre-filled in its input line; `true` is the original's own challenge,
+    /// answered by the player. A session setting, never saved — the frontend
+    /// sets it ([`crate::engine::Engine::set_copy_protection_faithful`]),
+    /// exactly as it sets the game speed.
+    #[serde(skip)]
+    pub copy_protection_faithful: bool,
     /// ★ `gbl.rest_incounter_count` (`Classes/Gbl.cs:440`) — the camp rest
     /// loop's encounter counter. See [`crate::rest`] for the check itself and
     /// for why this is `#[serde(skip)]`: the original's own `SaveGame` does not
@@ -1727,6 +1739,7 @@ impl EngineState {
             enter_temple: 0,
             enter_shop: 0,
             menu_selected_word: 0,
+            copy_protection_faithful: false,
             rest_encounter: crate::rest::RestEncounterSchedule::default(),
         }
     }
@@ -2498,6 +2511,14 @@ pub enum Shell {
     /// vector 3 runs (roll-credits §8, FD-44). Appended last so postcard keeps
     /// every existing variant's encoding.
     CampInterrupt(CampInterruptFlow),
+    /// ★ **The front door** (roll-credits slice 9b): `seg001.PROGRAM`'s
+    /// preamble — title screens, the Play-Demo prompt, copy protection and
+    /// `startGameMenu` — parked as one shell state
+    /// ([`crate::front_door::FrontDoor`]). `BEGIN Adventuring` leaves it for
+    /// [`Shell::Boot`], which is the same entry the `--slot` shortcut takes.
+    ///
+    /// Appended last, for the same postcard reason every variant above it was.
+    FrontDoor(Box<crate::front_door::FrontDoor>),
 }
 
 impl Shell {
@@ -2530,7 +2551,11 @@ impl Shell {
             // The death screen's own gate draws nothing on the prompt row
             // (`DisplayAndPause` already put its line there), so it is not a
             // `parked_widget` for drawing purposes — see [`GameOverFlow`].
-            Shell::GameOver(_) | Shell::Screen(_) => None,
+            // The front door paints its own prompt row in every stage (the
+            // version banner + menu line, the copy-protection editor, the
+            // start menu's "Choose a function") — see
+            // [`crate::front_door::FrontDoor::tick`].
+            Shell::GameOver(_) | Shell::Screen(_) | Shell::FrontDoor(_) => None,
             Shell::CampInterrupt(f) => from_run(&f.run, &f.chain),
         }
     }
@@ -2554,7 +2579,10 @@ impl Shell {
             Shell::Look(f) => from_run(&f.run, &f.chain),
             Shell::Step(f) => from_run(&f.run, &f.chain),
             Shell::CampInterrupt(f) => from_run(&f.run, &f.chain),
-            Shell::WorldMenu { .. } | Shell::GameOver(_) | Shell::Screen(_) => None,
+            Shell::WorldMenu { .. }
+            | Shell::GameOver(_)
+            | Shell::Screen(_)
+            | Shell::FrontDoor(_) => None,
         }
     }
 
@@ -2646,6 +2674,7 @@ impl Shell {
             },
             Shell::Screen(_) => "screen".to_string(),
             Shell::CampInterrupt(f) => format!("camp-interrupt/{}", run_probe(&f.run, &f.chain)),
+            Shell::FrontDoor(f) => f.probe().to_string(),
         }
     }
 }
@@ -2794,6 +2823,9 @@ impl Shell {
             // The camp-ambush vector is ordinary script: gated exactly like
             // Look's and Step's.
             Shell::CampInterrupt(c) => run_gated(&c.run) || chain_gated(&c.chain),
+            // The front door is the state BEFORE any vector exists — the VM
+            // has not been entered at all until `BEGIN Adventuring`.
+            Shell::FrontDoor(_) => true,
         }
     }
 
@@ -2841,11 +2873,24 @@ impl Shell {
             }
             Shell::GameOver(flow) => {
                 if flow.tick(ctx).is_some() {
-                    // The original's `startGameMenu`-with-a-dead-party offers
-                    // one way back into the game: Load. That is this screen.
-                    *self = Shell::Screen(crate::screens::Screen::SaveLoad(
-                        crate::screens::SaveLoad::new_recovery(ctx),
-                    ));
+                    // ★ Roll-credits slice 9b: the recovery is the original's
+                    // own — `sub_29758` returns into `seg001.PROGRAM`'s
+                    // `while (true)`, which runs `InitAgain()` and re-enters
+                    // `startGameMenu()` (`seg001.cs:147-152`).
+                    //
+                    // `InitAgain` clears `TeamList` outright (`:364`), and now
+                    // that we HAVE a start menu, so do we: without it the
+                    // party-less flag column (`ovr018.cs:103-114`) never
+                    // appears and the menu would offer `BEGIN Adventuring` to
+                    // a party of corpses — a state the original cannot express.
+                    // Slice 0's reason for keeping the roster ("a failed load
+                    // would be unrecoverable") is spent: the menu itself is the
+                    // recovery, and Load can be pressed again.
+                    ctx.roster.members.clear();
+                    ctx.state.party_size = 0;
+                    ctx.state.selected_player = 0;
+                    ctx.state.last_selected_player = 0;
+                    *self = Shell::FrontDoor(Box::new(crate::front_door::FrontDoor::start_menu()));
                 }
             }
             Shell::Screen(screen) => {
@@ -2861,6 +2906,14 @@ impl Shell {
                     // repainted from scratch (the load list overwrote it).
                     ScreenTransition::ToGameOver => {
                         *self = Shell::GameOver(GameOverFlow::start(ctx))
+                    }
+                    // ★ Slice 9b: a screen the START MENU opened (its Load,
+                    // Save, View and Train verbs) hands the front door back —
+                    // `loadGameMenu`/`SaveGame`/`viewPlayer`/`train_player` all
+                    // simply `return` into `startGameMenu`'s own loop.
+                    ScreenTransition::ToStartMenu => {
+                        *self =
+                            Shell::FrontDoor(Box::new(crate::front_door::FrontDoor::start_menu()))
                     }
                     // ★ FD-44. `MakeCamp` returned interrupted: run
                     // `cancel_spells` (its exit tail, `ovr016.cs:1154`),
@@ -2878,6 +2931,50 @@ impl Shell {
                 if flow.tick(ctx).is_some() {
                     ctx.state.last_selected_player = ctx.state.selected_player;
                     *self = Self::enter_world_menu(ctx);
+                }
+            }
+            // ★ Roll-credits slice 9b. Every arm but `Begin` is a screen the
+            // menu opens and returns from; `Begin` is `seg001.PROGRAM`'s own
+            // hand-off from `startGameMenu()` to `sub_29758()`.
+            Shell::FrontDoor(door) => {
+                use crate::front_door::FrontDoorTick;
+                use crate::screens::{ReturnTo, Screen};
+                match door.tick(ctx) {
+                    FrontDoorTick::Stay => {}
+                    FrontDoorTick::Begin => {
+                        // `BEGIN`'s own recompose (`ovr018.cs:247-266`): the
+                        // exploration frame and the roster, then a cleared
+                        // prompt row. The boot flow paints the viewport.
+                        Self::rebuild_exploration_screen(ctx);
+                        crate::combat::scene::render::clear_prompt_line(ctx.fb);
+                        *self = Shell::Boot(BootFlow::start(ctx.machine, ctx.state, ctx.vm_memory));
+                    }
+                    FrontDoorTick::OpenLoad => {
+                        *self = Shell::Screen(Screen::SaveLoad(crate::screens::SaveLoad::new_load(
+                            ctx,
+                            ReturnTo::StartMenu,
+                        )))
+                    }
+                    FrontDoorTick::OpenSave => {
+                        *self = Shell::Screen(Screen::SaveLoad(crate::screens::SaveLoad::new_save(
+                            ReturnTo::StartMenu,
+                        )))
+                    }
+                    FrontDoorTick::OpenView => {
+                        *self = Shell::Screen(Screen::PartyView(crate::screens::PartyView::new(
+                            ctx,
+                            ReturnTo::StartMenu,
+                        )))
+                    }
+                    FrontDoorTick::OpenTrain => {
+                        *self = Shell::Screen(Screen::Training(crate::screens::Training::new(
+                            ctx.state.selected_player,
+                            ReturnTo::StartMenu,
+                        )))
+                    }
+                    // `print_and_exit()` (`ovr018.cs:296`) — the core cannot
+                    // exit a process (D8), so it asks the host to.
+                    FrontDoorTick::Quit => *ctx.quit_requested = true,
                 }
             }
         }
@@ -2978,7 +3075,10 @@ impl Shell {
             Shell::Step(s) => in_run(&s.run).or_else(|| in_chain(&s.chain)),
             // A camp ambush's own `COMBAT` parks here like any other.
             Shell::CampInterrupt(c) => in_run(&c.run).or_else(|| in_chain(&c.chain)),
-            Shell::WorldMenu { .. } | Shell::GameOver(_) | Shell::Screen(_) => None,
+            Shell::WorldMenu { .. }
+            | Shell::GameOver(_)
+            | Shell::Screen(_)
+            | Shell::FrontDoor(_) => None,
         }
     }
 
@@ -3002,7 +3102,10 @@ impl Shell {
             Shell::Look(l) => in_run(&l.run).or_else(|| in_chain(&l.chain)),
             Shell::Step(s) => in_run(&s.run).or_else(|| in_chain(&s.chain)),
             Shell::CampInterrupt(c) => in_run(&c.run).or_else(|| in_chain(&c.chain)),
-            Shell::WorldMenu { .. } | Shell::GameOver(_) | Shell::Screen(_) => None,
+            Shell::WorldMenu { .. }
+            | Shell::GameOver(_)
+            | Shell::Screen(_)
+            | Shell::FrontDoor(_) => None,
         }
     }
 
@@ -3026,7 +3129,10 @@ impl Shell {
             Shell::Look(l) => in_run(&l.run).or_else(|| in_chain(&l.chain)),
             Shell::Step(s) => in_run(&s.run).or_else(|| in_chain(&s.chain)),
             Shell::CampInterrupt(c) => in_run(&c.run).or_else(|| in_chain(&c.chain)),
-            Shell::WorldMenu { .. } | Shell::GameOver(_) | Shell::Screen(_) => None,
+            Shell::WorldMenu { .. }
+            | Shell::GameOver(_)
+            | Shell::Screen(_)
+            | Shell::FrontDoor(_) => None,
         }
     }
 
@@ -3063,10 +3169,16 @@ impl Shell {
     /// wiped the whole interior and `AfterCombatExpAndTreasure`'s wipe branch
     /// draws nothing but the message and the prompt (`ovr006.cs:801-809`) —
     /// there is no map position to report when there is no party.
+    /// The front door is excluded for the same reason: the title screens, the
+    /// copy-protection prompt and `startGameMenu` each own the whole display,
+    /// and there is no map position to report before `BEGIN Adventuring`.
     pub fn draws_engine_status_line(&self) -> bool {
         self.combat_host().is_none()
             && self.temple_host().is_none()
-            && !matches!(self, Shell::Screen(_) | Shell::GameOver(_))
+            && !matches!(
+                self,
+                Shell::Screen(_) | Shell::GameOver(_) | Shell::FrontDoor(_)
+            )
     }
 }
 
@@ -3117,6 +3229,7 @@ mod tests {
         rules: gbx_rules::pack::RuleSet,
         slots: crate::saveload::SlotDirectory,
         io_request: Option<crate::saveload::SaveLoadRequest>,
+        quit_requested: bool,
         rng: EngineRng,
         fb: Framebuffer,
         font: Font,
@@ -3152,6 +3265,7 @@ mod tests {
                 rules: gbx_rules::pack::RuleSet::load(),
                 slots: crate::saveload::SlotDirectory::new(),
                 io_request: None,
+                quit_requested: false,
                 rng: EngineRng::new(1),
                 fb: Framebuffer::new(),
                 font: marker_font(),
@@ -3183,6 +3297,7 @@ mod tests {
                 rules: &self.rules,
                 slots: &self.slots,
                 io_request: &mut self.io_request,
+                quit_requested: &mut self.quit_requested,
                 rng: &mut self.rng,
                 fb: &mut self.fb,
                 font: &self.font,

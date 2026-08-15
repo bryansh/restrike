@@ -104,6 +104,14 @@ pub fn import_original_slot(
 /// Fulfills a [`SaveLoadRequest`] against `save_dir`, replacing `*engine` on a
 /// successful Load/Import. `data`/`seed` are needed only by the load paths
 /// (they rebuild an engine); Save ignores them.
+///
+/// ★ Roll-credits slice 9b: a load the **start menu** asked for returns to the
+/// start menu, not into the world — `ovr018.cs:223-228` calls `loadGameMenu()`
+/// from inside `startGameMenu`'s own `while (true)`, so the player lands back
+/// on the menu with the loaded party in front of them and presses `B` to
+/// begin. A replacement engine has no memory of where the request came from,
+/// so the bit is carried across here (hosts that do their own I/O can use
+/// [`Engine::at_front_door`]/[`Engine::park_at_start_menu`] directly).
 pub fn fulfill(
     engine: &mut Engine,
     request: SaveLoadRequest,
@@ -111,14 +119,21 @@ pub fn fulfill(
     data: GameData,
     seed: u32,
 ) -> Result<(), SlotIoError> {
+    let from_front_door = engine.at_front_door();
     match request {
         SaveLoadRequest::Save(letter) => save_to_slot(engine, save_dir, letter),
         SaveLoadRequest::Load(letter) => {
             *engine = load_from_slot(save_dir, letter, data)?;
+            if from_front_door {
+                engine.park_at_start_menu();
+            }
             Ok(())
         }
         SaveLoadRequest::ImportOriginal(letter) => {
             *engine = import_original_slot(save_dir, letter, data, seed)?;
+            if from_front_door {
+                engine.park_at_start_menu();
+            }
             Ok(())
         }
     }

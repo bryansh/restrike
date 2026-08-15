@@ -107,6 +107,19 @@ pub fn draw_frame_outer(fb: &mut Framebuffer, sets: &SymbolSets) -> Result<(), S
     Ok(())
 }
 
+/// `draw8x8_02` (`seg037.cs:57-70`): [`draw_frame_outer`] plus the same
+/// horizontal divider [`draw8x8_03`] uses, at rows **3 and 8** — the two rules
+/// that box the title-screen credits (`ovr002.credits`, `:28`). Its only
+/// caller in the shipped game.
+pub fn draw8x8_02(fb: &mut Framebuffer, sets: &SymbolSets) -> Result<(), SymbolError> {
+    draw_frame_outer(fb, sets)?;
+    for (col_x, &v) in X8X8_07.iter().enumerate() {
+        draw_symbol(fb, sets, v as u32 + OUTER_BASE, 3, col_x)?;
+        draw_symbol(fb, sets, v as u32 + OUTER_BASE, 8, col_x)?;
+    }
+    Ok(())
+}
+
 /// `draw8x8_03` (`seg037.cs:73-102`): the standard exploration screen —
 /// `DrawFrame_Outer` plus the row-16 horizontal divider, col-16 vertical
 /// divider, and the inner 3D-viewport frame at cells 2-14.

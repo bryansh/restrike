@@ -776,10 +776,17 @@ fn tick_until_probe(engine: &mut Engine, want: &str, limit: usize) {
 /// The original's death path unwinds to `startGameMenu` with the party cleared
 /// and `Load Saved Game` the only door back in (`ovr006.cs:801-809` →
 /// `ovr003.cs:2392-2394` → `seg001.cs:133-153` → `ovr018.cs:103-114`). This
-/// walks ours: wipe → the death screen → a key → the load list → a slot → the
-/// state that was saved before the party died.
+/// walks ours: wipe → the death screen → a key → **the start menu** → `L` →
+/// the load list → a slot → the state that was saved before the party died.
+///
+/// ★ Roll-credits slice 9b moved the middle of that sentence. Slice 0 had no
+/// start menu to unwind to, so the death screen opened the load list directly
+/// and `ReturnTo::GameOver` bounced a declined load back to the corpse screen.
+/// Now the front door exists, the recovery is the original's own — `InitAgain`
+/// clears `TeamList` and `startGameMenu` re-opens on its party-less column,
+/// where Load is the only verb that leads anywhere.
 #[test]
-fn a_party_wipe_recovers_through_the_load_screen() {
+fn a_party_wipe_recovers_through_the_start_menu() {
     use crate::saveload::SaveLoadRequest;
     use crate::saveload_fs::{fulfill, save_to_slot, scan_slot_directory};
     use crate::shell::Shell;
@@ -793,7 +800,7 @@ fn a_party_wipe_recovers_through_the_load_screen() {
     }
     save_to_slot(&engine, &dir, 'A').expect("bank a save before dying");
     engine.set_slot_directory(scan_slot_directory(&dir));
-    let alive = engine.save();
+    let alive = engine.state_digest();
 
     // The wipe. `party_killed` is what a lost fight raises
     // (`tick_combat` → `CombatOutcome::MonstersWin`).
@@ -809,20 +816,24 @@ fn a_party_wipe_recovers_through_the_load_screen() {
     // `DisplayAndPause` gate arms.
     tick_until_probe(&mut engine, "game-over/press-any-key", 600);
 
-    // Declining the recovery goes back to the death screen — never into the
-    // world with a dead party.
+    // Acknowledging the death screen lands on `startGameMenu`, party-less.
     engine.tick(&[crate::input::InputEvent::Char(b' ')]);
+    assert_eq!(engine.probe(), "front-door/start-menu");
+    assert!(
+        engine.party().members.is_empty(),
+        "`InitAgain` clears TeamList (`seg001.cs:364`)"
+    );
+
+    // Backing out of the load list returns to the menu — never into the world
+    // with a dead party (the original cannot express that state either).
+    engine.tick(&[crate::input::InputEvent::Char(b'L')]);
     assert_eq!(engine.probe(), "screen", "the load list opened");
     engine.tick(&[crate::input::InputEvent::Escape]);
     engine.tick(&[]);
-    assert!(
-        matches!(engine.shell(), Shell::GameOver(_)),
-        "Exit from the recovery list returns to the death screen"
-    );
+    assert_eq!(engine.probe(), "front-door/start-menu");
 
     // Take the load this time.
-    tick_until_probe(&mut engine, "game-over/press-any-key", 600);
-    engine.tick(&[crate::input::InputEvent::Char(b' ')]);
+    engine.tick(&[crate::input::InputEvent::Char(b'L')]);
     engine.tick(&[crate::input::InputEvent::Char(b'A')]);
     let request = engine
         .take_io_request()
@@ -832,14 +843,30 @@ fn a_party_wipe_recovers_through_the_load_screen() {
         .expect("the host fulfills the recovery Load");
     engine.recompose_world_screen();
 
+    // ★ The load came from the start menu, so it returns there — with the
+    // party back. The H5 state digest (rather than the raw `.rsav` bytes) is
+    // the comparison now: the recovered engine is parked on the menu the
+    // player will press `B` from, so the two saves differ by exactly that
+    // shell state and nothing else.
     assert_eq!(
-        engine.save(),
+        engine.state_digest(),
         alive,
         "the recovered engine is the one that was saved before the wipe"
     );
     assert!(
         !matches!(engine.shell(), Shell::GameOver(_)),
         "and the game is playable again"
+    );
+    assert_eq!(engine.probe(), "front-door/start-menu");
+    assert!(
+        !engine.party().members.is_empty(),
+        "with the party the save carried"
+    );
+    // `B` puts them back in the world (`ovr018.cs:239-274`).
+    engine.tick(&[crate::input::InputEvent::Char(b'B')]);
+    assert!(
+        !matches!(engine.shell(), Shell::FrontDoor(_)),
+        "BEGIN works"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
