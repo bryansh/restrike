@@ -142,6 +142,14 @@ fn main() {
     if !watching {
         eprintln!("restrike-desktop: save slots in {}", saves_dir.display());
         engine.set_slot_directory(saveload_fs::scan_slot_directory(&saves_dir));
+        // ★ Slice 9c: the `.guy` character files `Add Character to Party`
+        // lists, filtered against whoever is already in the party.
+        let files = saveload_fs::scan_char_files(&saves_dir).without_party_members(engine.party());
+        eprintln!(
+            "restrike-desktop: {} saved character(s) available to add",
+            files.entries.len()
+        );
+        engine.set_char_file_directory(files);
     }
 
     let event_loop = EventLoop::new().expect("failed to create the winit event loop");
@@ -350,6 +358,19 @@ impl App {
     /// replaces the whole engine, and an import starts at the boot default),
     /// and the on-screen verdict.
     fn fulfill_io(&mut self) {
+        // ★ Roll-credits slice 9c: the character-file half — creation's
+        // `Save <name>?`, `Remove`'s `SavePlayer`, and `Add`'s load. Same
+        // shape, same place, and its verdict reaches the player too.
+        if let Some(notice) =
+            debug_log::fulfill_pending_char_file(&mut self.engine, &self.saves_dir)
+        {
+            eprintln!("restrike-desktop: {notice} ({})", self.saves_dir.display());
+            if let Some(log) = &mut self.debug_log {
+                use std::io::Write;
+                let _ = writeln!(log, "io: {notice}");
+            }
+            self.engine.report_host_notice(notice);
+        }
         let Some((request, result)) =
             debug_log::fulfill_pending_io(&mut self.engine, &self.saves_dir, self.seed)
         else {

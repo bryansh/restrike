@@ -262,6 +262,38 @@ pub fn fulfill_pending_io(
     Some((request, result))
 }
 
+/// ★ The same shape for the **character-file** request (roll-credits slice
+/// 9c): creation's `Save <name>?`, `Remove`'s own `SavePlayer`, and `Add`'s
+/// load. Rescans the directory afterwards, so the Add picker sees a file the
+/// moment it is written and stops offering a character who has just joined.
+///
+/// Returns a player-facing line — the `.guy` that was written, the character
+/// who joined, or the original's own refusal words — for the host to show
+/// (`Engine::report_host_notice`). D8 keeps the *outcome* on the host side,
+/// and the M6 forensics rule says an outcome nothing shows is not an outcome.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn fulfill_pending_char_file(engine: &mut Engine, saves_dir: &Path) -> Option<String> {
+    use crate::chr_file::CharFileRequest;
+    let request = engine.take_char_file_request()?;
+    let described = match &request {
+        CharFileRequest::Save(ch) => format!(
+            "Saved {}.{}",
+            crate::chr_file::clean_stem(&ch.name),
+            crate::chr_file::CHAR_EXT
+        ),
+        CharFileRequest::Load(stem) => format!("Loaded {stem}"),
+    };
+    let notice = match crate::saveload_fs::fulfill_char_file(engine, request, saves_dir) {
+        Ok(None) => described,
+        Ok(Some(refusal)) => refusal,
+        Err(e) => format!("character file failed: {e:?}"),
+    };
+    engine.set_char_file_directory(
+        crate::saveload_fs::scan_char_files(saves_dir).without_party_members(engine.party()),
+    );
+    Some(notice)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
