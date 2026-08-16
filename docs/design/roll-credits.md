@@ -2364,3 +2364,226 @@ fields are `#[serde(skip)]`).
   inverts the edited stat in place (`draw_highlight_stat`, `:965-996`); ours
   names the field on a status row instead. Same information, different
   presentation.
+
+## 16. Slice 9d: the ending (G9)
+
+The finale is one square, one script arm, one opcode and one engine routine:
+`GEO6` block `0x43`'s square **(6, 1)**, `ECL6#67 @0x9280`, `PROGRAM 8`, and
+`ovr019.end_game_text`. Everything below was read off the shipped data and
+`~/src/goldbox-refs/coab`; nothing is inferred from the census's reachable set
+(§7's blindness note applies — every `ECL6` block was disassembled from every
+header vector, and every `PROGRAM` operand in all six files was enumerated by
+hand).
+
+### 16.1 Where `PROGRAM 8` is — and the whole `PROGRAM` census, corrected
+
+`restrike census` reports 13 `PROGRAM` (0x38) uses. Disassembled and read,
+they are:
+
+| operand | uses | sites |
+|---|---|---|
+| `0` — `startGameMenu` mid-game | 4 | `ECL1#80 @0x8817`, `ECL1#81 @0x8665`, `ECL2#1 @0x900E`, `ECL2#3 @0x8BB9` |
+| `3` — `party_killed = true` | 1 | `ECL1#82 @0x8391` (the attract mode) |
+| `8` — **you have won** | **1** | **`ECL6#67 @0x93E7`** |
+| `9` — `TryEncamp` then `CMD_Exit` | 7 | `ECL1#80 @0x84DB` + `@0x879B`, `ECL1#81 @0x85DB`, `ECL2#2 @0x8219`, `ECL3#18 @0x9181`, `ECL4#32 @0x96B0`, `ECL4#35 @0x812D` |
+
+★ **Correction to §0's dashboard** (superseded by §7 already, restated here
+because it is the entry a reader looking for PROGRAM will find): "PROGRAM ×1,
+demo-only" is wrong twice over. `PROGRAM 9` — camp-from-a-script — has **seven
+shipped sites on the ordinary playthrough**, and `PROGRAM 8` is the ending.
+Only the `3` is demo-only.
+
+### 16.2 The approach: `ECL6#67` is the Temple of Bane, and the finale is a special square
+
+`ECL6.DAX` holds four blocks: `64` (`0x40`, the graveyard/Myth Drannor
+approach), `66` (`0x42`, Myth Drannor outdoors), `67` (`0x43`, the ruined
+temple — two floors sharing one 16×16 grid) and `69` (`0x45`, the ruins).
+The party enters the temple from `ECL6#66 @0x80BA`: "YOU ARE HEADING TOWARD A
+LARGE RUINED TEMPLE. DO YOU CONTINUE?" → `SAVE 6, [0xC04B]` / `SAVE 0x0F,
+[0xC04C]` / `NEWECL 0x43` — arriving at **(6, 15)**, the temple's south door.
+
+`ECL6#67`'s vector 1 (the per-step script, `@0x81AD`) ends in the dispatch
+every Gold Box map uses:
+
+```text
+@0x81D6  AND [0xC04F], #0x7F -> [0x7F79]      ; the square's low-7 event code
+@0x81DF  ON GOTO [0x7F79], #0x1B, <27 targets>
+```
+
+Selector 0 is the wandering-monster roll (`@0x8236`), which is why *every*
+plain square runs it. The 27 targets and the squares that carry them
+(`GEO6#0x43`, `x2 & 0x7F`) line up exactly, and that agreement is the
+confirmation that the selector is **0-based into the first tail entry** — our
+`op_on_goto`'s indexing, not coab's `cmd_opps[var_1 + 1]` with its rewind
+(0x25 is on the known skip-divergence list):
+
+| code | square(s) | target | what |
+|---|---|---|---|
+| 0 | every plain square | `@0x8236` | the wandering-monster roll |
+| 1 | (6,15) | `@0x94AF` | the south door the party arrives on — redraw only |
+| 2–5 | (7,13), (7,11), (6,11), (5,11) | `@0x852F` | ★ **the great confrontation** (four doorway squares, one scene, `[0x4C00]`-latched) |
+| 7–22 | the temple's rooms | various | kennel, statuary, the Bane chapel fight, the bedroom loot, the office, the kitchen, the collapsed sewer, two dormitory fights, the lightning circle, the storeroom, the library, the crypt, the embalming room |
+| 23 | (10,7) | `@0x91FD` | "STAIRS LEAD UP HERE" → teleports to (2,5) |
+| 24 | (2,5) | `@0x923D` | "STAIRS LEAD DOWN HERE" → teleports to (10,7) |
+| 25 | (2,3) | `@0x94AF` | redraw only |
+| **26** | **(6,1)** | **`@0x9280`** | **the finale** |
+
+The two floors share the grid: (10,7) and (2,5) are the stair pair, so the
+"second floor" is a second region of the same 16×16 map — which is what
+`ECL6#67 @0x84A6`'s own clue means ("THE HELM OF DRAGONS SHOWS TYRANTHRAXUS ON
+THE SECOND FLOOR, NORTHEAST CORNER").
+
+### 16.3 The finale, instruction by instruction (`ECL6#67 @0x9280`)
+
+`GOSUB [0x9487]` throughout is the block's shared pause —
+`HORIZONTAL MENU [0x7F82], #1, "PRESS BUTTON OR RETURN TO CONTINUE."` then
+`PRINTCLEAR " "`.
+
+```text
+@0x9280  SETUP MONSTER #0x47, #0x00, #0x47      ; TYRANTHRAXUS's close-up
+@0x9287  PRINTCLEAR "'THE POWER OF YOUR BONDS HAS RETURNED. GROVEL AT "
+@0x92AF  PRINT      "MY FEET THIS INSTANT!' YOUR BODY BEGINS TO BOW DOWN."
+@0x92D9  GOSUB      [0x9487]
+@0x92DD  PRINTCLEAR "WITH A GREAT FORCE OF WILL, YOU OVERCOME THE "
+@0x9302  PRINT      "COMPULSION. 'SO BE IT! HERE IS YOUR DESTINY -- GROUND "
+@0x932E  PRINT      "TO DUST BENEATH MY FEET!'"
+@0x9344  GOSUB      [0x9487]
+@0x9348  PRINTCLEAR "HE SCOWLS. 'THAT AMULET WILL LET YOU SCRATCH ME, "
+@0x9370  PRINT      "BUT IT IS FAR FROM ENOUGH TO DEFEAT ME. FOR MY GREATER "
+@0x939D  PRINT      "GLORY, LET YOUR LIVES BE FORFEIT!'"
+@0x93BA  GOSUB      [0x9487]
+L93BE:
+@0x93BE  SAVE  [0x4CBB], [0x7F71]               ; the party's to-hit bonus
+@0x93C5  CLEARMONSTERS
+@0x93C6  LOAD MONSTER #0x45, #0x1C, #0x45       ; 28 x MARGOYLE
+@0x93CD  LOAD MONSTER #0x47, #0x01, #0x47       ; 1 x TYRANTHRAXUS
+@0x93D4  LOAD MONSTER #0x48, #0x08, #0x48       ; 8 x HIGH PRIEST
+@0x93DB  COMBAT
+@0x93DC  COMPARE [0x7EC7], #0x80
+@0x93E2  IF >
+@0x93E3  GOTO [0x93BE]                          ; the party FLED — fight again
+@0x93E7  PROGRAM #0x08                          ; >>> you have won <<<
+@0x93EA  EXIT
+```
+
+Three things this settles:
+
+- ★ **`[0x7EC7]` is `Area2.field_58E`, the combat outcome** (Area2 `DataOffset
+  0x58E`, `(0x7EC7 - 0x7C00) * 2`), and the loop reads it exactly.
+  `AfterCombatExpAndTreasure` opens by writing **0** (`ovr006.cs:765`); `0x80`
+  is "the party was destroyed" / "you have lost the fight" (`:403`, `:803`);
+  `0x81` is set per member when `party_fled` (`:306`). So `IF > 0x80` is
+  precisely **"the party ran away"** — and running away from Tyranthraxus does
+  not end the game, it restarts the fight at `@0x93BE`. A wipe never reaches
+  `PROGRAM 8` at all: `party_killed` fails `RunEclVm`'s own loop condition
+  (`ovr003.cs:2154-2155`) before the VM can step to it.
+- ★ **`[0x4CBB]` is Myth Drannor's dryad blessing**, copied into
+  `Area2.field_6E2` — the party's team-wide to-hit bonus, read by
+  `attack_target` (`ovr024.cs:533-535`) — before *every* fight in area 6
+  (`ECL6#64 @0x8249`, `#66 @0x8563`/`@0x8A44`, `#67 @0x8400`/`@0x93BE`).
+  `ECL6#64 @0x8ABD` sets it to `+2` for accepting the blessing and `@0x8B3F`
+  to `0xFE` (−2) for refusing it. Tyranthraxus's "THAT AMULET WILL LET YOU
+  SCRATCH ME" is fiction; the mechanical modifier at the final fight is the
+  dryad's.
+- The final roster is **37 monsters**: `MON6CHA` blocks `0x45` MARGOYLE
+  (6 HD, 30 hp, AC 2), `0x47` TYRANTHRAXUS (15 HD, 100 hp, AC −7) and `0x48`
+  HIGH PRIEST (10 HD, 60 hp) — read from the real `MON6CHA.DAX`, not guessed.
+
+### 16.4 `CMD_Program`'s `var_1 == 8` arm (`ovr003.cs:1951-1974`)
+
+```text
+end_game_text();                                 // ovr019, §16.5
+gameWon = true;
+area_ptr.field_3FA   = 0xFF;                     // the win latch
+area2_ptr.training_class_mask = 0xFF;            // every class trainable
+foreach (Player p in TeamList) {                 // the survivors are made whole
+    p.hit_point_current = p.hit_point_max;
+    p.health_status     = Status.okey;
+    p.in_combat         = true;
+}
+startGameMenu();                                 // BEGIN is now refused
+yes_no(defaultMenuColors, "You've won. Save before quitting? ");
+if (== 'Y') SaveGame();
+print_and_exit();                                // back to DOS
+```
+
+★ **The prompt comes *after* the menu, not before it.** `startGameMenu` is
+called first and runs its whole loop; the save question is what happens when
+the player leaves it. So the post-victory posture is: the menu, with `BEGIN
+Adventuring` refused (`ovr018.cs:243`'s `field_3FA == 0` guard) and everything
+else — View, Train (the mask was just set to `0xFF`), Save, Remove — still
+working; and the only way out of it is the save question and then DOS. There
+is no "keep playing".
+
+### 16.5 `end_game_text` (`ovr019.cs:474-538`) — the choreography
+
+`game_state` is saved and set to `GameState.EndGame` for the duration
+(`:476-477`, restored at `:536`), and the whole thing ends with
+`ovr025.LoadPic()`. Every line is `press_any_key(text, clearArea, 10,
+TextRegion.NormalBottom)` — the first of each group clears the window, the
+rest append.
+
+| beat | what | art |
+|---|---|---|
+| 1 | "Tyranthraxus' spirit coalesces over the slain / storm giant. 'You have defeated me. Were it not for / the Amulet of Lythander, I could possess you and rob / you of your victory. Still I can escape through the pool." → `DisplayAndPause("Press any key to continue.", 13)` | — |
+| 2 | "As you reach for the Pool of Radiance, he cries / out, 'Keep the Gauntlet of Moander away from there, you / will unleash dangerous energies. Stay back!' As the / gauntlet contacts the pool, it contracts and shatters it." | `ShowAnimation(1, 0x4A, 3, 3)` — `PIC6` block 74, then `DisplayAndPause` + `ClearPromptArea` |
+| 3 | "'I am trapped without escape, you have succeeded / where armies have not. Gloat while you may, Tyranthraxus / is slain this day.' Before your eyes he crumbles into / nothingness." | `ShowAnimation(1, 0x4B, 3, 3)` — `PIC6` block 75, then `DisplayAndPause` + `ClearPromptArea` |
+| 4 | "You are certain he is destroyed because your / final bond fades away. The Curse of the Azure Bonds / has finally been lifted from you! You are free at / last!" | ★ `picture_fade = 1`; `ShowAnimation((10 - game_speed_var) * 2, 0x4D, 3, 3)`; `picture_fade = 0` — **the progressive dissolve** (§16.6) |
+| 5 | "The Knights of Myth Drannor rush in, '/ Congratulations, you have destroyed the Flamed One. / With the power of Elminster, let us take you from / this  foul place, to a fine feast.'" (the double space is the original's) | `head_body(0x41, 0x41)` + `draw_head_and_body(true, 3, 3)` — `HEAD6`/`BODY6` block 65; then `DisplayAndPause` + `ClearPromptArea` |
+| 6 | "You are teleported to Shadowdale, where festivities / have already begun. A huge cheer goes up at your arrival. / Gharri and Nacacia, arm in arm, yell congratulations / from the nearby stands. 'You have won!'" | `load_bigpic(0x7A)` + `draw_bigpic()` — `BIGPIC6` block 122, the only block that file has |
+| 7 | `endgame_529F4()` — the fireworks, over the Shadowdale bigpic, **until a key is pressed** | — |
+
+`ShowAnimation` (`ovr019.cs:411-444`) is a redraw loop, not a frame loop: it
+calls `DrawMaybeOverlayed(CurrentPicture(), useOverlay: true, 3, 3)` every
+iteration and only advances `curFrame` once `CurrentDelay() * (game_speed_var
++ 3)` **centiseconds** have passed (`time01()` is a centisecond clock,
+`seg041.cs:309-314`); `num_loops` counts wraps of the frame cursor. `PIC6`
+block `0x4D` is a **single-frame** block (3,894 raw bytes = one 88×88 frame),
+so beat 4's loop is `(10 - speed) * 2` frame-delay periods of *continuous
+redraw* — which is exactly what makes the fade progress.
+
+### 16.6 The fireworks (`endgame_529F4`, `ovr019.cs:356-408`)
+
+A particle system, and **the only place in the shipped game that draws floats
+from the PRNG** (`seg051.Random__Real`, the four call sites `gbx-prng`'s
+`random_real` was explicitly reserved for — see that crate's own note). One
+burst, per outer iteration gated on `Random(10000) < 1`:
+
+1. `unk_1AE0B[0..n]` — `n = Random(2)` colours, each `Random(5) + 2`.
+2. A launch point: `word_1AE13 = Random(20) + 35`, `word_1AE15 = -(Random(5) + 50)`.
+3. `endgame_5285E(0, 0x3C, …)` — 60 invisible steps that integrate the rocket's
+   arc (`x += dx`, `y += dy + 1` in 1/32-pixel fixed point, `dy++` each step:
+   constant downward acceleration).
+4. `sub_520B8` — seeds 3 × 40 particles around the burst point, each with a
+   random direction (`Random__Real() * 2π` twice, a spherical pick), a
+   per-particle five-entry colour ramp and three lifetime thresholds
+   (`Random(7) - 4`, `Random(11) - 6`, `Random(7)`).
+5. `endgame_5285E(1, 0x3C, …)` — the same 60 steps again, this time **visible**:
+   `SetPixel(Random(7) + 8, …)` a bright pixel, restoring the pixel underneath
+   as it goes. `SysDelay(0x0F)` per step is the rocket's pace.
+6. `sub_5279B` → `sub_524F7` × (`byte_1ADFA` + 1) — the burst: every particle
+   moves, `field_0E` (its y velocity) gains 1 every sixth frame (gravity), the
+   colour ramp advances as each particle passes its thresholds, and every
+   particle saves and restores the pixel it covers so the bigpic underneath
+   survives. Rows are clipped to `8 < y < 0x41`.
+
+`sub_52068` (`:25-30`) is the flash: palette entry 15 is set to colour 9 for
+one `SysDelay(1)`, then back — fired at rocket launch and when the first
+particle reaches ramp stage 2.
+
+### 16.7 Where the credits are — and where they are not
+
+★ **The ending has no credits roll.** `ovr002.credits` (`:24-66`) has exactly
+one caller in the whole program, `title_screen` (`:93`) — beat 4 of the boot
+sequence (§14.1), already implemented. `end_game_text` calls no credits path,
+loads no credits art, and prints no names; the "roll credits" of this
+milestone's title is the metaphor, not a screen. The finale's own last image
+is the Shadowdale bigpic under the fireworks, and the last screen of the
+session is `startGameMenu`.
+
+★ **After the ending, the player lands at DOS.** `CMD_Program`'s arm ends in
+`seg043.print_and_exit()` (`:1972`), which plays `sound_FF`, closes the log,
+writes the item library and stops the engine. There is no return to the title
+and no return to the walk loop — the win is terminal. Per D8 the tick core
+never ends a process, so ours raises `Engine::quit_requested()`, exactly as
+copy protection's third failure and `Exit to DOS` already do.
