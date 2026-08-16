@@ -1979,10 +1979,12 @@ so it is closed two ways:
 - ~~**Residual — `PROGRAM 0` opens the start menu mid-game**
   (`ovr003.cs:1940-1948`).~~ **CLOSED by slice 9c** (§15.10), with its one
   ordering deviation named.
-- **Residual — the post-victory prompt** (`ovr003.cs:1964-1971`): `BEGIN` is
+- ~~**Residual — the post-victory prompt** (`ovr003.cs:1964-1971`): `BEGIN` is
   correctly refused once `field_3FA` is set, but the "You've won. Save before
   quitting?" flow that replaces it is slice 9d's, with the ending that sets
-  the latch.
+  the latch.~~ **CLOSED by slice 9d** (§16.8/§16.10): the ending sets the
+  latch, and leaving the start menu now asks the question in the original's
+  own words before `print_and_exit()`.
 
 ## 15. Slice 9c: character creation — LANDED 2026-08-15
 
@@ -2587,3 +2589,199 @@ writes the item library and stops the engine. There is no return to the title
 and no return to the walk loop — the win is terminal. Per D8 the tick core
 never ends a process, so ours raises `Engine::quit_requested()`, exactly as
 copy protection's third failure and `Exit to DOS` already do.
+
+### 16.8 What landed
+
+`crates/gbx-engine/src/ending.rs` is `end_game_text` as one `Shell::Ending`
+state walking a static `SCRIPT` table (the same shape `front_door.rs` gives
+`seg001.PROGRAM`'s preamble), plus `endgame_529F4`'s particle system. The
+variant is appended last on both enums it touches, and every new
+`EngineState` field is `#[serde(skip)]`, so **`SAVE_FORMAT_VERSION` stays at
+9** and no committed `.rsav` or golden moves.
+
+The wiring, end to end:
+
+| piece | where |
+|---|---|
+| `PROGRAM 8` raises `pending_ending` and returns `Exit` | `vmhost.rs`'s `program` |
+| the shell enters `Shell::Ending` at the next tick boundary, unconditionally (like the wipe) | `shell.rs`'s `tick` |
+| the six prose groups, four pauses, three `ShowAnimation`s, the head/body, the bigpic, the fireworks | `ending.rs`'s `SCRIPT` |
+| `ShowAnimation`'s redraw loop and its `CurrentDelay() * (game_speed_var + 3)` centisecond period | `picture.rs`'s `show_animation_begin`/`show_animation_tick` |
+| ★ the dissolve — `picture_fade = 1`, the fade step counter, `picture_fade = 0` | `picture.rs` + `draw.rs` (FD-32, §16.9) |
+| the win latch + training mask + healing the survivors | `shell.rs`'s `Shell::Ending` completion arm → `vmhost::latch_game_won` |
+| `startGameMenu()` with `BEGIN` refused | `front_door.rs`'s existing `field_3FA` guard |
+| ★ "You've won. Save before quitting? " and `print_and_exit()` | `front_door.rs`'s `FrontDoor::PostVictory` |
+
+Two things the implementation had to add beyond transcription:
+
+- **`Prng::random_real`** — the float `Random` (image `0xa570`,
+  `new_state / 2^32`) that `gbx-prng` has carried a "do not add this before
+  the session that reaches `ovr019`'s four `Random__Real` call sites" note
+  since M4. This is that session; all four sites are the firework burst's
+  spherical direction picks. The one approximation is the return type (an
+  `f64` against the original's 6-byte real), which has strictly more mantissa
+  than the 32-bit value it carries.
+- **`game_speed`, named at `0x4BFC`** (`Area1` `DataOffset 0x1F8`). The
+  finale's own teleport-flash subroutine backs it up, zeroes it, `DELAY`s and
+  restores it (`ECL6#67 @0x941E`/`@0x9425`/`@0x942C`), which is what confirms
+  the address; `ShowAnimation`'s frame period reads it.
+
+### 16.9 FD-32 resolved: the fade is a step counter, not a mutated cache
+
+The original dissolves by recoloring the **cached** `DaxBlock` in place on
+every fade-armed redraw (`ovr030.cs:19-22`), so the progress lives in the
+cache's own pixels. Ours cannot: composition is idempotent by design (D-UI4)
+and a save must never carry half-faded art. The resolution is
+`PictureLayer::fade_step` — how many `Recolor` passes the shown block has
+taken — and `draw::apply_recolor_dithered(pixels, table, step)`, which applies
+`step` passes to a scratch copy **in one go and exactly**, not by iterating:
+
+- every `FADE_RECOLOR` target is a fixed point, so a converted pixel stays
+  converted, and "converted after `step` passes" is precisely "at least one of
+  `step` independent 1-in-4 rolls hit this pixel" — probability
+  `1 - (3/4)^step`, computed in closed form;
+- the per-pixel key is the **old** Knuth hash with its bits reversed, so the
+  old low two bits become the new high two and `step == 1` recolors exactly
+  the set the pre-FD-32 dither recolored. No golden moves, and
+  `draw::tests::step_one_is_exactly_the_pre_fd32_one_in_four_dither` is the
+  pin;
+- still zero PRNG draws at any step, so FD-28's interim posture is untouched
+  and the whole model stays draw-neutral.
+
+**What advances it** is the ANIMATION cadence — FD-33's own mechanism, one
+redraw per tick: the `0xE804` opcode, `displayInput`'s wait loop, and the
+ending's `ShowAnimation`. ★ That closes **FD-33's remaining half** too: the
+wait loop's gate is `(picture_fade != 0 || useOverlay)` and its advance
+condition is `elapsed >= delay || picture_fade != 0` (`ovr027.cs:185-193`), so
+a fade-armed prompt steps its animation **every iteration with no delay test
+at all** — which is how a picture dissolves behind a menu.
+
+**What resets it** is a *different* block id, mirroring `load_pic_final`'s own
+cache guard (`ovr030.cs:37-38`): a re-decode is unfaded art; a redraw of the
+same block keeps dissolving.
+
+★ **The serde decision: `#[serde(skip)]` — it resets on load, and that is the
+faithful answer, not a shortcut.** The original's fade progress lives in the
+decoded `DaxBlock`, and `SaveGame` writes none of it: a restored session
+re-decodes every picture from the DAX files, pristine, while `picture_fade`
+(an `Area1` cell) *is* saved. So the original restoring mid-dissolve resumes
+with unfaded art and a still-armed fade — exactly `fade_step == 0` with
+`picture_fade > 0`. It also keeps `SAVE_FORMAT_VERSION` where it is, and a
+layer differing only in `fade_step` encodes to identical bytes.
+
+### 16.10 Acceptance
+
+`crates/gbx-engine/src/ending_tests.rs`, all against real CotAB data, frame
+dumps under `RESTRIKE_ENDING_DUMP`.
+
+**The staging, stated honestly.** The fixture is a hand-authored `savgam?.dat`
+(all self-authored bytes, D10) parked in **area 6, `ECL6` block `0x43`, `GEO6`
+block `0x43`, `inDungeon = 1`, party at (6, 1)**. The first test reads the
+square's `x2 & 0x7F` back off the shipped map and asserts it is 26 — so the
+fixture is standing on the finale square because the *data* says so, not
+because the disassembly was believed. From there the shipped script does
+everything.
+
+**The one injected fact, named.** The last fight is 37 monsters including a
+15-HD, AC −7 Tyranthraxus. Winning it is not a property this slice tests, and
+a fixture party that could win it is not a fixture. So the victory tests
+resume the shipped script at `@0x93DC` — the instruction *after* `COMBAT` —
+with `[0x7EC7] = 0`, which is exactly the value `AfterCombatExpAndTreasure`
+writes on entry (`ovr006.cs:765`). Everything downstream of that, `PROGRAM 8`
+included, is the original's own bytes. The approach test drives the real
+`COMBAT` and checks what arrives at it.
+
+1. **The approach**, driven through the real per-step vector and the real
+   `ON GOTO`: Tyranthraxus's three speeches in order, then `COMBAT` on the
+   monster branch with the loadout loaded. Dumped.
+2. **The whole ending**, beat by beat: `PROGRAM 8` → the six prose groups →
+   the three animations → the dissolve → the Knights → Shadowdale → the
+   fireworks → the post-victory start menu. Dumped at seven points.
+3. ★ **The dissolve pinned live**: the fade step is sampled every tick it is
+   on screen and asserted monotone and strictly increasing across the beat
+   (the run reports `[2, 3, … 19]`), with **two distinct steps dumped** so the
+   progression is visible, not merely counted. The unit tier pins the model
+   itself — monotone growth, saturation, per-step idempotence, and step 1's
+   bit-identity with the old dither.
+4. **The fireworks draw and clean up**: a synthetic-background unit test
+   drives a whole burst and asserts the rocket paints, the burst puts >20
+   pixels in the sky, and the display hands the picture back with **one**
+   pixel of residue — which is the original's own artifact, not a leak (its
+   `var_B` starts at 0 when the launch cell is outside the row clip, so the
+   rocket's first in-range step restores a black pixel it never sampled).
+5. **The win latch round trip**: win → `BEGIN` refused → save → load →
+   `BEGIN` still refused. The latch is an `Area1` cell, so `.rsav` carries it
+   with no second mechanism.
+6. **The post-victory prompt**: `Exit to DOS` no longer exits — it asks
+   "You've won. Save before quitting? ", `N` quits, `Y` opens the slot picker
+   and the quit follows it whether or not a file was written (the original's
+   `print_and_exit()` is unconditional).
+7. **Draw parity**, stated once: `PROGRAM 8` is reachable only from `ECL6#67
+   @0x93E7`, on the far side of the game's last fight. Every `.gbxtrace` is a
+   combat capture taken from an imported save via `--slot A` and replayed by
+   `gbx-oracle::replay` without a shell at all, so no capture can enter any
+   path this slice adds — including the fireworks' PRNG draws. Guard 16/16 and
+   reel smoke 16/16 are the referees.
+
+Gates green throughout: guard 16/16, reel smoke 16/16 (62,108 draws),
+**1,787** workspace tests (from 1,770), clippy 0, fmt clean,
+`SAVE_FORMAT_VERSION` unmoved at 9.
+
+### 16.11 Corrections and residuals
+
+- ★ **`PROGRAM`'s census was wrong in the dashboard** (§16.1): `PROGRAM 9` is
+  not demo-only, it has seven shipped sites on the ordinary playthrough.
+- ★ **`sub_524F7` integrates with `+=`, not `=`** (`ovr019.cs:172-173`). coab
+  reads `field_08 = field_0C` — position *assigned* from velocity. Three
+  things say it is a lost `+` in the decompilation: `sub_520B8` initialises
+  `field_08 = field_00 << 5` (`:135-136`) only for that to be discarded on the
+  first frame; the sibling routine `endgame_5285E` integrates the identical
+  fixed-point pair with `+=` (`:312-313`); and as literally written every
+  particle would sit one or two pixels from the origin forever, which is not a
+  firework. Transcribed as the accumulation it is.
+- ★ **The ending must not repaint the roster panel or the status line.**
+  `end_game_text` sets `gbl.game_state = GameState.EndGame` for its whole
+  duration (`ovr019.cs:476-477`) and no `LoadPic` arm, walk loop or menu
+  recompose runs under it. Our engine repainted both unconditionally every
+  tick, which erased every firework pixel in the right-hand panel before it
+  could be seen — the display draws single pixels across rows `9..0x40` at
+  whatever column the rocket reached. `Shell::Ending` now joins `Screen`,
+  `GameOver`, `FrontDoor` and combat in `draws_engine_status_line`'s
+  exclusion list; whatever the walk loop last painted stays on the glass,
+  which is what a retained framebuffer does. **Found by eyeballing the dumps,
+  not by a test.**
+- ★ **`yes_no` defaults to Yes.** `gbl.menuSelectedWord = 2` (`ovr027.cs:680`)
+  is out of range for a two-word menu, so `displayInput`'s open-time clamp
+  lands on word 0 — `<Enter>` at every `yes_no` in the game picks **Yes**,
+  including the post-victory save prompt.
+- ★ **`[0x4CBB]` is the dryad's blessing, not the amulet** (§16.3). The
+  mechanical to-hit modifier at the final fight comes from `ECL6#64`'s Myth
+  Drannor scene; Tyranthraxus's line about the Amulet of Lythander is fiction.
+- **Deviation — the invisible rocket pass costs no time.** `endgame_5285E`
+  sleeps `SysDelay(0x0F)` per step on *both* passes (`:331` sits outside the
+  `arg_0 != 0` guard), so the original holds a blank ~0.9 s before every
+  rocket. That pass draws nothing and exists only to find the burst point;
+  D-UI1 makes the tick budget ours to assign, so we integrate it in one tick
+  and spend the ticks on the rocket the player can see.
+- **Deviation — the idle gate's rate.** `Random(10000) < 1` is evaluated once
+  per unthrottled loop iteration in the original, which on period hardware is
+  tens of thousands a second. We have 60 ticks a second and no clock to read,
+  so the loop *rate* is a number we had to choose: 200 rolls a tick, which
+  reproduces the original's observed cadence (an expected ~0.8 s of quiet sky
+  between bursts, against a burst that itself runs about a second and a half).
+  The expression and the draw are the original's; only the iteration count per
+  tick is ours.
+- **Residual — the fireworks end at the end of a burst, not on the keypress.**
+  Faithful: the original only tests the keyboard inside the burst branch
+  (`ovr019.cs:400-403`), so a key pressed mid-rocket ends the show when that
+  rocket's burst finishes. Named because it will read as latency to anyone who
+  does not know the code.
+- **Residual — `PROGRAM 9` (camp-from-a-script) is still a tripwire.** Seven
+  shipped sites, all on the ordinary playthrough; the handler ends the
+  activation (which is right) but never camps. Now filed as **FD-45**, which
+  `vmhost.rs` had been citing since slice 9c without the entry existing.
+- **Residual — the pre-ending viewport.** In a real playthrough `CMD_Combat`'s
+  own `LoadPic()` puts the 3D view back before `PROGRAM 8` runs, so the first
+  prose group prints over the corridor. The acceptance fixture resumes past
+  the fight, so its first dump shows an empty viewport — a property of the
+  staging, not of the ending.

@@ -2237,6 +2237,11 @@ impl gbx_vm::EngineServices for EngineVmHost<'_> {
                     ));
                 ProgramOutcome::Exit
             }
+            // ★ FD-45, now a filed entry rather than a dangling citation:
+            // `9` is `TryEncamp()` then `CMD_Exit()` (`:1976-1982`) and has
+            // SEVEN shipped sites (roll-credits §16.1). The activation ends
+            // here, which is right; the camp itself is still missing, and the
+            // transcript says so out loud rather than pretending.
             _ => {
                 self.vm
                     .transcript

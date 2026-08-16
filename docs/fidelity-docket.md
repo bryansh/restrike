@@ -1469,6 +1469,36 @@ stays the one place showing the complete open-hypothesis picture.
   `crates/gbx-engine/src/shell.rs` `EngineState::rest_encounter`,
   `docs/design/roll-credits.md` G3/G4.
 
+### FD-45: `PROGRAM 9` ends the script but never camps — and it has seven shipped sites
+
+- **Status:** open (filed properly 2026-08-16, roll-credits slice 9d).
+  `vmhost.rs`'s `program` handler has been citing "docket FD-45" since slice
+  9c, but the entry was never written; this is it, narrowed to the one arm
+  that is still unimplemented.
+- **Question:** `CMD_Program`'s `var_1 == 9` arm is `TryEncamp()` then
+  `CMD_Exit()` (`ovr003.cs:1976-1982`), and `TryEncamp` (`:1913-1926`) is the
+  whole camp entry: `RunEclVm(PreCampCheckAddr)` (header vector 2),
+  `MakeCamp()`, and on an interrupted camp `LoadPic()` +
+  `RunEclVm(CampInterruptedAddr)` (vector 3), then `can_draw_bigpic = true`,
+  `RedrawView()` and `gameSaved = false`. Ours returns `ProgramOutcome::Exit`
+  — the activation ends, which is right — but nothing camps, so a script that
+  offers to camp silently does not.
+- **Reachability — not demo-only, and not rare.** ★ The census's `PROGRAM`
+  count is 13, and disassembling every operand (roll-credits §16.1) puts
+  **seven** of them on `9`: `ECL1#80 @0x84DB` and `@0x879B`, `ECL1#81
+  @0x85DB`, `ECL2#2 @0x8219`, `ECL3#18 @0x9181`, `ECL4#32 @0x96B0`, `ECL4#35
+  @0x812D`. The overland's own CAMP verb is among them. §0's "PROGRAM ×1,
+  demo-only" line is wrong twice over (`PROGRAM 8` is the ending, §16).
+- **Why it is not slice 9d's:** the camp screen, `MakeCamp` and the
+  camp-interrupt vector all exist already (`Shell::CampInterrupt`, FD-44) —
+  this is a wiring item that belongs with whoever next touches the camp
+  flow, not with the ending.
+- **Settled by:** routing `PROGRAM 9` into the same `Screen::Camp` entry the
+  world menu's `E` verb takes, with vector 2 run before it and vector 3 on
+  interruption, then ending the activation as it already does.
+- **Cross-reference:** FD-44, `crates/gbx-engine/src/vmhost.rs` `program`,
+  `docs/design/roll-credits.md` §16.1/§16.11.
+
 ### FD-46: `reclac_thief_skills`' `var_2` is 7, and nobody knows why
 
 - **Status:** open (measured, implemented, mechanism unexplained — filed
