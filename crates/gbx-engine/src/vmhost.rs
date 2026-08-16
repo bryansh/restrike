@@ -396,6 +396,31 @@ pub fn game_won_flag(vm: &VmMemoryState) -> u16 {
     vm.raw_word(GAME_WON_ADDR).unwrap_or(0)
 }
 
+/// ★ `CMD_Program`'s `var_1 == 8` arm (`ovr003.cs:1953-1954`): the win latch
+/// and the training permission, both `0xFF`, set the instant `end_game_text`
+/// returns. `GAME_WON_ADDR` is an `Area1` cell, so it rides `.rsav` like every
+/// other raw window value — which is what makes "win → save → load → BEGIN is
+/// still refused" true by construction.
+pub fn latch_game_won(vm: &mut VmMemoryState) {
+    vm.set_raw_word(GAME_WON_ADDR, 0xFF);
+    vm.set_raw_word(TRAINING_CLASS_MASK_ADDR, 0xFF);
+}
+
+/// ★ `gbl.area_ptr.game_speed` (`Classes/Area1.cs:80-81`, `DataOffset 0x1F8` →
+/// `0x4B00 + 0xFC`) — 0 (fastest) to 9 (slowest), the Speed menu's cell.
+///
+/// Confirmed by shipped content: `ECL6#67`'s teleport-flash subroutine backs
+/// it up, zeroes it, `DELAY`s and restores it (`@0x941E`/`@0x9425`/`@0x942C`),
+/// which only makes sense for the speed cell. Read by `ShowAnimation`'s frame
+/// period (`ovr019.cs:427`) and by `displayStringSlow`'s per-character pacing.
+const GAME_SPEED_ADDR: u16 = 0x4B00 + 0xFC;
+
+/// [`GAME_SPEED_ADDR`], defaulting to `InitFirst`'s 4 (`seg001.cs:274`) when
+/// nothing has written it — a bare-boot fixture, not a real save.
+pub fn game_speed(vm: &VmMemoryState) -> u8 {
+    vm.raw_word(GAME_SPEED_ADDR).unwrap_or(4).min(9) as u8
+}
+
 /// ★ `get_player_values`' `arg_4 == 0x100` case (`ovr008.cs:424-441`) — the
 /// **only** cell a script uses to ask "is the selected character actually
 /// there?", and the one every WHO (0x39) site tests on the very next
@@ -2190,6 +2215,27 @@ impl gbx_vm::EngineServices for EngineVmHost<'_> {
                         "PROGRAM 0: startGameMenu".to_string(),
                     ));
                 ProgramOutcome::Continue
+            }
+            // ★ Roll-credits slice 9d: **you have won** (`ovr003.cs:1951-1973`).
+            // `end_game_text()` is a whole screen sequence, so — exactly as
+            // the `var_1 == 0` arm does with `startGameMenu` — the handler
+            // raises it and the shell parks on it at the next tick boundary.
+            // Everything the arm does AFTER `end_game_text` returns (the win
+            // latch, the training mask, healing the survivors, the start menu,
+            // the save prompt, `print_and_exit`) belongs to the end of that
+            // sequence and is performed there, in the original's own order.
+            //
+            // `Exit` rather than `Continue` because the original never comes
+            // back: the arm's tail is `print_and_exit()`. The shipped script
+            // agrees — `ECL6#67 @0x93EA` is a bare `EXIT`.
+            8 => {
+                self.state.pending_ending = true;
+                self.vm
+                    .transcript
+                    .push(crate::vmhost::TranscriptEntry::Request(
+                        "PROGRAM 8: you have won — end_game_text".to_string(),
+                    ));
+                ProgramOutcome::Exit
             }
             _ => {
                 self.vm

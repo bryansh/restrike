@@ -45,6 +45,10 @@ pub mod debug_log;
 /// field order is append-only forever.
 pub mod digest;
 pub mod draw;
+/// ★ Roll-credits slice 9d: the ending — `ovr019.end_game_text` and the
+/// firework display it finishes on, everything `PROGRAM 8` shows before the
+/// start menu opens for the last time.
+pub mod ending;
 pub mod engine;
 pub mod framebuffer;
 pub mod frames;
@@ -108,6 +112,10 @@ mod combat_wiring;
 mod creation_tests;
 #[cfg(test)]
 mod demo;
+/// Roll-credits slice 9d's acceptance suite (`roll-credits.md` §16): the
+/// finale driven end to end against real CotAB data.
+#[cfg(test)]
+mod ending_tests;
 /// Roll-credits slice 9b's acceptance suite (`roll-credits.md` §13): the front
 /// door driven end to end against real CotAB data.
 #[cfg(test)]

@@ -534,7 +534,29 @@ pub enum FrontDoor {
     Protection(Box<CopyProtection>),
     /// `ovr018.startGameMenu()` (`seg001.cs:147`).
     StartMenu(Box<StartMenu>),
+    /// ★ **The post-victory prompt** (roll-credits slice 9d, closing §14.8's
+    /// last residual): `yes_no(defaultMenuColors, "You've won. Save before
+    /// quitting? ")` (`ovr003.cs:1965`).
+    ///
+    /// It is reached the way the original reaches it — by *leaving* the start
+    /// menu after `PROGRAM 8`. `startGameMenu()` is called first and runs its
+    /// whole loop; the question is what happens when it returns, and the only
+    /// thing after it is `print_and_exit()`.
+    ///
+    /// Appended last, so no committed `.rsav` moves.
+    PostVictory { menu: Box<Widget> },
 }
+
+/// `yes_no`'s two words (`ovr027.cs:684`) and the sentence in front of them
+/// (`ovr003.cs:1965`) — the trailing space is the original's own, and it is
+/// what separates the sentence from the first menu word at
+/// `displayInputXOffset = displayExtraString.Length`.
+const POST_VICTORY_PROMPT: &str = "You've won. Save before quitting? ";
+const YES_NO: &str = "Yes No";
+/// `gbl.menuSelectedWord = 2` (`ovr027.cs:680`) — out of range for a two-word
+/// menu, so `displayInput`'s open-time clamp lands it on word 0: **Yes** is
+/// what `<Enter>` picks at every `yes_no` in the game.
+const YES_NO_SELECTED_WORD: usize = 2;
 
 /// What the front door wants the shell to do next.
 pub enum FrontDoorTick {
@@ -562,6 +584,10 @@ pub enum FrontDoorTick {
     /// ★ Slice 9c. `BEGIN` on a `PROGRAM 0` menu: `startGameMenu` returns
     /// into `sub_29758`'s own loop, so the walk loop resumes where it was.
     ResumeWorld,
+    /// ★ Slice 9d. Leaving the start menu with the game already won: the
+    /// original's `startGameMenu()` has returned and `CMD_Program`'s arm asks
+    /// its one remaining question (`ovr003.cs:1965`).
+    PostVictoryPrompt,
     /// `Exit to DOS` — the host is asked to quit (`print_and_exit`).
     Quit,
 }
@@ -579,6 +605,25 @@ impl FrontDoor {
         FrontDoor::StartMenu(Box::default())
     }
 
+    /// ★ `CMD_Program`'s `startGameMenu()` after the ending (`ovr003.cs:1964`,
+    /// roll-credits slice 9d) — the same menu, doing the same job. Nothing
+    /// about the *stage* differs: the win latch is what changes its behavior
+    /// (`BEGIN` refused, and leaving it asks the save question), and the latch
+    /// is a saved cell, so this is a name for the intent, not a second state.
+    pub fn post_victory_menu() -> Self {
+        FrontDoor::start_menu()
+    }
+
+    /// `yes_no(defaultMenuColors, "You've won. Save before quitting? ")`
+    /// (`ovr003.cs:1965`).
+    fn post_victory_prompt() -> Self {
+        let mut hotbar = Hotbar::new(YES_NO);
+        hotbar.seed_selected_word(YES_NO_SELECTED_WORD);
+        FrontDoor::PostVictory {
+            menu: Box::new(Widget::Hotbar(hotbar)),
+        }
+    }
+
     /// A one-word probe for `RESTRIKE_DEBUG_LOG`.
     pub fn probe(&self) -> &'static str {
         match self {
@@ -587,6 +632,7 @@ impl FrontDoor {
             FrontDoor::DemoStub { .. } => "front-door/demo-deferred",
             FrontDoor::Protection(_) => "front-door/copy-protection",
             FrontDoor::StartMenu(_) => "front-door/start-menu",
+            FrontDoor::PostVictory { .. } => "front-door/post-victory-save",
         }
     }
 
@@ -684,7 +730,47 @@ impl FrontDoor {
                     None => FrontDoorTick::Stay,
                 }
             }
-            FrontDoor::StartMenu(menu) => menu.tick(ctx),
+            FrontDoor::StartMenu(menu) => {
+                let outcome = menu.tick(ctx);
+                if matches!(outcome, FrontDoorTick::PostVictoryPrompt) {
+                    *self = FrontDoor::post_victory_prompt();
+                    return FrontDoorTick::Stay;
+                }
+                outcome
+            }
+            // ★ Slice 9d: the last question the game asks.
+            FrontDoor::PostVictory { menu } => {
+                // `displayInput`'s own prompt+menu row, repainted every tick so
+                // the highlight follows `','`/`'.'` — the same two-tone line
+                // the Play-Demo prompt draws.
+                if let Widget::Hotbar(h) = menu.as_ref() {
+                    crate::combat::scene::render::clear_prompt_line(ctx.fb);
+                    crate::text::draw_string(ctx.fb, ctx.font, POST_VICTORY_PROMPT, 0x18, 0, 0, 13);
+                    crate::combat::scene::render::draw_menu_line_at(
+                        ctx.fb,
+                        ctx.font,
+                        &h.text,
+                        h.selected_span(),
+                        POST_VICTORY_PROMPT.len(),
+                    );
+                }
+                match menu.tick(ctx.input, ctx.dt_ticks) {
+                    WidgetOutcome::Hotbar(key) => match key.to_ascii_uppercase() {
+                        // `if (saveYes == 'Y') SaveGame();` then
+                        // `print_and_exit()` (`:1967-1972`) — the exit is
+                        // unconditional, so the save screen's own outcome
+                        // (written, or escaped) does not change what follows.
+                        b'Y' => {
+                            ctx.state.quit_after_save = true;
+                            FrontDoorTick::OpenSave
+                        }
+                        b'N' => FrontDoorTick::Quit,
+                        // `yes_no` loops until Y or N (`ovr027.cs:682-686`).
+                        _ => FrontDoorTick::Stay,
+                    },
+                    _ => FrontDoorTick::Stay,
+                }
+            }
         }
     }
 
@@ -997,6 +1083,14 @@ impl StartMenu {
                 FrontDoorTick::OpenSave
             }
             b'B' if flags.allows(ALLOW_BEGIN) => self.begin(ctx),
+            // ★ Slice 9d: with the game won, `startGameMenu` returning is what
+            // hands control back to `CMD_Program`'s tail — and its tail is the
+            // save question, not a bare exit (`ovr003.cs:1964-1972`).
+            b'E' if flags.allows(ALLOW_EXIT)
+                && crate::vmhost::game_won_flag(ctx.vm_memory) != 0 =>
+            {
+                FrontDoorTick::PostVictoryPrompt
+            }
             b'E' if flags.allows(ALLOW_EXIT) => FrontDoorTick::Quit,
             // A disabled verb, or a key outside the table: the original's
             // `switch` simply falls through and re-prompts. Ours says so — a

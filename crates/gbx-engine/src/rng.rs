@@ -106,6 +106,29 @@ impl EngineRng {
         result
     }
 
+    /// ★ The binary's **float** `Random` (image `0xa570`) — `new_state / 2^32`
+    /// in `[0, 1)`, one draw, reported to the sink like any other.
+    ///
+    /// One caller in the shipped game: the ending's firework burst
+    /// (`crate::ending`, `ovr019.sub_520B8:117-118,130-131`). `n`/`result` are
+    /// `None` because the wrapper has neither — the `(before, after)` pair is
+    /// still the full equality core, which is exactly the state-only draw the
+    /// `RngDraw` format already permits.
+    pub fn random_real(&mut self) -> f64 {
+        let before = self.inner.state();
+        let result = self.inner.random_real();
+        if let Some(sink) = self.sink.as_mut() {
+            let after = self.inner.state();
+            sink.on_draw(RngDraw {
+                before,
+                after,
+                n: None,
+                result: None,
+            });
+        }
+        result
+    }
+
     /// Attaches a differential-trace observer (D-OR3). Replaces any existing
     /// sink and returns it. Attaching a sink changes only what is *observed*,
     /// never the draw stream: `random` produces the same values and advances

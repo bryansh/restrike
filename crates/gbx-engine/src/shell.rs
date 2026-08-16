@@ -1780,6 +1780,26 @@ pub struct EngineState {
     /// than one tick, and a save cannot be taken while it is set.
     #[serde(skip)]
     pub pending_start_menu: bool,
+    /// ★ **`PROGRAM 8` asked for the ending** (roll-credits slice 9d): the
+    /// opcode handler raises this and the shell enters
+    /// [`Shell::Ending`](crate::shell::Shell::Ending) at the next tick
+    /// boundary, exactly as `pending_start_menu` above does for `PROGRAM 0`.
+    ///
+    /// `#[serde(skip)]` for the same two reasons: it lives for less than one
+    /// tick, and no `SAVE_FORMAT_VERSION` moves.
+    #[serde(skip)]
+    pub pending_ending: bool,
+    /// ★ **The post-victory save is the last thing that happens** (roll-credits
+    /// slice 9d): `if (saveYes == 'Y') SaveGame(); print_and_exit();`
+    /// (`ovr003.cs:1967-1972`) — the exit is unconditional and immediate, so
+    /// the save screen this raises must hand straight back to the quit
+    /// request rather than to the menu.
+    ///
+    /// `#[serde(skip)]`: it lives for the handful of ticks between the prompt
+    /// and the slot picker's answer, and a save taken *in* that window would
+    /// be one the original cannot express (its process is already gone).
+    #[serde(skip)]
+    pub quit_after_save: bool,
 }
 
 /// `gbl.game_state`'s M2 slice (`Classes/Gbl.cs`'s `GameState` enum —
@@ -1840,6 +1860,8 @@ impl EngineState {
             copy_protection_faithful: false,
             rest_encounter: crate::rest::RestEncounterSchedule::default(),
             pending_start_menu: false,
+            pending_ending: false,
+            quit_after_save: false,
         }
     }
 
@@ -2618,6 +2640,16 @@ pub enum Shell {
     ///
     /// Appended last, for the same postcard reason every variant above it was.
     FrontDoor(Box<crate::front_door::FrontDoor>),
+    /// ★ **The ending** (roll-credits slice 9d): `PROGRAM 8`'s
+    /// `end_game_text()` (`ovr003.cs:1952`) — the prose, the three
+    /// `ShowAnimation`s, the Knights, Shadowdale and the fireworks
+    /// ([`crate::ending::Ending`]). When it finishes, the arm's own tail runs
+    /// (the win latch, the training mask, healing the survivors) and the shell
+    /// hands over to [`Shell::FrontDoor`]'s start menu, where `BEGIN` is now
+    /// refused and the "You've won. Save before quitting?" prompt waits.
+    ///
+    /// Appended last, so no committed `.rsav` moves.
+    Ending(Box<crate::ending::Ending>),
 }
 
 impl Shell {
@@ -2654,7 +2686,9 @@ impl Shell {
             // version banner + menu line, the copy-protection editor, the
             // start menu's "Choose a function") — see
             // [`crate::front_door::FrontDoor::tick`].
-            Shell::GameOver(_) | Shell::Screen(_) | Shell::FrontDoor(_) => None,
+            // The ending paints its own prompt row (`DisplayAndPause`'s line, and
+            // nothing at all while the fireworks own the screen).
+            Shell::GameOver(_) | Shell::Screen(_) | Shell::FrontDoor(_) | Shell::Ending(_) => None,
             Shell::CampInterrupt(f) => from_run(&f.run, &f.chain),
         }
     }
@@ -2681,7 +2715,8 @@ impl Shell {
             Shell::WorldMenu { .. }
             | Shell::GameOver(_)
             | Shell::Screen(_)
-            | Shell::FrontDoor(_) => None,
+            | Shell::FrontDoor(_)
+            | Shell::Ending(_) => None,
         }
     }
 
@@ -2774,6 +2809,7 @@ impl Shell {
             Shell::Screen(_) => "screen".to_string(),
             Shell::CampInterrupt(f) => format!("camp-interrupt/{}", run_probe(&f.run, &f.chain)),
             Shell::FrontDoor(f) => f.probe().to_string(),
+            Shell::Ending(f) => f.probe().to_string(),
         }
     }
 }
@@ -2926,6 +2962,10 @@ impl Shell {
             // The front door is the state BEFORE any vector exists — the VM
             // has not been entered at all until `BEGIN Adventuring`.
             Shell::FrontDoor(_) => true,
+            // The ending is the state AFTER the last one: `PROGRAM 8` returned
+            // `Exit`, so no activation survives it, and the sequence owns the
+            // screen until the start menu takes over.
+            Shell::Ending(_) => true,
         }
     }
 
@@ -2937,6 +2977,17 @@ impl Shell {
             // broke has exited — the death *screen* is a separate state, not
             // the flag's continued life.
             ctx.state.party_killed = false;
+            return;
+        }
+
+        // ★ `PROGRAM 8` asked for the ending (roll-credits slice 9d,
+        // `ovr003.cs:1951-1952`). Taken unconditionally, exactly like the
+        // wipe above and for the same reason: the opcode returned `Exit`, so
+        // there is no activation left to protect, and nothing that could
+        // follow matters — the win is terminal.
+        if ctx.state.pending_ending {
+            ctx.state.pending_ending = false;
+            *self = Shell::Ending(Box::default());
             return;
         }
 
@@ -3025,6 +3076,15 @@ impl Shell {
                     // `loadGameMenu`/`SaveGame`/`viewPlayer`/`train_player` all
                     // simply `return` into `startGameMenu`'s own loop.
                     ScreenTransition::ToStartMenu => {
+                        // ★ Slice 9d: `if (saveYes == 'Y') SaveGame();
+                        // print_and_exit();` (`ovr003.cs:1967-1972`) — the save
+                        // the post-victory prompt asked for has been made (or
+                        // escaped), and the very next statement ends the
+                        // process. The host fulfils the deposited write before
+                        // it reads the quit request, so the file lands first.
+                        if std::mem::take(&mut ctx.state.quit_after_save) {
+                            *ctx.quit_requested = true;
+                        }
                         *self =
                             Shell::FrontDoor(Box::new(crate::front_door::FrontDoor::start_menu()))
                     }
@@ -3130,9 +3190,41 @@ impl Shell {
                         crate::corridor::redraw_view(ctx);
                         *self = Self::enter_world_menu(ctx);
                     }
+                    // ★ Slice 9d: handled entirely inside `FrontDoor::tick`,
+                    // which swaps the stage for the prompt and reports `Stay`
+                    // — the shell never sees it. The arm exists because the
+                    // match is total.
+                    FrontDoorTick::PostVictoryPrompt => {}
                     // `print_and_exit()` (`ovr018.cs:296`) — the core cannot
                     // exit a process (D8), so it asks the host to.
                     FrontDoorTick::Quit => *ctx.quit_requested = true,
+                }
+            }
+            // ★ Roll-credits slice 9d. `end_game_text()` has finished, so the
+            // rest of `CMD_Program`'s `var_1 == 8` arm runs — in its order
+            // (`ovr003.cs:1953-1965`).
+            Shell::Ending(ending) => {
+                if ending.tick(ctx).is_some() {
+                    // `field_3FA = 0xFF` + `training_class_mask = 0xFF`
+                    // (`:1953-1954`). Both are raw window cells, so both ride
+                    // `.rsav` — which is what makes "win, save, load, BEGIN is
+                    // still refused" true without a second mechanism.
+                    crate::vmhost::latch_game_won(ctx.vm_memory);
+                    // `:1956-1962` — the survivors are made whole. The dead
+                    // are not raised: the loop only writes `hit_point_current`,
+                    // `health_status` and `in_combat`, and every member of a
+                    // party that just won is in `TeamList` either way.
+                    for ch in ctx.roster.members.iter_mut() {
+                        ch.hit_point_current = ch.hit_point_max;
+                        ch.status.health_status = crate::rest::status::OKEY;
+                        ch.status.in_combat = true;
+                    }
+                    // `startGameMenu()` (`:1964`). `BEGIN` is refused from here
+                    // on, and the post-victory save prompt is what leaving the
+                    // menu now runs into.
+                    *self = Shell::FrontDoor(Box::new(
+                        crate::front_door::FrontDoor::post_victory_menu(),
+                    ));
                 }
             }
         }
@@ -3236,7 +3328,8 @@ impl Shell {
             Shell::WorldMenu { .. }
             | Shell::GameOver(_)
             | Shell::Screen(_)
-            | Shell::FrontDoor(_) => None,
+            | Shell::FrontDoor(_)
+            | Shell::Ending(_) => None,
         }
     }
 
@@ -3263,7 +3356,8 @@ impl Shell {
             Shell::WorldMenu { .. }
             | Shell::GameOver(_)
             | Shell::Screen(_)
-            | Shell::FrontDoor(_) => None,
+            | Shell::FrontDoor(_)
+            | Shell::Ending(_) => None,
         }
     }
 
@@ -3290,7 +3384,8 @@ impl Shell {
             Shell::WorldMenu { .. }
             | Shell::GameOver(_)
             | Shell::Screen(_)
-            | Shell::FrontDoor(_) => None,
+            | Shell::FrontDoor(_)
+            | Shell::Ending(_) => None,
         }
     }
 
@@ -3330,12 +3425,23 @@ impl Shell {
     /// The front door is excluded for the same reason: the title screens, the
     /// copy-protection prompt and `startGameMenu` each own the whole display,
     /// and there is no map position to report before `BEGIN Adventuring`.
+    ///
+    /// ★ **And the ending** (roll-credits slice 9d): `end_game_text` sets
+    /// `gbl.game_state = GameState.EndGame` for its whole duration
+    /// (`ovr019.cs:476-477`, restored at `:536`), and no `LoadPic` arm, walk
+    /// loop or menu recompose runs under it — so neither the roster panel nor
+    /// the position line is repainted while the finale is on screen. That is
+    /// not cosmetic: the firework display draws single pixels into rows 9..0x40
+    /// across the whole width (`ovr019.cs:205-242`), and an unconditional
+    /// per-tick roster repaint erases every one of them in the right-hand
+    /// panel before it can be seen. Whatever the walk loop last painted stays
+    /// on the glass, which is exactly what a retained framebuffer does.
     pub fn draws_engine_status_line(&self) -> bool {
         self.combat_host().is_none()
             && self.temple_host().is_none()
             && !matches!(
                 self,
-                Shell::Screen(_) | Shell::GameOver(_) | Shell::FrontDoor(_)
+                Shell::Screen(_) | Shell::GameOver(_) | Shell::FrontDoor(_) | Shell::Ending(_)
             )
     }
 }

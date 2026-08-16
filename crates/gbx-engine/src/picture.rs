@@ -128,7 +128,7 @@ const BIGPIC_COL: usize = 1;
 ///
 /// (FD-31 resolved: `crate::corridor`'s sky cells and `vmhost.rs`'s clock
 /// cluster now use this same halved mapping.)
-const PICTURE_FADE_ADDR: u16 = 0x4B00 + 0x1FF;
+pub(crate) const PICTURE_FADE_ADDR: u16 = 0x4B00 + 0x1FF;
 
 /// What the viewport's picture layer currently shows — one of `CMD_Picture`'s
 /// three draw arms, or nothing.
@@ -860,6 +860,73 @@ pub fn menu_wait_animation(ctx: &mut FlowCtx, waited: &mut u32) {
         ctx.state.picture.next_frame(count);
         *waited = 0;
     }
+}
+
+/// ★ `ShowAnimation`'s opening (`ovr019.cs:413-420`):
+/// `load_pic_final(ref animation, 2, block_id, "PIC")`, then
+/// `OverlayBounded(frames[0], …)` + `DrawOverlay()` — i.e. the block becomes
+/// the running animation object at frame 1 and its first frame goes straight
+/// on the glass. `crate::ending` is the only caller in the shipped game.
+pub fn show_animation_begin(ctx: &mut FlowCtx, block: u8) {
+    let was = ctx.state.picture.anim_block;
+    ctx.state.picture.anim_block = Some(block);
+    ctx.state.picture.anim_frame = 1; // `load_pic_final`, `ovr030.cs:66`
+    ctx.state.picture.last_dax_block = block; // `ovr030.cs:51`
+    ctx.state.picture.shown = Shown::Pic;
+    ctx.state
+        .picture
+        .reset_fade_if_block_changed(was, Some(block));
+    compose(ctx);
+}
+
+/// ★ One iteration of `ShowAnimation`'s `do … while (loop_count != num_loops)`
+/// (`ovr019.cs:422-441`), tick-paced.
+///
+/// The original re-blits `CurrentPicture()` **every** iteration and advances
+/// the frame cursor only once `CurrentDelay() * (game_speed_var + 3)` have
+/// elapsed on `time01()`'s centisecond clock (`seg041.cs:309-314`) — so a
+/// one-frame block (like the ending's dissolve, `PIC6` block `0x4D`) simply
+/// redraws itself, which is exactly what makes a fade-armed loop progress.
+/// `num_loops` counts wraps of the cursor.
+///
+/// Returns `true` when the loop has run out of wraps.
+pub fn show_animation_tick(ctx: &mut FlowCtx, waited: &mut u32, loops_left: &mut u16) -> bool {
+    // `DrawMaybeOverlayed(animation.CurrentPicture(), true, row_y, col_x)`.
+    ctx.state.picture.shown = Shown::Pic;
+    compose(ctx);
+    // ★ FD-32: the original's redraw recolored the cache; ours steps the
+    // counter that stands in for it.
+    if picture_fade(ctx) > 0 {
+        ctx.state.picture.advance_fade();
+    }
+    if *loops_left == 0 {
+        return true;
+    }
+    let Some(delay) = ctx.pictures.pic_frame_delay(ctx.state.picture.anim_frame) else {
+        return true; // nothing loaded — do not spin forever
+    };
+    *waited = waited.saturating_add(ctx.dt_ticks);
+    if *waited < frame_ticks(delay, crate::vmhost::game_speed(ctx.vm_memory)) {
+        return false;
+    }
+    *waited = 0;
+    let before = ctx.state.picture.anim_frame;
+    let count = ctx.pictures.pic_frame_count();
+    ctx.state.picture.next_frame(count);
+    if ctx.state.picture.anim_frame <= before {
+        // `curFrame > numFrames` → back to 1, `loop_count++` (`:433-437`).
+        *loops_left -= 1;
+    }
+    *loops_left == 0
+}
+
+/// `ShowAnimation`'s frame period in engine ticks: `CurrentDelay() *
+/// (game_speed_var + 3)` **centiseconds** (`ovr019.cs:427` against
+/// `time01()`'s 1/100 s clock), converted at [`crate::input::TICK_HZ`] = 60 —
+/// 1 cs = 0.6 ticks. Never zero, or the loop would spin.
+fn frame_ticks(delay_units: u32, game_speed: u8) -> u32 {
+    let centiseconds = delay_units.saturating_mul(u32::from(game_speed) + 3);
+    (centiseconds * 6 / 10).max(1)
 }
 
 /// One decoded picture ready to blit: pixels + geometry, lifted out of the

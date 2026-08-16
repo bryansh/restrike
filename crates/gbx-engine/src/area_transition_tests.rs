@@ -344,11 +344,15 @@ fn a_resolvable_cross_file_newecl_records_no_halt() {
 /// on ECL block `ecl_block` with GEO block `geo_block`, one party member. The
 /// bytes are all self-authored (D10) — only the *game data* it is imported
 /// against is real.
-pub(crate) fn master_bytes(
+/// The party's `(mapPosX, mapPosY, mapDirection)` is a parameter because
+/// roll-credits slice 9d needs to stand it on one specific square; `(7, 7, 0)`
+/// is what every earlier caller used.
+pub(crate) fn master_bytes_at(
     game_area: u8,
     ecl_block: u8,
     geo_block: u8,
     in_dungeon: bool,
+    (pos_x, pos_y, dir): (u8, u8, u8),
 ) -> Vec<u8> {
     use gbx_formats::save_orig::SAVGAM_SIZE;
     let mut buf = vec![0u8; SAVGAM_SIZE];
@@ -365,9 +369,9 @@ pub(crate) fn master_bytes(
     off += 0x400; // stru_1b2ca
     off += 0x1E00; // ecl_ptr (discarded on import)
 
-    buf[off] = 7; // mapPosX
-    buf[off + 1] = 7; // mapPosY
-    buf[off + 2] = 0; // mapDirection
+    buf[off] = pos_x; // mapPosX
+    buf[off + 1] = pos_y; // mapPosY
+    buf[off + 2] = dir; // mapDirection
     off += 5;
     off += 1; // last_game_state
     off += 1; // game_state
@@ -400,10 +404,21 @@ pub(crate) fn real_data_engine(
     geo_block: u8,
     in_dungeon: bool,
 ) -> Option<Engine> {
+    real_data_engine_at(game_area, ecl_block, geo_block, in_dungeon, (7, 7, 0))
+}
+
+/// [`real_data_engine`] with the party standing somewhere specific.
+pub(crate) fn real_data_engine_at(
+    game_area: u8,
+    ecl_block: u8,
+    geo_block: u8,
+    in_dungeon: bool,
+    pos: (u8, u8, u8),
+) -> Option<Engine> {
     let dir = std::env::var_os("GBX_DATA_DIR")?;
     let data = gbx_formats::game_data::load_dir(std::path::Path::new(&dir))
         .expect("GBX_DATA_DIR must be readable");
-    let master = master_bytes(game_area, ecl_block, geo_block, in_dungeon);
+    let master = master_bytes_at(game_area, ecl_block, geo_block, in_dungeon, pos);
     let chars = char_bytes();
     let set = gbx_formats::save_orig::load_from_lookup(&master, 'A', |name| {
         if name == "CHRDATA1.SAV" {

@@ -98,12 +98,23 @@ impl Prng {
         self.state = state;
     }
 
-    // The float `Random` path (image `0xa570`: `new_state / 2^32` as a Turbo
-    // Pascal 6-byte real) is intentionally **not implemented**. It lands in M5,
-    // when `ovr019`'s four `Random__Real` call sites are reached (oracle-rig §1,
-    // caller census). Do not add it before then.
-    //
-    // pub fn random_real(&mut self) -> ... {}
+    /// ★ The float `Random` (image `0xa570`): **`new_state / 2^32`**, i.e. one
+    /// `RandNext` step reinterpreted as a fraction in `[0, 1)`.
+    ///
+    /// Reserved since M4 for "when `ovr019`'s four `Random__Real` call sites
+    /// are reached" (oracle-rig §1's caller census). Roll-credits slice 9d
+    /// reaches them: all four are the ending's firework burst
+    /// (`ovr019.sub_520B8`, `:117-118` and `:130-131`), which picks each
+    /// particle's direction with `Random__Real() * 2π`.
+    ///
+    /// **The one documented approximation:** the original returns a Turbo
+    /// Pascal 6-byte real (a 40-bit mantissa); this returns an `f64` (53-bit).
+    /// Every bit of the 32-bit state is representable in both, so the *value*
+    /// is identical — only the type's headroom differs. The draw itself is
+    /// exact: one `next()`, always, exactly like the integer wrapper.
+    pub fn random_real(&mut self) -> f64 {
+        f64::from(self.next()) / 4_294_967_296.0
+    }
 }
 
 #[cfg(test)]
@@ -179,6 +190,25 @@ mod tests {
         for (i, want) in want_mod100.iter().enumerate() {
             assert_eq!(q.random(100), *want, "random(100) draw {i}");
         }
+    }
+
+    /// ★ Float `Random` (image `0xa570`): `new_state / 2^32`, in `[0, 1)`,
+    /// consuming exactly one draw — the same draw the integer wrapper would
+    /// have consumed, so the two are interchangeable in the stream.
+    #[test]
+    fn random_real_is_the_new_state_over_two_to_the_32_and_draws_once() {
+        let mut a = Prng::new(0);
+        let mut b = Prng::new(0);
+        for i in 0..64 {
+            let want = f64::from(b.next()) / 4_294_967_296.0;
+            let got = a.random_real();
+            assert_eq!(got, want, "draw {i}");
+            assert_eq!(a.state(), b.state(), "draw {i} advanced identically");
+            assert!((0.0..1.0).contains(&got), "draw {i} out of [0, 1): {got}");
+        }
+        // Seed 0's first state is 1, so the first fraction is 2^-32 exactly.
+        let mut p = Prng::new(0);
+        assert_eq!(p.random_real(), 1.0 / 4_294_967_296.0);
     }
 
     /// `random(1)` is always 0 — but it still consumes a draw every call.
