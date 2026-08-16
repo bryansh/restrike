@@ -202,6 +202,41 @@ pub struct PictureLayer {
     /// [`anim_block`]: PictureLayer::anim_block
     /// [`sprite_block`]: PictureLayer::sprite_block
     pub last_dax_block: u8,
+    /// ★ **FD-32's mechanism.** How many `DaxBlock.Recolor` fade passes the
+    /// currently-shown block has taken.
+    ///
+    /// The original has no such counter: `DrawMaybeOverlayed` recolors the
+    /// **cached** block in place whenever `picture_fade > 0` (`ovr030.cs:19-22`),
+    /// so the progress *is* the cache's own pixels and every redraw of the
+    /// same block fades it further. Ours keeps the decoded asset pristine
+    /// (D-UI4: composition is idempotent, and a save must never carry
+    /// half-faded art), so the progress lives here instead and
+    /// [`crate::draw::apply_recolor_dithered`] applies `step` passes in one
+    /// go. `0` and `1` both mean "one pass" — the original always recolors at
+    /// least once before a fade-armed blit.
+    ///
+    /// **Advanced by the ANIMATION cadence** — [`animation_frame`] (the
+    /// `0xE804` opcode), [`menu_wait_animation`] (`displayInput`'s wait loop,
+    /// whose fade arm advances every iteration, `ovr027.cs:185-198`), and the
+    /// ending's own `ShowAnimation` loop (`crate::ending`) — which is exactly
+    /// FD-33's precedent, one redraw per tick.
+    ///
+    /// **Reset when the decoded asset changes**, mirroring `load_pic_final`'s
+    /// own cache guard (`ovr030.cs:37-38`): loading a *different* block
+    /// re-decodes and the fresh pixels are unfaded; re-showing the *same*
+    /// block keeps fading it, exactly as the original's retained `DaxArray`
+    /// does.
+    ///
+    /// ★ **`#[serde(skip)]` — it resets on load, and that is the faithful
+    /// answer, not a shortcut.** The original's fade progress lives in the
+    /// decoded `DaxBlock`, and `SaveGame` writes none of it: a restored
+    /// session re-decodes every picture from the DAX files, pristine, while
+    /// `picture_fade` itself (an `Area1` cell) *is* saved. So the original
+    /// restoring mid-dissolve resumes with an unfaded picture and a still-armed
+    /// fade — which is precisely `fade_step == 0` with `picture_fade > 0`.
+    /// Skipping it also keeps `SAVE_FORMAT_VERSION` where it is.
+    #[serde(skip)]
+    pub fade_step: u16,
 }
 
 impl Default for PictureLayer {
@@ -216,6 +251,7 @@ impl Default for PictureLayer {
             sprite_frame: 0,
             shown: Shown::Nothing,
             last_dax_block: NO_DAX_BLOCK,
+            fade_step: 0,
         }
     }
 }
@@ -237,6 +273,31 @@ impl PictureLayer {
         self.anim_frame += 1;
         if self.anim_frame > num_frames {
             self.anim_frame = 1;
+        }
+    }
+
+    /// ★ FD-32: one more `DaxBlock.Recolor` pass on the shown block — what the
+    /// original gets for free by recoloring its cache in place. Clamped at
+    /// [`crate::draw::FADE_STEP_MAX`], past which nothing eligible is left.
+    pub fn advance_fade(&mut self) {
+        self.fade_step = self
+            .fade_step
+            .saturating_add(1)
+            .min(crate::draw::FADE_STEP_MAX);
+    }
+
+    /// The step [`compose_into`] should apply: `0` still means one pass,
+    /// because `DrawMaybeOverlayed` recolors before *every* fade-armed blit.
+    fn effective_fade_step(&self) -> u16 {
+        self.fade_step.max(1)
+    }
+
+    /// `load_pic_final`'s cache guard (`ovr030.cs:37-38`): a *different* block
+    /// id re-decodes, and fresh pixels are unfaded. Same id, same (possibly
+    /// already-faded) cache.
+    fn reset_fade_if_block_changed(&mut self, was: Option<u8>, now: Option<u8>) {
+        if was != now {
+            self.fade_step = 0;
         }
     }
 }
@@ -437,15 +498,17 @@ fn load_image(data: &GameData, file: &str, block: u8) -> Result<ImageBlock, Pict
 /// recolor.
 ///
 /// - `picture_fade > 0` → the block is recolored toward palette 12 through
-///   `FADE_RECOLOR` with `DaxBlock.Recolor`'s 1-in-4 dither.
-///   **Divergence, deliberate:** the original recolors the *cached* block in
-///   place, so repeated draws fade it progressively; this applies the pass to
-///   a scratch copy so [`compose`] stays idempotent (D-UI4) and a save/restore
-///   cannot land mid-fade. `apply_recolor_dithered`'s dither is a position
-///   hash, not a PRNG draw (FD-28) — so it is also draw-neutral, which the
-///   in-place version could not be. The only exerciser in the shipped game is
-///   the ending sequence (`ovr019.cs:510-514`) plus `ECL3` block 18's own
-///   `SAVE 0xFF, 0x4CFF`; docketed.
+///   `FADE_RECOLOR` with `DaxBlock.Recolor`'s 1-in-4 dither, `fade_step` times
+///   (★ FD-32, resolved). The original recolors the *cached* block in place so
+///   repeated draws fade it progressively; ours applies the accumulated pass
+///   count to a scratch copy, which keeps [`compose`] idempotent (D-UI4) and
+///   the decoded asset pristine, while still *progressing* —
+///   [`PictureLayer::fade_step`] is what moves, driven by the ANIMATION
+///   cadence. `apply_recolor_dithered`'s dither is a position hash, not a PRNG
+///   draw (FD-28), so the whole model is draw-neutral, which the in-place
+///   version could not be. The exercisers in the shipped game are the ending
+///   sequence (`ovr019.cs:510-514`) and `ECL3` block 18's own
+///   `SAVE 0xFF, 0x4CFF`.
 /// - `useOverlay` → `OverlayBounded` + `DrawOverlay`, whose net effect is
 ///   `draw_combat_picture`'s tighter clip ([`Clip::OVERLAY`],
 ///   `seg040.cs:29-31,115-118`); otherwise `draw_picture`'s full-canvas clip
@@ -458,6 +521,7 @@ fn draw_maybe_overlayed(
     (row, col): (usize, usize),
     use_overlay: bool,
     picture_fade: u16,
+    fade_step: u16,
 ) {
     let (pixels, width, height) = (&img.0, img.1, img.2);
     let clip = if picture_fade > 0 || use_overlay {
@@ -467,7 +531,7 @@ fn draw_maybe_overlayed(
     };
     if picture_fade > 0 {
         let mut faded = pixels.clone();
-        apply_recolor_dithered(&mut faded, &FADE_RECOLOR);
+        apply_recolor_dithered(&mut faded, &FADE_RECOLOR, fade_step);
         blit_image(fb, &faded, width, height, row, col, clip, None, None);
     } else {
         blit_image(fb, pixels, width, height, row, col, clip, None, None);
@@ -522,15 +586,26 @@ pub fn cmd_picture(ctx: &mut FlowCtx, block_id: u8, head_block_id: u8) {
         // `ECL1#80`'s `@0x86C7 PICTURE 0x79` re-arms the overland's cursor
         // after a city menu closes.
         ctx.state.picture.last_dax_block = NO_DAX_BLOCK;
+        let was = ctx.state.picture.bigpic_block;
         ctx.state.picture.bigpic_block = Some(block_id);
         ctx.state.picture.shown = Shown::BigPic;
+        // ★ FD-32: a re-decode is a pristine block (`ovr030.cs:233`).
+        ctx.state
+            .picture
+            .reset_fade_if_block_changed(was, Some(block_id));
         ctx.vm_memory.can_draw_bigpic = false; // `:332`
     } else {
         // `:335-337`
+        let was = ctx.state.picture.anim_block;
         ctx.state.picture.anim_block = Some(block_id);
         ctx.state.picture.anim_frame = 1; // `load_pic_final`, `ovr030.cs:66`
         ctx.state.picture.last_dax_block = block_id; // `ovr030.cs:51`
         ctx.state.picture.shown = Shown::Pic;
+        // ★ FD-32: `load_pic_final` re-decodes only when the block id moved
+        // (`ovr030.cs:37-38`) — so only then is the fade progress discarded.
+        ctx.state
+            .picture
+            .reset_fade_if_block_changed(was, Some(block_id));
     }
     compose(ctx);
 }
@@ -538,9 +613,15 @@ pub fn cmd_picture(ctx: &mut FlowCtx, block_id: u8, head_block_id: u8) {
 /// `set_and_draw_head_body` (`ovr008.cs:208-217`).
 fn set_and_draw_head_body(ctx: &mut FlowCtx, body_id: u8, head_id: u8) {
     ctx.vm_memory.byte_1ee8d = false; // `:210`
+    let was = (ctx.state.picture.head_block, ctx.state.picture.body_block);
     ctx.state.picture.head_block = head_id; // `:212`
     ctx.state.picture.body_block = body_id; // `:213`
     ctx.state.picture.shown = Shown::HeadBody;
+    // ★ FD-32: `head_body` re-loads each half only when its id changed
+    // (`ovr030.cs:169,181`).
+    if was != (head_id, body_id) {
+        ctx.state.picture.fade_step = 0;
+    }
     compose(ctx);
 }
 
@@ -723,6 +804,11 @@ pub fn animation_frame(ctx: &mut FlowCtx) {
     // original draws straight from `byte_1D556`.
     ctx.state.picture.shown = Shown::Pic;
     compose(ctx);
+    // ★ FD-32: `DrawMaybeOverlayed` recolored the cache on the way past, so
+    // the NEXT draw of this block is one pass further along.
+    if picture_fade(ctx) > 0 {
+        ctx.state.picture.advance_fade();
+    }
     let count = ctx.pictures.pic_frame_count();
     ctx.state.picture.next_frame(count);
 }
@@ -740,17 +826,31 @@ pub fn animation_frame(ctx: &mut FlowCtx) {
 /// transient `timeStart`, owned by the parked gate and never serialized
 /// (the original's is a stack local).
 ///
-/// The `picture_fade != 0` arm of the same loop (fade dissolves advance
-/// every iteration regardless of delay) stays with FD-32.
+/// ★ **FD-32's other half, now closed too.** The loop's gate is
+/// `(picture_fade != 0 || useOverlay) && curFrame > 0` (`ovr027.cs:185-186`),
+/// and its advance condition is `elapsed >= delay || picture_fade != 0`
+/// (`:192-193`) — so while a fade is armed the wait loop steps the animation
+/// **every iteration, ignoring the frame delay**, which is what dissolves a
+/// picture behind a menu. Ours advances the fade step and the frame cursor
+/// once per tick on that arm.
 pub fn menu_wait_animation(ctx: &mut FlowCtx, waited: &mut u32) {
     let use_overlay = ctx.vm_memory.sprite_changed && ctx.vm_memory.byte_1ee8d;
-    if !use_overlay || ctx.state.picture.anim_frame == 0 {
+    let fade = picture_fade(ctx);
+    if (fade == 0 && !use_overlay) || ctx.state.picture.anim_frame == 0 {
         return;
     }
     // `DrawMaybeOverlayed(byte_1D556.CurrentPicture(), useOverlay, 3, 3)` —
     // straight from the animation object, the PIC arm's geometry.
     ctx.state.picture.shown = Shown::Pic;
     compose(ctx);
+    if fade != 0 {
+        // `:192-193` — no delay test at all on this arm.
+        ctx.state.picture.advance_fade();
+        let count = ctx.pictures.pic_frame_count();
+        ctx.state.picture.next_frame(count);
+        *waited = 0;
+        return;
+    }
     let Some(delay) = ctx.pictures.pic_frame_delay(ctx.state.picture.anim_frame) else {
         return;
     };
@@ -790,7 +890,9 @@ pub fn compose(ctx: &mut FlowCtx) {
 /// way, before any tick has run.
 ///
 /// Idempotent and free of PRNG draws: the frontier guard and the reel smoke
-/// are the standing referees for the second half of that.
+/// are the standing referees for the second half of that. Idempotency survives
+/// FD-32's fade because the *step* is an input here
+/// ([`PictureLayer::fade_step`]), never something this function advances.
 #[allow(clippy::too_many_arguments)]
 pub fn compose_into(
     fb: &mut Framebuffer,
@@ -801,6 +903,7 @@ pub fn compose_into(
     cache: &mut PictureCache,
     fade: u16,
 ) -> Result<(), (&'static str, PictureLoadError)> {
+    let step = layer.effective_fade_step();
     match layer.shown {
         Shown::Nothing => {}
         Shown::Pic => {
@@ -815,7 +918,7 @@ pub fn compose_into(
             // changed underneath it; clamp rather than panic.
             let f = anim.frames.get(index).unwrap_or(&anim.frames[0]);
             let img = (f.pixels.clone(), f.width_px(), f.height as usize);
-            draw_maybe_overlayed(fb, &img, (PIC_ROW, PIC_COL), true, fade);
+            draw_maybe_overlayed(fb, &img, (PIC_ROW, PIC_COL), true, fade, step);
         }
         Shown::BigPic => {
             let Some(block) = layer.bigpic_block else {
@@ -831,7 +934,7 @@ pub fn compose_into(
             // clip. A missing symbol set is not a reason to skip the picture:
             // the frame is decoration, the picture is content.
             let _ = crate::frames::draw_frame_wilderness_map(fb, symbols);
-            draw_maybe_overlayed(fb, &img, (BIGPIC_ROW, BIGPIC_COL), false, 0);
+            draw_maybe_overlayed(fb, &img, (BIGPIC_ROW, BIGPIC_COL), false, 0, 0);
         }
         Shown::Sprite => {
             // ★ `Show3DSprite(byte_1D556, sprite_index)` (`ovr030.cs:215-226`).
@@ -889,14 +992,14 @@ pub fn compose_into(
                     .head(data, game_area, layer.head_block)
                     .map(first_item)
                     .map_err(|e| ("HEAD", e))?;
-                draw_maybe_overlayed(fb, &img, (PIC_ROW, PIC_COL), false, fade);
+                draw_maybe_overlayed(fb, &img, (PIC_ROW, PIC_COL), false, fade, step);
             }
             if layer.body_block != 0xFF {
                 let img = cache
                     .body(data, game_area, layer.body_block)
                     .map(first_item)
                     .map_err(|e| ("BODY", e))?;
-                draw_maybe_overlayed(fb, &img, (BODY_ROW, PIC_COL), false, fade);
+                draw_maybe_overlayed(fb, &img, (BODY_ROW, PIC_COL), false, fade, step);
             }
         }
     }
@@ -935,6 +1038,69 @@ mod tests {
         let mut layer = PictureLayer::default();
         layer.next_frame(4);
         assert_eq!(layer.anim_frame, 0);
+    }
+
+    /// ★ FD-32: the counter climbs one pass per redraw, clamps, and a step of
+    /// 0 still composes ONE pass (the original recolors before every
+    /// fade-armed blit).
+    #[test]
+    fn the_fade_counter_advances_clamps_and_never_composes_zero_passes() {
+        let mut layer = PictureLayer::default();
+        assert_eq!(layer.fade_step, 0);
+        assert_eq!(layer.effective_fade_step(), 1, "0 still means one pass");
+        for expect in 1..=5u16 {
+            layer.advance_fade();
+            assert_eq!(layer.fade_step, expect);
+            assert_eq!(layer.effective_fade_step(), expect);
+        }
+        for _ in 0..500 {
+            layer.advance_fade();
+        }
+        assert_eq!(layer.fade_step, crate::draw::FADE_STEP_MAX, "clamped");
+    }
+
+    /// ★ FD-32: the fade resets exactly when the original re-decodes — a
+    /// different block id — and survives a redraw of the same one.
+    #[test]
+    fn the_fade_resets_only_when_the_decoded_block_changes() {
+        let mut layer = PictureLayer {
+            anim_block: Some(0x4D),
+            fade_step: 9,
+            ..PictureLayer::default()
+        };
+        layer.reset_fade_if_block_changed(Some(0x4D), Some(0x4D));
+        assert_eq!(layer.fade_step, 9, "same block: the cache is still faded");
+        layer.reset_fade_if_block_changed(Some(0x4D), Some(0x4A));
+        assert_eq!(layer.fade_step, 0, "a re-decode is pristine");
+    }
+
+    /// ★ FD-32's serde decision, pinned: the counter is presentation state and
+    /// **resets on load**. The original's fade progress lives in the decoded
+    /// `DaxBlock`, which `SaveGame` never writes; a restored session
+    /// re-decodes pristine art with `picture_fade` still armed. Being
+    /// `#[serde(skip)]` is also what keeps `SAVE_FORMAT_VERSION` at 9.
+    #[test]
+    fn the_fade_step_is_presentation_state_and_does_not_survive_a_save() {
+        let layer = PictureLayer {
+            anim_block: Some(0x4D),
+            anim_frame: 1,
+            shown: Shown::Pic,
+            fade_step: 17,
+            ..PictureLayer::default()
+        };
+        let bytes = postcard::to_allocvec(&layer).expect("serialize");
+        let back: PictureLayer = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(back.fade_step, 0, "a restore starts the dissolve over");
+        assert_eq!(back.anim_block, Some(0x4D), "everything else round-trips");
+        assert_eq!(back.anim_frame, 1);
+        assert_eq!(back.shown, Shown::Pic);
+        // And the encoding carries no bytes for it: a layer that differs ONLY
+        // in `fade_step` serializes identically, which is why no golden moves.
+        let pristine = PictureLayer {
+            fade_step: 0,
+            ..layer
+        };
+        assert_eq!(bytes, postcard::to_allocvec(&pristine).expect("serialize"));
     }
 
     #[test]

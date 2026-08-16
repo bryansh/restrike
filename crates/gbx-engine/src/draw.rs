@@ -193,31 +193,82 @@ pub fn apply_recolor(pixels: &mut [u8], table: &[u8; 16]) {
     }
 }
 
-/// A deterministic 1-in-4 dither key over a pixel's position (its index in the
-/// flat framebuffer slice). No PRNG: this is a pure position hash.
-fn dither_hit(index: usize) -> bool {
-    // Knuth multiplicative hash of the index; take two spread-out bits so
-    // adjacent pixels don't fall on an obvious 4-stride comb. ~1-in-4 by
-    // construction. Exact pattern is unspecified (dither pixels are declared
-    // non-comparable by the renderer doc) — only determinism matters.
-    ((index as u32).wrapping_mul(2_654_435_761) >> 13) & 3 == 0
+/// A deterministic, uniformly-distributed **fade key** for a pixel position
+/// (its index in the flat picture slice). No PRNG: a pure position hash.
+///
+/// The construction is deliberate, and the top two bits are load-bearing.
+/// `h = index * 2654435761 >> 13` is the Knuth multiplicative hash the 1-in-4
+/// dither has always used; reversing its bits moves `h`'s two LOWEST bits into
+/// the key's two HIGHEST, so `key < 2^30` is exactly the old
+/// `(h & 3) == 0` — i.e. [`fade_dither_hit`] at step 1 recolors precisely the
+/// pixels the pre-FD-32 dither recolored, and no golden moves. The 13 bits the
+/// shift discarded fill the key's tail, which is what gives the later steps
+/// their resolution.
+fn fade_key(index: usize) -> u32 {
+    let h = (index as u32).wrapping_mul(2_654_435_761);
+    ((h >> 13).reverse_bits()) | (h & 0x1FFF)
 }
 
-/// The fade recolor pass, with `DaxBlock.Recolor`'s 1-in-4 dither per matching
-/// pixel (`useRandom == true`, `DaxBlock.cs:84`).
+/// Past this many steps every eligible pixel has converted (`0.75^n · 2^32 < 1`
+/// by n = 78, and the key's own resolution exhausts sooner) — the counter is
+/// clamped here so a long dissolve cannot run the threshold loop forever.
+pub const FADE_STEP_MAX: u16 = 80;
+
+/// The key threshold after `step` dither passes: a pixel has converted iff at
+/// least one of `step` independent 1-in-4 rolls hit it, i.e. with probability
+/// `1 - (3/4)^step`. Monotone non-decreasing in `step` by construction, which
+/// is what makes the fade *progress* rather than flicker.
+fn fade_threshold(step: u16) -> u64 {
+    const FULL: u64 = 1u64 << 32;
+    let mut remaining = FULL;
+    for _ in 0..step.min(FADE_STEP_MAX) {
+        remaining = remaining * 3 / 4;
+        if remaining == 0 {
+            break;
+        }
+    }
+    FULL - remaining
+}
+
+/// Whether the pixel at `index` has converted after `step` fade passes.
+fn fade_dither_hit(index: usize, threshold: u64) -> bool {
+    u64::from(fade_key(index)) < threshold
+}
+
+/// ★ **FD-32 resolved.** The fade recolor pass — `DaxBlock.Recolor`'s 1-in-4
+/// dither (`useRandom == true`, `DaxBlock.cs:84`) applied `step` times, in one
+/// pass, without ever mutating the decoded asset.
 ///
-/// D-OR1(c)/FD-28: this draw has **no original counterpart in the game PRNG
-/// stream** (coab uses a *separate* time-seeded `random_number` for the dither,
-/// `DaxBlock.cs:84` — and whether the binary's dither touches `DS:0x47F0` at
-/// all is FD-28, still open). A framebuffer-content-dependent draw count would
-/// desync any traced window, so the dither draws from `gbx-prng` *not at all*:
-/// it is a deterministic position hash ([`dither_hit`]). No `VmRng` parameter.
-pub fn apply_recolor_dithered(pixels: &mut [u8], table: &[u8; 16]) {
+/// The original recolors the **cached** `DaxBlock` in place
+/// (`ovr030.DrawMaybeOverlayed`, `:19-22`), so each redraw during a fade-armed
+/// animation dissolves the same block one pass further — that is how the
+/// ending's `ShowAnimation` dissolve works (`ovr019.cs:510-514`). Our
+/// composition must stay idempotent (D-UI4) and must not leave a save
+/// mid-fade, so the *progress* lives in a step counter
+/// ([`crate::picture::PictureLayer::fade_step`]) and this function is a pure
+/// function of `(pixels, table, step)`: same inputs, same output, every time.
+///
+/// It is exact rather than approximate because `FADE_RECOLOR`'s targets are
+/// all fixed points (`12→12`, `4→4`, `5→5`, `6→6`, `7→7`, `10→10`, `14→14`),
+/// so a pixel that converts stays converted: "recolored after `step` passes"
+/// is precisely "at least one of `step` 1-in-4 rolls hit it", which
+/// [`fade_threshold`] computes in closed form.
+///
+/// D-OR1(c)/FD-28: no PRNG, at any step. coab dithers from a *separate*
+/// time-seeded `random_number`, and whether the binary's dither touches
+/// `DS:0x47F0` at all is FD-28, still open; a framebuffer-content-dependent
+/// draw count would desync any traced window, so this touches `gbx-prng` zero
+/// times and there is no `VmRng` parameter to pass it one.
+pub fn apply_recolor_dithered(pixels: &mut [u8], table: &[u8; 16], step: u16) {
+    let threshold = fade_threshold(step);
+    if threshold == 0 {
+        return;
+    }
     for (i, p) in pixels.iter_mut().enumerate() {
         let v = *p as usize;
         if v < 16 {
             let new = table[v];
-            if new != *p && dither_hit(i) {
+            if new != *p && fade_dither_hit(i, threshold) {
                 *p = new;
             }
         }
@@ -422,8 +473,8 @@ mod tests {
         let base: Vec<u8> = (0..256).map(|i| (i % 16) as u8).collect();
         let mut a = base.clone();
         let mut b = base.clone();
-        apply_recolor_dithered(&mut a, &FADE_RECOLOR);
-        apply_recolor_dithered(&mut b, &FADE_RECOLOR);
+        apply_recolor_dithered(&mut a, &FADE_RECOLOR, 1);
+        apply_recolor_dithered(&mut b, &FADE_RECOLOR, 1);
         assert_eq!(a, b, "dither must be deterministic across calls");
     }
 
@@ -433,7 +484,7 @@ mod tests {
         // all of them, keeping the 1-in-4 character. Identity/out-of-range
         // pixels are never touched.
         let mut pixels = vec![0u8; 64];
-        apply_recolor_dithered(&mut pixels, &FADE_RECOLOR);
+        apply_recolor_dithered(&mut pixels, &FADE_RECOLOR, 1);
         let recolored = pixels.iter().filter(|&&p| p == 12).count();
         assert!(recolored > 0, "some eligible pixels must recolor");
         assert!(
@@ -446,7 +497,75 @@ mod tests {
     fn apply_recolor_dithered_never_touches_identity_or_out_of_range_pixels() {
         // 4 -> 4 is identity in FADE_RECOLOR; 200 is out of the 0..16 range.
         let mut pixels = vec![4u8, 200u8, 4u8, 200u8];
-        apply_recolor_dithered(&mut pixels, &FADE_RECOLOR);
+        apply_recolor_dithered(&mut pixels, &FADE_RECOLOR, 1);
         assert_eq!(pixels, vec![4, 200, 4, 200]);
+    }
+
+    /// ★ FD-32's own pin, half 1: **step 1 is bit-for-bit the pre-FD-32
+    /// dither.** The old predicate was `(index * 2654435761 >> 13) & 3 == 0`;
+    /// the new one is `fade_key(index) < fade_threshold(1)`. If the
+    /// bit-reversal construction ever drifts, every fade-armed golden moves,
+    /// so this compares against the old expression written out longhand.
+    #[test]
+    fn step_one_is_exactly_the_pre_fd32_one_in_four_dither() {
+        let threshold = fade_threshold(1);
+        assert_eq!(threshold, 1u64 << 30, "1 - (3/4)^1 of 2^32");
+        for index in 0..20_000usize {
+            let legacy = ((index as u32).wrapping_mul(2_654_435_761) >> 13) & 3 == 0;
+            assert_eq!(
+                fade_dither_hit(index, threshold),
+                legacy,
+                "pixel {index} changed sides"
+            );
+        }
+    }
+
+    /// ★ FD-32's own pin, half 2: the fade **progresses** — the converted set
+    /// grows monotonically with the step and saturates, and every step is
+    /// idempotent (applying the same step twice changes nothing after the
+    /// first).
+    #[test]
+    fn the_fade_step_progresses_monotonically_and_each_step_is_idempotent() {
+        let base = vec![0u8; 4096]; // all eligible: 0 -> 12
+        let mut previous = 0usize;
+        let mut counts = Vec::new();
+        for step in 0..=12u16 {
+            let mut pixels = base.clone();
+            apply_recolor_dithered(&mut pixels, &FADE_RECOLOR, step);
+            let faded = pixels.iter().filter(|&&p| p == 12).count();
+            assert!(
+                faded >= previous,
+                "step {step} faded {faded} pixels, fewer than step {}'s {previous}",
+                step - 1
+            );
+            if step > 0 {
+                assert!(faded > previous, "step {step} must fade something NEW");
+            }
+            previous = faded;
+            counts.push(faded);
+
+            // Idempotent at a fixed step: a second pass is a no-op.
+            let once = pixels.clone();
+            apply_recolor_dithered(&mut pixels, &FADE_RECOLOR, step);
+            assert_eq!(pixels, once, "step {step} is not idempotent");
+        }
+        assert_eq!(counts[0], 0, "step 0 fades nothing");
+        // ~1/4, then ~7/16, ... — the 1 - (3/4)^n curve, within a few percent
+        // of 4096 at the sample sizes involved.
+        assert!(
+            (950..1150).contains(&counts[1]),
+            "step 1 ≈ 1/4: {}",
+            counts[1]
+        );
+        assert!(
+            (1700..1900).contains(&counts[2]),
+            "step 2 ≈ 7/16: {}",
+            counts[2]
+        );
+
+        // And it saturates: past FADE_STEP_MAX everything eligible is gone.
+        let mut pixels = base.clone();
+        apply_recolor_dithered(&mut pixels, &FADE_RECOLOR, FADE_STEP_MAX);
+        assert!(pixels.iter().all(|&p| p == 12), "the dissolve completes");
     }
 }

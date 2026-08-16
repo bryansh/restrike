@@ -999,8 +999,9 @@ stays the one place showing the complete open-hypothesis picture.
 
 ### FD-32: `picture_fade`'s progressive fade needs an in-place recolor our idempotent composition refuses
 
-- **Status:** deferred (documented divergence; the only exerciser is the
-  ending sequence plus one `ECL3` scene)
+- **Status:** ★ **RESOLVED 2026-08-16** (roll-credits slice 9d, the ending) —
+  the progressive behavior is expressed as a **fade step counter**, with the
+  decoded cache still pristine and composition still idempotent.
 - **Question:** the original's `DrawMaybeOverlayed` recolors the **cached**
   `DaxBlock` in place when `picture_fade > 0` (`ovr030.cs:19-22` →
   `DaxBlock.Recolor(useRandom: true, …)`, `DaxBlock.cs:71-94`), so each
@@ -1008,16 +1009,39 @@ stays the one place showing the complete open-hypothesis picture.
   `ShowAnimation` dissolve works (`ovr019.cs:510-514`). Our
   `crate::picture::draw_maybe_overlayed` applies the pass to a scratch copy,
   keeping the decoded asset pristine.
-- **Why:** composition must be idempotent (D-UI4) and must not leave a save
-  mid-fade; and our dither is a position hash, not a PRNG draw (FD-28), so an
-  in-place pass would converge after one application anyway rather than
-  progressing. Both halves of the divergence are already non-comparable
-  renderer territory.
-- **Settled by:** the session that implements the ending sequence — it needs a
-  real fade *animation* model (a fade step counter in `PictureLayer`, driven
-  by the ANIMATION cadence), at which point the progressive behavior can be
-  expressed without mutating the cache.
-- **Cross-reference:** FD-28, `crates/gbx-engine/src/picture.rs`.
+- **Why it could not simply be copied:** composition must be idempotent
+  (D-UI4) and must not leave a save mid-fade; and our dither is a position
+  hash, not a PRNG draw (FD-28), so an in-place pass would converge after one
+  application rather than progressing.
+- **The mechanism.** `PictureLayer::fade_step` counts `Recolor` passes;
+  `draw::apply_recolor_dithered(pixels, table, step)` applies `step` of them to
+  a scratch copy in **one pass**, exactly (not approximately): every
+  `FADE_RECOLOR` target is a fixed point, so a converted pixel stays
+  converted, and "converted after `step` passes" is precisely "at least one of
+  `step` 1-in-4 rolls hit it" — probability `1 - (3/4)^step`, computed in
+  closed form against a per-pixel position hash. The hash is the old one
+  bit-reversed, so **step 1 is bit-for-bit the pre-FD-32 dither** and no
+  golden moves (`draw::tests::step_one_is_exactly_the_pre_fd32_one_in_four_dither`).
+  Still zero PRNG draws, so FD-28's interim posture is untouched.
+- **What advances it** — the ANIMATION cadence, FD-33's own precedent, one
+  redraw per tick: `picture::animation_frame` (the `0xE804` opcode),
+  `picture::menu_wait_animation`'s fade arm (which also closes FD-33's
+  remaining half: `ovr027.cs:185-193`'s loop advances the frame **every
+  iteration, ignoring the frame delay**, whenever `picture_fade != 0`), and
+  the ending's own `ShowAnimation` loop (`crate::ending`).
+- **What resets it** — a *different* block id, mirroring `load_pic_final`'s
+  own cache guard (`ovr030.cs:37-38`): a re-decode is unfaded art, a redraw of
+  the same block keeps dissolving.
+- **Serde: `#[serde(skip)]` — it resets on load, and that is the faithful
+  answer.** The original's fade progress lives in the decoded `DaxBlock`, and
+  `SaveGame` writes none of it; a restored session re-decodes every picture
+  from the DAX files, pristine, while `picture_fade` (an `Area1` cell) *is*
+  saved. Restoring mid-dissolve therefore resumes with unfaded art and a
+  still-armed fade — exactly `fade_step == 0` with `picture_fade > 0`. It also
+  keeps `SAVE_FORMAT_VERSION` at 9, and a layer differing only in `fade_step`
+  encodes identically (`picture::tests::the_fade_step_is_presentation_state_and_does_not_survive_a_save`).
+- **Cross-reference:** FD-28, FD-33, `crates/gbx-engine/src/picture.rs`,
+  `crates/gbx-engine/src/draw.rs`, `docs/design/roll-credits.md` §16.5.
 
 ### FD-33: `CMD_HorizontalMenu`'s `useOverlay` animation is tracked but not driven
 
@@ -1028,10 +1052,15 @@ stays the one place showing the complete open-hypothesis picture.
   frame's own `delay * 100` ms (6 ticks per unit at 60 Hz); the timer is the
   gate's transient (`VectorRun::anim_wait`, `#[serde(skip)]` — the original's
   `timeStart` is a wait-loop stack local). Pinned by
-  `a_parked_menu_animates_the_picture_at_the_frames_own_delay`. The
-  `picture_fade != 0` arm of the same loop stays with FD-32; the camp
-  screen's campfire (`screens::Camp::draw_campfire`, a static frame-0 blit)
-  joins this mechanism whenever it swaps onto the picture layer.
+  `a_parked_menu_animates_the_picture_at_the_frames_own_delay`. ★ **The
+  `picture_fade != 0` arm of the same loop closed 2026-08-16 with FD-32**
+  (roll-credits slice 9d): the gate is `(picture_fade != 0 || useOverlay)`
+  and the advance condition is `elapsed >= delay || picture_fade != 0`
+  (`ovr027.cs:185-193`), so a fade-armed wait steps the animation every
+  iteration with no delay test at all — which is what dissolves a picture
+  behind a menu. The camp screen's campfire
+  (`screens::Camp::draw_campfire`, a static frame-0 blit) joins this
+  mechanism whenever it swaps onto the picture layer.
 - **Question:** `CMD_HorizontalMenu` computes
   `useOverlay = spriteChanged && byte_1EE8D` (`ovr003.cs:730-738`) and passes
   it to `displayInput`, whose wait loop then re-blits **and advances** the
